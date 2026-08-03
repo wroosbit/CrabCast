@@ -168,12 +168,17 @@ const router = new MessageRouter({
 // the fixture path is deliberate.
 const AS_SHELL = { defaultAgent: 'shell' };
 
+// The capacity gate reads the real machine, and whether this box is busy is
+// not what is being proved here. The override path is real, recorded, and
+// what [Start anyway] sends; verify-agent-capacity.mjs proves the gate.
+const OVERRIDE = { override: true };
+
 /** Drive the real handler and return exactly what the caller would receive. */
 async function activate(key, extra = {}) {
   sent = undefined;
   const startedAt = Date.now();
   await router.handleActivateByKey(
-    { action: 'activate_by_key', type: TYPE, key, ...AS_SHELL, ...extra },
+    { action: 'activate_by_key', type: TYPE, key, ...AS_SHELL, ...OVERRIDE, ...extra },
     (msg) => { sent = msg; }
   );
   return { response: sent, elapsedMs: Date.now() - startedAt };

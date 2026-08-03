@@ -233,8 +233,11 @@ const call = (action, data = {}) =>
     socket.write(JSON.stringify({ action, ...data, id }) + '\n');
   });
 
+// `override: true`: the capacity gate measures the real machine, and whether
+// this box is busy is not what is being proved. The override is recorded
+// with the figures at the time, as it is for anyone.
 const activate = (key) =>
-  call('activate_by_key', { type: 'task', key, defaultAgent: 'claude' });
+  call('activate_by_key', { type: 'task', key, defaultAgent: 'claude', override: true });
 
 const banner = (title) => {
   console.log('\n' + '='.repeat(78));

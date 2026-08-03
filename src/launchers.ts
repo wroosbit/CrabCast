@@ -326,6 +326,18 @@ export interface AgentLauncher {
    * to refuse the activation through the same spawnError channel.
    */
   preSpawnCheck?: (workDir: string) => void;
+  /**
+   * The process name (`comm` in /proc) of the agent runtime this launcher
+   * starts, when it starts one. Absent for `shell`, which starts no runtime —
+   * a bare bash prompt is its delivered product.
+   *
+   * This is what the cost sampler (agent-cost.ts) groups process trees under:
+   * an agent's cost is the whole tree rooted at this process. Declared here,
+   * next to the command that spawns it, so the sampler's notion of "agent
+   * tree root" is derived from the launcher table rather than being a second
+   * copy of it that drifts when a launcher is added.
+   */
+  runtimeComm?: string;
 }
 
 // The only agents CrabCast will launch. defaultAgent arrives from activation
@@ -387,14 +399,27 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
       if (!trust.ok) {
         throw new Error(`Refusing to spawn claude: ${trust.error}`);
       }
-    }
+    },
+    runtimeComm: 'claude'
   },
   'anti-gravity': {
     command: (promptCommand = PROMPT_CMD) =>
       `agy --continue || agy -i ${shellQuote(promptCommand)}`,
-    setup: (_workDir, mcpServers) => configureAgyMcp(mcpServers)
+    setup: (_workDir, mcpServers) => configureAgyMcp(mcpServers),
+    runtimeComm: 'agy'
   }
 };
+
+/**
+ * Every agent-runtime process name the launcher table can start. The cost
+ * sampler treats a process with one of these comms (and no such ancestor) as
+ * the root of an agent tree; everything under it is that agent's cost.
+ */
+export const AGENT_RUNTIME_COMMS: ReadonlySet<string> = new Set(
+  Object.values(AGENT_LAUNCHERS)
+    .map((launcher) => launcher.runtimeComm)
+    .filter((comm): comm is string => typeof comm === 'string')
+);
 
 /**
  * What resolveLauncher falls back to when neither the caller nor the type

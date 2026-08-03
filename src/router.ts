@@ -13,6 +13,24 @@ import {
 } from './herdr.js';
 import { readFdUsage, isFdPressureHigh, PTMX_FDS_PER_PANE } from './herdr-health.js';
 import { ResumeCause } from './resume.js';
+import {
+  Capacity,
+  capacityReason,
+  capacityRefusal,
+  describeCapacity,
+  readCapacity,
+  summarizeCapacity
+} from './capacity.js';
+import {
+  PreemptionCandidate,
+  PreemptionRecord,
+  addressOf,
+  describeCandidate,
+  describeFleetPriorities,
+  noVictimReason,
+  preemptionOffer,
+  selectVictim
+} from './priority.js';
 
 type Respond = (msg: any) => void;
 
@@ -87,6 +105,53 @@ interface UnbackedPane {
 }
 
 /**
+ * The capacity numbers as they go over the wire.
+ *
+ * Flat and named rather than nested, because the caller most likely to read
+ * this is a language model deciding whether to staff another agent, and the
+ * fields it needs — `headroom`, `atCapacity`, `summary` — should not be at the
+ * end of a path. `summary` is the same figures in a sentence: a caller that
+ * ignores every number still cannot ignore that one.
+ */
+function capacityDto(c: Capacity) {
+  return {
+    cap: c.cap,
+    running: c.running,
+    exemptAgents: c.exemptAgents,
+    headroom: c.headroom,
+    atCapacity: c.atCapacity,
+    capBoundBy: c.capBoundBy,
+    headroomBoundBy: c.headroomBoundBy,
+    // The one sentence a UI with a single line to spare can render. Sent on
+    // every capacity payload rather than only on refusals, because a client
+    // that has to explain a refused toggle should not have to parse the
+    // reason out of a paragraph of derivation.
+    reason: capacityReason(c),
+    cores: c.machine.cores,
+    load1: Math.round(c.machine.load1 * 100) / 100,
+    totalMb: Math.round(c.machine.totalBytes / (1024 * 1024)),
+    availableMb: Math.round(c.machine.availableBytes / (1024 * 1024)),
+    agentMemoryMb: Math.round(c.cost.residentBytes / (1024 * 1024)),
+    agentCores: c.cost.cores,
+    // Where the two cost figures came from (KAN-56): 'override', 'measured'
+    // or 'seed', plus the sample's metadata when a measurement was consulted.
+    // A caller deciding whether to trust the cap can see whether anyone
+    // measured it.
+    agentMemorySource: c.costSource.residentBytes,
+    agentCoresSource: c.costSource.cores,
+    measuredAt: c.measured ? new Date(c.measured.sampledAt).toISOString() : null,
+    measuredWindowSeconds: c.measured ? Math.round(c.measured.windowSeconds) : null,
+    measuredAgentTrees: c.measured ? c.measured.agentTrees : null,
+    capByCpu: c.capByCpu,
+    capByMemory: c.capByMemory,
+    headroomByCap: c.headroomByCap,
+    headroomByLoad: c.headroomByLoad,
+    headroomByMemory: c.headroomByMemory,
+    summary: summarizeCapacity(c)
+  };
+}
+
+/**
  * The addressing convention shared by every agent-targeted action: a key is
  * required, a type is optional but must be meaningful when present. Returns
  * the complaint, or null when the address is usable.
@@ -99,19 +164,57 @@ function invalidAddress(key: unknown, type: unknown): string | null {
   return null;
 }
 
-/** What {@link MessageRouter.admitActivation} decided, and why. */
-interface GateResult {
-  /** The refusal to send back, or null when the activation may proceed. */
-  refusal: string | null;
+/**
+ * What the caller is told about the agent it could stand down, when it is at
+ * capacity and outranks something.
+ *
+ * Sent on the *refusal*, not after the fact. Preemption is opt-in per
+ * activation for the same reason capacity refusals are visible: someone
+ * switching an agent on must not silently destroy another agent's uncommitted
+ * work. This is the sentence a client turns into a named button, and its
+ * presence in the payload is what the consent criterion is satisfied by.
+ */
+interface PreemptionOfferDto {
+  agentName: string;
+  type: string | null;
+  key: string;
+  priority: number;
+  herdrStatus: HerdrAgentStatus;
+  /** The priority of the activation being refused, for the comparison. */
+  incomingPriority: number;
+  /** One sentence naming what would be stood down and what authorises it. */
+  offer: string;
 }
 
-/** Everything the activation gate needs to know about what it is judging. */
+/** What {@link MessageRouter.capacityGate} decided, and why. */
+interface CapacityGateResult {
+  capacity: Capacity;
+  /** The refusal to send back, or null when the activation may proceed. */
+  refusal: string | null;
+  /** Set when it may proceed only because the caller deliberately said so. */
+  overrode: { at: string; derivation: string } | null;
+  /**
+   * Set on a refusal that preemption could lift. Null both when there is
+   * nothing to preempt and when preemption already happened.
+   */
+  preemptable: PreemptionOfferDto | null;
+  /** Set when an agent was actually stood down to make this room. */
+  preempted: { at: string; victim: PreemptionOfferDto; derivation: string } | null;
+}
+
+/** Everything the capacity gate needs to know about the activation it is judging. */
 interface GateRequest {
   /** `shell/demo-1`, for refusal prose. */
   what: string;
   type: string;
   key: string;
   agentName: string;
+  /** What this activation outranks. See priority.ts. */
+  priority: number;
+  /** Start it past the cap without freeing anything. */
+  override: unknown;
+  /** Free a slot by standing down something this activation outranks. */
+  preempt: unknown;
 }
 
 export interface RouterDeps {
@@ -194,6 +297,9 @@ export class MessageRouter {
       case 'list_agents':
         this.handleListAgents(data, respond);
         return;
+      case 'capacity':
+        this.handleCapacity(data, respond);
+        return;
       case 'pty_init':
         this.handlePtyInit(data, respond);
         return;
@@ -212,21 +318,236 @@ export class MessageRouter {
   }
 
   /**
-   * Whether this activation may start a new agent.
-   *
-   * Today the answer is always yes: this daemon does not yet measure the
-   * machine. The seam exists so the capacity slice (T3 of KAN-68) replaces
-   * exactly one thing — this function — with the measured gate: hardware-
-   * derived cap, per-type `gateExempt` honoured, refusals carrying a
-   * human-checkable derivation. Callers already branch on `refusal`, so the
-   * gate's arrival changes no handler shape.
+   * Whether the machine can carry another agent, checked before spawning one.
    *
    * Only consulted when a *new* agent would be created: re-attaching to an
-   * agent that is already running costs the machine nothing, and refusing
-   * that would be refusing to look at work already in flight.
+   * agent that is already running costs the machine nothing, and refusing that
+   * would be refusing to look at work already in flight. The caller's own
+   * session miss is not enough to establish that, because the session map dies
+   * with the daemon while the herdr pane does not — so the census check below
+   * asks herdr, and every re-attach after a daemon restart skips the gate.
+   * Without it a client could not get back to agents it was already
+   * supervising, and precisely when the machine was busiest.
+   *
+   * An override is honoured — a cap that cannot be exceeded on purpose is a
+   * cap people work around — but it is recorded rather than waved through.
+   * Someone reading the log later should be able to see that the machine was
+   * over-staffed deliberately, and what the numbers were at the time.
+   *
+   * Activations of `gateExempt` types are never refused at all — see the
+   * exemption below, which is where the capacity model's "exempt types are
+   * not part of the limit" decision is actually honoured.
    */
-  private admitActivation(_request: GateRequest): GateResult {
-    return { refusal: null };
+  private capacityGate(request: GateRequest): CapacityGateResult {
+    const { what, type, key, agentName, priority, override, preempt } = request;
+    const pass = (capacity: Capacity): CapacityGateResult => ({
+      capacity,
+      refusal: null,
+      overrode: null,
+      preemptable: null,
+      preempted: null
+    });
+
+    const { agents } = this.surveyAgents();
+
+    if (agents.some((a) => a.agentName === agentName)) {
+      // Already alive and already counted. Starting nothing costs nothing.
+      return pass(this.capacityOf(agents));
+    }
+
+    const capacity = this.capacityOf(agents);
+
+    // gateExempt types pass unconditionally (KAN-57, generalized from the
+    // extraction source's hardcoded supervisor set to the flag in
+    // crabcast.config.json). The capacity model already decided they are not
+    // part of the limit: they are neither counted in `running` nor charged a
+    // slot (see capacity.ts's header for the argument), so a load- or
+    // headroom-bound refusal here was refusing an agent whose cost the model
+    // had already declined to charge — the gate arguing with its own
+    // arithmetic. It was also a lockout in practice: desktop baseline load
+    // alone can pin headroomByLoad at 0 indefinitely, which meant always-on
+    // supervising agents could never start or auto-restore without a manual
+    // override. They are higher priority by convention and always-on by
+    // intent, so the gate has nothing to ration for them: no refusal, and
+    // therefore no override to record and no preemption to offer. Charged
+    // activations below are untouched, and exempt agents still appear in
+    // every capacity report as `exemptAgents`.
+    if (this.deps.registry.get(type)?.gateExempt === true) return pass(capacity);
+
+    if (!capacity.atCapacity) return pass(capacity);
+
+    // Everything running that this activation could conceivably displace, and
+    // the one it would take. `victim` is null in the ordinary case — a worker
+    // agent on a machine full of workers of its own priority outranks
+    // nothing, and neither does anything at all when only top-of-scale agents
+    // are running.
+    const candidates = this.preemptionCandidates(agents, agentName);
+    const victim = selectVictim(candidates, priority);
+    const derivation = describeCapacity(capacity);
+    const offer = (v: PreemptionCandidate): PreemptionOfferDto => ({
+      agentName: v.agentName,
+      type: v.type,
+      key: v.key,
+      priority: v.priority,
+      herdrStatus: v.herdrStatus,
+      incomingPriority: priority,
+      offer: preemptionOffer(v, priority)
+    });
+
+    if (preempt && victim) {
+      const at = new Date().toISOString();
+      const preemption: PreemptionRecord = {
+        byAgentName: agentName,
+        byType: type,
+        byKey: key,
+        byPriority: priority,
+        priority: victim.priority,
+        herdrStatus: victim.herdrStatus,
+        derivation
+      };
+
+      // Through the ordinary stand-down path rather than a teardown of its
+      // own. `deactivate_by_key` already handles every case this needs — a
+      // live session and an agent that outlived its daemon — and answers
+      // honestly about which it found. Preemption reusing it means there is
+      // one way an agent stops, not two.
+      let standDown: any = null;
+      this.handleDeactivateByKey(
+        { key: victim.key, type: victim.type ?? undefined, preemption },
+        (msg: any) => {
+          standDown = msg;
+        }
+      );
+
+      if (!standDown?.success) {
+        // Nothing was freed, so nothing may start. Refusing here is the
+        // important half: proceeding would leave the machine over capacity
+        // *and* have announced a preemption that did not happen.
+        const error =
+          `Refusing to activate ${what}: standing down ${addressOf(victim)} to make room ` +
+          `failed (${standDown?.error ?? 'no reason given'}), so no capacity was freed.\n` +
+          derivation;
+        console.error(`[capacity] preemption aborted: ${error}`);
+        return { capacity, refusal: error, overrode: null, preemptable: offer(victim), preempted: null };
+      }
+
+      console.warn(
+        `[capacity] preemption: ${what} (priority ${priority}) stood down ` +
+        `${describeCandidate(victim)} at ${at}\n${derivation}`
+      );
+      // The event carries the full PreemptionRecord. Durable persistence of
+      // that record — and the preemptedAgents reporting built on it — is the
+      // registry slice's (T4 of KAN-68, `recordDeactivated(record,
+      // preemption)`); until it lands, this broadcast is the record's only
+      // carrier, so nothing here may drop a field of it.
+      this.deps.broadcast({
+        action: 'agent_preempted_event',
+        success: true,
+        at,
+        victim: offer(victim),
+        by: { agentName, type, key, priority },
+        record: preemption,
+        capacity: capacityDto(capacity)
+      });
+
+      // Re-surveyed rather than reused: the caller is about to be told what the
+      // machine looks like, and it is not the machine that refused a moment ago.
+      //
+      // The activation now proceeds unconditionally, and that is deliberate.
+      // Only the count term responds to a stand-down immediately — the load
+      // average is a one-minute mean and the kernel has not yet reclaimed the
+      // memory — so re-running the whole gate here would sometimes refuse
+      // *after* destroying an agent's work, which is the worst of both
+      // outcomes. A slot was freed on purpose; the machine is strictly better
+      // off than it was a moment ago, and it is about to look it.
+      const after = this.capacityOf(this.surveyAgents().agents);
+      return {
+        capacity: after,
+        refusal: null,
+        overrode: null,
+        preemptable: null,
+        preempted: { at, victim: offer(victim), derivation }
+      };
+    }
+
+    if (!override) {
+      // Both branches name what is running and what it is worth. Losing a slot
+      // is survivable; not being able to see who you lost it to is not.
+      const refusal =
+        `${capacityRefusal(capacity, what)}\n` +
+        (victim ? preemptionOffer(victim, priority) : noVictimReason(candidates, priority));
+      return {
+        capacity,
+        refusal,
+        overrode: null,
+        preemptable: victim ? offer(victim) : null,
+        preempted: null
+      };
+    }
+
+    const at = new Date().toISOString();
+    console.warn(
+      `[capacity] override: starting ${what} past capacity at ${at}\n${derivation}`
+    );
+    this.deps.broadcast({
+      action: 'capacity_override_event',
+      success: true,
+      what,
+      at,
+      capacity: capacityDto(capacity)
+    });
+    return {
+      capacity,
+      refusal: null,
+      overrode: { at, derivation },
+      preemptable: victim ? offer(victim) : null,
+      preempted: null
+    };
+  }
+
+  /**
+   * Everything running that could be considered for a stand-down.
+   *
+   * The same filter the capacity model uses, for the same reason it exists
+   * there: a list that counted panes with nothing behind them would offer to
+   * kill one, and a list that disagreed with `running` would offer to free a
+   * slot that was never occupied.
+   *
+   * gateExempt-type agents are *excluded*, and the reason is arithmetic, not
+   * protection: an exempt agent was never counted in `running`, so standing
+   * one down frees no charged slot — the machine would be exactly as full a
+   * moment later, and the preempt path would admit the newcomer over the cap
+   * on the false premise that room was made. In the extraction source the
+   * exempt set was the hardcoded top of the priority scale, so the
+   * strictly-greater ordering happened to protect it; here `gateExempt` and
+   * `priority` are independent config fields — a low-priority exempt type
+   * (a watchdog, say) is legitimate, and only this exclusion keeps it from
+   * being selected as a victim whose death buys nothing. Exemption from the
+   * gate is exemption from its rationing in both directions: never refused,
+   * never a victim.
+   */
+  private preemptionCandidates(agents: ListedAgent[], exclude?: string): PreemptionCandidate[] {
+    const candidates: PreemptionCandidate[] = [];
+
+    for (const entry of agents) {
+      if (!this.countsAsAgent(entry)) continue;
+      if (exclude && entry.agentName === exclude) continue;
+      if (entry.gateExempt) continue;
+
+      candidates.push({
+        agentName: entry.agentName,
+        type: entry.type,
+        key: entry.key,
+        priority: this.deps.registry.priorityFor(entry.type),
+        herdrStatus: entry.herdrStatus,
+        // The session's creation time; null for every agent that outlived a
+        // daemon restart. The durable registry (T4 of KAN-68) upgrades this
+        // to the recorded activation time, which also survives restarts.
+        activatedAt: entry.createdAt
+      });
+    }
+
+    return candidates;
   }
 
   /**
@@ -320,11 +641,20 @@ export class MessageRouter {
     // `crabcast-B-k` — which is absent — and abandonSession would tear down
     // A's live PTY. A mistyped type must never destroy an unrelated agent.
     let session = herdrBridge.getSessionByAddress(key, type);
+    let gate: CapacityGateResult | null = null;
 
     if (!session) {
       // Before the prompt is even rendered: the cheapest refusal is the one
       // that happens before any work is done for an agent that will not exist.
-      const gate = this.admitActivation({ what: `${type}/${key}`, type, key, agentName });
+      gate = this.capacityGate({
+        what: `${type}/${key}`,
+        type,
+        key,
+        agentName,
+        priority: config.priority,
+        override: data.override,
+        preempt: data.preempt
+      });
       if (gate.refusal) {
         respond({
           action: 'activate_response',
@@ -332,8 +662,19 @@ export class MessageRouter {
           type,
           key,
           url,
+          // `error` is the whole refusal, for the log and for MCP callers.
+          // `refusedBy`, `reason` and `derivation` are the same thing split
+          // into the pieces a UI can lay out — a client that shows none of
+          // this leaves the user at a dead switch.
           error: gate.refusal,
-          refusedBy: 'capacity'
+          refusedBy: 'capacity',
+          reason: capacityReason(gate.capacity),
+          derivation: describeCapacity(gate.capacity),
+          capacity: capacityDto(gate.capacity),
+          priority: config.priority,
+          // Named, so a client can offer a button that says whose work it
+          // ends. Absent when there is nothing this activation outranks.
+          ...(gate.preemptable ? { preemption: gate.preemptable } : {})
         });
         return;
       }
@@ -429,6 +770,13 @@ export class MessageRouter {
       // reconcile (T4), which reads exactly these fields.
       ...(session.resume
         ? { resume: session.resume, resumedConversation: session.resumedConversation }
+        : {}),
+      // What this activation cost somebody else. Reported to the caller as
+      // well as broadcast, so an MCP client that started an agent by
+      // preemption learns whose work it interrupted from the same response.
+      ...(gate?.preempted ? { preempted: gate.preempted } : {}),
+      ...(gate?.overrode
+        ? { capacityOverride: { ...gate.overrode, capacity: capacityDto(gate.capacity) } }
         : {})
     });
   }
@@ -475,7 +823,15 @@ export class MessageRouter {
     // not the agent's own idea, and it is echoed so the caller can attribute
     // the outcome. Carried opaquely until the registry slice (T4) persists it.
     const preemption = data.preemption;
-    const session = this.deps.herdrBridge.getSessionByKey(key);
+    // By full address when the caller gave one, for the same reason activate
+    // resolves that way (see handleActivateByKey): a session for a different
+    // type is a different agent, and with `task/K` and `hotfix/K` both live a
+    // key-only lookup here would tear down whichever one the map yields —
+    // for the preempt path, that is killing an agent the refusal never named.
+    // A bare key keeps the key-only behaviour for callers that have no type.
+    const type =
+      typeof data.type === 'string' && data.type.trim() ? data.type.trim() : undefined;
+    const session = this.deps.herdrBridge.getSessionByAddress(key, type);
 
     if (session) {
       const { success, error } = this.deps.herdrBridge.terminateSession(session.sessionId);
@@ -518,11 +874,10 @@ export class MessageRouter {
     // durable registry, which is what let "already gone" count as success —
     // the registry write was the real request. That arrives with T4; until
     // then an agent that cannot be found is reported as exactly that.)
-    const result = this.deps.herdrBridge.closeAgentByKey(key);
+    const result = this.deps.herdrBridge.closeAgentByKey(key, type);
 
     const closedType =
-      (typeof data.type === 'string' && data.type.trim() ? data.type.trim() : undefined) ??
-      (result.agentName ? typeFromAgentName(result.agentName, key) : undefined);
+      type ?? (result.agentName ? typeFromAgentName(result.agentName, key) : undefined);
 
     if (result.success) {
       this.deps.broadcast({
@@ -743,11 +1098,29 @@ export class MessageRouter {
     // descriptors" is trivia.
     const usage = readFdUsage();
 
+    // CPU and memory headroom, for the same reason and in the same place. A
+    // supervisor reading this list is about to decide whether to staff
+    // another agent; this is the number that decision needs.
+    const capacity = this.capacityOf(agents);
+
     respond({
       action: 'list_agents_response',
       success: true,
       agents,
       unbackedPanes,
+      capacity: capacityDto(capacity),
+      // What each running agent is worth, and therefore what a would-be
+      // activation would have to outrank. Sent alongside the capacity figures
+      // because "there is no room" and "there is no room *for you*" are
+      // different answers, and a supervisor deciding whether to staff
+      // something needs both.
+      priorities: this.preemptionCandidates(agents).map((c) => ({
+        agentName: c.agentName,
+        type: c.type,
+        key: c.key,
+        priority: c.priority,
+        herdrStatus: c.herdrStatus
+      })),
       ...(usage ? {
         herdrHealth: {
           pid: usage.pid,
@@ -764,6 +1137,82 @@ export class MessageRouter {
         }
       } : {})
     });
+  }
+
+  /** `capacity`: how many more agents this machine can carry, and why. */
+  private handleCapacity(_data: any, respond: Respond) {
+    const { agents } = this.surveyAgents();
+    const capacity = this.capacityOf(agents);
+    const candidates = this.preemptionCandidates(agents);
+    respond({
+      action: 'capacity_response',
+      success: true,
+      ...capacityDto(capacity),
+      derivation: describeCapacity(capacity),
+      // At capacity the next question is always "then what would I have to
+      // stand down?", and answering it here saves a caller from working the
+      // ordering out for itself — or, worse, guessing at it.
+      priorities: candidates.map((c) => ({
+        agentName: c.agentName,
+        type: c.type,
+        key: c.key,
+        priority: c.priority,
+        herdrStatus: c.herdrStatus
+      })),
+      fleetPriorities: describeFleetPriorities(candidates)
+    });
+  }
+
+  /**
+   * Whether a `list_agents` entry costs an agent's worth of machine.
+   *
+   * Not everything the list reports does. The extraction source's daemon once
+   * opened a bare shell for itself, and it appeared in this list because a
+   * session was held for it — the right answer to "what can I attach to" and
+   * the wrong one to "what is this machine carrying"; on a 4-core box it was
+   * silently occupying one of two slots (KAN-25). This daemon starts nothing
+   * for itself, but herdr hosts more than CrabCast and the distinction still
+   * has to be drawn.
+   *
+   * The test is whether the entry is a workspace type this daemon starts
+   * agents into, or whether herdr can see an agent runtime behind the pane.
+   * Either is enough; a registered type does not wait for herdr to notice a
+   * freshly spawned agent, and a runtime catches anything the config has not
+   * heard of.
+   *
+   * Shared by the capacity count and the preemption candidate list, so an
+   * agent that occupies a slot is exactly an agent that can be asked to give
+   * it up.
+   */
+  private countsAsAgent(entry: ListedAgent): boolean {
+    const registered = entry.type !== null && this.deps.registry.get(entry.type) !== undefined;
+    return registered || entry.agentRuntime !== null;
+  }
+
+  /**
+   * The capacity model applied to a census: charged agents in `running`,
+   * gateExempt-type agents counted separately as `exemptAgents` (reported,
+   * never charged — see capacity.ts).
+   *
+   * Every capacity answer in this daemon goes through here, so `running`
+   * means the same thing in the refusal, in `list_agents` and in the
+   * `capacity` action. The extraction source once passed `agents.length` at
+   * each call site and its then-single supervisor was silently one of them —
+   * on a 4-core machine that was half the budget spent on the supervisor
+   * (KAN-34).
+   */
+  private capacityOf(agents: ListedAgent[]): Capacity {
+    let fleet = 0;
+    let exempt = 0;
+
+    for (const entry of agents) {
+      if (!this.countsAsAgent(entry)) continue;
+
+      if (entry.gateExempt) exempt++;
+      else fleet++;
+    }
+
+    return readCapacity(fleet, exempt);
   }
 
   /**
