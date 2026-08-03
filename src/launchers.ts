@@ -319,6 +319,26 @@ export interface AgentLauncher {
    * to refuse the activation through the same spawnError channel.
    */
   preSpawnCheck?: (workDir: string) => void;
+  /**
+   * Whether this launcher's command restores a prior conversation when its
+   * workspace has one (claude's `--continue`). This is what decides whether a
+   * restored agent needs the interrupted-work nudge: a runtime that came back
+   * remembering everything sits at an empty prompt with no turn to take,
+   * while one that starts fresh got its instructions on the command line and
+   * is already working. In the extraction source this was a hardcoded
+   * `defaultAgent !== 'claude'` guard inside the nudge; a launcher declares
+   * it here instead, so a new launcher is not silently assumed to behave
+   * like Claude. Omitted means false: no restore, no nudge.
+   */
+  restoresConversation?: boolean;
+  /**
+   * Pane text that is evidence this launcher's runtime has finished starting
+   * and is listening for input. Read off the pane tail by the nudge machinery
+   * (see nudge.ts) before anything is typed at a restored agent — a nudge
+   * sent earlier would go to the bash that is still starting the runtime.
+   * Only consulted when {@link restoresConversation} is true.
+   */
+  readyMarkers?: string[];
 }
 
 // The only agents CrabCast will launch. defaultAgent arrives from activation
@@ -380,12 +400,25 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
       if (!trust.ok) {
         throw new Error(`Refusing to spawn claude: ${trust.error}`);
       }
-    }
+    },
+    // The `--continue` branch of the command above is what makes this true;
+    // hasRestorableConversation (resume.ts) is what predicts whether it fires.
+    restoresConversation: true,
+    // The two things Claude Code puts on screen once its input box exists —
+    // the permission-mode footer and the prompt caret. Measured off real
+    // panes in the extraction source, not guessed.
+    readyMarkers: ['bypass permissions', 'for shortcuts', '❯']
   },
   'anti-gravity': {
     command: (promptCommand = PROMPT_CMD) =>
       `agy --continue || agy -i ${shellQuote(promptCommand)}`,
     setup: (_workDir, mcpServers) => configureAgyMcp(mcpServers)
+    // No restoresConversation, deliberately, despite the `--continue` above:
+    // the restore *predictor* (hasRestorableConversation in resume.ts) reads
+    // Claude Code's transcript directory and knows nothing about agy's, so a
+    // "restored" verdict for this launcher would be an answer about the wrong
+    // program. Declaring restore support here requires bringing the evidence
+    // — a readyMarkers list and a transcript probe for agy — not just the flag.
   }
 };
 

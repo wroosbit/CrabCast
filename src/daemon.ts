@@ -16,6 +16,8 @@ import {
 import { ensureDataDir, onJsonLines, socketPathFor, writeJsonLine } from './ipc.js';
 import { resolveUserPath, which } from './env.js';
 import { AGENT_LAUNCHERS } from './launchers.js';
+import { AgentRegistry, registryPathFor } from './agent-registry.js';
+import { reconcileAgents } from './reconcile.js';
 
 // The single long-lived CrabCast daemon. Owns all sessions and the workspace
 // registry. Clients (the CLI, the MCP server) connect over a Unix domain
@@ -131,6 +133,12 @@ const registry = new WorkspaceRegistry(config.workspaceTypes);
 const promptLoader = new PromptLoader(config.baseDir);
 const herdrBridge = new HerdrBridge(config.dataDir);
 
+// The one piece of state that outlives the machine. Everything else here —
+// the session map, herdr's panes, a client's view — dies in a power cut,
+// which is why a reboot used to destroy the fleet with nothing to say about
+// it. See agent-registry.ts for why it is an fsync'd append-only log.
+const agentRegistry = new AgentRegistry(registryPathFor(config.dataDir));
+
 log(`Config loaded from ${config.configPath} (dataDir ${config.dataDir})`);
 log(`Loaded ${config.workspaceTypes.length} workspace type(s):`);
 for (const type of config.workspaceTypes) {
@@ -174,6 +182,7 @@ const server = net.createServer((socket) => {
     promptLoader,
     herdrBridge,
     daemonStartedAt,
+    agentRegistry,
     send: (msg) => writeJsonLine(socket, msg),
     broadcast
   });
@@ -232,11 +241,121 @@ server.on('error', (err: any) => {
   });
 });
 
+/**
+ * A router with nowhere to answer, for the daemon's own use.
+ *
+ * Reconciliation and the loss sweep are not requests — nobody is connected at
+ * boot, which is the whole difficulty restoration is about — but they need to
+ * do exactly what a request would. Rather than duplicating activation, they get
+ * a router whose per-request `send` goes nowhere while broadcasts still reach
+ * whatever clients turn up later.
+ */
+const daemonRouter = new MessageRouter({
+  registry,
+  config,
+  promptLoader,
+  herdrBridge,
+  daemonStartedAt,
+  agentRegistry,
+  send: () => {},
+  broadcast
+});
+
+/**
+ * How long between checks that the fleet still matches the registry.
+ *
+ * Not a restart loop: this only *reports*. An agent that dies mid-afternoon is
+ * a different decision from one that was killed by a power cut, with different
+ * failure modes, and the loss is surfaced rather than guessed at. Restoring is
+ * startup's job.
+ */
+const MISSING_SWEEP_INTERVAL_MS = 30_000;
+
+/**
+ * The detectability half. Silent loss is what made the extraction source's
+ * KAN-21 outage expensive — the board read healthy for twenty minutes while
+ * nothing was running — so a missing agent is announced to every connected
+ * client, on top of being reported in `list_agents` on every poll. It is
+ * deliberately not just a log line.
+ *
+ * Only *newly* missing agents are announced. An agent that has been gone for an
+ * hour is still reported in `list_agents` on every request, but re-broadcasting
+ * it twice a minute forever would train everyone to ignore the event.
+ */
+const announcedMissing = new Set<string>();
+
+function sweepForMissingAgents() {
+  let missing;
+  try {
+    missing = daemonRouter.findMissingAgents();
+  } catch (e: any) {
+    log('Missing-agent sweep failed:', e?.message ?? String(e));
+    return;
+  }
+
+  const names = new Set(missing.map((agent) => agent.agentName));
+  for (const name of announcedMissing) {
+    if (!names.has(name)) announcedMissing.delete(name);
+  }
+
+  for (const agent of missing) {
+    if (announcedMissing.has(agent.agentName)) continue;
+    announcedMissing.add(agent.agentName);
+    log(
+      `AGENT LOST: ${agent.agentName} (${agent.type}/${agent.key}) is recorded as active ` +
+      `since ${agent.since} but herdr has no such agent. Workspace: ${agent.workDir}`
+    );
+    broadcast({ action: 'agent_lost_event', success: true, ...agent });
+  }
+}
+
 function onListen() {
   try {
     fs.chmodSync(SOCKET_PATH, 0o600);
   } catch {}
   log(`CrabCast daemon listening on ${SOCKET_PATH} (pid ${process.pid})`);
+
+  log(`Agent registry: ${registryPathFor(config.dataDir)}`);
+
+  // Restoration runs after the socket is listening, not before: an activation
+  // takes minutes for a fleet, and a daemon that answered nothing until it
+  // finished would look exactly like a daemon that never came up.
+  //
+  // `reboot` rather than `daemon-restart` because that is what this daemon
+  // starting means in the case restoration exists for, and because it is the
+  // framing an agent needs to read: the machine went away, not just its
+  // supervisor. A restored agent is told to check the repository and the
+  // workspace for what it already did either way.
+  void reconcileAgents({
+    registry: agentRegistry,
+    herdrBridge,
+    router: daemonRouter,
+    workspaceTypes: registry,
+    cause: 'reboot',
+    log
+  })
+    .then((result) => {
+      const restored = result.outcomes.filter((o) => o.result === 'restored');
+      const failed = result.outcomes.filter((o) => o.result === 'failed');
+      const idle = restored.filter((o) => o.resumedConversation && o.nudged === false);
+      log(
+        `[reconcile] Done: ${result.expected} expected, ` +
+        `${restored.length} restored, ` +
+        `${result.outcomes.filter((o) => o.result === 'already-running').length} already running, ` +
+        `${failed.length} failed.` +
+        (idle.length
+          ? ` ${idle.length} restored agent(s) could not be told to carry on and may be idle: ` +
+            idle.map((o) => o.agentName).join(', ')
+          : '')
+      );
+      // Whatever restoration could not bring back is a loss, and is announced
+      // by the same sweep that watches for losses later.
+      sweepForMissingAgents();
+    })
+    .catch((err) => log('[reconcile] Reconciliation failed:', err));
+
+  const sweep = setInterval(sweepForMissingAgents, MISSING_SWEEP_INTERVAL_MS);
+  sweep.unref();
 }
 
 const shutdown = () => {

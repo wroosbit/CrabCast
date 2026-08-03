@@ -168,6 +168,7 @@ const { MessageRouter } = await import(path.join(distDir, 'router.js'));
 const { WorkspaceRegistry } = await import(path.join(distDir, 'registry.js'));
 const { PromptLoader } = await import(path.join(distDir, 'prompt.js'));
 const { loadConfig } = await import(path.join(distDir, 'config.js'));
+const { AgentRegistry } = await import(path.join(distDir, 'agent-registry.js'));
 const { AGENT_LAUNCHERS, DEFAULT_AGENT, PROMPT_FILENAME } = await import(path.join(distDir, 'launchers.js'));
 
 const config = loadConfig(configPath);
@@ -179,6 +180,9 @@ const router = new MessageRouter({
   promptLoader: new PromptLoader(config.baseDir),
   herdrBridge: bridge,
   daemonStartedAt: new Date(),
+  // The durable registry landed with the T4 slice; a scratch log keeps this
+  // script's activations out of any real fleet record.
+  agentRegistry: new AgentRegistry(path.join(dataDir, 'agents.jsonl')),
   send: (msg) => { sent = msg; },
   broadcast: () => {}
 });

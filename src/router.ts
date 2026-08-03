@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import { CrabcastConfig } from './config.js';
 import { WorkspaceRegistry } from './registry.js';
 import { PromptLoader } from './prompt.js';
@@ -12,7 +13,9 @@ import {
   typeFromAgentName
 } from './herdr.js';
 import { readFdUsage, isFdPressureHigh, PTMX_FDS_PER_PANE } from './herdr-health.js';
+import { AgentRecord, AgentRegistry, PreemptionRecord } from './agent-registry.js';
 import { ResumeCause } from './resume.js';
+import { nudgeResumedAgent } from './nudge.js';
 
 type Respond = (msg: any) => void;
 
@@ -87,6 +90,70 @@ interface UnbackedPane {
 }
 
 /**
+ * An agent the registry says should be running that herdr does not have.
+ *
+ * This is the whole of the detectability half of the extraction source's
+ * KAN-21, as data. On the day that ticket was written two agents ceased to
+ * exist and their board read healthy for twenty minutes; the loss was found
+ * only because a human thought to ask. The registry is what makes the question
+ * answerable without asking — it holds the *intended* fleet, and anything in
+ * it that herdr cannot show is a loss, reported on every `list_agents` poll
+ * rather than written to a log.
+ */
+interface MissingAgent {
+  agentName: string;
+  type: string;
+  key: string;
+  workDir: string;
+  url: string | null;
+  /** When the registry last recorded this agent as activated. */
+  since: string;
+  reason: string;
+}
+
+/**
+ * An agent somebody deliberately switched off, that could be switched back on.
+ *
+ * A fleet client lists what is running, and a stopped agent is by definition
+ * not in that list — so the *on* half of a fleet switch needs its candidates
+ * from somewhere else. The answer is the registry, and this is the third of
+ * the three ways it can answer "not running":
+ *
+ *   - {@link MissingAgent}    — recorded active, absent anyway. A loss.
+ *   - preempted (see below)   — stood down so something else could run. A debt.
+ *   - StandbyAgent            — stood down because a person said so.
+ *
+ * The three are disjoint on purpose, so no agent grows two switches. This one
+ * is what makes Off reversible from the client that offers it: without it,
+ * turning an agent off would drop it off every list the client renders and
+ * there would be no way back except reconstructing the activation by hand.
+ *
+ * Only agents whose workspace still exists are offered. A `reset` also records
+ * a stand-down, and the directory it deleted is the evidence that "turn this
+ * back on" is not what anyone means by it.
+ */
+interface StandbyAgent {
+  agentName: string;
+  type: string;
+  key: string;
+  workDir: string;
+  url: string | null;
+  /** Which launcher it last ran, so it comes back as what it was. */
+  defaultAgent: string | null;
+  /** When the registry recorded the stand-down. */
+  since: string;
+  reason: string;
+}
+
+/**
+ * How many stood-down agents `list_agents` will carry. The registry compacts
+ * at 500 records, so this is bounded already — the cap is about clients that
+ * poll continuously, not about the log. Anything beyond it is *counted* rather
+ * than dropped silently: see `standbyTotal`.
+ */
+const STANDBY_LIMIT = 25;
+
+/**
  * The addressing convention shared by every agent-targeted action: a key is
  * required, a type is optional but must be meaningful when present. Returns
  * the complaint, or null when the address is usable.
@@ -120,6 +187,13 @@ export interface RouterDeps {
   promptLoader: PromptLoader;
   herdrBridge: HerdrBridge;
   daemonStartedAt: Date;
+  /**
+   * The durable record of which agents should exist — the one piece of state
+   * that outlives the daemon, herdr, and the machine. Everything the router
+   * remembers or reports about agents that are *not* running (missing,
+   * preempted, standby) is derived from it, and never from the session map.
+   */
+  agentRegistry: AgentRegistry;
   /** Replies to the requesting client. */
   send: (msg: DaemonResponse) => void;
   /** Events for every connected client (activations, teardowns, PTY deaths). */
@@ -227,6 +301,123 @@ export class MessageRouter {
    */
   private admitActivation(_request: GateRequest): GateResult {
     return { refusal: null };
+  }
+
+  /**
+   * Write an activation down before it is acknowledged.
+   *
+   * Called on every successful activate, but only appends when it would change
+   * something: re-attaching to an agent already recorded as activated is a
+   * no-op, and fleet clients re-activate often enough that recording each one
+   * would fill the log with restatements of the same intent.
+   */
+  private rememberActivated(record: AgentRecord): void {
+    const current = this.deps.agentRegistry.intents().get(record.agentName);
+    if (
+      current?.event === 'activated' &&
+      current.record.workDir === record.workDir &&
+      current.record.url === record.url &&
+      current.record.defaultAgent === record.defaultAgent
+    ) {
+      return;
+    }
+    this.deps.agentRegistry.recordActivated(record);
+  }
+
+  /**
+   * Write a stand-down down, so reconciliation leaves this agent alone.
+   *
+   * This is the half of the registry that makes it *intent* rather than
+   * history: without it, boot-time restoration would resurrect every agent
+   * anyone had ever run. Recorded even when the teardown failed — the caller
+   * asked for the agent to be gone, and that is the intent to honour.
+   *
+   * Everything the last activation knew is carried onto the stand-down, and
+   * that is not tidiness. `AgentRecord` is the argument list of an activation,
+   * and `defaultAgent` is one of its arguments: an agent recorded without it
+   * and then switched back on falls to the type's `defaultLauncher`, which may
+   * not be the launcher it actually ran — it would come back as something
+   * other than what it was. The url and workDir travel for the same reason.
+   */
+  private rememberDeactivated(
+    type: string,
+    key: string,
+    workDir?: string,
+    preemption?: PreemptionRecord
+  ): void {
+    const agentName = agentNameFor(type, key);
+    const previous = this.deps.agentRegistry.intents().get(agentName)?.record;
+    this.deps.agentRegistry.recordDeactivated(
+      {
+        agentName,
+        type,
+        // The registry's spelling of the key, when it has one. `agentName` is
+        // built from a lower-cased key, so an agent addressed from a census
+        // arrives here as `kan-38`, and recording that would quietly replace a
+        // key spelled the way its ticket is. This key is about to be shown to
+        // a person next to work that is spelled KAN-38.
+        key: previous?.key ?? key,
+        // The caller's own answer wins — it is looking at the live session —
+        // and the registry's is the fallback for the by-key paths that have no
+        // session to read one from.
+        workDir: workDir ?? previous?.workDir ?? '',
+        ...(previous?.url ? { url: previous.url } : {}),
+        ...(previous?.defaultAgent ? { defaultAgent: previous.defaultAgent } : {}),
+        ...(previous?.mcpServers ? { mcpServers: previous.mcpServers } : {})
+      },
+      preemption
+    );
+  }
+
+  /**
+   * The resume cause for an activation nobody labelled one.
+   *
+   * An agent whose last stand-down was a preemption is being *resumed* when it
+   * is switched back on, whatever the caller thinks it is doing — and it must
+   * be told so, or it comes back with its whole conversation restored and no
+   * turn to take. That is the idle-forever failure, reached by a route that
+   * has nothing to do with booting: nobody rebooted anything, a person just
+   * turned a switch back on.
+   *
+   * An explicit cause always wins; only boot-time reconciliation sets one.
+   */
+  private resumeCauseFor(agentName: string, explicit?: ResumeCause): ResumeCause | undefined {
+    if (explicit) return explicit;
+    return this.deps.agentRegistry.preemptionFor(agentName) ? 'preempted' : undefined;
+  }
+
+  /**
+   * Tell a just-resumed agent to carry on, without making the caller wait.
+   *
+   * Fire-and-forget on purpose: the nudge waits up to two minutes for the
+   * agent's prompt to appear, and an activate that blocked on that would time
+   * out in every client. The response has already gone; this is the part that
+   * happens afterwards, and its outcome lands in the daemon log.
+   *
+   * Scheduled onto a later turn rather than merely un-awaited, which is not
+   * fussiness. The first thing the nudge does is read the agent's pane, and
+   * `herdr agent read` is an `execSync` with a five-second ceiling — starting
+   * it inside this call would run it *before* the handler reaches `respond`,
+   * and the caller would watch an activation hang on a message it is not
+   * waiting for.
+   *
+   * Only when a conversation actually came back. The other branch started with
+   * the degraded-resume prompt on its command line and is already working.
+   */
+  private nudgeIfResumed(session: HerdrSession, defaultAgent?: string): void {
+    if (!session.resume || session.resumedConversation !== true) return;
+    const cause = session.resume;
+    setTimeout(() => {
+      void nudgeResumedAgent({
+        herdrBridge: this.deps.herdrBridge,
+        type: session.type,
+        key: session.key,
+        cause,
+        defaultAgent,
+        typeDefaultLauncher: this.deps.registry.get(session.type)?.defaultLauncher,
+        log: (...args: any[]) => console.log(...args)
+      });
+    }, 0);
   }
 
   /**
@@ -346,12 +537,13 @@ export class MessageRouter {
       // An explicit `resume` is set only by boot-time reconciliation, never by
       // an ordinary client: it changes what the agent is told when there is
       // nothing to continue, and an ordinary activation is not an interrupted
-      // one. The field is accepted and threaded here so the registry slice
-      // (T4 of KAN-68) — whose reconcile is what sends it, and whose records
-      // are what recognise an unlabelled preemption resume — does not have to
-      // re-plumb the payload.
+      // one. What a client *can* produce without saying so is the
+      // re-activation of an agent it previously preempted, which is an
+      // interrupted one — resumeCauseFor is where that is recognised rather
+      // than trusted to the caller.
       const explicit: ResumeCause | undefined =
         data.resume === 'reboot' || data.resume === 'daemon-restart' ? data.resume : undefined;
+      const resume = this.resumeCauseFor(agentName, explicit);
 
       session = herdrBridge.spawnSession(
         type,
@@ -360,9 +552,14 @@ export class MessageRouter {
         renderedPrompt,
         defaultAgent,
         config.mcpServers,
-        explicit,
+        resume,
         config.defaultLauncher
       );
+
+      // Reconciliation nudges its own restores, in sequence and with the
+      // stagger it needs; it passes an explicit cause, which is how the two
+      // are told apart. A preemption resume has nobody else to do it.
+      if (!explicit && !session.spawnError) this.nudgeIfResumed(session, defaultAgent);
     }
 
     // A spawn herdr refused is the one case where activate can say for certain
@@ -396,6 +593,19 @@ export class MessageRouter {
       });
       return;
     }
+
+    // After confirmation, deliberately: the registry records agents that
+    // provably exist, and an fsync'd record of an agent that was never there
+    // would have reconciliation resurrecting a ghost on every boot.
+    this.rememberActivated({
+      agentName,
+      type,
+      key,
+      workDir: session.workDir,
+      url,
+      defaultAgent,
+      mcpServers: config.mcpServers
+    });
 
     this.deps.broadcast({
       action: 'agent_activated_event',
@@ -445,9 +655,10 @@ export class MessageRouter {
 
     // Read before the teardown: terminateSession marks the session terminated,
     // after which getSession still answers but the address is what we need and
-    // it does not change.
+    // it does not change. Recorded either way — see rememberDeactivated.
     const session = this.deps.herdrBridge.getSession(data.sessionId);
     const { success, error } = this.deps.herdrBridge.terminateSession(data.sessionId);
+    if (session) this.rememberDeactivated(session.type, session.key, session.workDir);
 
     if (success && session) {
       this.deps.broadcast({
@@ -472,13 +683,15 @@ export class MessageRouter {
     const { key } = data;
     // Set by a supervising caller (the capacity slice's preemption path in
     // T3), never invented here: it is the record of why this stand-down was
-    // not the agent's own idea, and it is echoed so the caller can attribute
-    // the outcome. Carried opaquely until the registry slice (T4) persists it.
-    const preemption = data.preemption;
+    // not the agent's own idea. Persisted onto the registry record, which is
+    // what keeps `list_agents` reporting the interrupted work until somebody
+    // decides about it — see PreemptionRecord.
+    const preemption: PreemptionRecord | undefined = data.preemption;
     const session = this.deps.herdrBridge.getSessionByKey(key);
 
     if (session) {
       const { success, error } = this.deps.herdrBridge.terminateSession(session.sessionId);
+      this.rememberDeactivated(session.type, session.key, session.workDir, preemption);
 
       // Not broadcast when the teardown could not be confirmed: the event is
       // what fleet clients act on, and announcing an agent deactivated while
@@ -513,18 +726,42 @@ export class MessageRouter {
     // No session, but the agent may well be alive: the session map dies with
     // the daemon and the herdr pane does not. Close it through the fallback
     // rather than telling the caller an obviously-running agent is gone.
-    //
-    // (In the extraction source this path also recorded the stand-down in the
-    // durable registry, which is what let "already gone" count as success —
-    // the registry write was the real request. That arrives with T4; until
-    // then an agent that cannot be found is reported as exactly that.)
     const result = this.deps.herdrBridge.closeAgentByKey(key);
 
+    // The type comes from the agent herdr just closed, or — when herdr has no
+    // such agent — from the registry.
+    //
+    // That second source is not a nicety. An agent that has already died cannot
+    // be resolved through herdr at all, so without it the one case where a
+    // human most needs to say "stop expecting this" would record nothing, and
+    // the next boot would resurrect an agent someone had explicitly given up
+    // on. Standing down something that is already gone has to work, because
+    // that is exactly when it is asked for.
+    //
+    // A caller that already knows the type says so and is believed first — it
+    // may be looking at a census this daemon has not read.
     const closedType =
       (typeof data.type === 'string' && data.type.trim() ? data.type.trim() : undefined) ??
-      (result.agentName ? typeFromAgentName(result.agentName, key) : undefined);
+      (result.agentName ? typeFromAgentName(result.agentName, key) : undefined) ??
+      this.registeredTypeFor(key);
 
-    if (result.success) {
+    if (closedType) this.rememberDeactivated(closedType, key, undefined, preemption);
+
+    // Standing down an agent that has already died is not a failure — it is the
+    // request working. There was no pane to close, and the thing actually being
+    // asked for ("stop expecting this agent back") is the registry write, which
+    // succeeded. Reporting `success: false` there tells a supervisor its
+    // stand-down did not take, inviting it either to retry forever or to
+    // conclude the agent is still owed a slot; the next boot would then be the
+    // first anyone learns the intent was recorded all along.
+    //
+    // Only when herdr *answered* though. An unreachable herdr also fails to
+    // close the pane, and calling that "already gone" would report an agent
+    // stood down while it is still running.
+    const goneAlready =
+      !result.success && Boolean(closedType) && this.deps.herdrBridge.listHerdrAgentsChecked().reachable;
+
+    if (result.success || goneAlready) {
       this.deps.broadcast({
         action: 'agent_deactivated_event',
         success: true,
@@ -538,9 +775,12 @@ export class MessageRouter {
       action: 'deactivate_response',
       key,
       ...(closedType ? { type: closedType } : {}),
-      success: result.success,
+      success: result.success || goneAlready,
       ...(preemption ? { preempted: true } : {}),
-      ...(result.error ? { error: result.error } : {})
+      ...(goneAlready
+        ? { alreadyGone: true, note: 'No agent was running. Its stand-down is recorded, so it will not be restored.' }
+        : {}),
+      ...(result.error && !goneAlready ? { error: result.error } : {})
     });
   }
 
@@ -564,6 +804,12 @@ export class MessageRouter {
     const { success: agentClosed, error: agentError } = session
       ? this.deps.herdrBridge.terminateSession(session.sessionId)
       : this.deps.herdrBridge.closeAgentByKey(key);
+
+    // The workspace is about to be deleted, so this agent must not be brought
+    // back by reconciliation. The record also keeps it out of standbyAgents:
+    // with no workspace on disk there is nothing to switch back on, and the
+    // standby list checks for exactly that.
+    this.rememberDeactivated(type, key, session?.workDir);
 
     // The workspace still goes away even if no agent was there to close —
     // reset's job is to leave nothing behind. Unless the target isn't ours to
@@ -728,12 +974,17 @@ export class MessageRouter {
    * out of `agents`, because a supervisor counting the list must get a number
    * it can act on, and reported under `unbackedPanes`, because silently
    * dropping them would repeat the mistake this handler exists to fix.
-   *
-   * (The registry-derived categories — missingAgents, preemptedAgents,
-   * standbyAgents — arrive with the durable registry, T4 of KAN-68.)
    */
   private handleListAgents(_data: any, respond: Respond) {
-    const { agents, unbackedPanes } = this.surveyAgents();
+    const { agents, unbackedPanes, staleSessions } = this.surveyAgents();
+
+    // Agents that should be here and are not. Computed from the same census the
+    // list is built from, so the two can never disagree about what is running.
+    const missingAgents = this.missingAgents(agents, staleSessions);
+
+    // Agents a person switched off. From the same census for the same reason:
+    // an agent that is running must never be offered an On button.
+    const { standby, total: standbyTotal } = this.standbyAgents(agents);
 
     // Descriptor headroom, reported where someone looking at agents will see
     // it. In the extraction source the herdr server's fd usage was invisible
@@ -748,6 +999,28 @@ export class MessageRouter {
       success: true,
       agents,
       unbackedPanes,
+      // Always present, even when empty: a caller that has to distinguish "no
+      // agents are missing" from "this daemon does not track that" cannot do it
+      // from an absent field. Empty array means the fleet is whole.
+      missingAgents,
+      // Work that was taken off the machine to make room for something more
+      // important, and has not been put back. Always present, empty when
+      // nothing is owed — a caller distinguishing "nothing was preempted" from
+      // "this daemon does not track that" cannot do it from an absent field.
+      //
+      // It is a queue of decisions still owed rather than a log of events: the
+      // moment one of these is re-activated it leaves the list. Nothing here
+      // restarts them, deliberately — a preemption queue that restarts its own
+      // entries is a scheduler, and preemption must never be automatic.
+      preemptedAgents: this.preemptedAgents(),
+      // Where a fleet client's On button gets its candidates. Always present
+      // and empty rather than absent, by the same rule as the two lists above:
+      // "nothing is switched off" and "this daemon does not track that" are
+      // different answers and a client cannot tell them apart from a missing
+      // field. `standbyTotal` is the unclipped count — a list that silently
+      // stopped at STANDBY_LIMIT would read as "that is all of them".
+      standbyAgents: standby,
+      standbyTotal,
       ...(usage ? {
         herdrHealth: {
           pid: usage.pid,
@@ -764,6 +1037,156 @@ export class MessageRouter {
         }
       } : {})
     });
+  }
+
+  /**
+   * Agents stood down to make room, in the shape a client renders.
+   *
+   * Reported until they are re-activated. Restarting them is deliberately not
+   * done here — a preemption queue that restarts its own entries is a
+   * scheduler — so what this buys is that the decision is *owed to someone*
+   * rather than lost: a supervising caller sees it on every poll and can put
+   * the work back, and a human sees whose work is waiting.
+   */
+  private preemptedAgents() {
+    return this.deps.agentRegistry.preempted().map((entry) => ({
+      agentName: entry.agentName,
+      type: entry.record.type,
+      key: entry.record.key,
+      workDir: entry.record.workDir,
+      url: entry.record.url ?? null,
+      at: entry.at,
+      priority: entry.preemption.priority,
+      herdrStatusWhenPreempted: entry.preemption.herdrStatus,
+      by: {
+        agentName: entry.preemption.byAgentName,
+        type: entry.preemption.byType,
+        key: entry.preemption.byKey,
+        priority: entry.preemption.byPriority
+      },
+      reason:
+        `Stood down at ${entry.at} to free capacity for ` +
+        `${entry.preemption.byType}/${entry.preemption.byKey} ` +
+        `(priority ${entry.preemption.byPriority} against this agent's ` +
+        `${entry.preemption.priority}). Its work was interrupted, not finished. ` +
+        `Re-activating it resumes the conversation it was stopped in; until then ` +
+        `its work should not be read as in progress.`,
+      derivation: entry.preemption.derivation
+    }));
+  }
+
+  /**
+   * The gap between what the registry says should be running and what herdr
+   * actually has.
+   *
+   * The comparison is against the *census*, not against the session map: an
+   * agent that survived a daemon restart has no session of ours and is
+   * nonetheless perfectly alive, and calling it missing would be a false
+   * alarm about something working exactly as designed.
+   */
+  private missingAgents(agents: ListedAgent[], staleSessions?: Set<string>): MissingAgent[] {
+    const alive = new Set(agents.map((a) => a.agentName));
+    const missing: MissingAgent[] = [];
+
+    for (const [agentName, intent] of this.deps.agentRegistry.intents()) {
+      if (intent.event !== 'activated') continue;
+      if (alive.has(agentName)) continue;
+
+      missing.push({
+        agentName,
+        type: intent.record.type,
+        key: intent.record.key,
+        workDir: intent.record.workDir,
+        url: intent.record.url ?? null,
+        since: intent.at,
+        // Both cases are "not running", but they are not the same event and a
+        // reader acting on this deserves the difference: an agent that never
+        // came back, versus one that was running under this daemon and died
+        // while we held its session. The second is a crash we witnessed.
+        reason: staleSessions?.has(agentName)
+          ? 'The registry records this agent as active and this daemon held a session ' +
+            'for it, but herdr has no agent by that name: it started and then died. ' +
+            'It is not running.'
+          : 'The registry records this agent as active, but herdr has no agent by that name ' +
+            'and this daemon holds no session for it. It is not running.'
+      });
+    }
+
+    return missing;
+  }
+
+  /**
+   * Agents a person switched off, that could be switched back on.
+   *
+   * Three filters, each removing a different kind of thing nobody means by
+   * "turn it back on":
+   *
+   *   - still running — the stand-down failed, or it was started again since.
+   *     Offering On for something already on is how a control starts lying.
+   *   - preempted — reported separately, with the name of what took its slot.
+   *     One agent, one switch: a row in two lists is a row that can be pressed
+   *     twice.
+   *   - no workspace on disk — `reset` records a stand-down too, and the
+   *     directory it deleted is the whole difference between "stopped" and
+   *     "finished with". Re-activating one of those would create an empty
+   *     workspace and start an agent in it with nothing to continue.
+   *
+   * Newest first, because the thing you just switched off is the thing you are
+   * most likely to want back.
+   */
+  private standbyAgents(agents: ListedAgent[]): { standby: StandbyAgent[]; total: number } {
+    const alive = new Set(agents.map((a) => a.agentName));
+    const standby: StandbyAgent[] = [];
+
+    for (const [agentName, intent] of this.deps.agentRegistry.intents()) {
+      if (intent.event !== 'deactivated') continue;
+      if (intent.preemption) continue;
+      if (alive.has(agentName)) continue;
+
+      const workDir = intent.record.workDir;
+      if (!workDir || !fs.existsSync(workDir)) continue;
+
+      standby.push({
+        agentName,
+        type: intent.record.type,
+        key: intent.record.key,
+        workDir,
+        url: intent.record.url ?? null,
+        defaultAgent: intent.record.defaultAgent ?? null,
+        since: intent.at,
+        reason:
+          'Switched off deliberately. Its workspace is still on disk, so switching it back ' +
+          'on resumes the conversation it was stopped in rather than starting a new one.'
+      });
+    }
+
+    standby.sort((a, b) => b.since.localeCompare(a.since));
+    return { standby: standby.slice(0, STANDBY_LIMIT), total: standby.length };
+  }
+
+  /**
+   * The workspace type the registry has on file for a key, when it is
+   * unambiguous. Used to address an agent that no longer exists anywhere else —
+   * see handleDeactivateByKey. Two registered agents sharing a key differ only
+   * by type, which is precisely what this cannot guess, so it declines rather
+   * than picking one.
+   */
+  private registeredTypeFor(key: string): string | undefined {
+    const lower = key.toLowerCase();
+    const matches = Array.from(this.deps.agentRegistry.intents().values()).filter(
+      (intent) => intent.event === 'activated' && intent.record.key.toLowerCase() === lower
+    );
+    return matches.length === 1 ? matches[0].record.type : undefined;
+  }
+
+  /**
+   * `missingAgents`, for callers outside a request — the daemon's periodic
+   * sweep. Public because the sweep runs on a timer rather than in response to
+   * a client, and must ask the same question the list answers.
+   */
+  public findMissingAgents(): MissingAgent[] {
+    const { agents, staleSessions } = this.surveyAgents();
+    return this.missingAgents(agents, staleSessions);
   }
 
   /**
@@ -816,6 +1239,18 @@ export class MessageRouter {
         const dead = !record || (!record.agentRuntime && (session.expectsRuntime ?? true));
         if (dead) {
           staleSessions.add(agentName);
+          // Release the corpse, not just skip it. A session left `active` for
+          // a dead pane is the one the next activate for this address would
+          // reuse — it would then fail confirmation only after a full
+          // confirm-timeout poll, tearing the session down at the moment the
+          // caller is waiting on it. The extraction source computed this set
+          // and discarded it (flagged in KAN-70's review); releasing here
+          // means the next activation spawns fresh instead of inheriting a
+          // session whose agent it can never confirm.
+          this.deps.herdrBridge.abandonSession(
+            session.sessionId,
+            `herdr has no live agent behind ${agentName}; the session was released by the census`
+          );
           continue;
         }
       }
