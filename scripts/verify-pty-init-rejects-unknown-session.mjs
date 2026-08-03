@@ -291,11 +291,15 @@ if (!herdrAvailable) {
   console.log('SKIPPED: no herdr to start an agent with.');
 } else {
   // `shell` explicitly: what this stage needs is a PTY the daemon genuinely
-  // holds a session for — a bare shell, not a coding agent.
+  // holds a session for — a bare shell, not a coding agent. `override: true`
+  // with it: the capacity gate measures the real machine, and whether this
+  // box is busy is not what is being proved. The override is recorded with
+  // the figures at the time, as it is for anyone.
   const activated = await call('activate_by_key', {
     type: 'task',
     key: 'KAN-25-VERIFY',
-    defaultAgent: 'shell'
+    defaultAgent: 'shell',
+    override: true
   });
   console.log('activate_by_key →', JSON.stringify({ ...activated, id: undefined }, null, 2));
 
