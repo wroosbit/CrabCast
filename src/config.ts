@@ -2,6 +2,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { WorkspaceTypeConfig } from './types.js';
+// For the socket-path length check below. One-way: ipc.ts imports nothing
+// from here, so naming the socket in one place costs no cycle.
+import { socketPathFor } from './ipc.js';
 
 // The config file is the whole definition of what this daemon can run: an
 // optional data directory and a list of workspace types. Validation refuses
@@ -12,6 +15,31 @@ import { WorkspaceTypeConfig } from './types.js';
 
 export const DEFAULT_CONFIG_FILENAME = 'crabcast.config.json';
 export const DEFAULT_DATA_DIR = path.join(os.homedir(), '.local', 'share', 'crabcast');
+
+/**
+ * The longest socket path this config may imply.
+ *
+ * A unix socket address is a fixed `sun_path` buffer — 108 bytes on Linux,
+ * 104 on macOS and the BSDs — and a path past it is **truncated**, not
+ * rejected. What that looks like from the outside is worth stating, because
+ * it was found the hard way twice: the daemon logs a clean start and binds a
+ * socket somewhere else entirely (outside the dataDir, and therefore outside
+ * the `0700` directory that is this daemon's whole auth boundary), its
+ * `chmod 0600` fails on a path that does not exist, its `unlinkSync` never
+ * removes anything, and the next daemon exits with "Removing stale socket
+ * file" against a directory that is brand new and empty. Two different long
+ * dataDirs can even truncate to the *same* address and collide.
+ *
+ * 104 rather than 108, so a config that loads here loads on a Mac too: this
+ * file's whole contract is that a config it accepts is a config the daemon
+ * can run.
+ *
+ * Refused at load, with the figures, because that is what the rest of this
+ * loader does — the alternative is a failure that surfaces as a message about
+ * a file nobody touched. Fixing what the daemon does with an over-long path
+ * once it is past this gate is KAN-97.
+ */
+export const MAX_SOCKET_PATH_CHARS = 104;
 
 /** A refusal by the config loader; the message names the field and the type. */
 export class ConfigError extends Error {}
@@ -27,16 +55,54 @@ export interface CrabcastConfig {
 }
 
 /**
- * Where the config comes from: an explicit path as the first CLI argument,
- * else the CRABCAST_CONFIG environment variable, else `crabcast.config.json`
- * in the current directory.
+ * Where a config came from, and whether anyone actually named it.
+ *
+ * `named` is the second half of the rule, and it is the half that decides
+ * what a caller does when the file will not load. A config somebody named —
+ * on the command line or in CRABCAST_CONFIG — that does not load is a
+ * refusal: falling back would connect to a *different* daemon than the one
+ * asked for, which is how a tool call steers the wrong fleet. A config nobody
+ * named is a default that may simply not be there, and falling back to the
+ * default data dir (without ever spawning a daemon into it) is reasonable.
+ *
+ * Returned together because every consumer needs both, and a consumer that
+ * recomputes `named` from its own argv is a second copy of this rule.
  */
+export interface ConfigSource {
+  /** Absolute path the config will be read from. */
+  path: string;
+  /** True when a config path was named explicitly or via CRABCAST_CONFIG. */
+  named: boolean;
+}
+
+/**
+ * Where the config comes from: an explicit path the caller was given, else the
+ * CRABCAST_CONFIG environment variable, else `crabcast.config.json` in the
+ * current directory.
+ *
+ * The explicit path is a *parameter* rather than something read out of
+ * `process.argv` here, and that is not a stylistic preference. This function
+ * used to read `argv[2]` itself, which is the config path for the daemon and
+ * the *subcommand* for the CLI — `crabcast list` would have gone looking for
+ * a config file named `list`. There are three consumers of this rule now (the
+ * daemon, the MCP server, the CLI) and only two of them have the path at
+ * `argv[2]`; the rule belongs here and the argv position belongs to whoever
+ * knows their own argv.
+ */
+export function resolveConfigSource(
+  explicit?: string,
+  env: NodeJS.ProcessEnv = process.env
+): ConfigSource {
+  const named = explicit || env.CRABCAST_CONFIG;
+  return { path: path.resolve(named || DEFAULT_CONFIG_FILENAME), named: Boolean(named) };
+}
+
+/** {@link resolveConfigSource} when only the path is wanted. */
 export function resolveConfigPath(
-  argv: string[] = process.argv,
+  explicit?: string,
   env: NodeJS.ProcessEnv = process.env
 ): string {
-  const explicit = argv[2] || env.CRABCAST_CONFIG;
-  return path.resolve(explicit || DEFAULT_CONFIG_FILENAME);
+  return resolveConfigSource(explicit, env).path;
 }
 
 function refuse(message: string): never {
@@ -137,6 +203,24 @@ export function parseConfig(raw: string, configPath: string): CrabcastConfig {
       refuse(`${configPath}: "dataDir" must be a non-empty string`);
     }
     dataDir = path.resolve(baseDir, expandHome(data.dataDir));
+  }
+
+  // See MAX_SOCKET_PATH_CHARS. Checked on the default too, not only on a
+  // dataDir somebody wrote: the default is under `os.homedir()`, and a home
+  // directory long enough to blow the budget would produce exactly the same
+  // unreadable failure with nothing in the config to point at.
+  const socketPath = socketPathFor(dataDir);
+  if (socketPath.length > MAX_SOCKET_PATH_CHARS) {
+    refuse(
+      `${configPath}: "dataDir" is too long — its socket path is ` +
+        `${socketPath.length} characters and a unix socket address holds at most ` +
+        `${MAX_SOCKET_PATH_CHARS} (108 on Linux, 104 on macOS; the smaller is used so a ` +
+        `config that loads here loads there). Over the limit the address is ` +
+        `silently truncated, so the daemon binds a socket somewhere other than ` +
+        `its data directory, cannot chmod or unlink it, and the next daemon ` +
+        `reports a stale socket file in a directory that is empty. Shorten the ` +
+        `dataDir.\n  dataDir: ${dataDir}\n  socket:  ${socketPath}`
+    );
   }
 
   if (!('workspaceTypes' in data) || !Array.isArray(data.workspaceTypes)) {

@@ -6,6 +6,9 @@
   "private": true,
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "crabcast": "dist/cli.js"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc"
