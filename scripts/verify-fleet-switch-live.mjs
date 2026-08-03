@@ -93,6 +93,24 @@ function herdrAgents() {
 
 const probeRunning = () => (herdrAgents() ?? []).includes(PROBE_AGENT);
 
+/**
+ * Close the probe's pane the way the daemon itself does: resolve the pane id
+ * with `agent get`, close it with `pane close`. herdr has no `agent close`
+ * subcommand.
+ */
+function closeProbePane() {
+  const out = execFileSync('herdr', ['agent', 'get', PROBE_AGENT], {
+    encoding: 'utf8',
+    timeout: 15000,
+    stdio: ['ignore', 'pipe', 'ignore']
+  });
+  const paneId = JSON.parse(out)?.result?.agent?.pane_id;
+  if (typeof paneId !== 'string' || !paneId) {
+    throw new Error(`no pane id for ${PROBE_AGENT}`);
+  }
+  execFileSync('herdr', ['pane', 'close', paneId], { stdio: 'ignore', timeout: 15000 });
+}
+
 /** Wait for herdr to agree, or give up. Panes do not open or close instantly. */
 async function waitForProbe(present, timeoutMs = 20000) {
   const deadline = Date.now() + timeoutMs;
@@ -133,9 +151,7 @@ function cleanup() {
   if (cleanedUp) return;
   cleanedUp = true;
   try {
-    if ((herdrAgents() ?? []).includes(PROBE_AGENT)) {
-      execFileSync('herdr', ['agent', 'close', PROBE_AGENT], { stdio: 'ignore', timeout: 15000 });
-    }
+    if ((herdrAgents() ?? []).includes(PROBE_AGENT)) closeProbePane();
   } catch {}
   daemon?.kill('SIGKILL');
   rmSync(scratch, { recursive: true, force: true });
@@ -176,10 +192,17 @@ function attachSocket(sock) {
   sock.on('error', () => {});
 }
 
-const call = (action, data = {}) =>
-  new Promise((resolve) => {
+const call = (action, data = {}, timeoutMs = 60000) =>
+  new Promise((resolve, reject) => {
     const id = `kan72-${++nextId}`;
-    pending.set(id, resolve);
+    // A watchdog, not a nicety: a request written to a socket that died
+    // between connect and write is simply never answered, and a proof that
+    // hangs forever proves less than one that fails saying where.
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`no response to ${action} (id ${id}) within ${timeoutMs / 1000}s`));
+    }, timeoutMs);
+    pending.set(id, (msg) => { clearTimeout(timer); resolve(msg); });
     socket.write(JSON.stringify({ action, ...data, id }) + '\n');
   });
 
@@ -189,33 +212,48 @@ async function startDaemon(label) {
   daemon = spawn(process.execPath, [path.join(rootDir, 'dist', 'daemon.js'), configPath], {
     stdio: ['ignore', 'ignore', 'inherit']
   });
-  // Connect-based readiness, not file-based: a SIGKILLed predecessor leaves a
-  // stale socket file behind, and the new daemon replaces it on its own.
-  const deadline = Date.now() + 20000;
+  // Round-trip readiness, not connect-based readiness. A `connect` that
+  // succeeds is not evidence of a daemon: a unix listener accepts into its
+  // kernel backlog without the owning process ever calling accept(), so a
+  // connect racing a predecessor's death can land in a dead daemon's backlog
+  // and then hang silently. Only an answered daemon_status counts.
+  const deadline = Date.now() + 30000;
   for (;;) {
     if (Date.now() > deadline) {
-      console.error('daemon never accepted a connection');
+      console.error('daemon never answered daemon_status');
       process.exit(1);
     }
     const attempt = await new Promise((resolve) => {
       const sock = net.connect(socketPath);
-      sock.once('connect', () => resolve(sock));
-      sock.once('error', () => { sock.destroy(); resolve(null); });
+      const timer = setTimeout(() => { sock.destroy(); resolve(null); }, 2000);
+      sock.once('connect', () => { clearTimeout(timer); resolve(sock); });
+      sock.once('error', () => { clearTimeout(timer); sock.destroy(); resolve(null); });
     });
     if (attempt) {
       attachSocket(attempt);
-      return;
+      try {
+        const status = await call('daemon_status', {}, 3000);
+        if (status?.success && status?.pid === daemon.pid) return;
+      } catch {}
+      socket?.destroy();
+      socket = null;
     }
     await sleep(250);
   }
 }
 
 /** SIGKILL the daemon — no shutdown hook, exactly like a crash. */
-function killDaemon() {
+async function killDaemon() {
   socket?.destroy();
   socket = null;
+  const pid = daemon.pid;
+  const gone = new Promise((resolve) => daemon.once('exit', resolve));
   daemon.kill('SIGKILL');
-  console.log(`daemon pid ${daemon.pid} SIGKILLed (no shutdown hook ran; its socket file is now stale)`);
+  // Wait for the kernel to actually reap it: kill() is asynchronous, and a
+  // successor started against a listener that is still dying can race into
+  // its backlog (see startDaemon).
+  await gone;
+  console.log(`daemon pid ${pid} SIGKILLed (no shutdown hook ran; its socket file is now stale)`);
 }
 
 const grepReconcile = () => {
@@ -279,7 +317,7 @@ verdict(
 rule('3. RESTART SURVIVAL — SIGKILL the daemon; a fresh one restores the fleet');
 
 const sessionBefore = started.sessionId;
-killDaemon();
+await killDaemon();
 console.log(`probe pane still alive without its daemon: ${probeRunning()} (herdr owns the pane, not the daemon)\n`);
 
 await startDaemon('daemon #2');
@@ -325,7 +363,7 @@ console.log(`probe gone from herdr: ${vanished}`);
 console.log(`registry line recorded for the stand-down:`);
 console.log(`  ${readFileSync(registryPath, 'utf8').trim().split('\n').pop()}`);
 
-killDaemon();
+await killDaemon();
 await startDaemon('daemon #3');
 // Give reconciliation the same window it had in section 3 — the assertion is
 // that it does NOT use it.
@@ -381,8 +419,8 @@ verdict(
 rule('6. LOST — a pane closed behind the daemon\'s back is announced once, not every sweep');
 
 console.log('closing the probe pane with herdr directly — the daemon is not consulted:\n');
-console.log(`  herdr agent close ${PROBE_AGENT}\n`);
-execFileSync('herdr', ['agent', 'close', PROBE_AGENT], { stdio: 'ignore', timeout: 15000 });
+console.log(`  herdr agent get ${PROBE_AGENT} → herdr pane close <pane_id>\n`);
+closeProbePane();
 await waitForProbe(false);
 
 // The sweep runs every 30s. Wait up to 45s for the first announcement…
