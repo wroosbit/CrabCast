@@ -12,6 +12,7 @@ import { MessageRouter } from './router.js';
 import { PromptLoader } from './prompt.js';
 import { HerdrBridge } from './herdr.js';
 import {
+  HERDR_VERSION_NOTICE_FIELD,
   checkHerdrVersion,
   describeFdCeiling,
   isFdCeilingUnraised,
@@ -96,6 +97,23 @@ process.on('unhandledRejection', (err) => {
 // started it, and its environment is inherited by every herdr pane and agent.
 process.env.PATH = resolveUserPath();
 log(`PATH resolved to: ${process.env.PATH}`);
+
+/**
+ * The verdict on the installed herdr, computed once here at startup and then
+ * carried to a person (KAN-102).
+ *
+ * It used to be logged and nothing else. This daemon is spawned detached by
+ * whichever client needed it first (ipc.ts), so nothing is attached to its
+ * stdout and `daemon.log` is a file a new user does not know exists — which
+ * made a check that had already diagnosed the problem indistinguishable, from
+ * the user's seat, from no check at all. It is still logged; it now also rides
+ * out on the first response each client gets, where somebody is looking.
+ *
+ * Once, at startup, deliberately: `herdr --version` is a process spawn, and
+ * the answer is a property of the machine rather than of any one request.
+ */
+let herdrVersionNotice: string | undefined;
+
 const herdrPath = which('herdr');
 if (herdrPath) {
   log(`herdr found at ${herdrPath}`);
@@ -109,8 +127,8 @@ if (herdrPath) {
       stdio: ['ignore', 'pipe', 'ignore']
     });
     log(`herdr version: ${version.trim()}`);
-    const versionWarning = checkHerdrVersion(version);
-    if (versionWarning) log(`WARNING: ${versionWarning}`);
+    herdrVersionNotice = checkHerdrVersion(version);
+    if (herdrVersionNotice) log(`WARNING: ${herdrVersionNotice}`);
   } catch (e: any) {
     log(`Could not read herdr's version: ${e?.message ?? String(e)}`);
   }
@@ -180,6 +198,25 @@ const server = net.createServer((socket) => {
   connections.add(socket);
   log(`Client connected (${connections.size} total)`);
 
+  // The version verdict rides on the FIRST answer this client gets and no
+  // later one. Once is what makes it a notice: repeated on every response it
+  // would be noise a client learns to skip, which is the failure mode the
+  // 30-second missing-agent broadcast is latched against for the same reason.
+  // On a response rather than on a banner of its own because there is no
+  // banner — the socket carries answers, and a client that has just received
+  // one is a client with a human reading it.
+  //
+  // Only per-request responses, never broadcasts: an event delivered to
+  // whoever happens to be connected is not somebody's command coming back.
+  let noticeSent = false;
+  const send = (msg: any) => {
+    if (herdrVersionNotice && !noticeSent) {
+      noticeSent = true;
+      msg = { ...msg, [HERDR_VERSION_NOTICE_FIELD]: herdrVersionNotice };
+    }
+    writeJsonLine(socket, msg);
+  };
+
   // One router per connection: responses go back to the requesting client,
   // and PTY listeners registered by this client die with its connection.
   const router = new MessageRouter({
@@ -189,7 +226,7 @@ const server = net.createServer((socket) => {
     herdrBridge,
     daemonStartedAt,
     agentRegistry,
-    send: (msg) => writeJsonLine(socket, msg),
+    send,
     broadcast
   });
 
@@ -200,7 +237,11 @@ const server = net.createServer((socket) => {
         router.handle(msg);
       } catch (err: any) {
         log('Handler error:', err);
-        writeJsonLine(socket, {
+        // Through `send`, not straight to the socket: this is still this
+        // client's answer to this client's request, and a caller whose command
+        // blew up is exactly the caller who should hear that their herdr is
+        // one CrabCast has never been run against.
+        send({
           success: false,
           error: err?.message ?? String(err),
           ...(msg?.id !== undefined ? { id: msg.id } : {})
