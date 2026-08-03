@@ -2,17 +2,23 @@
 // an agent off and back on, and every way that could go wrong has an answer
 // rather than a discovery.
 //
-// Seven sections, one per thing that had to be decided:
+// Eight sections, one per thing that had to be decided:
 //
 //   1. off          — the message a client sends, and the agent gone from the census
 //   2. on           — where the On candidates come from, and the agent back
 //   3. launcher     — why a stand-down has to carry the activation record with it
 //   4. preempted    — a preemption is a debt: reported until re-activation,
-//                     disjoint from standby, and re-activation is a resume
+//                     disjoint from standby, and re-activation is a resume;
+//                     4b: a failed teardown writes nothing; 4c: the debt list
+//                     is census-cross-checked like every category
 //   5. already gone — standing down an agent that already died records the
 //                     intent and reports success, not failure
 //   6. poll churn   — a census position is not an identity across polls
-//   7. reset        — a deleted workspace is not offered a way back
+//   7. reset        — a deleted workspace is not offered a way back;
+//                     7b: reset resolves the full address, never a key-twin
+//   8. durability   — a registry that cannot be written answers durable: false
+//                     and broadcasts the degradation, instead of hiding it
+//                     behind verified: true
 //
 // Every section drives the real MessageRouter, the real WorkspaceRegistry, a
 // real config through the real loader and a real on-disk AgentRegistry, so
@@ -124,9 +130,14 @@ function stubHerdr(running, { statuses = {}, workDirs = {}, closeFails = false }
     getSessionByKey: () => undefined,
     getSessionByAddress: () => undefined,
     terminateSession: () => ({ success: true }),
-    closeAgentByKey: (key) => {
+    // Type-aware, like the real one: a caller that gives the full address must
+    // only ever close that address's pane — that precision is what section 7's
+    // cross-type reset check leans on.
+    closeAgentByKey: (key, type) => {
       if (closeFails) return { success: false, error: `No agent found for key '${key}'` };
-      const i = alive.findIndex((n) => n.endsWith(`-${key.toLowerCase()}`));
+      const i = type
+        ? alive.findIndex((n) => n === `crabcast-${type}-${key.toLowerCase()}`)
+        : alive.findIndex((n) => n.endsWith(`-${key.toLowerCase()}`));
       if (i === -1) return { success: false, error: `No agent found for key '${key}'` };
       const [agentName] = alive.splice(i, 1);
       return { success: true, agentName };
@@ -426,6 +437,72 @@ rule('4. PREEMPTED — a debt, reported until re-activation, and re-activation i
     '    recognised as resuming interrupted work — the caller did not have to say so.',
     `the preemption lifecycle broke: owed=${Boolean(owed)} resume=${spawned?.resume} after=${after.preemptedAgents.length}`
   );
+
+  // -- 4b. a teardown that fails writes nothing --------------------------------
+  console.log('\n  4b. the record follows the teardown — a failed stand-down writes nothing:\n');
+  console.log('  The gate aborts the whole preemption when the stand-down fails. A durable');
+  console.log('  record written before that check would say the victim was preempted while it');
+  console.log('  is alive and working: owed a resume it is not owed, absent from expected()');
+  console.log('  so a reboot forgets it, and framed as interrupted on its next activation.\n');
+
+  const survivorDir = path.join(WORKSPACES, 'task', 'kan-42');
+  fs.mkdirSync(survivorDir, { recursive: true });
+  const failBridge = stubHerdr(['crabcast-task-kan-42'], { workDirs: { 'crabcast-task-kan-42': survivorDir } });
+  // A live session whose teardown fails — the pane stays, the agent works on.
+  failBridge.getSessionByAddress = () => ({
+    sessionId: 'task-kan-42-stub', type: 'task', key: 'KAN-42',
+    createdAt: new Date(), status: 'active', workDir: survivorDir,
+    ptyBuffer: '', onDataListeners: []
+  });
+  failBridge.terminateSession = () => ({ success: false, error: 'stub: the pane would not close' });
+  const failHarness = newRouter(failBridge, seedOf(['crabcast-task-kan-42'], { 'crabcast-task-kan-42': survivorDir }));
+
+  const failed = await quiet(async () => {
+    failHarness.router.handle({ action: 'deactivate_by_key', type: 'task', key: 'KAN-42', preemption });
+    return failHarness.sent();
+  });
+  const survivorIntent = failHarness.agentRegistry.intents().get('crabcast-task-kan-42');
+  const failedList = list(failHarness.router, failHarness.sent);
+  console.log(`  deactivate_by_key (teardown fails) → ${JSON.stringify({ success: failed.success, error: failed.error })}`);
+  console.log(`  registry intent after: ${survivorIntent.event}`);
+  console.log(`  preemptedAgents after: ${JSON.stringify(failedList.preemptedAgents)}`);
+
+  verdict(
+    failed.success === false &&
+      survivorIntent.event === 'activated' &&
+      failedList.preemptedAgents.length === 0 &&
+      failedList.agents.some((a) => a.agentName === 'crabcast-task-kan-42'),
+    'the failed stand-down wrote nothing: the survivor is still expected, still\n' +
+    '    listed as running, and owed nothing.',
+    `a failed teardown left a durable lie: ${JSON.stringify({ success: failed.success, intent: survivorIntent.event, owed: failedList.preemptedAgents.length })}`
+  );
+
+  // -- 4c. a record that contradicts the census is not reported as fact --------
+  console.log('\n  4c. preemptedAgents is cross-checked against the census, like every category:\n');
+  const phantomDir = path.join(WORKSPACES, 'task', 'kan-43');
+  fs.mkdirSync(phantomDir, { recursive: true });
+  // The census says the agent is RUNNING; the registry (via some past failure
+  // this rule exists to contain) says it was preempted.
+  const phantomBridge = stubHerdr(['crabcast-task-kan-43'], { workDirs: { 'crabcast-task-kan-43': phantomDir } });
+  const phantomHarness = newRouter(phantomBridge, []);
+  phantomHarness.agentRegistry.recordActivated({
+    agentName: 'crabcast-task-kan-43', type: 'task', key: 'KAN-43', workDir: phantomDir, defaultAgent: 'claude'
+  });
+  phantomHarness.agentRegistry.recordDeactivated(
+    { agentName: 'crabcast-task-kan-43', type: 'task', key: 'KAN-43', workDir: phantomDir, defaultAgent: 'claude' },
+    preemption
+  );
+  const phantomList = list(phantomHarness.router, phantomHarness.sent);
+  console.log(`  census: ${phantomList.agents.map((a) => a.agentName).join(', ')}`);
+  console.log(`  preemptedAgents: ${JSON.stringify(phantomList.preemptedAgents)}`);
+
+  verdict(
+    phantomList.agents.some((a) => a.agentName === 'crabcast-task-kan-43') &&
+      phantomList.preemptedAgents.length === 0,
+    'an agent herdr can show running is never simultaneously reported as preempted\n' +
+    '    debt — reality outranks the record, in this category as in the other three.',
+    `a phantom debt was reported over a live agent: ${JSON.stringify(phantomList.preemptedAgents)}`
+  );
 }
 
 // ---------------------------------------------------------- 5. already gone --
@@ -528,6 +605,95 @@ rule('7. RESET — a deleted workspace is not offered a way back');
     'a workspace on disk is what makes an agent restorable, and a reset one is not\n' +
     '    offered.',
     'a reset workspace was still offered a way back.'
+  );
+
+  // -- 7b. reset resolves the full address -------------------------------------
+  console.log('\n  7b. reset is by full address — with task/K and epic/K live, resetting one');
+  console.log('  must not tear down or record against the other:\n');
+  const twinTask = path.join(WORKSPACES, 'twin', 'task-kan-88');
+  const twinEpic = path.join(WORKSPACES, 'twin', 'epic-kan-88');
+  fs.mkdirSync(twinTask, { recursive: true });
+  fs.mkdirSync(twinEpic, { recursive: true });
+  const twinBridge = stubHerdr(
+    ['crabcast-task-kan-88', 'crabcast-epic-kan-88'],
+    { workDirs: { 'crabcast-task-kan-88': twinTask, 'crabcast-epic-kan-88': twinEpic } }
+  );
+  const twins = newRouter(twinBridge, seedOf(
+    ['crabcast-task-kan-88', 'crabcast-epic-kan-88'],
+    { 'crabcast-task-kan-88': twinTask, 'crabcast-epic-kan-88': twinEpic }
+  ));
+
+  await quiet(async () => twins.router.handle({ action: 'reset_by_key', type: 'task', key: 'KAN-88' }));
+  const taskIntent = twins.agentRegistry.intents().get('crabcast-task-kan-88');
+  const epicIntent = twins.agentRegistry.intents().get('crabcast-epic-kan-88');
+  const twinCensus = list(twins.router, twins.sent).agents.map((a) => a.agentName);
+  console.log(`  after reset task/KAN-88: census = [${twinCensus.join(', ')}]`);
+  console.log(`  registry: task=${taskIntent.event}, epic=${epicIntent.event}`);
+
+  verdict(
+    taskIntent.event === 'deactivated' &&
+      epicIntent.event === 'activated' &&
+      !twinCensus.includes('crabcast-task-kan-88') &&
+      twinCensus.includes('crabcast-epic-kan-88'),
+    'the addressed agent was torn down and recorded; its key-twin of another type\n' +
+    '    was neither touched nor written about.',
+    `reset crossed types: task=${taskIntent.event} epic=${epicIntent.event} census=${twinCensus.join(',')}`
+  );
+}
+
+// ------------------------------------------------------------ 8. durability --
+rule('8. DURABILITY IS REPORTED — a registry that cannot be written says so');
+
+{
+  const workDir = path.join(WORKSPACES, 'task', 'kan-90');
+  fs.mkdirSync(workDir, { recursive: true });
+  const bridge = stubHerdr([], { workDirs: { 'crabcast-task-kan-90': workDir } });
+
+  // A registry whose directory refuses writes: the append's openSync fails,
+  // which is what a full or read-only data dir looks like from here.
+  const sealedDir = path.join(TMP, 'sealed');
+  fs.mkdirSync(sealedDir, { recursive: true });
+  fs.chmodSync(sealedDir, 0o500);
+  const events = [];
+  let last;
+  const router = new MessageRouter({
+    registry,
+    config,
+    promptLoader: prompts,
+    herdrBridge: bridge,
+    daemonStartedAt: new Date(),
+    agentRegistry: new AgentRegistry(path.join(sealedDir, 'agents.jsonl')),
+    send: (msg) => { last = msg; },
+    broadcast: (msg) => events.push(msg)
+  });
+
+  const res = await quiet(async () => {
+    let out;
+    await router.handleActivateByKey(
+      { type: 'task', key: 'KAN-90', defaultAgent: 'claude', ...PAST_THE_GATE },
+      (msg) => { out = msg; }
+    );
+    return out;
+  });
+  fs.chmodSync(sealedDir, 0o755); // so cleanup can remove the scratch
+
+  const degraded = events.find((e) => e.action === 'registry_degraded_event');
+  console.log('the agent exists and is verified — but the disk does not know it, and that');
+  console.log('gap must be somebody\'s to act on rather than a line in a log nobody reads:\n');
+  console.log(`  activate_by_key → ${JSON.stringify({ success: res.success, verified: res.verified, durable: res.durable, durabilityError: Boolean(res.durabilityError) })}`);
+  console.log(`  broadcast: ${JSON.stringify(degraded && { action: degraded.action, what: degraded.what })}`);
+
+  verdict(
+    res.success === true &&
+      res.verified === true &&
+      res.durable === false &&
+      typeof res.durabilityError === 'string' &&
+      Boolean(degraded) &&
+      /re-issue|restart/i.test(degraded.consequence ?? ''),
+    'the activation is honest twice over: success because the agent provably lives,\n' +
+    '    durable: false because a restart will not know it — and every connected client\n' +
+    '    heard the registry degrade.',
+    `the write failure was swallowed: ${JSON.stringify({ durable: res.durable, degraded: Boolean(degraded) })}`
   );
 }
 

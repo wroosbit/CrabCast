@@ -128,6 +128,16 @@ export interface PreemptedAgent {
   preemption: PreemptionRecord;
 }
 
+/**
+ * Whether one append reached the disk. `ok: false` means the lifecycle event
+ * happened and the registry does not know it — the caller must say so, not
+ * swallow it.
+ */
+export interface RecordOutcome {
+  ok: boolean;
+  error?: string;
+}
+
 function isUsableEntry(value: any): value is AgentLogEntry {
   return (
     value &&
@@ -157,10 +167,19 @@ export class AgentRegistry {
    * concurrent writers (a second daemon losing the socket race, say) interleave
    * whole lines rather than overwriting each other.
    *
-   * Never throws. A registry that cannot be written is a degraded restore, not
-   * a reason to fail the activation the caller is in the middle of.
+   * Never throws — a registry that cannot be written is a degraded restore,
+   * not a reason to fail the activation the caller is in the middle of — but
+   * it *answers*. A swallowed failure here is KAN-21 re-entering through the
+   * error path: the agent exists, the disk does not know, and nothing outside
+   * the daemon log can observe it. The caller surfaces `ok: false` (a
+   * `durable: false` on its response, a degraded-registry broadcast) so the
+   * gap is somebody's to act on rather than nobody's.
    */
-  public record(event: AgentEvent, record: AgentRecord, preemption?: PreemptionRecord): void {
+  public record(
+    event: AgentEvent,
+    record: AgentRecord,
+    preemption?: PreemptionRecord
+  ): RecordOutcome {
     const entry: AgentLogEntry = {
       ...record,
       event,
@@ -175,10 +194,9 @@ export class AgentRegistry {
       fs.writeSync(fd, JSON.stringify(entry) + '\n');
       fs.fsyncSync(fd);
     } catch (e: any) {
-      console.error(
-        `[AgentRegistry] Could not record ${event} for ${record.agentName}: ${e?.message ?? String(e)}`
-      );
-      return;
+      const error = `Could not record ${event} for ${record.agentName}: ${e?.message ?? String(e)}`;
+      console.error(`[AgentRegistry] ${error}`);
+      return { ok: false, error };
     } finally {
       if (fd !== undefined) {
         try {
@@ -188,14 +206,15 @@ export class AgentRegistry {
     }
 
     this.compactIfLarge();
+    return { ok: true };
   }
 
-  public recordActivated(record: AgentRecord): void {
-    this.record('activated', record);
+  public recordActivated(record: AgentRecord): RecordOutcome {
+    return this.record('activated', record);
   }
 
-  public recordDeactivated(record: AgentRecord, preemption?: PreemptionRecord): void {
-    this.record('deactivated', record, preemption);
+  public recordDeactivated(record: AgentRecord, preemption?: PreemptionRecord): RecordOutcome {
+    return this.record('deactivated', record, preemption);
   }
 
   /**

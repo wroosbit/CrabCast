@@ -442,10 +442,20 @@ function onListen() {
       // by the same sweep that watches for losses later.
       sweepForMissingAgents();
     })
-    .catch((err) => log('[reconcile] Reconciliation failed:', err));
-
-  const sweep = setInterval(sweepForMissingAgents, MISSING_SWEEP_INTERVAL_MS);
-  sweep.unref();
+    .catch((err) => log('[reconcile] Reconciliation failed:', err))
+    .finally(() => {
+      // The periodic sweep starts only after reconciliation settles. Started
+      // alongside it, the first tick could land mid-restore — reconcile
+      // staggers 3s between starts, so a fleet of a dozen agents is still
+      // being brought back at t+30s — and every agent whose turn had not yet
+      // come would be broadcast as an agent_lost_event and latched in
+      // announcedMissing, a loss announcement with no recovery signal to
+      // follow it. `.finally` so a reconcile that failed outright still
+      // leaves the watch running: whatever it could not restore genuinely is
+      // missing, and the sweep is what says so.
+      const sweep = setInterval(sweepForMissingAgents, MISSING_SWEEP_INTERVAL_MS);
+      sweep.unref();
+    });
 
   // Open the first cost window now rather than a minute from now; the first
   // damped figure lands one interval later. Until then — and whenever the

@@ -8,6 +8,7 @@ import {
   HerdrSession,
   HerdrAgentRecord,
   HerdrAgentStatus,
+  RUNTIME_CONFIRM_TIMEOUT_MS,
   addressFromAgentName,
   agentNameFor,
   typeFromAgentName
@@ -32,7 +33,7 @@ import {
   preemptionOffer,
   selectVictim
 } from './priority.js';
-import { AgentRecord, AgentRegistry } from './agent-registry.js';
+import { AgentRecord, AgentRegistry, RecordOutcome } from './agent-registry.js';
 import { nudgeResumedAgent } from './nudge.js';
 
 type Respond = (msg: any) => void;
@@ -641,7 +642,7 @@ export class MessageRouter {
    * no-op, and fleet clients re-activate often enough that recording each one
    * would fill the log with restatements of the same intent.
    */
-  private rememberActivated(record: AgentRecord): void {
+  private rememberActivated(record: AgentRecord): RecordOutcome {
     const current = this.deps.agentRegistry.intents().get(record.agentName);
     if (
       current?.event === 'activated' &&
@@ -649,9 +650,39 @@ export class MessageRouter {
       current.record.url === record.url &&
       current.record.defaultAgent === record.defaultAgent
     ) {
-      return;
+      // The disk already knows exactly this — a skipped restatement is durable.
+      return { ok: true };
     }
-    this.deps.agentRegistry.recordActivated(record);
+    return this.surfaceRegistryOutcome(
+      this.deps.agentRegistry.recordActivated(record),
+      `activated ${record.type}/${record.key}`
+    );
+  }
+
+  /**
+   * Make a registry write failure observable outside the daemon log.
+   *
+   * The registry itself never throws — an unwritable log must not fail the
+   * lifecycle operation the caller is in the middle of — but a swallowed
+   * failure is the KAN-21 silent loss re-entering through the error path: the
+   * agent exists, the disk does not know, and the next boot forgets it. So
+   * the failure is broadcast to every connected client, and the caller puts
+   * `durable: false` on its response, which is the difference between "the
+   * daemon said yes and the disk knows" and "the daemon said yes".
+   */
+  private surfaceRegistryOutcome(outcome: RecordOutcome, what: string): RecordOutcome {
+    if (!outcome.ok) {
+      this.deps.broadcast({
+        action: 'registry_degraded_event',
+        success: false,
+        what,
+        error: outcome.error ?? 'registry write failed',
+        consequence:
+          'This lifecycle event is not durably recorded: a daemon restart will not know about it. ' +
+          'Fix the data directory (space, permissions) and re-issue the operation.'
+      });
+    }
+    return outcome;
   }
 
   /**
@@ -674,10 +705,10 @@ export class MessageRouter {
     key: string,
     workDir?: string,
     preemption?: PreemptionRecord
-  ): void {
+  ): RecordOutcome {
     const agentName = agentNameFor(type, key);
     const previous = this.deps.agentRegistry.intents().get(agentName)?.record;
-    this.deps.agentRegistry.recordDeactivated(
+    const outcome = this.deps.agentRegistry.recordDeactivated(
       {
         agentName,
         type,
@@ -696,6 +727,10 @@ export class MessageRouter {
         ...(previous?.mcpServers ? { mcpServers: previous.mcpServers } : {})
       },
       preemption
+    );
+    return this.surfaceRegistryOutcome(
+      outcome,
+      `deactivated ${type}/${key}${preemption ? ' (preempted)' : ''}`
     );
   }
 
@@ -947,7 +982,7 @@ export class MessageRouter {
     // After confirmation, deliberately: the registry records agents that
     // provably exist, and an fsync'd record of an agent that was never there
     // would have reconciliation resurrecting a ghost on every boot.
-    this.rememberActivated({
+    const durable = this.rememberActivated({
       agentName,
       type,
       key,
@@ -982,6 +1017,11 @@ export class MessageRouter {
       // KAN-23 false success. `true` means the agent was found in herdr's
       // census before this was sent, and success is never reported without it.
       verified: true,
+      // Present only when the registry write FAILED: the agent is running and
+      // verified, but a daemon restart will not know to restore it. `verified`
+      // answers "does it exist"; this answers "will it survive" — conflating
+      // them would hide a degraded registry behind a healthy activation.
+      ...(durable.ok ? {} : { durable: false, durabilityError: durable.error }),
       // Only present on a restore. `false` means the agent came up with the
       // degraded-resume prompt and is already working; `true` means it was
       // handed its old conversation and is sitting at an empty prompt, which
@@ -1012,10 +1052,20 @@ export class MessageRouter {
 
     // Read before the teardown: terminateSession marks the session terminated,
     // after which getSession still answers but the address is what we need and
-    // it does not change. Recorded either way — see rememberDeactivated.
+    // it does not change.
     const session = this.deps.herdrBridge.getSession(data.sessionId);
     const { success, error } = this.deps.herdrBridge.terminateSession(data.sessionId);
-    if (session) this.rememberDeactivated(session.type, session.key, session.workDir);
+
+    // Recorded only after a confirmed teardown. A stand-down that did not
+    // take, written down as if it had, is a durable lie with three faces: the
+    // agent leaves `expected()` (a reboot will not restore it), it can be
+    // reported stood-down while running, and — on the preempt path — it reads
+    // as owed work that was never actually interrupted. The caller sees
+    // `success: false` and decides; recording is the consequence of the
+    // teardown, not of the request.
+    const durable = success && session
+      ? this.rememberDeactivated(session.type, session.key, session.workDir)
+      : undefined;
 
     if (success && session) {
       this.deps.broadcast({
@@ -1032,6 +1082,7 @@ export class MessageRouter {
       success,
       sessionId: data.sessionId,
       ...(session ? { type: session.type, key: session.key } : {}),
+      ...(durable && !durable.ok ? { durable: false, durabilityError: durable.error } : {}),
       ...(error ? { error } : {})
     });
   }
@@ -1056,7 +1107,18 @@ export class MessageRouter {
 
     if (session) {
       const { success, error } = this.deps.herdrBridge.terminateSession(session.sessionId);
-      this.rememberDeactivated(session.type, session.key, session.workDir, preemption);
+
+      // Recorded only after a confirmed teardown — the same rule as the
+      // broadcast below, for a sharper reason: the preempt path *aborts the
+      // whole preemption* when this teardown fails, and a durable record
+      // written first would say the victim was preempted while it is alive
+      // and working. It would then be owed a resume it is not owed, be absent
+      // from `expected()` so a reboot forgets it, and get the interrupted-work
+      // framing on its next ordinary re-activation. The record follows the
+      // teardown or does not happen.
+      const durable = success
+        ? this.rememberDeactivated(session.type, session.key, session.workDir, preemption)
+        : undefined;
 
       // Not broadcast when the teardown could not be confirmed: the event is
       // what fleet clients act on, and announcing an agent deactivated while
@@ -1083,6 +1145,7 @@ export class MessageRouter {
         key: session.key,
         sessionId: session.sessionId,
         ...(preemption ? { preempted: true } : {}),
+        ...(durable && !durable.ok ? { durable: false, durabilityError: durable.error } : {}),
         ...(error ? { error } : {})
       });
       return;
@@ -1107,21 +1170,29 @@ export class MessageRouter {
       (result.agentName ? typeFromAgentName(result.agentName, key) : undefined) ??
       this.registeredTypeFor(key);
 
-    if (closedType) this.rememberDeactivated(closedType, key, undefined, preemption);
-
     // Standing down an agent that has already died is not a failure — it is the
     // request working. There was no pane to close, and the thing actually being
-    // asked for ("stop expecting this agent back") is the registry write, which
-    // succeeded. Reporting `success: false` there tells a supervisor its
-    // stand-down did not take, inviting it either to retry forever or to
-    // conclude the agent is still owed a slot; the next boot would then be the
-    // first anyone learns the intent was recorded all along.
+    // asked for ("stop expecting this agent back") is the registry write below.
+    // Reporting `success: false` there tells a supervisor its stand-down did
+    // not take, inviting it either to retry forever or to conclude the agent
+    // is still owed a slot; the next boot would then be the first anyone
+    // learns the intent was recorded all along.
     //
     // Only when herdr *answered* though. An unreachable herdr also fails to
     // close the pane, and calling that "already gone" would report an agent
     // stood down while it is still running.
     const goneAlready =
       !result.success && Boolean(closedType) && this.deps.herdrBridge.listHerdrAgentsChecked().reachable;
+
+    // Recorded only when the world matches the record: the pane provably
+    // closed, or herdr answered and provably has no such agent. A close that
+    // failed against an unreachable herdr records nothing — the agent may
+    // well be running, and a durable stand-down for a running agent is the
+    // lie the confirmed-teardown rule exists to prevent.
+    const durable =
+      closedType && (result.success || goneAlready)
+        ? this.rememberDeactivated(closedType, key, undefined, preemption)
+        : undefined;
 
     if (result.success || goneAlready) {
       this.deps.broadcast({
@@ -1142,6 +1213,7 @@ export class MessageRouter {
       ...(goneAlready
         ? { alreadyGone: true, note: 'No agent was running. Its stand-down is recorded, so it will not be restored.' }
         : {}),
+      ...(durable && !durable.ok ? { durable: false, durabilityError: durable.error } : {}),
       ...(result.error && !goneAlready ? { error: result.error } : {})
     });
   }
@@ -1157,7 +1229,13 @@ export class MessageRouter {
       });
       return;
     }
-    const session = this.deps.herdrBridge.getSessionByKey(key);
+    // By full address, for the same reason activate and deactivate resolve
+    // that way — and with a sharper stake here: this handler both deletes a
+    // directory and writes a durable record for `type/key`. A key-only lookup
+    // with `task/K` and `hotfix/K` live could terminate one agent while
+    // recording the *other* as stood down — a teardown and a record about two
+    // different agents.
+    const session = this.deps.herdrBridge.getSessionByAddress(key, type);
 
     // Tear the agent down *before* resetWorkspace deletes the directory it is
     // running in. Without a session the agent is still reachable through the
@@ -1165,18 +1243,24 @@ export class MessageRouter {
     // cwd that no longer exists.
     const { success: agentClosed, error: agentError } = session
       ? this.deps.herdrBridge.terminateSession(session.sessionId)
-      : this.deps.herdrBridge.closeAgentByKey(key);
-
-    // The workspace is about to be deleted, so this agent must not be brought
-    // back by reconciliation. The record also keeps it out of standbyAgents:
-    // with no workspace on disk there is nothing to switch back on, and the
-    // standby list checks for exactly that.
-    this.rememberDeactivated(type, key, session?.workDir);
+      : this.deps.herdrBridge.closeAgentByKey(key, type);
 
     // The workspace still goes away even if no agent was there to close —
     // reset's job is to leave nothing behind. Unless the target isn't ours to
     // delete, in which case `resetError` says which path was refused and why.
     const { success, error: resetError } = this.deps.herdrBridge.resetWorkspace(type, key);
+
+    // Recorded when anything actually changed: the workspace is gone (the
+    // agent must not be resurrected into a recreated empty directory), or the
+    // agent was closed (a deliberate stop, restorable while its directory
+    // survives — the standby list checks the disk for exactly that). When
+    // both the teardown and the delete failed, nothing happened, and a record
+    // claiming otherwise would be the durable lie the confirmed-teardown rule
+    // exists to prevent.
+    const durable =
+      success || agentClosed
+        ? this.rememberDeactivated(type, key, session?.workDir)
+        : undefined;
 
     this.deps.broadcast({
       action: 'agent_reset_event',
@@ -1191,6 +1275,7 @@ export class MessageRouter {
       success,
       agentClosed,
       ...(agentError ? { agentError } : {}),
+      ...(durable && !durable.ok ? { durable: false, durabilityError: durable.error } : {}),
       // A refusal outranks the agent's complaint: it is the reason the reset
       // did not happen, and the caller needs to see the path that was rejected.
       ...(success ? {} : { error: resetError ?? agentError ?? `No workspace directory for ${type}/${key}` })
@@ -1379,7 +1464,7 @@ export class MessageRouter {
       // moment one of these is re-activated it leaves the list. Nothing here
       // restarts them, deliberately — a preemption queue that restarts its own
       // entries is a scheduler, and preemption must never be automatic.
-      preemptedAgents: this.preemptedAgents(),
+      preemptedAgents: this.preemptedAgents(agents),
       // Where a fleet client's On button gets its candidates. Always present
       // and empty rather than absent, by the same rule as the two lists above:
       // "nothing is switched off" and "this daemon does not track that" are
@@ -1503,32 +1588,43 @@ export class MessageRouter {
    * scheduler — so what this buys is that the decision is *owed to someone*
    * rather than lost: a supervising caller sees it on every poll and can put
    * the work back, and a human sees whose work is waiting.
+   *
+   * Cross-checked against the same census as the other three categories: an
+   * agent the registry believes preempted that herdr can show running is not
+   * owed anything — the record and reality disagree, and reality is the one a
+   * supervisor acts on. (A stale record can only arise from a failure — the
+   * confirmed-teardown rule refuses to write one on purpose — but a category
+   * that reports records as facts without looking would turn any such failure
+   * into a permanent phantom debt.)
    */
-  private preemptedAgents() {
-    return this.deps.agentRegistry.preempted().map((entry) => ({
-      agentName: entry.agentName,
-      type: entry.record.type,
-      key: entry.record.key,
-      workDir: entry.record.workDir,
-      url: entry.record.url ?? null,
-      at: entry.at,
-      priority: entry.preemption.priority,
-      herdrStatusWhenPreempted: entry.preemption.herdrStatus,
-      by: {
-        agentName: entry.preemption.byAgentName,
-        type: entry.preemption.byType,
-        key: entry.preemption.byKey,
-        priority: entry.preemption.byPriority
-      },
-      reason:
-        `Stood down at ${entry.at} to free capacity for ` +
-        `${entry.preemption.byType}/${entry.preemption.byKey} ` +
-        `(priority ${entry.preemption.byPriority} against this agent's ` +
-        `${entry.preemption.priority}). Its work was interrupted, not finished. ` +
-        `Re-activating it resumes the conversation it was stopped in; until then ` +
-        `its work should not be read as in progress.`,
-      derivation: entry.preemption.derivation
-    }));
+  private preemptedAgents(agents: ListedAgent[]) {
+    const alive = new Set(agents.map((a) => a.agentName));
+    return this.deps.agentRegistry.preempted()
+      .filter((entry) => !alive.has(entry.agentName))
+      .map((entry) => ({
+        agentName: entry.agentName,
+        type: entry.record.type,
+        key: entry.record.key,
+        workDir: entry.record.workDir,
+        url: entry.record.url ?? null,
+        at: entry.at,
+        priority: entry.preemption.priority,
+        herdrStatusWhenPreempted: entry.preemption.herdrStatus,
+        by: {
+          agentName: entry.preemption.byAgentName,
+          type: entry.preemption.byType,
+          key: entry.preemption.byKey,
+          priority: entry.preemption.byPriority
+        },
+        reason:
+          `Stood down at ${entry.at} to free capacity for ` +
+          `${entry.preemption.byType}/${entry.preemption.byKey} ` +
+          `(priority ${entry.preemption.byPriority} against this agent's ` +
+          `${entry.preemption.priority}). Its work was interrupted, not finished. ` +
+          `Re-activating it resumes the conversation it was stopped in; until then ` +
+          `its work should not be read as in progress.`,
+        derivation: entry.preemption.derivation
+      }));
   }
 
   /**
@@ -1693,7 +1789,18 @@ export class MessageRouter {
       if (reachable) {
         const record = byName.get(agentName);
         const dead = !record || (!record.agentRuntime && (session.expectsRuntime ?? true));
-        if (dead) {
+        // An empty pane is only evidence of death once the launcher has had
+        // its runtime-confirm window: a freshly spawned agent legitimately
+        // shows no runtime for up to RUNTIME_CONFIRM_TIMEOUT_MS — that gap is
+        // exactly why confirmActivation polls — and any concurrent
+        // list_agents/capacity call (or the 30s sweep) landing inside it
+        // would otherwise abandon the session the in-flight activate is
+        // still confirming, which then answers `success: true` over a killed
+        // PTY. Inside the window the session is reported as it is; the next
+        // census after the window closes is the one entitled to a verdict.
+        const settled =
+          Date.now() - session.createdAt.getTime() >= RUNTIME_CONFIRM_TIMEOUT_MS;
+        if (dead && settled) {
           staleSessions.add(agentName);
           // Release the corpse, not just skip it. A session left `active` for
           // a dead pane is the one the next activate for this address would

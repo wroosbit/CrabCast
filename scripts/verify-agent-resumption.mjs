@@ -675,6 +675,40 @@ check('the census releases the stale session instead of leaving the corpse activ
   assert.strictEqual(released.sessionId, stale.sessionId);
 });
 
+check('a session inside the runtime-confirm window is not condemned by an empty pane', () => {
+  // The epic review's blocker on the release above: a freshly spawned agent
+  // legitimately shows no runtime for up to RUNTIME_CONFIRM_TIMEOUT_MS —
+  // that gap is exactly why confirmActivation polls — so a census taken
+  // inside the window (any list_agents poll, the 30s sweep) must neither
+  // abandon the session the in-flight activate is still confirming nor
+  // report the agent missing. Only a session older than the window is fair
+  // game for the verdict.
+  const fresh = { ...session('kan-21'), createdAt: new Date() };
+  let released = null;
+  const herdrBridge = {
+    listActiveSessions: () => [fresh],
+    // herdr answered: the pane exists, nothing runs in it yet — a booting
+    // agent, indistinguishable on this evidence from a dead one.
+    listHerdrAgentsChecked: () => ({ reachable: true, agents: [herdrAgent('kan-21', null)] }),
+    listHerdrAgents: () => [herdrAgent('kan-21', null)],
+    listHerdrStatuses: () => new Map(),
+    abandonSession: (sessionId, error) => { released = { sessionId, error }; }
+  };
+  const r = new MessageRouter({
+    registry: workspaceTypes,
+    config,
+    promptLoader: new PromptLoader(config.baseDir),
+    herdrBridge,
+    daemonStartedAt: new Date(),
+    agentRegistry: registryExpecting('kan-21'),
+    send: () => {},
+    broadcast: () => {}
+  });
+  const missing = r.findMissingAgents();
+  assert.strictEqual(released, null, `the in-flight session was abandoned: ${JSON.stringify(released)}`);
+  assert.deepStrictEqual(missing, [], 'a booting agent must not be reported missing');
+});
+
 check('a pane whose agent runtime has exited is missing too', () => {
   // herdr knows the name but nothing is running in the pane — the same
   // emptiness, reported one layer down.
