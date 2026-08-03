@@ -33,7 +33,7 @@ import {
   preemptionOffer,
   selectVictim
 } from './priority.js';
-import { AgentRecord, AgentRegistry, RecordOutcome } from './agent-registry.js';
+import { AgentIntent, AgentRecord, AgentRegistry, RecordOutcome } from './agent-registry.js';
 import { nudgeResumedAgent } from './nudge.js';
 
 type Respond = (msg: any) => void;
@@ -169,6 +169,41 @@ function invalidAddress(key: unknown, type: unknown): string | null {
 }
 
 /**
+ * A flag that decides whether an agent gets destroyed, checked as a flag.
+ *
+ * `override` and `preempt` arrive from the wire as `unknown` and were tested
+ * for truthiness, so the string `"false"` — what a shell client or a hand-typed
+ * JSON line produces when someone means no — is true. For `override` that
+ * quietly starts an agent past a cap the caller declined; for `preempt` it
+ * tears down somebody else's running work. A flag whose wrong reading destroys
+ * work is worth one type check: absent means no, a boolean means what it says,
+ * and anything else is refused by name rather than guessed at.
+ */
+function invalidFlag(name: string, value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'boolean') return null;
+  return (
+    `Invalid ${name}: expected true or false, got ${JSON.stringify(value)}. ` +
+    `This flag is not read for truthiness — it changes whether an agent is ` +
+    `started past capacity or another agent is stood down, so it must be said exactly.`
+  );
+}
+
+/**
+ * Whether two activations were given the same MCP server list.
+ *
+ * Order-sensitive on purpose: this decides whether to append a restatement to
+ * a 500-record log, and the cost of being wrong in the cheap direction is one
+ * line. Being wrong in the expensive direction is a restored agent holding a
+ * tool set nobody configured.
+ */
+function sameServerList(a?: string[], b?: string[]): boolean {
+  const left = a ?? [];
+  const right = b ?? [];
+  return left.length === right.length && left.every((name, i) => name === right[i]);
+}
+
+/**
  * An agent the registry says should be running that herdr does not have.
  *
  * This is the whole of the detectability half of the extraction source's
@@ -225,12 +260,35 @@ interface StandbyAgent {
 }
 
 /**
- * How many stood-down agents `list_agents` will carry. The registry compacts
- * at 500 records, so this is bounded already — the cap is about clients that
- * poll continuously, not about the log. Anything beyond it is *counted* rather
- * than dropped silently: see `standbyTotal`.
+ * How many agents each of `list_agents`' registry-derived categories will
+ * carry. The registry compacts at 500 records, so these are bounded already —
+ * the cap is about clients that poll continuously, not about the log. Anything
+ * beyond it is *counted* rather than dropped silently: see `standbyTotal`,
+ * `missingTotal`, `preemptedTotal`.
+ *
+ * One number for all three. Standby was capped and the other two were not,
+ * which is the wrong way round if either is: a fleet that has lost forty agents
+ * is exactly the fleet whose `list_agents` response a client can least afford
+ * to have grow without limit, and it is also the one where the first
+ * twenty-five names plus "and 15 more" says everything the reader needs to act.
+ * A cap that only applies to the harmless category protects nothing.
  */
-const STANDBY_LIMIT = 25;
+const FLEET_CATEGORY_LIMIT = 25;
+
+/**
+ * Newest first, then clipped, with the unclipped count returned alongside.
+ *
+ * The order matters as much as the cap: clipping an unordered list hides an
+ * arbitrary subset, while clipping a newest-first one hides the oldest — which
+ * for all three of these categories is the least urgent thing in it.
+ */
+function clipFleetCategory<T>(
+  rows: T[],
+  when: (row: T) => string
+): { rows: T[]; total: number } {
+  const sorted = [...rows].sort((a, b) => when(b).localeCompare(when(a)));
+  return { rows: sorted.slice(0, FLEET_CATEGORY_LIMIT), total: sorted.length };
+}
 
 /**
  * What the caller is told about the agent it could stand down, when it is at
@@ -279,10 +337,14 @@ interface GateRequest {
   agentName: string;
   /** What this activation outranks. See priority.ts. */
   priority: number;
-  /** Start it past the cap without freeing anything. */
-  override: unknown;
+  /**
+   * Start it past the cap without freeing anything. Booleans only — the
+   * handler validates before it gets here (see invalidFlag), so the gate is
+   * reading a decision rather than guessing at one.
+   */
+  override?: boolean;
   /** Free a slot by standing down something this activation outranks. */
-  preempt: unknown;
+  preempt?: boolean;
 }
 
 export interface RouterDeps {
@@ -602,10 +664,17 @@ export class MessageRouter {
    * gate is exemption from its rationing in both directions: never refused,
    * never a victim.
    */
-  private preemptionCandidates(agents: ListedAgent[], exclude?: string): PreemptionCandidate[] {
+  private preemptionCandidates(
+    agents: ListedAgent[],
+    exclude?: string,
+    sharedIntents?: Map<string, AgentIntent>
+  ): PreemptionCandidate[] {
     const candidates: PreemptionCandidate[] = [];
 
-    const intents = this.deps.agentRegistry.intents();
+    // The caller's map when it has one — `list_agents` reads the registry once
+    // for the whole response — and our own read otherwise, for the gate, which
+    // is the only other caller and asks exactly once.
+    const intents = sharedIntents ?? this.deps.agentRegistry.intents();
 
     for (const entry of agents) {
       if (!this.countsAsAgent(entry)) continue;
@@ -648,7 +717,16 @@ export class MessageRouter {
       current?.event === 'activated' &&
       current.record.workDir === record.workDir &&
       current.record.url === record.url &&
-      current.record.defaultAgent === record.defaultAgent
+      current.record.defaultAgent === record.defaultAgent &&
+      // Every other field of the activation's argument list is compared, and
+      // this one was not — so an agent whose type gained or lost an MCP server
+      // in the config was still "exactly what the disk knows", the restatement
+      // was skipped, and a restart brought it back with the server list it had
+      // the first time anyone activated it. Silently handing a restored agent
+      // a tool set that no longer matches its config is the same class of
+      // wrong as bringing it back as the wrong launcher, which is why
+      // defaultAgent is on this list already.
+      sameServerList(current.record.mcpServers, record.mcpServers)
     ) {
       // The disk already knows exactly this — a skipped restatement is durable.
       return { ok: true };
@@ -838,6 +916,14 @@ export class MessageRouter {
       return;
     }
 
+    // Before anything is looked up, because both of these decide what happens
+    // to agents other than this one. See invalidFlag.
+    const badFlag = invalidFlag('override', data.override) ?? invalidFlag('preempt', data.preempt);
+    if (badFlag) {
+      respond({ action: 'activate_response', success: false, type, key, error: badFlag });
+      return;
+    }
+
     // The config file is the whole definition of what this daemon can run
     // (KAN-69), so a type it does not declare is refused by name — with the
     // declared types listed, because a caller that is only told "no" will
@@ -887,8 +973,8 @@ export class MessageRouter {
         key,
         agentName,
         priority: config.priority,
-        override: data.override,
-        preempt: data.preempt
+        override: data.override === true,
+        preempt: data.preempt === true
       });
       if (gate.refusal) {
         respond({
@@ -1425,13 +1511,28 @@ export class MessageRouter {
   private handleListAgents(_data: any, respond: Respond) {
     const { agents, unbackedPanes, staleSessions } = this.surveyAgents();
 
+    // One read of the registry for the whole response. Four of the fields
+    // below are derived from it, and asking it four times was both four
+    // whole-file parses per poll and four chances for an append landing
+    // mid-response to make the categories contradict each other.
+    const intents = this.deps.agentRegistry.intents();
+
     // Agents that should be here and are not. Computed from the same census the
     // list is built from, so the two can never disagree about what is running.
-    const missingAgents = this.missingAgents(agents, staleSessions);
+    const missing = clipFleetCategory(
+      this.missingAgents(agents, staleSessions, intents),
+      (row) => row.since
+    );
+
+    // Work taken off the machine to make room, still owed a decision.
+    const preempted = clipFleetCategory(
+      this.preemptedAgents(agents, intents),
+      (row) => row.at
+    );
 
     // Agents a person switched off. From the same census for the same reason:
     // an agent that is running must never be offered an On button.
-    const { standby, total: standbyTotal } = this.standbyAgents(agents);
+    const { standby, total: standbyTotal } = this.standbyAgents(agents, intents);
 
     // Descriptor headroom, reported where someone looking at agents will see
     // it. In the extraction source the herdr server's fd usage was invisible
@@ -1454,7 +1555,12 @@ export class MessageRouter {
       // Always present, even when empty: a caller that has to distinguish "no
       // agents are missing" from "this daemon does not track that" cannot do it
       // from an absent field. Empty array means the fleet is whole.
-      missingAgents,
+      missingAgents: missing.rows,
+      // The unclipped count, by the same rule as `standbyTotal`: a list that
+      // silently stopped at the cap would read as "that is all of them", and
+      // "that is all of them" is the one thing a reader must not conclude
+      // wrongly about work that has silently stopped.
+      missingTotal: missing.total,
       // Work that was taken off the machine to make room for something more
       // important, and has not been put back. Always present, empty when
       // nothing is owed — a caller distinguishing "nothing was preempted" from
@@ -1464,13 +1570,15 @@ export class MessageRouter {
       // moment one of these is re-activated it leaves the list. Nothing here
       // restarts them, deliberately — a preemption queue that restarts its own
       // entries is a scheduler, and preemption must never be automatic.
-      preemptedAgents: this.preemptedAgents(agents),
+      preemptedAgents: preempted.rows,
+      /** The unclipped count — see `missingTotal`. */
+      preemptedTotal: preempted.total,
       // Where a fleet client's On button gets its candidates. Always present
       // and empty rather than absent, by the same rule as the two lists above:
       // "nothing is switched off" and "this daemon does not track that" are
       // different answers and a client cannot tell them apart from a missing
       // field. `standbyTotal` is the unclipped count — a list that silently
-      // stopped at STANDBY_LIMIT would read as "that is all of them".
+      // stopped at FLEET_CATEGORY_LIMIT would read as "that is all of them".
       standbyAgents: standby,
       standbyTotal,
       capacity: capacityDto(capacity),
@@ -1479,7 +1587,7 @@ export class MessageRouter {
       // because "there is no room" and "there is no room *for you*" are
       // different answers, and a supervisor deciding whether to staff
       // something needs both.
-      priorities: this.preemptionCandidates(agents).map((c) => ({
+      priorities: this.preemptionCandidates(agents, undefined, intents).map((c) => ({
         agentName: c.agentName,
         type: c.type,
         key: c.key,
@@ -1597,9 +1705,12 @@ export class MessageRouter {
    * that reports records as facts without looking would turn any such failure
    * into a permanent phantom debt.)
    */
-  private preemptedAgents(agents: ListedAgent[]) {
+  private preemptedAgents(agents: ListedAgent[], sharedIntents?: Map<string, AgentIntent>) {
     const alive = new Set(agents.map((a) => a.agentName));
-    return this.deps.agentRegistry.preempted()
+    const preempted = sharedIntents
+      ? AgentRegistry.preemptedFrom(sharedIntents)
+      : this.deps.agentRegistry.preempted();
+    return preempted
       .filter((entry) => !alive.has(entry.agentName))
       .map((entry) => ({
         agentName: entry.agentName,
@@ -1636,11 +1747,15 @@ export class MessageRouter {
    * nonetheless perfectly alive, and calling it missing would be a false
    * alarm about something working exactly as designed.
    */
-  private missingAgents(agents: ListedAgent[], staleSessions?: Set<string>): MissingAgent[] {
+  private missingAgents(
+    agents: ListedAgent[],
+    staleSessions?: Set<string>,
+    sharedIntents?: Map<string, AgentIntent>
+  ): MissingAgent[] {
     const alive = new Set(agents.map((a) => a.agentName));
     const missing: MissingAgent[] = [];
 
-    for (const [agentName, intent] of this.deps.agentRegistry.intents()) {
+    for (const [agentName, intent] of sharedIntents ?? this.deps.agentRegistry.intents()) {
       if (intent.event !== 'activated') continue;
       if (alive.has(agentName)) continue;
 
@@ -1686,11 +1801,14 @@ export class MessageRouter {
    * Newest first, because the thing you just switched off is the thing you are
    * most likely to want back.
    */
-  private standbyAgents(agents: ListedAgent[]): { standby: StandbyAgent[]; total: number } {
+  private standbyAgents(
+    agents: ListedAgent[],
+    sharedIntents?: Map<string, AgentIntent>
+  ): { standby: StandbyAgent[]; total: number } {
     const alive = new Set(agents.map((a) => a.agentName));
     const standby: StandbyAgent[] = [];
 
-    for (const [agentName, intent] of this.deps.agentRegistry.intents()) {
+    for (const [agentName, intent] of sharedIntents ?? this.deps.agentRegistry.intents()) {
       if (intent.event !== 'deactivated') continue;
       if (intent.preemption) continue;
       if (alive.has(agentName)) continue;
@@ -1712,8 +1830,8 @@ export class MessageRouter {
       });
     }
 
-    standby.sort((a, b) => b.since.localeCompare(a.since));
-    return { standby: standby.slice(0, STANDBY_LIMIT), total: standby.length };
+    const clipped = clipFleetCategory(standby, (row) => row.since);
+    return { standby: clipped.rows, total: clipped.total };
   }
 
   /**

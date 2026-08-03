@@ -29,3 +29,89 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+
+  # Additive to the two required checks above (KAN-88 item 10). Until this
+  # existed, every behavioural invariant in this daemon — verified activation,
+  # the capacity gate's arithmetic, preemption's consent rules, restart
+  # survival, the MCP tool surface — was asserted only when a human or a
+  # reviewer remembered to run a script by hand.
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      # ---------------------------------------------------------------------
+      # WHAT RUNS HERE, AND WHAT CANNOT
+      #
+      # Every script below shims the `herdr` binary — a fake on PATH answering
+      # in herdr's own JSON shapes — and scratches its own $HOME and dataDir,
+      # so it needs nothing installed on the runner but node. The daemon,
+      # router, bridge, registry, config loader and MCP server they drive are
+      # all the real compiled code.
+      #
+      # DELIBERATELY EXCLUDED — these need a real herdr server and real
+      # terminal panes, which no GitHub runner has (herdr's public
+      # availability is itself an open question on this project). Running
+      # them here would produce a red check about the runner rather than
+      # about the code:
+      #
+      #   verify-no-attach-steal.mjs              attaches to a live agent
+      #   verify-tab-per-agent.mjs                needs real tabs and panes
+      #   verify-fleet-switch-live.mjs            live restart/stand-down
+      #                                           sequences against a real
+      #                                           daemon and `herdr agent list`
+      #   verify-activate-verified-existence.mjs  real herdr 0.6.x, real panes
+      #   verify-pretrust-survives-concurrency    private herdr server + panes
+      #   verify-pty-init-rejects-unknown-session private herdr server + PTYs
+      #   verify-spawn-failure-legibility.mjs     private herdr server
+      #
+      # They are the live half of this suite and are run by hand on a machine
+      # with herdr; their output goes on the PR.
+      # ---------------------------------------------------------------------
+      - name: verify (isolatable scripts, serialized)
+        run: |
+          set -euo pipefail
+          scripts=(
+            verify-config-and-socket
+            verify-activate-requires-agent
+            verify-list-agents-survives-restart
+            verify-agent-capacity
+            verify-agent-preemption
+            verify-agent-power-controls
+            verify-agent-resumption
+            verify-mcp-tools
+          )
+          # One at a time, and one scratch $HOME each. Both halves are
+          # deliberate (KAN-88 item 11): these scripts start real daemons,
+          # bind real unix sockets and — in two cases — spawn real PTYs, and a
+          # full back-to-back run has been observed to produce a
+          # timing-dependent failure once. Serial execution removes the
+          # contention; the per-script $HOME removes the shared state that
+          # would make one script's leftovers another's flake.
+          failed=()
+          for s in "${scripts[@]}"; do
+            echo "::group::$s"
+            home="$RUNNER_TEMP/verify-home-$s"
+            mkdir -p "$home"
+            if HOME="$home" node "scripts/$s.mjs"; then
+              echo "--- $s PASSED"
+            else
+              echo "--- $s FAILED"
+              failed+=("$s")
+            fi
+            echo "::endgroup::"
+          done
+          echo
+          echo "ran ${#scripts[@]} script(s); ${#failed[@]} failed"
+          if [ ${#failed[@]} -ne 0 ]; then
+            printf 'FAILED: %s\n' "${failed[@]}"
+            exit 1
+          fi

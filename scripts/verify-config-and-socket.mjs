@@ -185,7 +185,72 @@ const first = startDaemon(configPath);
   );
 }
 
-console.log('\n=== 3. Single daemon wins ===');
+console.log('\n=== 3. The line buffer is bounded (KAN-88 finding A3) ===');
+{
+  // The framing assembled a line without limit, so a peer that streams bytes
+  // and never sends a newline was never *wrong* by the framing's rules — it
+  // just grew the daemon's memory as far as it cared to, on a socket whose
+  // only auth boundary is file permissions. The bound turns that from memory
+  // exhaustion into a refused connection, and the refusal is legible: the peer
+  // is told the bound it hit rather than watching the connection vanish.
+  const MAX = 1024 * 1024;
+  const attacker = net.connect(socketPath);
+  const answer = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('the daemon never answered or closed')), 20000);
+    let received = '';
+    let sent = 0;
+    let closed = false;
+    attacker.on('data', (chunk) => { received += chunk.toString('utf8'); });
+    attacker.on('error', () => {}); // the hang-up may arrive as a write error
+    attacker.on('close', () => {
+      if (closed) return;
+      closed = true;
+      clearTimeout(timer);
+      resolve({ received, sent });
+    });
+    attacker.once('connect', () => {
+      // 64 KiB at a time, newline-free, well past the bound. `write` keeps
+      // returning as long as the peer is there; the close is what stops it.
+      const chunk = 'A'.repeat(64 * 1024);
+      const pump = () => {
+        while (!closed && sent < MAX * 4) {
+          if (!attacker.write(chunk)) { attacker.once('drain', pump); sent += chunk.length; return; }
+          sent += chunk.length;
+        }
+      };
+      pump();
+    });
+  });
+
+  const firstLine = answer.received.split('\n')[0];
+  console.log(`streamed ${answer.sent} newline-free bytes (bound is ${MAX})`);
+  console.log(`daemon said: ${firstLine}`);
+  let parsed = null;
+  try { parsed = JSON.parse(firstLine); } catch {}
+  check(
+    parsed?.success === false && /exceeded 1048576 characters with no newline/.test(parsed?.error ?? ''),
+    'the daemon refused the oversized line on the wire, naming the bound'
+  );
+  check(
+    attacker.destroyed,
+    'the daemon closed the connection rather than growing with it'
+  );
+  check(
+    fs.readFileSync(logPath, 'utf8').includes('Line exceeded 1048576 characters'),
+    'the refusal is in the daemon log too'
+  );
+
+  // And the bound does not refuse anything real: a large-but-legitimate
+  // message still round-trips on a fresh connection, and the daemon that hung
+  // up on the flood is still serving.
+  const big = await roundTrip({ action: 'daemon_status', id: 45, padding: 'B'.repeat(512 * 1024) });
+  check(
+    big.success === true && big.id === 45,
+    'a 512 KiB well-formed message still round-trips — the bound refuses floods, not big messages'
+  );
+}
+
+console.log('\n=== 4. Single daemon wins ===');
 {
   const second = startDaemonSync(configPath);
   check(second.status === 0, 'second daemon exits 0 while the first owns the socket', `exit ${second.status}`);

@@ -20,6 +20,19 @@
 //                     and broadcasts the degradation, instead of hiding it
 //                     behind verified: true
 //
+// KAN-88 added four more, for the deferred findings from PR #6's review:
+//
+//   9. compaction   — compaction carries the standby rows whose workspace still
+//                     exists, so a stood-down agent keeps its way back past the
+//                     500-record mark (B5)
+//  10. mcpServers   — a changed server list is re-recorded, so a restart does
+//                     not replay the list the agent first started with (B6)
+//  11. short writes — a write that stops part way is finished, and one that
+//                     cannot progress is reported instead of fsynced (B7)
+//  12. one read     — one whole-log read per list_agents poll instead of four,
+//                     and all three registry-derived categories capped with
+//                     totals rather than only standby (B9)
+//
 // Every section drives the real MessageRouter, the real WorkspaceRegistry, a
 // real config through the real loader and a real on-disk AgentRegistry, so
 // what it prints is what a caller actually receives and what is actually
@@ -694,6 +707,377 @@ rule('8. DURABILITY IS REPORTED — a registry that cannot be written says so');
     '    durable: false because a restart will not know it — and every connected client\n' +
     '    heard the registry degrade.',
     `the write failure was swallowed: ${JSON.stringify({ durable: res.durable, degraded: Boolean(degraded) })}`
+  );
+}
+
+// ------------------------------------------------------- 9. compaction (B5) --
+rule('9. COMPACTION KEEPS THE WAY BACK — KAN-88 finding B5');
+
+{
+  console.log('Compaction rewrote the log as one `activated` record per expected agent, which');
+  console.log('silently emptied the standby list the moment the 501st record landed: every');
+  console.log('agent a person had switched off stopped being offered a way back, while its');
+  console.log('workspace — and the conversation in it — sat on disk. That was never decided,');
+  console.log('it is what dropping `deactivated` records happened to do. It is decided now:');
+  console.log('standby records travel (bounded by "workspace still exists" and by a cap),');
+  console.log('preemption annotations still do not.\n');
+
+  const logPath = path.join(TMP, 'compaction.jsonl');
+  const reg = new AgentRegistry(logPath);
+
+  // One agent switched off with its workspace intact — the row a client's On
+  // button is built from.
+  const keptDir = path.join(WORKSPACES, 'compact', 'kept');
+  fs.mkdirSync(keptDir, { recursive: true });
+  const kept = { agentName: 'crabcast-task-kept', type: 'task', key: 'KEPT', workDir: keptDir, defaultAgent: 'claude' };
+  reg.recordActivated(kept);
+  reg.recordDeactivated(kept);
+
+  // One switched off whose workspace is gone — `reset` looks like this, and
+  // re-activating it would make an empty directory and start an agent in it.
+  const goneDir = path.join(WORKSPACES, 'compact', 'gone');
+  const gone = { agentName: 'crabcast-task-gone', type: 'task', key: 'GONE', workDir: goneDir, defaultAgent: 'claude' };
+  reg.recordActivated(gone);
+  reg.recordDeactivated(gone);
+
+  // One preempted, workspace intact: the annotation is the deliberate loss,
+  // the route back is not.
+  const preemptedDir = path.join(WORKSPACES, 'compact', 'preempted');
+  fs.mkdirSync(preemptedDir, { recursive: true });
+  const victim = { agentName: 'crabcast-task-victim', type: 'task', key: 'VICTIM', workDir: preemptedDir, defaultAgent: 'claude' };
+  reg.recordActivated(victim);
+  reg.recordDeactivated(victim, {
+    byAgentName: 'crabcast-epic-boss', byType: 'epic', byKey: 'BOSS', byPriority: 10,
+    priority: 1, herdrStatus: 'working', derivation: 'at capacity'
+  });
+
+  // One still expected, so the activated half is provably untouched.
+  const liveDir = path.join(WORKSPACES, 'compact', 'live');
+  fs.mkdirSync(liveDir, { recursive: true });
+  reg.recordActivated({ agentName: 'crabcast-task-live', type: 'task', key: 'LIVE', workDir: liveDir, defaultAgent: 'claude' });
+
+  const beforeCompaction = reg.readLog().length;
+  const standbyBefore = reg.intents();
+  reg.compact();
+  const after = reg.readLog();
+  const intentsAfter = reg.intents();
+
+  console.log(`  records before compaction: ${beforeCompaction}`);
+  console.log(`  records after:             ${after.length}`);
+  console.log(`  events after: ${JSON.stringify(after.map((e) => `${e.agentName}:${e.event}`))}`);
+  console.log(`  preemption annotation survived: ${Boolean(intentsAfter.get('crabcast-task-victim')?.preemption)}`);
+
+  // Through a real router, because "the standby list survived" is a claim
+  // about what a client renders, not about the file.
+  const bridge = stubHerdr([]);
+  let sent9;
+  const router9 = new MessageRouter({
+    registry, config, promptLoader: prompts, herdrBridge: bridge,
+    daemonStartedAt: new Date(), agentRegistry: reg,
+    send: (msg) => { sent9 = msg; }, broadcast: () => {}
+  });
+  router9.handle({ action: 'list_agents' });
+  const standbyNames = sent9.standbyAgents.map((a) => a.agentName);
+  console.log(`\n  standbyAgents after compaction: ${JSON.stringify(standbyNames)}`);
+  console.log(`  expected() after compaction:    ${JSON.stringify(reg.expected().map((r) => r.agentName))}`);
+  console.log(`  preemptedAgents after:          ${JSON.stringify(sent9.preemptedAgents.map((a) => a.agentName))}`);
+
+  verdict(
+    standbyBefore.get('crabcast-task-kept')?.event === 'deactivated' &&
+      standbyNames.includes('crabcast-task-kept'),
+    'a stood-down agent whose workspace still exists is still offered a way back after\n' +
+    '    compaction — the switch a person turned off is still a switch.',
+    `the standby row was lost to compaction: ${JSON.stringify(standbyNames)}`
+  );
+  verdict(
+    !standbyNames.includes('crabcast-task-gone'),
+    'a stood-down agent whose workspace is gone is not carried — a reset stays a reset,\n' +
+    '    and the bound on what compaction preserves is "the work still exists".',
+    'compaction carried a record whose workspace had been deleted'
+  );
+  verdict(
+    !intentsAfter.get('crabcast-task-victim')?.preemption &&
+      sent9.preemptedAgents.length === 0 &&
+      standbyNames.includes('crabcast-task-victim'),
+    'a preempted agent keeps the deliberate half of the old behaviour — the debt stops\n' +
+    '    being reported past 500 records — while the route back to its work survives.',
+    'the preemption annotation outlived compaction, or the victim lost its way back'
+  );
+  verdict(
+    reg.expected().map((r) => r.agentName).join() === 'crabcast-task-live' &&
+      after.length < beforeCompaction,
+    'and compaction still compacts: the expected fleet is exactly what it was, in fewer\n' +
+    '    records than it took to get here.',
+    `compaction changed the expected fleet or did not shrink the log`
+  );
+}
+
+// --------------------------------------------------- 10. mcpServers (B6) --
+rule('10. A CHANGED SERVER LIST IS RE-RECORDED — KAN-88 finding B6');
+
+{
+  console.log('rememberActivated skips a restatement when the disk already knows exactly this');
+  console.log('activation — workDir, url, defaultAgent were compared, and mcpServers was not.');
+  console.log('So an agent whose type gained an MCP server in the config was still "exactly');
+  console.log('this", the restatement was skipped, and a restart brought it back with the');
+  console.log('server list it had the first time anyone ever activated it.\n');
+
+  const typeWith = (servers) => ({
+    ...config.workspaceTypes.find((t) => t.name === 'task'),
+    mcpServers: servers
+  });
+  const routerFor = (servers, agentRegistry, bridge) => {
+    let last;
+    const router = new MessageRouter({
+      registry: new WorkspaceRegistry([
+        config.workspaceTypes.find((t) => t.name === 'epic'),
+        typeWith(servers)
+      ]),
+      config, promptLoader: prompts, herdrBridge: bridge,
+      daemonStartedAt: new Date(), agentRegistry,
+      send: (msg) => { last = msg; }, broadcast: () => {}
+    });
+    return { router, sent: () => last };
+  };
+
+  const agentRegistry = new AgentRegistry(path.join(TMP, 'mcpservers.jsonl'));
+  const bridge = stubHerdr([]);
+  const activate = async (servers) => {
+    const { router } = routerFor(servers, agentRegistry, bridge);
+    await quiet(async () => {
+      await router.handleActivateByKey({ type: 'task', key: 'KAN-91', ...PAST_THE_GATE }, () => {});
+    });
+    return agentRegistry.readLog().length;
+  };
+
+  const afterFirst = await activate(['crabcast']);
+  const afterSame = await activate(['crabcast']);
+  const afterChanged = await activate(['crabcast', 'extra-server']);
+  const recorded = agentRegistry.intents().get('crabcast-task-kan-91')?.record.mcpServers;
+
+  console.log(`  activate with mcpServers ['crabcast']              → ${afterFirst} record(s)`);
+  console.log(`  re-activate, list unchanged                        → ${afterSame} record(s) (restatement skipped)`);
+  console.log(`  re-activate after the config gained a server       → ${afterChanged} record(s)`);
+  console.log(`  what a restart would replay: ${JSON.stringify(recorded)}`);
+
+  verdict(
+    afterSame === afterFirst,
+    'an unchanged re-activation still writes nothing — the dedupe that keeps fleet clients\n' +
+    '    from filling the log with restatements is intact.',
+    `an unchanged re-activation appended a record: ${afterFirst} → ${afterSame}`
+  );
+  verdict(
+    afterChanged > afterSame &&
+      JSON.stringify(recorded) === JSON.stringify(['crabcast', 'extra-server']),
+    'a changed server list IS re-recorded, so a restart replays the list the config\n' +
+    '    actually declares rather than the one this agent first started with.',
+    `the changed list was not recorded: ${afterSame} → ${afterChanged}, recorded ${JSON.stringify(recorded)}`
+  );
+}
+
+// -------------------------------------------------- 11. short writes (B7) --
+rule('11. A SHORT WRITE IS NOT SILENTLY A TORN RECORD — KAN-88 finding B7');
+
+{
+  console.log('fs.writeSync returns how much it wrote and is under no obligation for that to');
+  console.log('be everything — a full disk, a quota edge or a signal can stop it part way.');
+  console.log('Both registry write paths discarded that number, which made a short write');
+  console.log('indistinguishable from a complete one: an fsync and a success over half a');
+  console.log('record on the append path, and a truncated file renamed over the whole log on');
+  console.log('the compaction path.\n');
+  console.log('Proven in a child process that injects a short writeSync before importing the');
+  console.log('registry — the same shape as this suite\'s herdr shim: the code under test is');
+  console.log('real, one syscall is not.\n');
+
+  const child = path.join(TMP, 'short-write-child.mjs');
+  fs.writeFileSync(child, `
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const fsCjs = require('fs');
+const realWriteSync = fsCjs.writeSync;
+
+// mode 'partial': every call writes at most 7 bytes, so a record takes many
+// calls and a caller that trusted one call would truncate it.
+// mode 'stuck':   every call writes 0 — no progress is possible.
+const mode = process.argv[3];
+fsCjs.writeSync = (fd, data, ...rest) => {
+  if (mode === 'stuck') return 0;
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+  const offset = typeof rest[0] === 'number' ? rest[0] : 0;
+  const length = typeof rest[1] === 'number' ? rest[1] : buf.length - offset;
+  return realWriteSync(fd, buf, offset, Math.min(7, length));
+};
+
+// Imported AFTER the patch so the registry's own fs namespace picks it up.
+const { AgentRegistry } = await import(process.argv[2]);
+
+const file = process.argv[4];
+const reg = new AgentRegistry(file);
+const record = {
+  agentName: 'crabcast-task-shortwrite', type: 'task', key: 'SHORTWRITE',
+  workDir: '/tmp/kan88-shortwrite', defaultAgent: 'claude'
+};
+const outcome = reg.record('activated', record);
+const raw = realWriteSync ? fsCjs.readFileSync(file, 'utf8') : '';
+process.stdout.write(JSON.stringify({
+  outcome,
+  raw,
+  parsedAgents: reg.readLog().map((e) => e.agentName)
+}));
+`);
+
+  const { spawnSync } = await import('child_process');
+  const run = (mode, file) => {
+    const res = spawnSync(
+      process.execPath,
+      [child, path.join(distDir, 'agent-registry.js'), mode, file],
+      { encoding: 'utf8', timeout: 20000 }
+    );
+    return JSON.parse(res.stdout || '{}');
+  };
+
+  const partial = run('partial', path.join(TMP, 'shortwrite-partial.jsonl'));
+  const stuck = run('stuck', path.join(TMP, 'shortwrite-stuck.jsonl'));
+
+  console.log(`  writeSync capped at 7 bytes/call:`);
+  console.log(`    record() → ${JSON.stringify(partial.outcome)}`);
+  console.log(`    file holds: ${JSON.stringify(partial.raw)}`);
+  console.log(`    readable records: ${JSON.stringify(partial.parsedAgents)}`);
+  console.log(`  writeSync making no progress at all:`);
+  console.log(`    record() → ${JSON.stringify(stuck.outcome)}`);
+  console.log(`    file holds: ${JSON.stringify(stuck.raw)}`);
+
+  verdict(
+    partial.outcome?.ok === true &&
+      partial.parsedAgents?.length === 1 &&
+      partial.raw?.endsWith('\n'),
+    'a write that stops part way is finished rather than fsynced half-written — the record\n' +
+    '    on disk is complete and readable.',
+    `the partial write left a torn record: ${JSON.stringify(partial)}`
+  );
+  verdict(
+    stuck.outcome?.ok === false && /short write/.test(stuck.outcome?.error ?? ''),
+    'a write that cannot make progress is reported — ok: false naming the short write, which\n' +
+    '    is what becomes durable: false and the degraded-registry broadcast (section 8).',
+    `a stuck write claimed success: ${JSON.stringify(stuck.outcome)}`
+  );
+  verdict(
+    (stuck.parsedAgents ?? []).length === 0,
+    'and it left nothing readable behind pretending to be a record.',
+    `a stuck write left a phantom record: ${JSON.stringify(stuck.parsedAgents)}`
+  );
+}
+
+// ------------------------------------------- 12. one read, one cap (B9) --
+rule('12. ONE REGISTRY READ PER POLL, AND ALL THREE CATEGORIES CAPPED — KAN-88 finding B9');
+
+{
+  console.log('list_agents asked the registry four separate times per poll — missing,');
+  console.log('preempted, standby and the priority list each re-read and re-parsed the whole');
+  console.log('log. That is four whole-file parses on a client that polls continuously, and');
+  console.log('four *different* reads: an append landing between them produced one response');
+  console.log('whose own categories disagreed about the same agent.\n');
+  console.log('And of the three registry-derived lists, only standby was capped — so the');
+  console.log('fleet that had lost forty agents was exactly the one whose response grew');
+  console.log('without limit.\n');
+
+  const N = 30;
+  const reg = new AgentRegistry(path.join(TMP, 'capping.jsonl'));
+  const mkDir = (name) => {
+    const dir = path.join(WORKSPACES, 'cap', name);
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+
+  for (let i = 0; i < N; i++) {
+    // missing: last word `activated`, and herdr will not have it.
+    reg.recordActivated({
+      agentName: `crabcast-task-miss-${i}`, type: 'task', key: `MISS-${i}`,
+      workDir: mkDir(`miss-${i}`), defaultAgent: 'claude'
+    });
+    // standby: deliberately off, workspace on disk.
+    const standby = {
+      agentName: `crabcast-task-standby-${i}`, type: 'task', key: `STANDBY-${i}`,
+      workDir: mkDir(`standby-${i}`), defaultAgent: 'claude'
+    };
+    reg.recordActivated(standby);
+    reg.recordDeactivated(standby);
+    // preempted: a debt.
+    const victim = {
+      agentName: `crabcast-task-victim-${i}`, type: 'task', key: `VICTIM-${i}`,
+      workDir: mkDir(`victim-${i}`), defaultAgent: 'claude'
+    };
+    reg.recordActivated(victim);
+    reg.recordDeactivated(victim, {
+      byAgentName: 'crabcast-epic-boss', byType: 'epic', byKey: 'BOSS', byPriority: 10,
+      priority: 1, herdrStatus: 'working', derivation: 'at capacity'
+    });
+  }
+
+  // A registry that counts what the response actually costs. Every one of
+  // these entry points reads and parses the whole log once — `intents` and
+  // `preempted` both go through `readLog` — so the tally is the number of
+  // whole-file parses this one response paid for.
+  const reads = { readLog: 0, intents: 0, preempted: 0 };
+  const counting = new Proxy(reg, {
+    get(target, prop, receiver) {
+      if (prop in reads) {
+        reads[prop]++;
+        return target[prop].bind(target);
+      }
+      return Reflect.get(target, prop, receiver);
+    }
+  });
+
+  const bridge = stubHerdr([]);
+  let sent12;
+  const router12 = new MessageRouter({
+    registry, config, promptLoader: prompts, herdrBridge: bridge,
+    daemonStartedAt: new Date(), agentRegistry: counting,
+    send: (msg) => { sent12 = msg; }, broadcast: () => {}
+  });
+
+  const records = reg.readLog().length;
+  reads.readLog = 0;
+  reads.intents = 0;
+  reads.preempted = 0;
+  router12.handle({ action: 'list_agents' });
+  const wholeLogReads = reads.readLog + reads.intents + reads.preempted;
+
+  console.log(`  seeded: ${N} missing, ${N} preempted, ${N} standby (${records} records)`);
+  console.log(`  whole-log reads for one list_agents response: ${wholeLogReads} ${JSON.stringify(reads)}`);
+  console.log(`  missingAgents   ${sent12.missingAgents.length} of missingTotal ${sent12.missingTotal}`);
+  console.log(`  preemptedAgents ${sent12.preemptedAgents.length} of preemptedTotal ${sent12.preemptedTotal}`);
+  console.log(`  standbyAgents   ${sent12.standbyAgents.length} of standbyTotal ${sent12.standbyTotal}`);
+  console.log(`  newest first: missing[0]=${sent12.missingAgents[0].agentName} since ${sent12.missingAgents[0].since}`);
+
+  verdict(
+    wholeLogReads === 1,
+    'one read of the log for the whole response — so it costs one parse, and every category\n' +
+    '    in it is describing the same instant.',
+    `the response read the log ${wholeLogReads} time(s): ${JSON.stringify(reads)}`
+  );
+  verdict(
+    sent12.missingAgents.length === 25 && sent12.missingTotal === N &&
+      sent12.preemptedAgents.length === 25 && sent12.preemptedTotal === N &&
+      sent12.standbyAgents.length === 25 && sent12.standbyTotal === N,
+    'all three registry-derived categories cap at the same 25 and report the unclipped\n' +
+    '    total, so no list can silently read as "that is all of them".',
+    `capping is still inconsistent: ${JSON.stringify({
+      missing: sent12.missingAgents.length, missingTotal: sent12.missingTotal,
+      preempted: sent12.preemptedAgents.length, preemptedTotal: sent12.preemptedTotal,
+      standby: sent12.standbyAgents.length, standbyTotal: sent12.standbyTotal
+    })}`
+  );
+  const descending = (rows, field) =>
+    rows.every((row, i) => i === 0 || rows[i - 1][field] >= row[field]);
+  verdict(
+    descending(sent12.missingAgents, 'since') &&
+      descending(sent12.preemptedAgents, 'at') &&
+      descending(sent12.standbyAgents, 'since'),
+    'and what is kept is the newest of each — clipping an unordered list would hide an\n' +
+    '    arbitrary subset; clipping a newest-first one hides the least urgent.',
+    'a clipped category was not ordered newest-first'
   );
 }
 

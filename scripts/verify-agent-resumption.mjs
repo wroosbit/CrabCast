@@ -503,10 +503,28 @@ reconcileRegistry.recordActivated({
   workDir: freshDir, defaultAgent: 'claude'
 });
 
-// The conversation that survived, where Claude Code would have left it.
+// A third, for KAN-88 finding B8: a non-claude launcher in a workspace that
+// has a *Claude* transcript on disk. `hasRestorableConversation` reads Claude
+// Code's transcript directory and knows nothing about agy's, so asking it
+// unconditionally answered a question about the wrong program — this agent was
+// framed as having its memory back and the nudge machinery was told to wait
+// for a prompt it would never recognise, while agy had in fact started fresh.
+const AGY_KEY = 'res-agy';
+const agyDir = workspaceDirFor(config.dataDir, 'task', AGY_KEY);
+fs.mkdirSync(agyDir, { recursive: true });
+reconcileRegistry.recordActivated({
+  agentName: `crabcast-task-${AGY_KEY}`, type: 'task', key: AGY_KEY,
+  workDir: agyDir, defaultAgent: 'anti-gravity'
+});
+
+// The conversations that survived, where Claude Code would have left them —
+// including in the agy agent's workspace, which is the trap.
+for (const dir of [histDir, agyDir]) {
+  const transcripts = claudeTranscriptDir(dir);
+  fs.mkdirSync(transcripts, { recursive: true });
+  fs.writeFileSync(path.join(transcripts, 'session.jsonl'), '{"type":"user"}\n');
+}
 const transcriptDir = claudeTranscriptDir(histDir);
-fs.mkdirSync(transcriptDir, { recursive: true });
-fs.writeFileSync(path.join(transcriptDir, 'session.jsonl'), '{"type":"user"}\n');
 
 const reconcileLog = [];
 const result = await reconcileAgents({
@@ -524,10 +542,11 @@ const startFor = (name) => starts.find((argv) => argv[2] === name);
 const paneCommandOf = (argv) => argv[argv.length - 1];
 const outcomeFor = (key) => result.outcomes.find((o) => o.key === key);
 
-await checkAsync('both expected agents were restored through the real activation path', async () => {
-  assert.strictEqual(result.expected, 2);
+await checkAsync('every expected agent was restored through the real activation path', async () => {
+  assert.strictEqual(result.expected, 3);
   assert.strictEqual(outcomeFor(HIST_KEY)?.result, 'restored');
   assert.strictEqual(outcomeFor(FRESH_KEY)?.result, 'restored');
+  assert.strictEqual(outcomeFor(AGY_KEY)?.result, 'restored');
 });
 
 await checkAsync('a restored conversation resumes and gets the interrupted-work nudge typed at it', async () => {
@@ -562,6 +581,35 @@ await checkAsync('a workspace with no history starts with the degraded-resume pr
   const sends = invocations().filter((argv) => argv[0] === 'pane' && argv[1] === 'send-text');
   assert.strictEqual(sends.length, 1, JSON.stringify(sends.map((s) => s[3])));
 });
+
+await checkAsync(
+  'KAN-88 B8: a non-claude launcher is not framed by Claude\'s transcript directory',
+  async () => {
+    const outcome = outcomeFor(AGY_KEY);
+
+    // The trap is live: Claude's transcript directory for this workspace does
+    // hold a conversation, so the old unconditional probe would have said yes.
+    assert.ok(
+      hasRestorableConversation(agyDir),
+      'the fixture is wrong — there is no Claude transcript to be misled by'
+    );
+
+    // And the answer is nonetheless no, because the launcher does not declare
+    // that it restores conversations.
+    assert.strictEqual(
+      outcome.resumedConversation,
+      false,
+      `an anti-gravity agent was framed by Claude's transcripts: ${JSON.stringify(outcome)}`
+    );
+
+    // So it starts already working, with the degraded framing on its command
+    // line, and nothing waits on a prompt marker it would never print.
+    const command = paneCommandOf(startFor(`crabcast-task-${AGY_KEY}`));
+    assert.ok(command.startsWith('agy '), `not the agy launcher: ${command}`);
+    assert.ok(command.includes('NO memory'), `degraded framing missing from: ${command}`);
+    assert.ok(outcome.nudged === undefined, `it was nudged anyway: ${JSON.stringify(outcome)}`);
+  }
+);
 
 // Release the shim's PTY attaches before the census sections below.
 for (const session of bridge.listActiveSessions()) {
