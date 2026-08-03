@@ -350,7 +350,7 @@ const rendered = activateSpec.render(new ResponseReader({
   reason: 'the load average is 3.00',
   derivation: SYNTHETIC_DERIVATION,
   id: 'cli-1-1'
-}), { type: 'task', key: 'KAN-93' }));
+}), { type: 'task', key: 'KAN-93' });
 show('rendered:', rendered);
 check(rendered.includes(SYNTHETIC_DERIVATION), 'the rendered text contains the derivation as one contiguous verbatim block');
 check(
@@ -370,7 +370,7 @@ const withUnknown = activateSpec.render(new ResponseReader({
   status: 'active',
   verified: true,
   somethingTheCliHasNeverHeardOf: 'must still be visible'
-}), { type: 'shell', key: 'demo' }));
+}), { type: 'shell', key: 'demo' });
 check(
   withUnknown.includes('somethingTheCliHasNeverHeardOf') && withUnknown.includes('must still be visible'),
   'an unrecognised response field is printed, not silently dropped'
