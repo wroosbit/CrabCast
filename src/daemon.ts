@@ -131,7 +131,7 @@ const registry = new WorkspaceRegistry(config.workspaceTypes);
 // Prompt paths belong to the config that names them, so they resolve from the
 // config file's directory rather than from any install location.
 const promptLoader = new PromptLoader(config.baseDir);
-const herdrBridge = new HerdrBridge(config.dataDir);
+const herdrBridge = new HerdrBridge(config.dataDir, config.configPath);
 
 // The one piece of state that outlives the machine. Everything else here —
 // the session map, herdr's panes, a client's view — dies in a power cut,

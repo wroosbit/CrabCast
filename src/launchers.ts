@@ -16,7 +16,7 @@ export const PROMPT_FILENAME = '.crabcast-prompt.md';
 const PROMPT_CMD = `Please read and follow the instructions in ${PROMPT_FILENAME} to begin.`;
 
 // MCP server definitions CrabCast can attach to an agent workspace.
-function mcpServerDefinitions(servers: string[]): Record<string, any> {
+function mcpServerDefinitions(servers: string[], daemonConfigPath?: string): Record<string, any> {
   const defs: Record<string, any> = {};
   // Absolute commands: the agent spawns these with the *pane's* PATH, which
   // can be thinner than ours (a login-started herdr server has no nvm) and
@@ -24,15 +24,18 @@ function mcpServerDefinitions(servers: string[]): Record<string, any> {
   // file on every activation, so the baked paths never go stale.
   //
   // `crabcast` is the daemon's own MCP server — how agents inspect and steer
-  // each other over the same unix socket. The mcp.js it points at ships with
-  // the MCP-server slice (T5 of KAN-68); until that lands, a workspace that
-  // asks for it gets a definition whose command exists but whose entry point
-  // does not yet, and Claude reports the server as failed rather than
-  // anything worse.
+  // each other over the same unix socket. mcp.js finds that socket through
+  // the config (the socket lives under the config's dataDir), and the pane
+  // environment does not carry it, so the definition bakes this daemon's own
+  // config path in as CRABCAST_CONFIG — the same variable mcp.js's config
+  // resolution already reads. Without it, a server spawned inside a
+  // workspace would fall back to the default data dir and could address a
+  // different daemon than the one that provisioned it.
   if (servers.includes('crabcast')) {
     defs['crabcast'] = {
       command: process.execPath,
-      args: [path.join(__dirname, 'mcp.js')]
+      args: [path.join(__dirname, 'mcp.js')],
+      ...(daemonConfigPath ? { env: { CRABCAST_CONFIG: daemonConfigPath } } : {})
     };
   }
   return defs;
@@ -41,8 +44,12 @@ function mcpServerDefinitions(servers: string[]): Record<string, any> {
 // Claude Code reads .mcp.json from the project root, and each session's
 // workDir is its project — so MCP config is scoped to the workspace instead
 // of being injected into the user's global ~/.claude.json.
-export function writeWorkspaceMcpConfig(workDir: string, servers: string[]): void {
-  const defs = mcpServerDefinitions(servers);
+export function writeWorkspaceMcpConfig(
+  workDir: string,
+  servers: string[],
+  daemonConfigPath?: string
+): void {
+  const defs = mcpServerDefinitions(servers, daemonConfigPath);
   if (Object.keys(defs).length === 0) return;
 
   const configPath = path.join(workDir, '.mcp.json');
