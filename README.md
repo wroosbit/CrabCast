@@ -25,9 +25,23 @@ mkdir -p ~/.local/bin && mv herdr ~/.local/bin/herdr    # or anywhere on PATH
 herdr --version                                          # herdr 0.6.4
 ```
 
-**0.6.4 is the version CrabCast is verified against — not a floor.** Every proof in this repository was produced against 0.6.4 and against nothing else. herdr 0.7 and 0.8 are **untested**: not known to be broken, not known to work, because nobody has run CrabCast against them. Validating a newer herdr is planned after launch; until then, pinning is what lets this README say what it has actually seen.
+**0.6.4 is the version CrabCast is verified against — and "not 0.6.x" is not one situation but two.** They rest on different amounts of evidence, so they get different answers. The daemon draws the same three bands, checking the installed herdr at startup:
 
-**The pin is more friction than it should be, and pretending otherwise would waste your time.** Current herdr is 0.8.0, so `brew install herdr` — or any other "get the latest" route — gets you a version CrabCast has never been run against. Downloading a release asset, `chmod +x`, and putting it on `PATH` yourself is the price of being on the tested version, and there is no one-liner that does it.
+| herdr | what is known | what it rests on |
+| --- | --- | --- |
+| **0.6.x** | **Supported.** Every proof in this repository was produced on 0.6.4. | run, repeatedly |
+| **0.7.x** | **A known break — do not use it.** 0.7.0 redesigned `agent start`: it no longer creates a pane but attaches an agent kind to an existing one (`--kind`/`--pane`), and it dropped `--cwd`, `--tab`, `--no-focus` and the trailing `-- <argv>`. CrabCast's spawn path passes all four, so **every activation fails** with `unknown option: --cwd`. | observed, on 0.7.5, on a clean machine |
+| **0.8 and above** | **Untested — a genuine unknown.** Nobody has run CrabCast on it. It may well work; this is not a prediction that it will fail. | nothing, and that is the point |
+
+**Install something other than 0.6.x and the daemon tells you which band you are in**, once, before the answer to whatever you typed. It reports rather than vetoes — it will not refuse to run for you — but on 0.7.x the activation itself still dies at herdr, so the notice is the warning and not a reprieve:
+
+```
+crabcast: note: herdr 0.7.5 is the line that redesigned 'agent start': it takes --kind/--pane and no longer accepts --cwd, which CrabCast's spawn path passes on every activation — so activations fail with 'unknown option: --cwd'. Observed on herdr 0.7.5, on a clean machine (KAN-33). Install a 0.6.x herdr (0.6.4 is the release CrabCast is verified against).
+```
+
+Adapting the spawn path to 0.7's API, and validating 0.8, are both planned after launch. Until then, pinning is what lets this README say only what it has actually seen.
+
+**The pin is more friction than it should be, and pretending otherwise would waste your time.** Current herdr is 0.8.0, so `brew install herdr` — or any other "get the latest" route — gets you a version CrabCast has never been run against, and a route that happens to land on 0.7.x gets you one where nothing will start at all. Downloading a release asset, `chmod +x`, and putting it on `PATH` yourself is the price of being on the tested version, and there is no one-liner that does it.
 
 **Do not run `npm install herdr`.** There is a package by that name on npm, at version `0.0.0`, published by an unrelated third party and self-described as a reserved name. It is not herdr, and installing it gets you nothing that CrabCast can use.
 
@@ -54,7 +68,9 @@ If you have previously run `npm link` from a CrabCast clone, remove that link fi
 
 A new project directory, no prior state: declare a workspace type, activate an agent, watch it, stand it down. Every command below is one that was run, and the output is what it printed; the long paths are the machine it was run on, and yours will be your own directory.
 
-Four things worth knowing before reading it:
+Five things worth knowing before reading it:
+
+* **The first `activate` may be refused, and that is the system working rather than the walkthrough failing.** CrabCast asks whether this machine can carry another agent *before* it starts one, and on a machine already under load the answer is no. It happened to the first person who followed this document — refused at a load average of 2.99 against the 3.0 cores reserved for agents. The refusal names the binding constraint and shows every term it used; there is a worked example [below](#when-the-machine-is-full-activate-refuses). Two ways past it: wait for the machine to quieten and run the same command again, or pass `--override` to start the agent anyway and have the bypass recorded with the figures it bypassed. Waiting is the better answer on a machine you are also trying to use.
 
 * **Nothing starts a daemon by hand.** `activate`, `deactivate`, `reset` and `send` spawn one when none is running; `list`, `status`, `tail`, `capacity` and `daemon-status` refuse with exit 3 instead of starting a fleet nobody asked for. The first `crabcast list` below is that refusal, on purpose.
 * **This config declares `"dataDir": ".crabcast"`**, which puts the socket, the log, the durable registry and the agents' workspaces inside the project directory, so the whole demo is removable with one `rm -rf`. Omit `dataDir` and CrabCast uses `~/.local/share/crabcast` instead.
