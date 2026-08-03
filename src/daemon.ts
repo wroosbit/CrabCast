@@ -129,7 +129,7 @@ const registry = new WorkspaceRegistry(config.workspaceTypes);
 // Prompt paths belong to the config that names them, so they resolve from the
 // config file's directory rather than from any install location.
 const promptLoader = new PromptLoader(config.baseDir);
-const herdrBridge = new HerdrBridge(config.dataDir);
+const herdrBridge = new HerdrBridge(config.dataDir, config.configPath);
 
 log(`Config loaded from ${config.configPath} (dataDir ${config.dataDir})`);
 log(`Loaded ${config.workspaceTypes.length} workspace type(s):`);

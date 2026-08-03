@@ -337,8 +337,12 @@ export class HerdrBridge {
   /**
    * The data directory from `crabcast.config.json`; every workspace this
    * bridge creates or deletes lives under `<dataDir>/workspaces/`.
+   *
+   * `configPath` is the file that config was loaded from, baked into each
+   * workspace's `crabcast` MCP definition so the server it spawns addresses
+   * this daemon rather than whichever one the default data dir holds.
    */
-  constructor(private dataDir: string) {}
+  constructor(private dataDir: string, private configPath?: string) {}
 
   public setSessionEndedListener(listener: (event: SessionEndedEvent) => void): void {
     this.sessionEndedListener = listener;
@@ -614,7 +618,7 @@ export class HerdrBridge {
     // Workspace-scoped MCP config, written for every agent type: Claude picks
     // up .mcp.json from its cwd, and the file documents the workspace either way.
     if (mcpServers && mcpServers.length > 0) {
-      writeWorkspaceMcpConfig(session.workDir, mcpServers);
+      writeWorkspaceMcpConfig(session.workDir, mcpServers, this.configPath);
     }
 
     // Agent-specific provisioning, also on every activation: it is idempotent,
