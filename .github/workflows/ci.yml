@@ -95,6 +95,7 @@ jobs:
             verify-mcp-tools
             verify-cli-refusal
             verify-cli-parity
+            verify-herdr-version-notice
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,
