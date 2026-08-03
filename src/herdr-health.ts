@@ -231,6 +231,33 @@ export function isFdPressureHigh(p: FdUsage): boolean {
  */
 export const SUPPORTED_HERDR_MAJOR_MINOR = '0.6';
 
+/**
+ * The herdr release CrabCast has actually been run against, named in every
+ * verdict so a reader knows what "supported" is grounded in rather than
+ * inferring it from a version range.
+ */
+export const VERIFIED_HERDR_RELEASE = '0.6.4';
+
+/**
+ * The line where `agent start` was redesigned — see the docblock above. It is
+ * a separate constant from {@link SUPPORTED_HERDR_MAJOR_MINOR} because the two
+ * facts have different evidence behind them, and {@link checkHerdrVersion}
+ * says different things on either side of it (KAN-102).
+ */
+export const HERDR_AGENT_START_REDESIGN_MAJOR_MINOR = '0.7';
+
+/**
+ * The wire field a version verdict travels on, from the daemon that computed
+ * it at startup to the client that renders it.
+ *
+ * The daemon computes; the CLI renders (KAN-92 constraint 1). A client that
+ * ran its own comparison would be a second copy of {@link checkHerdrVersion} —
+ * the copy that is wrong after this one changes — so the verdict crosses the
+ * socket as finished prose and the field name is shared rather than spelled
+ * twice.
+ */
+export const HERDR_VERSION_NOTICE_FIELD = 'herdrVersionNotice';
+
 /** `herdr --version` output → a comparable `[major, minor]`, or undefined. */
 export function parseHerdrVersion(versionOutput: string): [number, number] | undefined {
   const match = /(\d+)\.(\d+)(?:\.\d+)?/.exec(versionOutput);
@@ -239,30 +266,65 @@ export function parseHerdrVersion(versionOutput: string): [number, number] | und
 }
 
 /**
- * A warning when herdr is a line CrabCast cannot drive, or undefined when it
- * is fine (or unreadable — an unknown version is not evidence of a problem,
- * and refusing to run on one would break every future release).
+ * The single version comparison in this codebase (KAN-102).
+ *
+ * A verdict on the herdr that is installed, or undefined when it is fine (or
+ * unreadable — an unknown version is not evidence of a problem, and refusing
+ * to run on one would break every future release). Never a refusal: it returns
+ * words, and the caller decides where to put them.
+ *
+ * Three bands, because they rest on three different amounts of evidence and a
+ * message that flattened them would be claiming more than anyone knows:
+ *
+ *   - **0.6.x** — the supported line, verified on {@link VERIFIED_HERDR_RELEASE}.
+ *     Nothing is said. A notice that fires for the configuration we tell people
+ *     to install trains them to ignore the one that matters.
+ *   - **0.7.x** — `agent start` was redesigned and `--cwd` is gone; the failure
+ *     was *observed*, on 0.7.5, on the extraction source's clean-machine run
+ *     (KAN-33). The specific claim is kept, with the version it was seen on.
+ *   - **above 0.7, and below 0.6** — untested. Nobody has run CrabCast on 0.8;
+ *     deferring that check was a schedule decision, not a finding (KAN-59
+ *     decision 7). So the verdict says *untested against*, not *broken*: a
+ *     definite prediction that turns out to be wrong is how a diagnostic loses
+ *     the credibility the 0.7 message depends on.
  */
 export function checkHerdrVersion(versionOutput: string): string | undefined {
   const parsed = parseHerdrVersion(versionOutput);
   if (!parsed) return undefined;
 
   const [major, minor] = parsed;
+  // `herdr --version` already prints "herdr 0.7.5", so the name is not
+  // prepended — doing so produced "herdr herdr 0.7.5" in the daemon log.
+  const reported = versionOutput.trim();
   const [wantMajor, wantMinor] = SUPPORTED_HERDR_MAJOR_MINOR.split('.').map(Number);
   if (major === wantMajor && minor === wantMinor) return undefined;
 
-  // `herdr --version` already prints "herdr 0.7.5", so the name is not
-  // prepended — doing so produced "herdr herdr 0.7.5" in the daemon log.
-  if (major > wantMajor || (major === wantMajor && minor > wantMinor)) {
+  const [redesignMajor, redesignMinor] =
+    HERDR_AGENT_START_REDESIGN_MAJOR_MINOR.split('.').map(Number);
+  if (major === redesignMajor && minor === redesignMinor) {
     return (
-      `${versionOutput.trim()} is newer than the ${SUPPORTED_HERDR_MAJOR_MINOR}.x line CrabCast's spawn path ` +
-      `is written against. herdr 0.7 redesigned 'agent start' — it takes --kind/--pane and no longer ` +
-      `accepts --cwd — so every activation will fail with 'unknown option: --cwd'. Install a ` +
-      `${SUPPORTED_HERDR_MAJOR_MINOR}.x herdr (0.6.4 is the release this line was verified against).`
+      `${reported} is the line that redesigned 'agent start': it takes --kind/--pane and no ` +
+      `longer accepts --cwd, which CrabCast's spawn path passes on every activation — so ` +
+      `activations fail with 'unknown option: --cwd'. Observed on herdr 0.7.5, on a clean ` +
+      `machine (KAN-33). Install a ${SUPPORTED_HERDR_MAJOR_MINOR}.x herdr ` +
+      `(${VERIFIED_HERDR_RELEASE} is the release CrabCast is verified against).`
     );
   }
+
+  if (major > wantMajor || (major === wantMajor && minor > wantMinor)) {
+    return (
+      `${reported} is above the herdr line CrabCast is verified against ` +
+      `(${VERIFIED_HERDR_RELEASE}) and CrabCast has not been tested on it. That is an unknown, ` +
+      `not a known breakage — nobody has looked yet, so it may well work. If activations do ` +
+      `fail, start with 'herdr agent start': ` +
+      `${HERDR_AGENT_START_REDESIGN_MAJOR_MINOR} redesigned it and dropped the --cwd this ` +
+      `spawn path passes, and nothing has re-checked that since. Installing ` +
+      `${VERIFIED_HERDR_RELEASE} puts you on the tested path.`
+    );
+  }
+
   return (
-    `${versionOutput.trim()} is older than the ${SUPPORTED_HERDR_MAJOR_MINOR}.x line CrabCast is written ` +
+    `${reported} is older than the ${SUPPORTED_HERDR_MAJOR_MINOR}.x line CrabCast is written ` +
     `against; agent spawning may not work.`
   );
 }

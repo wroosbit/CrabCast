@@ -41,6 +41,7 @@ import {
   socketPathFor,
   writeJsonLine
 } from './ipc.js';
+import { HERDR_VERSION_NOTICE_FIELD } from './herdr-health.js';
 
 // ---------------------------------------------------------------- exit codes
 
@@ -1565,12 +1566,31 @@ export async function main(argv: string[]): Promise<ExitCode> {
     client?.close();
   }
 
+  // The daemon's verdict on the installed herdr, rendered — never computed
+  // (constraint 1). The CLI does not know what 0.6 means and must not learn:
+  // it prints the sentence the daemon wrote, or prints nothing because the
+  // daemon sent nothing.
+  //
+  // On stderr, before the answer, and on every mode including `--json`:
+  // `--json` is the wire and must stay parseable on stdout (it carries the
+  // notice as a field there, like every other field the daemon sent), while a
+  // human reading a terminal sees both streams interleaved in order.
+  const versionNotice = response?.[HERDR_VERSION_NOTICE_FIELD];
+  if (typeof versionNotice === 'string' && versionNotice.length > 0) {
+    process.stderr.write(`crabcast: note: ${versionNotice}\n`);
+  }
+
   try {
     if (flags.json) {
       // Exactly what arrived. Nothing dropped, nothing added.
       process.stdout.write(JSON.stringify(response, null, 2) + '\n');
     } else {
-      process.stdout.write(spec.render(new ResponseReader(response), payload) + '\n');
+      const reader = new ResponseReader(response);
+      // Shown above rather than dropped, which is what `seen` is for: the
+      // leftovers block exists so an unrendered field cannot vanish, and this
+      // one has already been rendered on stderr.
+      reader.seen(HERDR_VERSION_NOTICE_FIELD);
+      process.stdout.write(spec.render(reader, payload) + '\n');
     }
   } catch (err: any) {
     // A bug in a renderer must not lose the daemon's answer, and must not be
