@@ -7,7 +7,7 @@ import {
   McpError
 } from "@modelcontextprotocol/sdk/types.js";
 import * as net from 'net';
-import { DEFAULT_DATA_DIR, loadConfig, resolveConfigPath } from './config.js';
+import { DEFAULT_DATA_DIR, loadConfig, resolveConfigSource } from './config.js';
 import { connectToDaemon, onJsonLines, writeJsonLine } from './ipc.js';
 
 // The daemon's MCP server: stdio to its client, and an ordinary NDJSON client
@@ -47,8 +47,11 @@ const server = new Server(
 // first refused connect is already the final answer (see ipc.ts). It used to
 // take the full 20 × 250ms before saying so, on a path that had nothing to
 // wait for.
-const explicitConfig = process.argv[2] || process.env.CRABCAST_CONFIG;
-const configPath = resolveConfigPath();
+// `argv[2]` is this server's own config argument (workspace .mcp.json
+// definitions pass it, or set CRABCAST_CONFIG); the resolution rule and the
+// was-it-named question both live in config.ts, shared with the daemon and
+// the CLI.
+const { path: configPath, named: explicitConfig } = resolveConfigSource(process.argv[2]);
 let dataDir: string;
 let spawnIfMissing: boolean;
 try {

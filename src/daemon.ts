@@ -33,7 +33,9 @@ import { reconcileAgents } from './reconcile.js';
 // mistyped the config is looking.
 let config: CrabcastConfig;
 try {
-  config = loadConfig(resolveConfigPath());
+  // The daemon's own argv: `node dist/daemon.js [configPath]`. The position is
+  // this file's business; the resolution rule after it is config.ts's.
+  config = loadConfig(resolveConfigPath(process.argv[2]));
 } catch (err) {
   if (err instanceof ConfigError) {
     process.stderr.write(`crabcast: refusing to start: ${err.message}\n`);

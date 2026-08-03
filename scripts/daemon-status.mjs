@@ -11,7 +11,7 @@
 import { loadConfig, resolveConfigPath } from '../dist/config.js';
 import { connectToDaemon, onJsonLines, writeJsonLine } from '../dist/ipc.js';
 
-const configPath = resolveConfigPath();
+const configPath = resolveConfigPath(process.argv[2]);
 const config = loadConfig(configPath);
 
 const socket = await connectToDaemon(config.dataDir, { configPath });

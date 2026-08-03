@@ -27,16 +27,54 @@ export interface CrabcastConfig {
 }
 
 /**
- * Where the config comes from: an explicit path as the first CLI argument,
- * else the CRABCAST_CONFIG environment variable, else `crabcast.config.json`
- * in the current directory.
+ * Where a config came from, and whether anyone actually named it.
+ *
+ * `named` is the second half of the rule, and it is the half that decides
+ * what a caller does when the file will not load. A config somebody named —
+ * on the command line or in CRABCAST_CONFIG — that does not load is a
+ * refusal: falling back would connect to a *different* daemon than the one
+ * asked for, which is how a tool call steers the wrong fleet. A config nobody
+ * named is a default that may simply not be there, and falling back to the
+ * default data dir (without ever spawning a daemon into it) is reasonable.
+ *
+ * Returned together because every consumer needs both, and a consumer that
+ * recomputes `named` from its own argv is a second copy of this rule.
  */
+export interface ConfigSource {
+  /** Absolute path the config will be read from. */
+  path: string;
+  /** True when a config path was named explicitly or via CRABCAST_CONFIG. */
+  named: boolean;
+}
+
+/**
+ * Where the config comes from: an explicit path the caller was given, else the
+ * CRABCAST_CONFIG environment variable, else `crabcast.config.json` in the
+ * current directory.
+ *
+ * The explicit path is a *parameter* rather than something read out of
+ * `process.argv` here, and that is not a stylistic preference. This function
+ * used to read `argv[2]` itself, which is the config path for the daemon and
+ * the *subcommand* for the CLI — `crabcast list` would have gone looking for
+ * a config file named `list`. There are three consumers of this rule now (the
+ * daemon, the MCP server, the CLI) and only two of them have the path at
+ * `argv[2]`; the rule belongs here and the argv position belongs to whoever
+ * knows their own argv.
+ */
+export function resolveConfigSource(
+  explicit?: string,
+  env: NodeJS.ProcessEnv = process.env
+): ConfigSource {
+  const named = explicit || env.CRABCAST_CONFIG;
+  return { path: path.resolve(named || DEFAULT_CONFIG_FILENAME), named: Boolean(named) };
+}
+
+/** {@link resolveConfigSource} when only the path is wanted. */
 export function resolveConfigPath(
-  argv: string[] = process.argv,
+  explicit?: string,
   env: NodeJS.ProcessEnv = process.env
 ): string {
-  const explicit = argv[2] || env.CRABCAST_CONFIG;
-  return path.resolve(explicit || DEFAULT_CONFIG_FILENAME);
+  return resolveConfigSource(explicit, env).path;
 }
 
 function refuse(message: string): never {
