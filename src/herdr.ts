@@ -634,12 +634,26 @@ export class HerdrBridge {
       }
     }
 
+    // A write that fails refuses the activation, on the same spawnError
+    // channel as every other provisioning failure here. The agent's first
+    // instruction is to read this file, so spawning without it would start an
+    // agent with no instructions behind a `success: true, verified: true`
+    // answer — a check that renders its own failure as an all-clear. (The
+    // extraction source logged and fell through here; the lesson its epic
+    // recorded is ported instead of the line.)
     if (initialPrompt) {
       const promptFile = path.join(session.workDir, PROMPT_FILENAME);
       try {
         fs.writeFileSync(promptFile, initialPrompt);
-      } catch (e) {
-        console.error('[HerdrBridge] Failed to write prompt file', e);
+      } catch (e: any) {
+        session.spawnError =
+          `Could not write ${PROMPT_FILENAME} into ${session.workDir}: ` +
+          `${e?.message ?? String(e)}. The agent's bootstrap prompt is that file, so an agent ` +
+          `spawned without it would sit with no instructions behind a success answer. ` +
+          `Nothing was started.`;
+        session.status = 'terminated';
+        console.error(`[HerdrBridge] Refusing to start ${agentName}: ${session.spawnError}`);
+        return;
       }
     }
 

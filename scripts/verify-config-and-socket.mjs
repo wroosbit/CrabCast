@@ -138,6 +138,24 @@ console.log('=== 1. Config validation refuses rather than repairs ===');
     result2.stderr.includes('"priority"') && result2.stderr.includes('shell'),
     'missing priority: error names the field and the type'
   );
+
+  // Boot-time check rather than the config loader's: the launcher table lives
+  // in launchers.ts, and a typo'd launcher surviving to first activation
+  // would break the fail-at-load contract in the one field the loader cannot
+  // check itself.
+  const badLauncher = writeConfig('bad-launcher.config.json', (c) => {
+    c.workspaceTypes[0].defaultLauncher = 'clade';
+  });
+  const result3 = startDaemonSync(badLauncher);
+  console.log(`stderr: ${result3.stderr.trim()}`);
+  check(result3.status === 1, 'unknown defaultLauncher: daemon refuses at boot with exit 1', `exit ${result3.status}`);
+  check(
+    result3.stderr.includes('clade') &&
+      result3.stderr.includes('shell') &&
+      result3.stderr.includes('claude') &&
+      result3.stderr.includes('Valid launchers'),
+    'unknown defaultLauncher: error names the typo, the type, and the valid launchers'
+  );
 }
 
 console.log('\n=== 2. Daemon starts from config; daemon_status round-trips ===');

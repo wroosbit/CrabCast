@@ -314,7 +314,12 @@ export class MessageRouter {
         : undefined;
 
     const agentName = agentNameFor(type, key);
-    let session = herdrBridge.getSessionByKey(key);
+    // By full address, not by key alone: a session for a different type is a
+    // different agent. A key-only lookup here would reuse `{A, k}`'s session
+    // for an activation of `{B, k}`, then confirm existence against the name
+    // `crabcast-B-k` — which is absent — and abandonSession would tear down
+    // A's live PTY. A mistyped type must never destroy an unrelated agent.
+    let session = herdrBridge.getSessionByAddress(key, type);
 
     if (!session) {
       // Before the prompt is even rendered: the cheapest refusal is the one

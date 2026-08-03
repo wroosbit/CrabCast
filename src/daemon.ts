@@ -15,6 +15,7 @@ import {
 } from './herdr-health.js';
 import { ensureDataDir, onJsonLines, socketPathFor, writeJsonLine } from './ipc.js';
 import { resolveUserPath, which } from './env.js';
+import { AGENT_LAUNCHERS } from './launchers.js';
 
 // The single long-lived CrabCast daemon. Owns all sessions and the workspace
 // registry. Clients (the CLI, the MCP server) connect over a Unix domain
@@ -33,6 +34,25 @@ try {
     process.exit(1);
   }
   throw err;
+}
+
+// Each type's defaultLauncher checked against the launcher table now, at
+// boot, not at first activation: the config loader's contract is that a
+// config it accepts is a config the daemon can run, and a typo'd launcher
+// surviving to activation time breaks that in the one field the loader
+// cannot check itself (the table lives here, not in config.ts — validating
+// there would couple the loader to the launchers). Same channel as a
+// ConfigError: stderr, where the operator who just edited the config is
+// looking.
+for (const type of config.workspaceTypes) {
+  if (!AGENT_LAUNCHERS[type.defaultLauncher]) {
+    process.stderr.write(
+      `crabcast: refusing to start: workspace type "${type.name}": defaultLauncher ` +
+      `"${type.defaultLauncher}" is not a known launcher. Valid launchers: ` +
+      `${Object.keys(AGENT_LAUNCHERS).join(', ')}\n`
+    );
+    process.exit(1);
+  }
 }
 
 const SOCKET_PATH = socketPathFor(config.dataDir);

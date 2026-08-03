@@ -12,17 +12,25 @@
 // crabcast.config.json, then DEFAULT_AGENT — and unknown names refuse at
 // every step.
 //
-// Four sections:
+// Six sections:
 //
-//   1. omitted   — activate with no defaultAgent: the type's launcher
-//                  (claude), not a shell
-//   2. unknown   — defaultAgent: 'zzz' refuses, names the valid launchers,
-//                  starts nothing, provisions nothing, and does not latch
-//   3. explicit  — defaultAgent: 'shell' still works: shell is a legitimate
-//                  *explicit* request (verify fixtures use it), only the
-//                  implicit paths to it are gone
-//   4. audit     — across sections 1 and 2, no bash-launching command was
-//                  ever constructed
+//   1. omitted    — activate with no defaultAgent: the type's launcher
+//                   (claude), not a shell
+//   2. unknown    — defaultAgent: 'zzz' refuses, names the valid launchers,
+//                   starts nothing, provisions nothing, and does not latch
+//   3. explicit   — defaultAgent: 'shell' still works: shell is a legitimate
+//                   *explicit* request (verify fixtures use it), only the
+//                   implicit paths to it are gone
+//   4. audit      — across sections 1 and 2, no bash-launching command was
+//                   ever constructed
+//   5. cross-type — activating a second type on a key another type already
+//                   holds spawns its own agent and leaves the first session
+//                   untouched (a key-only session lookup would reuse the
+//                   first session, fail existence against the second type's
+//                   name, and tear the first agent's PTY down)
+//   6. unwritable — a workspace whose prompt file cannot be written refuses
+//                   the activation naming the file, instead of spawning an
+//                   instruction-less agent behind success: true
 //
 // Everything on the daemon side is real: the real MessageRouter, the real
 // HerdrBridge (initPty and all), the real WorkspaceRegistry and PromptLoader,
@@ -33,9 +41,11 @@
 // therefore the whole truth about what would have run, which is what lets
 // section 4 say "no bash launch was constructed" rather than inferring it.
 //
-// Isolation is by a scratch dataDir in the config, so this run never touches
-// ~/.local/share/crabcast, and no real herdr — live or private — is ever
-// contacted.
+// Isolation is by a scratch dataDir in the config AND by a scratch $HOME —
+// the `claude` launcher's setup records folder trust in ~/.claude.json, and
+// os.homedir() reads $HOME at call time, so the temp HOME (set before any
+// dist import) keeps those writes out of the real user file. No real herdr —
+// live or private — is ever contacted.
 //
 // Usage:
 //   npm run build
@@ -51,7 +61,12 @@ const distDir = process.argv[2] ?? path.join(scriptDir, '..', 'dist');
 
 const TYPE = 'task';
 
+// A private HOME, before any dist import: the claude launcher's trust write
+// targets os.homedir()/.claude.json, which reads $HOME at call time.
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'kan53-'));
+const fakeHome = path.join(scratch, 'home');
+fs.mkdirSync(fakeHome, { recursive: true });
+process.env.HOME = fakeHome;
 
 // ---------------------------------------------------------------- the shim --
 //
@@ -140,7 +155,9 @@ fs.writeFileSync(path.join(scratch, 'prompts', 'task.md'), 'KAN-53 proof workspa
 fs.writeFileSync(configPath, JSON.stringify({
   dataDir,
   workspaceTypes: [
-    { name: TYPE, priority: 1, promptFile: 'prompts/task.md', defaultLauncher: 'claude' }
+    { name: TYPE, priority: 1, promptFile: 'prompts/task.md', defaultLauncher: 'claude' },
+    // A second type for section 5: two types sharing one key are two agents.
+    { name: 'sidecar', priority: 1, promptFile: 'prompts/task.md', defaultLauncher: 'claude' }
   ]
 }, null, 2));
 
@@ -295,6 +312,76 @@ verdict(
   accidentalShells.length === 0,
   "no bash-launching command was ever constructed except the one that asked for 'shell' by name",
   `${accidentalShells.length} bash launch(es) were constructed without being asked for`
+);
+
+// ------------------------------------------------- 5. cross-type isolation --
+
+rule('5. cross-type isolation — a second type on the same key leaves the first alone');
+
+console.log('   The session lookup in activate_by_key must be by full address, not by key');
+console.log('   alone: a key-only match would hand sidecar/SHARED the task/SHARED session,');
+console.log('   confirm existence against the sidecar agent name — absent — and abandon the');
+console.log("   task agent's live PTY. A mistyped type must never destroy an unrelated agent.\n");
+
+const SHARED = 'KAN-70-SHARED';
+const first = await activate(SHARED);
+const firstSession = bridge.getSession(first?.sessionId);
+show('first activation (task/SHARED):', {
+  success: first?.success, verified: first?.verified, sessionId: first?.sessionId
+});
+
+const second = await activate(SHARED, { type: 'sidecar' });
+show('second activation (sidecar/SHARED):', {
+  success: second?.success, verified: second?.verified, sessionId: second?.sessionId
+});
+
+const firstAfter = bridge.getSession(first?.sessionId);
+const sharedStarts = startsIn(invocations()).map((argv) => argv[2]);
+console.log(`\n   task session after the sidecar activation: status=${firstAfter?.status}, ` +
+  `spawnError ${firstAfter?.spawnError ? 'set' : 'unset'}`);
+console.log(`   agents started for the shared key: ` +
+  `${JSON.stringify(sharedStarts.filter((n) => n.endsWith('-kan-70-shared')))}`);
+
+verdict(
+  first?.success === true &&
+    second?.success === true &&
+    typeof second?.sessionId === 'string' &&
+    second.sessionId !== first?.sessionId &&
+    firstAfter?.status === 'active' &&
+    !firstAfter?.spawnError &&
+    sharedStarts.includes(agentNameFor(TYPE, SHARED)) &&
+    sharedStarts.includes(agentNameFor('sidecar', SHARED)),
+  'two types on one key are two agents, and the first session survived untouched',
+  'the second type reused or destroyed the first session'
+);
+
+// ---------------------------------------------- 6. unwritable prompt file --
+
+rule('6. a prompt file that cannot be written refuses the activation');
+
+console.log("   The agent's first instruction is to read the prompt file, so an activation");
+console.log('   whose prompt write failed must refuse — spawning anyway would start an agent');
+console.log('   with no instructions behind a success: true, verified: true answer.\n');
+
+const RO_KEY = 'KAN-70-READONLY';
+const roDir = path.join(dataDir, 'workspaces', TYPE, RO_KEY.toLowerCase());
+fs.mkdirSync(roDir, { recursive: true });
+fs.chmodSync(roDir, 0o500); // read + traverse, no write: the prompt write must fail
+
+const readonly = await activate(RO_KEY, { defaultAgent: 'shell' });
+fs.chmodSync(roDir, 0o755); // restored so cleanup can remove the scratch
+
+show('activate_by_key response:', readonly);
+const roStarts = startsIn(invocations()).filter((argv) => argv[2] === agentNameFor(TYPE, RO_KEY));
+console.log(`\n   agent start invocations for ${agentNameFor(TYPE, RO_KEY)}: ${roStarts.length}`);
+
+verdict(
+  readonly?.success === false &&
+    typeof readonly?.error === 'string' &&
+    readonly.error.includes(PROMPT_FILENAME) &&
+    roStarts.length === 0,
+  'refused naming the prompt file, and nothing was started for the broken workspace',
+  'a failed prompt write did not refuse the activation'
 );
 
 rule(failures === 0 ? 'all sections passed' : `${failures} section(s) FAILED`);
