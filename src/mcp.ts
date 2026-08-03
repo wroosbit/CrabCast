@@ -127,7 +127,7 @@ async function callDaemonAPI(action: string, data: any = {}): Promise<any> {
       reject(new Error(`Daemon request timed out: ${action}`));
     }, 30_000);
     pending.set(id, { resolve, reject, timer });
-    writeJsonLine(socket, {
+    const wrote = writeJsonLine(socket, {
       action,
       ...data,
       id,
@@ -139,6 +139,16 @@ async function callDaemonAPI(action: string, data: any = {}): Promise<any> {
       workspaceType: process.env.CRABCAST_WORKSPACE_TYPE || undefined,
       workspaceKey: process.env.CRABCAST_WORKSPACE_KEY || undefined
     });
+    // writeJsonLine refuses (returns false) on a destroyed socket. That is
+    // the close-then-write race: the memoised socket died after daemonLink
+    // resolved it, the request was never sent, and nothing is coming back —
+    // waiting out the 30s timeout would charge the caller half a minute for
+    // a failure detected in this very call. The next call reconnects lazily.
+    if (!wrote) {
+      pending.delete(id);
+      clearTimeout(timer);
+      reject(new Error(`Daemon connection closed before the request could be sent: ${action}`));
+    }
   });
 }
 

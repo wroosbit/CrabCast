@@ -9,18 +9,27 @@
 //                   vocabulary while keeping the behavioural guidance
 //                   (missing = silently stopped; preempted = decision owed)
 //   3. round trip — through MCP tool calls only: activate a `shell`-type
-//                   agent, list_agents shows it, tail_agent returns pane
-//                   text, agent_status reports it, deactivate stands it down
-//                   and the list no longer shows it
+//                   agent, list_agents shows it, send_to_agent reaches its
+//                   terminal, tail_agent returns pane text, agent_status
+//                   reports it, deactivate stands it down and the list no
+//                   longer shows it
 //   4. events     — the activation's agent_activated_event arrives as an MCP
 //                   notification on a SECOND connected client, proving the
 //                   daemon's broadcasts are forwarded, not just responses
-//   5. isError    — failures arrive flagged: a deactivation of nothing is
-//                   isError (the mapping this port deliberately adds over the
-//                   extraction source), and `capacity` — an action that lands
-//                   with the capacity slice (KAN-71) — is passed through
-//                   faithfully whether or not this daemon serves it yet:
-//                   isError exactly when the daemon answered success: false
+//   5. reset      — reset_agent stands a second agent down AND deletes its
+//                   workspace directory; a reset of nothing is isError (the
+//                   mapping this port deliberately adds over the extraction
+//                   source)
+//   6. isError    — the other failures arrive flagged: a deactivation of
+//                   nothing is isError (the same deliberately-added mapping),
+//                   and `capacity` — an action that lands with the capacity
+//                   slice (KAN-71) — is passed through faithfully whether or
+//                   not this daemon serves it yet: isError exactly when the
+//                   daemon answered success: false
+//   7. startup    — an explicitly-named config that does not load refuses at
+//                   startup (exit 1, before serving stdio), and the
+//                   no-config fallback connects without ever spawning a
+//                   daemon into the default data dir
 //
 // Everything on the daemon side is real: the real daemon process (spawned by
 // the MCP server's own eager connect, exactly as a workspace-spawned server
@@ -38,7 +47,7 @@
 //   npm run build
 //   node scripts/verify-mcp-tools.mjs [distDir]
 
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -364,7 +373,7 @@ console.log(`\n   daemon spawned by the MCP server's eager connect: pid ${daemon
 
 // ------------------------------------------------------------ 3. round trip --
 
-rule('3. the round trip — activate, list, tail, status, deactivate, through MCP only');
+rule('3. the round trip — activate, list, send, tail, status, deactivate, through MCP only');
 
 // The second client connects before the activation so section 4 can prove
 // the broadcast reached a client that did not make the request.
@@ -387,6 +396,17 @@ verdict(
   Array.isArray(listed?.agents) && listed.agents.some((a) => a.type === TYPE && a.key === KEY),
   `list_agents shows ${TYPE}/${KEY}`,
   'the activated agent is not in the list'
+);
+
+const sent = await clientA.callTool('crabcast_send_to_agent', {
+  key: KEY, type: TYPE, message: 'echo KAN-73 send round trip'
+});
+const sentRes = parsedText(sent);
+show('crabcast_send_to_agent:', sentRes);
+verdict(
+  sent.isError !== true && sentRes?.success === true,
+  'send_to_agent delivered to the agent\'s terminal',
+  'send_to_agent did not report delivery'
 );
 
 const tailed = await clientA.callTool('crabcast_tail_agent', { key: KEY, type: TYPE });
@@ -443,9 +463,43 @@ verdict(
   'no activation event reached the second client'
 );
 
-// ------------------------------------------------------ 5. isError mappings --
+// ----------------------------------------------------------------- 5. reset --
 
-rule('5. failures arrive flagged — isError mappings');
+rule('5. reset_agent — the workspace is deleted, and a reset of nothing is flagged');
+
+const RESET_KEY = 'kan73-reset-demo';
+const resetActivate = parsedText(
+  await clientA.callTool('crabcast_activate_agent', { type: TYPE, key: RESET_KEY }));
+const resetWorkDir = resetActivate?.workDir;
+console.log(`   activated ${TYPE}/${RESET_KEY} to reset (workDir ${resetWorkDir})`);
+console.log(`   workspace exists before reset: ${fs.existsSync(resetWorkDir ?? '')}`);
+
+const reset = await clientA.callTool('crabcast_reset_agent', { type: TYPE, key: RESET_KEY });
+const resetRes = parsedText(reset);
+show('crabcast_reset_agent:', resetRes);
+const resetListed = parsedText(await clientA.callTool('crabcast_list_agents'));
+console.log(`   workspace exists after reset: ${fs.existsSync(resetWorkDir ?? '')}`);
+
+verdict(
+  resetActivate?.success === true && typeof resetWorkDir === 'string' &&
+    reset.isError !== true && resetRes?.success === true && resetRes?.agentClosed === true &&
+    !fs.existsSync(resetWorkDir) &&
+    !resetListed?.agents?.some((a) => a.type === TYPE && a.key === RESET_KEY),
+  'reset stood the agent down and its workspace directory is gone',
+  'reset did not remove both the agent and its workspace'
+);
+
+const resetGhost = await clientA.callTool('crabcast_reset_agent', { type: TYPE, key: 'kan73-never-existed' });
+show('reset of nothing:', { isError: resetGhost.isError, response: parsedText(resetGhost) });
+verdict(
+  resetGhost.isError === true && parsedText(resetGhost)?.success === false,
+  'a failed reset is flagged isError (the mapping this port adds deliberately)',
+  'a failed reset arrived as ordinary text'
+);
+
+// ------------------------------------------------------ 6. isError mappings --
+
+rule('6. failures arrive flagged — isError mappings');
 
 const ghost = await clientA.callTool('crabcast_deactivate_agent', { key: 'kan73-no-such-agent' });
 show('deactivate of nothing:', { isError: ghost.isError, response: parsedText(ghost) });
@@ -472,6 +526,56 @@ verdict(
   capacity.isError === (capacityRes?.success === false),
   'capacity passes the daemon\'s answer through, isError exactly on success: false',
   'the capacity pass-through mislabeled the daemon\'s answer'
+);
+
+// ---------------------------------------------------- 7. startup refusals --
+
+rule('7. startup — explicit-but-unloadable config refuses; no-config fallback never spawns');
+
+// An explicitly named config that does not load must refuse at startup —
+// falling back would connect (or worse, spawn) some other daemon than the
+// one asked for, and every tool call would steer the wrong fleet.
+const badConfigPath = path.join(scratch, 'broken.config.json');
+fs.writeFileSync(badConfigPath, '{ this is not json');
+const refused = spawnSync(process.execPath, [mcpJs, badConfigPath], {
+  env: childEnv,
+  input: '',
+  encoding: 'utf8',
+  timeout: 15_000
+});
+console.log(`   exit code with unloadable explicit config: ${refused.status}`);
+console.log(`   stderr: ${refused.stderr.trim().split('\n')[0]}`);
+verdict(
+  refused.status === 1 && /refusing to start/.test(refused.stderr),
+  'the server exited 1 before serving stdio, naming the refusal',
+  'an unloadable explicit config did not refuse at startup'
+);
+
+// With nothing named at all, the fallback is the default data dir under
+// $HOME — connect-only. A daemon spawned there could not resolve a config of
+// its own, so the fallback must never spawn one: after the connect retries
+// have run their course, the default data dir must not even exist.
+const fallbackDataDir = path.join(fakeHome, '.local', 'share', 'crabcast');
+const noConfigCwd = path.join(scratch, 'empty-cwd');
+fs.mkdirSync(noConfigCwd, { recursive: true });
+const fallbackEnv = { ...childEnv };
+delete fallbackEnv.CRABCAST_CONFIG;
+const fallbackChild = spawn(process.execPath, [mcpJs], {
+  cwd: noConfigCwd,
+  env: fallbackEnv,
+  stdio: ['pipe', 'pipe', 'pipe']
+});
+let fallbackStderr = '';
+fallbackChild.stderr.on('data', (d) => { fallbackStderr += d.toString(); });
+await sleep(7000); // past connectToDaemon's full retry budget (20 × 250ms)
+const spawnedAnything = fs.existsSync(fallbackDataDir);
+fallbackChild.kill();
+console.log(`   fallback stderr: ${fallbackStderr.trim().split('\n')[0]}`);
+console.log(`   ${fallbackDataDir} exists after the retry budget: ${spawnedAnything}`);
+verdict(
+  /connecting only to an already-running daemon/.test(fallbackStderr) && !spawnedAnything,
+  'the no-config fallback announced itself and spawned nothing into the default data dir',
+  'the no-config fallback spawned (or provisioned for) a daemon it could not configure'
 );
 
 rule(failures === 0 ? 'all sections passed' : `${failures} section(s) FAILED`);
