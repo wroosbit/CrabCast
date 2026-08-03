@@ -1,0 +1,20 @@
+{
+  "name": "crabcast",
+  "version": "0.1.0",
+  "description": "Standalone agent orchestration for terminal AI agents — one daemon, a CLI, and a fleet UI, with capacity, priority, and honesty built in.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^20.14.0"
+  }
+}
