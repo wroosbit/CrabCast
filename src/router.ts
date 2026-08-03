@@ -256,6 +256,13 @@ interface StandbyAgent {
   defaultAgent: string | null;
   /** When the registry recorded the stand-down. */
   since: string;
+  /**
+   * Present when this row is an ex-preempted agent whose annotation compaction
+   * dropped: its work was taken, not switched off. Absent means somebody chose
+   * to stop it. A client rendering an On button treats both the same; a human
+   * reading why it is off does not.
+   */
+  wasPreempted?: boolean;
   reason: string;
 }
 
@@ -1792,7 +1799,10 @@ export class MessageRouter {
    *     Offering On for something already on is how a control starts lying.
    *   - preempted — reported separately, with the name of what took its slot.
    *     One agent, one switch: a row in two lists is a row that can be pressed
-   *     twice.
+   *     twice. (Once compaction has dropped that annotation the agent does
+   *     land here — there is no longer a debt to report it as — but it arrives
+   *     carrying `wasPreempted` and a reason that says what actually happened
+   *     to it. It is still in exactly one list.)
    *   - no workspace on disk — `reset` records a stand-down too, and the
    *     directory it deleted is the whole difference between "stopped" and
    *     "finished with". Re-activating one of those would create an empty
@@ -1824,9 +1834,18 @@ export class MessageRouter {
         url: intent.record.url ?? null,
         defaultAgent: intent.record.defaultAgent ?? null,
         since: intent.at,
-        reason:
-          'Switched off deliberately. Its workspace is still on disk, so switching it back ' +
-          'on resumes the conversation it was stopped in rather than starting a new one.'
+        // Set on a row that reached this list through compaction dropping a
+        // preemption annotation. It is here so a client can tell the two
+        // apart, and so the sentence below can stop short of claiming a
+        // decision nobody made.
+        ...(intent.wasPreempted ? { wasPreempted: true } : {}),
+        reason: intent.wasPreempted
+          ? 'Stopped to free capacity for higher-priority work, long enough ago that the ' +
+            'record of what took its slot has been compacted away. Its workspace is still ' +
+            'on disk, so switching it back on resumes the conversation it was stopped in ' +
+            'rather than starting a new one.'
+          : 'Switched off deliberately. Its workspace is still on disk, so switching it back ' +
+            'on resumes the conversation it was stopped in rather than starting a new one.'
       });
     }
 

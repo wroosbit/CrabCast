@@ -10,11 +10,27 @@
 // or disturb — the live one. The live daemon at ~/.local/share/crabcast is
 // never contacted.
 //
+// The round-trip stage asserts DELIVERY rather than assuming it: it sends,
+// checks the echo came back, and resends a bounded number of times before
+// failing. Keystrokes written to a pane whose shell has not yet reached its
+// `read` are dropped by the terminal, which is load-dependent and was the
+// cause of this script's flake (KAN-88 item 11) — a retry costs a second and
+// removes a red check that was never about CrabCast.
+//
 // Usage:
 //   npm run build
 //   node scripts/verify-pty-init-rejects-unknown-session.mjs [--dist <dir>]
 //
 //   --dist <dir>  run a different compiled daemon than this checkout's dist.
+//
+// Environment:
+//   KAN25_DROP_FIRST_SENDS=<n>  drop the first n sends without writing them,
+//                               modelling exactly those lost keystrokes. With
+//                               n < the attempt budget the run must still pass
+//                               (the retry recovers); with n >= it, the run
+//                               must still FAIL (the retry has not been turned
+//                               into a check that cannot fail). Both are how
+//                               the retry itself is tested.
 //
 // Exit code 0 means every stage passed.
 
@@ -306,8 +322,17 @@ if (!herdrAvailable) {
   if (!activated.success) {
     record('a real session could be started', false, activated.error);
   } else {
-    await sleep(1500);
-    const good = await call('pty_init', { sessionId: activated.sessionId });
+    // Polled rather than slept. This used to be a flat 1500ms, which is a
+    // guess about how long the daemon takes to have the session ready — and a
+    // guess is exactly what the rest of this script exists to argue against.
+    // `pty_init` on a session this daemon holds succeeds immediately, so the
+    // first attempt normally is the last one.
+    let good;
+    for (let i = 0; i < 40; i++) {
+      good = await call('pty_init', { sessionId: activated.sessionId });
+      if (good.success === true) break;
+      await sleep(250);
+    }
     console.log(`\npty_init with the real id '${activated.sessionId}' →`);
     console.log(JSON.stringify({ ...good, buffer: `<${(good.buffer ?? '').length} chars>` }, null, 2));
     record(
@@ -329,61 +354,102 @@ if (!herdrAvailable) {
 
     const marker = 'kan25-round-trip';
 
-    // Typed only once the shell is provably listening, and this is the fix for
-    // a real flake (KAN-88 item 11): this used to type after a flat 1500ms
-    // sleep, which is a guess about how long bash and herdr's TUI take to
-    // finish starting. On a quiet machine the guess held; in a back-to-back
-    // suite run it did not, the keystrokes were delivered to a pane whose
-    // shell had not yet started reading, and they were simply lost — after
-    // which the six seconds of polling below could only ever confirm that the
-    // marker never arrived. The failure printed as "input reaches the real
-    // PTY" failing with a buffer that had only just finished drawing its
-    // prompt, which is the tell.
+    // DELIVERY IS ASSERTED, NOT ASSUMED — the second attempt at a real flake
+    // (KAN-88 item 11, and its round-2 review).
     //
-    // Waiting for evidence instead of for a duration is the same discipline
-    // the nudge machinery uses on a resumed agent (nudge.ts's readyMarkers):
-    // the prompt on screen is the shell saying it is ready for input.
-    const deescape = (text) => text.replace(/\u001b\[[0-9;?]*[a-zA-Z]/g, '');
-    let promptReady = false;
-    let promptTail = '';
-    for (let i = 0; i < 60 && !promptReady; i++) {
-      const snapshot = await call('pty_init', { sessionId: activated.sessionId });
-      const text = deescape(typeof snapshot.buffer === 'string' ? snapshot.buffer : '');
-      promptTail = text.slice(-120);
-      // A bash prompt at the end of the drawn screen: `…user@host:dir$ ` with
-      // nothing typed after it.
-      promptReady = /\$\s*$/.test(text.trimEnd() + ' ');
-      if (!promptReady) await sleep(500);
+    // The original wrote once after a flat 1500ms sleep. Under load the
+    // keystrokes reached a pane whose shell had not begun reading and were
+    // silently dropped, and the polling that followed could only ever confirm
+    // the marker never arrived — a red check about the machine, not the code.
+    //
+    // The first fix waited for a shell prompt before typing. Necessary, and
+    // not sufficient: a drawn prompt proves the shell has *printed* something,
+    // not that it has reached its `read`. Worse, the wait degraded — after 30s
+    // it logged "typing anyway" and fell back to exactly the old racy write,
+    // so the failure survived at roughly 1 run in 11 under 4-way concurrency
+    // (reproduced on `main` at 273c18f before this change: 1 of 12). It also
+    // assumed a default `PS1`, which is a fact about whoever runs the script
+    // rather than about CrabCast.
+    //
+    // So: send, verify the echo came back, and if it did not, send again — a
+    // bounded number of times before failing loudly. A keystroke that vanishes
+    // into a not-yet-reading shell now costs one retry instead of a false
+    // failure, and a PTY that genuinely never delivers still fails, which is
+    // the property this check exists for. Look, do not assume — the same rule
+    // the router applies to every other claim about the world.
+    const deescape = (text) => text.replace(/\[[0-9;?]*[a-zA-Z]/g, '');
+
+    // Reads go through `tail_agent`, the non-mutating way to ask what is on the
+    // pane. The previous version polled with `pty_init`, which re-registers the
+    // session's data listener on every call — ~60 registrations to answer a
+    // question that changes nothing.
+    const paneText = async () => {
+      const tailed = await call('tail_agent', { key: 'KAN-25-VERIFY', type: 'task', lines: 200 });
+      return typeof tailed.text === 'string' ? tailed.text : '';
+    };
+
+    const SEND_ATTEMPTS = 8;
+    const WAIT_PER_ATTEMPT_MS = 3000;
+
+    // Fault injection, so the recovery above is demonstrated rather than
+    // assumed. The condition it models — keystrokes written to a pane whose
+    // shell has not reached its `read` and are therefore dropped — is real but
+    // load-dependent, so it cannot be summoned on demand: a green run proves
+    // the check passes, not that the retry works, and a retry nobody has ever
+    // seen fire is a retry nobody has tested. Setting this makes the first N
+    // attempts skip the write entirely, which is exactly what the shell not
+    // reading looks like from here.
+    const dropFirstSends = Number(process.env.KAN25_DROP_FIRST_SENDS ?? 0);
+    if (dropFirstSends > 0) {
+      console.log(
+        `\n  [fault injection] KAN25_DROP_FIRST_SENDS=${dropFirstSends}: the first ` +
+        `${dropFirstSends} send(s) will not be written, modelling keystrokes lost to a ` +
+        `shell that is not yet reading`
+      );
     }
-    console.log(
-      promptReady
-        ? `\n  the shell drew its prompt before anything was typed: ${JSON.stringify(promptTail.slice(-40))}`
-        : `\n  WARNING: no shell prompt after 30s; typing anyway. tail: ${JSON.stringify(promptTail)}`
+
+    let seen = false;
+    let attemptsUsed = 0;
+    let tail = '';
+    for (let attempt = 1; attempt <= SEND_ATTEMPTS && !seen; attempt++) {
+      attemptsUsed = attempt;
+      if (attempt > dropFirstSends) {
+        await call('pty_input', { sessionId: activated.sessionId, data: `echo ${marker}\n` });
+      }
+      const deadline = Date.now() + WAIT_PER_ATTEMPT_MS;
+      while (Date.now() < deadline && !seen) {
+        await sleep(250);
+        const text = await paneText();
+        tail = text.slice(-400);
+        // herdr's TUI draws a character at a time, each preceded by an explicit
+        // cursor move, so the marker is never a contiguous substring of the raw
+        // text. Escapes out, order preserved, and it reads normally.
+        seen = deescape(text).includes(marker);
+      }
+    }
+
+    // The stream is a separate fact from delivery and is checked separately:
+    // anything at all arriving on the listener the re-init registered proves it
+    // is live. Grepping the streamed chunks for the marker would conflate the
+    // two — a full-screen TUI repaints in fragments and can split a short
+    // string across two writes.
+    const streamed = unsolicited.filter(
+      (m) => m.action === 'pty_output' && m.sessionId === activated.sessionId
     );
 
-    await call('pty_input', { sessionId: activated.sessionId, data: `echo ${marker}\n` });
-
-    // Two separate facts, checked separately. The stream is live if anything
-    // at all comes back on the listener the re-init registered; the input
-    // landed if the marker turns up in the session's own buffer. Grepping the
-    // streamed chunks for the marker would conflate them — a full-screen TUI
-    // repaints in fragments and can split a short string across two writes.
-    let streamed = [];
-    let seen = false;
-    let tail = '';
-    for (let i = 0; i < 12 && !seen; i++) {
-      await sleep(500);
-      streamed = unsolicited.filter((m) => m.action === 'pty_output' && m.sessionId === activated.sessionId);
-      const snapshot = await call('pty_init', { sessionId: activated.sessionId });
-      const text = typeof snapshot.buffer === 'string' ? snapshot.buffer : '';
-      tail = text.slice(-400);
-      // herdr's TUI draws a character at a time, each preceded by an explicit
-      // cursor move, so the marker is never a contiguous substring of the raw
-      // buffer. Escapes out, order preserved, and the text reads normally.
-      seen = text.replace(/\u001b\[[0-9;?]*[a-zA-Z]/g, '').includes(marker);
+    console.log(
+      `\n  round trip: '${marker}' ${seen ? 'echoed' : 'NEVER appeared'} after ` +
+      `${attemptsUsed} send attempt(s) of at most ${SEND_ATTEMPTS} ` +
+      `(${WAIT_PER_ATTEMPT_MS}ms each)`
+    );
+    if (seen && attemptsUsed > 1) {
+      console.log(
+        '  (a resend was needed — the first keystrokes reached a shell that was not yet\n' +
+        '   reading, which is the condition that used to fail this check outright)'
+      );
     }
     if (!seen) {
-      console.log('\n  last 400 chars of the session buffer (escapes shown), for diagnosis:');
+      console.log('\n  last 400 chars of the pane (escapes shown), for diagnosis:');
       console.log('  ' + JSON.stringify(tail));
     }
     record(
@@ -394,7 +460,9 @@ if (!herdrAvailable) {
     record(
       'input reaches the real PTY',
       seen,
-      seen ? `'${marker}' echoed into the session buffer` : `'${marker}' never appeared in the buffer`
+      seen
+        ? `'${marker}' echoed back after ${attemptsUsed} send attempt(s)`
+        : `'${marker}' never appeared after ${SEND_ATTEMPTS} send attempts`
     );
 
     await call('deactivate', { sessionId: activated.sessionId });

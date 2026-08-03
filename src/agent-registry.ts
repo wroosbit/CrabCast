@@ -121,6 +121,15 @@ export interface AgentLogEntry extends AgentRecord {
   at: string;
   /** Present only on a `deactivated` that was not the agent's own idea. */
   preemption?: PreemptionRecord;
+  /**
+   * Written only by compaction, on a stand-down whose {@link preemption}
+   * annotation it dropped. The annotation is a debt — who took the slot, at
+   * what priority, with what derivation — and compaction is allowed to forget
+   * it (see {@link AgentRegistry.preempted}). *How the agent stopped* is not a
+   * debt, it is a fact about the work, and a carried row without this marker
+   * gets reported as one somebody switched off on purpose. Nobody did.
+   */
+  wasPreempted?: boolean;
 }
 
 /** The last thing said about one agent. */
@@ -129,6 +138,8 @@ export interface AgentIntent {
   record: AgentRecord;
   at: string;
   preemption?: PreemptionRecord;
+  /** See {@link AgentLogEntry.wasPreempted}. */
+  wasPreempted?: boolean;
 }
 
 /** An agent that was stood down to make room, and has not come back. */
@@ -163,8 +174,20 @@ export interface RecordOutcome {
  * unrecoverable move.
  *
  * So: loop on the count, and throw when no progress is possible. The throw
- * lands in each caller's existing catch, which is where "the disk does not
- * know" already becomes `ok: false` and a degraded-registry broadcast.
+ * lands in each caller's existing catch — and the two callers answer for it
+ * differently, because the two failures are not the same failure:
+ *
+ * - {@link AgentRegistry.record} returns `ok: false`, which the router turns
+ *   into `durable: false` on the response and a `registry_degraded_event`. A
+ *   lifecycle event happened and the disk does not know it: somebody has to
+ *   act on that, so somebody is told.
+ * - {@link AgentRegistry.compact} returns `ok: false` and is logged. Nothing
+ *   is lost — the rename is the only destructive step and it is the last one,
+ *   so the previous log survives whole — and the record whose append triggered
+ *   the compaction is already fsync'd and durable. Reporting `durable: false`
+ *   there would be a *different* untruth: it would tell the caller its
+ *   activation might not survive a restart when it certainly will. What is
+ *   degraded is housekeeping, and the log says so with its consequence.
  */
 function writeFully(fd: number, text: string): void {
   const buf = Buffer.from(text, 'utf8');
@@ -314,11 +337,19 @@ export class AgentRegistry {
   public intents(): Map<string, AgentIntent> {
     const intents = new Map<string, AgentIntent>();
     for (const entry of this.readLog()) {
-      // `preemption` is pulled out rather than left in the rest: `record` is
-      // the argument list of an activation, and a later activate must not carry
-      // the reason a previous stand-down happened.
-      const { event, at, preemption, ...record } = entry;
-      intents.set(entry.agentName, { event, at, record, ...(preemption ? { preemption } : {}) });
+      // `preemption` and `wasPreempted` are pulled out rather than left in the
+      // rest: `record` is the argument list of an activation, and a later
+      // activate must not carry the reason a previous stand-down happened —
+      // nor a marker about it, which would then travel into the activation
+      // record of an agent somebody simply switched back on.
+      const { event, at, preemption, wasPreempted, ...record } = entry;
+      intents.set(entry.agentName, {
+        event,
+        at,
+        record,
+        ...(preemption ? { preemption } : {}),
+        ...(wasPreempted ? { wasPreempted: true } : {})
+      });
     }
     return intents;
   }
@@ -337,9 +368,11 @@ export class AgentRegistry {
    * happens after 500 records, by which time a preemption nobody acted on is
    * not news. (The stand-down itself is a different question, decided the other
    * way — see {@link AgentRegistry.standbyToPreserve}. A preempted agent whose
-   * annotation is dropped is therefore carried across as an ordinary standby
-   * agent when its workspace still exists: the debt stops being reported, the
-   * way back to the work does not disappear.)
+   * annotation is dropped is therefore carried across as a standby agent when
+   * its workspace still exists: the debt stops being reported, the way back to
+   * the work does not disappear. It keeps a bare {@link
+   * AgentLogEntry.wasPreempted} so the row can still say how the work stopped
+   * without claiming a decision nobody made.)
    */
   public preempted(): PreemptedAgent[] {
     return AgentRegistry.preemptedFrom(this.intents());
@@ -391,6 +424,20 @@ export class AgentRegistry {
   }
 
   /**
+   * The expected agents compaction carries across, each with the `at` of the
+   * activation that put it there rather than the time of the compaction. See
+   * {@link compact} for why that timestamp is load-bearing.
+   */
+  private activatedToPreserve(): AgentLogEntry[] {
+    const out: AgentLogEntry[] = [];
+    for (const [agentName, intent] of this.intents()) {
+      if (intent.event !== 'activated') continue;
+      out.push({ ...intent.record, agentName, event: 'activated', at: intent.at });
+    }
+    return out;
+  }
+
+  /**
    * The stood-down agents compaction carries across, newest first.
    *
    * WHY THIS EXISTS AT ALL — the decision, stated rather than defaulted
@@ -434,7 +481,19 @@ export class AgentRegistry {
       } catch {
         continue;
       }
-      out.push({ ...intent.record, agentName, event: 'deactivated', at: intent.at });
+      out.push({
+        ...intent.record,
+        agentName,
+        event: 'deactivated',
+        at: intent.at,
+        // The annotation is dropped (see above); the *fact* is not. Without
+        // this the carried row lands in `standbyAgents` wearing that list's
+        // "switched off deliberately" reason, which is the opposite of what
+        // happened to it — nobody chose to stop this agent, its slot was
+        // taken. Dropping a debt is a decision; asserting a falsehood about
+        // how work ended is not, and this is the difference.
+        ...(intent.preemption || intent.wasPreempted ? { wasPreempted: true } : {})
+      });
     }
     out.sort((a, b) => b.at.localeCompare(a.at));
     return out.slice(0, COMPACT_STANDBY_LIMIT);
@@ -450,13 +509,22 @@ export class AgentRegistry {
    * the directory` instead. The rename is what makes it atomic; the directory
    * fsync is what makes the rename itself durable. Crashing anywhere in here
    * leaves the *old* log intact, which is a correct answer.
+   *
+   * EVERY CARRIED RECORD KEEPS ITS OWN `at`, and that is load-bearing rather
+   * than tidy. Compaction used to stamp the carried `activated` records with
+   * the time of the compaction, which quietly did three things: it told
+   * `missingAgents` that an agent had been active "since" a housekeeping event
+   * it had nothing to do with; it collapsed every expected agent onto one
+   * identical timestamp; and — because the reporting path sorts newest-first
+   * before it clips at 25 — it turned that sort into an all-ties comparison,
+   * so the clip hid an *arbitrary* twenty-five rather than the oldest ones.
+   * The ordering guarantee the clip is built on only exists if the timestamps
+   * are real, and only the log knows them. (The standby half already did this;
+   * the asymmetry is what made it easy to miss.)
    */
-  public compact(): void {
-    const now = new Date().toISOString();
+  public compact(): RecordOutcome {
     const kept: AgentLogEntry[] = [
-      ...this.expected().map(
-        (record) => ({ ...record, event: 'activated', at: now } as AgentLogEntry)
-      ),
+      ...this.activatedToPreserve(),
       ...this.standbyToPreserve()
     ];
     const body = kept.map((entry) => JSON.stringify(entry)).join('\n');
@@ -477,10 +545,22 @@ export class AgentRegistry {
       dir = fs.openSync(path.dirname(this.file), 'r');
       fs.fsyncSync(dir);
     } catch (e: any) {
-      console.error(`[AgentRegistry] Compaction failed: ${e?.message ?? String(e)}`);
+      const error = `Compaction failed: ${e?.message ?? String(e)}`;
+      // Said with its consequence, because the consequence is the unusual
+      // part: nothing was lost. The rename is the only destructive step and it
+      // is the last one, so a failure anywhere leaves the previous log whole
+      // and every record in it readable. What is degraded is housekeeping —
+      // the file goes on growing — and that is worth a line in the log rather
+      // than an alarm on somebody's activation.
+      console.error(
+        `[AgentRegistry] ${error}. The previous log is intact and no record was lost; ` +
+        `the file will keep growing until this is fixed (usually disk space or permissions ` +
+        `on ${path.dirname(this.file)}).`
+      );
       try {
         fs.unlinkSync(temp);
       } catch {}
+      return { ok: false, error };
     } finally {
       for (const handle of [fd, dir]) {
         if (handle !== undefined) {
@@ -490,11 +570,28 @@ export class AgentRegistry {
         }
       }
     }
+    return { ok: true };
   }
+
+  /**
+   * How many further records must accumulate before a compaction that failed
+   * is attempted again.
+   *
+   * Without it, a data dir that cannot be written retries a doomed whole-file
+   * rewrite on *every* activation from the 501st record onwards — the failure
+   * mode is a full disk, and the response to a full disk should not be writing
+   * more to it. Retried rather than abandoned because the condition is usually
+   * temporary and nothing else would ever try again.
+   */
+  private retryCompactionAt: number | null = null;
 
   private compactIfLarge(): void {
     try {
-      if (this.readLog().length > COMPACT_AFTER_RECORDS) this.compact();
+      const size = this.readLog().length;
+      if (size <= COMPACT_AFTER_RECORDS) return;
+      if (this.retryCompactionAt !== null && size < this.retryCompactionAt) return;
+      const outcome = this.compact();
+      this.retryCompactionAt = outcome.ok ? null : size + COMPACT_AFTER_RECORDS;
     } catch {
       // Compaction is housekeeping; failing it must not fail an activation.
     }
