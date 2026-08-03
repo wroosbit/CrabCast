@@ -31,6 +31,18 @@
 //                   no-config fallback connects without ever spawning a
 //                   daemon into the default data dir
 //
+// KAN-88 added three more, for the deferred findings from PR #4's review:
+//
+//   8. error cause — a socket that dies under a pending request rejects it
+//                    with the underlying errno, not a generic "closed"
+//                    (finding A1: socket `error` events were swallowed)
+//   9. McpError    — an unknown tool name comes back as a JSON-RPC
+//                    MethodNotFound error, not as a tool result with
+//                    isError: true (finding A2)
+//  10. fast refusal — the never-spawn daemon resolution answers on the first
+//                    refused connect instead of walking a retry budget it has
+//                    nothing to wait for (finding A4)
+//
 // Everything on the daemon side is real: the real daemon process (spawned by
 // the MCP server's own eager connect, exactly as a workspace-spawned server
 // would), the real router, bridge, registry and loader, a real config loaded
@@ -174,10 +186,15 @@ const childEnv = {
 // protocol to any client, not that two copies of the SDK agree with
 // themselves.
 class McpClient {
-  constructor(label) {
+  // `opts` is how the KAN-88 sections point a server at something other than
+  // this run's daemon: a different config (section 8's rude daemon) or no
+  // config at all (section 10's never-spawn fallback).
+  constructor(label, opts = {}) {
+    const { config = configPath, env = childEnv, cwd } = opts;
     this.label = label;
-    this.child = spawn(process.execPath, [mcpJs, configPath], {
-      env: childEnv,
+    this.child = spawn(process.execPath, config ? [mcpJs, config] : [mcpJs], {
+      env,
+      ...(cwd ? { cwd } : {}),
       stdio: ['pipe', 'pipe', 'pipe']
     });
     this.nextId = 0;
@@ -576,7 +593,11 @@ const fallbackChild = spawn(process.execPath, [mcpJs], {
 });
 let fallbackStderr = '';
 fallbackChild.stderr.on('data', (d) => { fallbackStderr += d.toString(); });
-await sleep(7000); // past connectToDaemon's full retry budget (20 × 250ms)
+// Two seconds is now generous: the never-spawn path's retry budget is zero
+// (KAN-88 finding A4), so the eager connect has long since given up. Section
+// 10 is what measures that; this only needs the announcement and the absence
+// of a data dir.
+await sleep(2000);
 const spawnedAnything = fs.existsSync(fallbackDataDir);
 fallbackChild.kill();
 console.log(`   fallback stderr: ${fallbackStderr.trim().split('\n')[0]}`);
@@ -585,6 +606,162 @@ verdict(
   /connecting only to an already-running daemon/.test(fallbackStderr) && !spawnedAnything,
   'the no-config fallback announced itself and spawned nothing into the default data dir',
   'the no-config fallback spawned (or provisioned for) a daemon it could not configure'
+);
+
+// ------------------------------------------------ 8. the socket error cause --
+
+rule('8. KAN-88 A1 + A3 — the daemon hangs up on an oversized line, and the cause reaches the caller');
+
+// One scenario proving both halves, because they are the same event seen from
+// the two ends of the socket.
+//
+// A3: the daemon's NDJSON framing used to assemble a line without limit, so a
+// peer streaming bytes with no newline grew the daemon's memory as far as it
+// cared to. It is now bounded: past the bound the daemon says so on the wire
+// and destroys the connection.
+//
+// A1: that destroy lands on the MCP server mid-write, which is a real
+// `error` event carrying a real errno (EPIPE — the write had far more to send
+// than the socket buffer could hold). The handler used to be `() => {}`, so
+// every pending request was rejected with the bare string "Daemon connection
+// closed": the shape of the failure with none of its content, on the one path
+// where the content is the whole diagnosis. Now the cause travels — to the
+// caller's tool result and to the server's log.
+//
+// The oversized request goes through a real tool (`send_to_agent`'s message is
+// forwarded verbatim), so this is a real client sending a real request to the
+// real daemon, not a socket fixture.
+const OVERSIZE = 4 * 1024 * 1024; // four times the daemon's 1 MiB line bound
+const overClient = new McpClient('oversize client');
+clients.push(overClient);
+await overClient.initialize();
+// Settle the eager connect first, so the write below lands on an established
+// socket rather than racing the connect.
+await sleep(500);
+
+const oversized = await overClient.callTool('crabcast_send_to_agent', {
+  key: KEY,
+  type: TYPE,
+  message: 'A'.repeat(OVERSIZE)
+});
+const oversizedText = oversized?.content?.find((c) => c.type === 'text')?.text ?? '';
+const daemonLogText = fs.readFileSync(path.join(dataDir, 'daemon.log'), 'utf8');
+const overflowLine = daemonLogText.split('\n').filter((l) => /exceeded/.test(l)).join('\n');
+console.log(`   request size: ${OVERSIZE} bytes on one line (bound is 1048576)`);
+console.log(`   tool result isError: ${oversized.isError}`);
+console.log(`   tool result text: ${oversizedText}`);
+console.log(`   daemon log: ${overflowLine || '(nothing about an oversized line)'}`);
+console.log(`   mcp server stderr: ${overClient.stderr.trim().split('\n').filter((l) => /socket error/.test(l)).join('\n') || '(none)'}`);
+
+verdict(
+  /exceeded 1048576 characters with no newline/.test(overflowLine),
+  'A3: the daemon bounded the line, said which bound was hit, and closed the connection',
+  'A3: the daemon did not report an oversized line — the buffer is still unbounded'
+);
+verdict(
+  oversized.isError === true &&
+    /Daemon connection closed: /.test(oversizedText) &&
+    /EPIPE|ECONNRESET/.test(oversizedText),
+  'A1: the pending request was rejected with the underlying errno, not a generic close',
+  `A1: the cause did not reach the caller: ${JSON.stringify(oversizedText)}`
+);
+verdict(
+  /daemon socket error: .*(EPIPE|ECONNRESET)/.test(overClient.stderr),
+  'A1: and the same cause was logged where an operator will find it',
+  'A1: the socket error never reached the log'
+);
+
+// The daemon survived the refusal — it hung up on one connection, it did not
+// fall over. Asked on a fresh connection, through the same tool that just
+// failed.
+const afterOverflow = parsedText(await clientA.callTool('crabcast_list_agents'));
+verdict(
+  afterOverflow?.success === true,
+  'and the daemon is still serving — the bound refuses a connection, not the process',
+  'the daemon did not survive the oversized line'
+);
+
+// ---------------------------------------------- 9. McpError stays an McpError --
+
+rule('9. KAN-88 A2 — an unknown tool is a protocol error, not a tool result');
+
+// The catch-all around the tool dispatch turns failures into `isError: true`
+// tool results, which is right for a tool that ran and failed — a model reads
+// that text and can act on it. An unknown tool name is not that: it is the MCP
+// layer's own MethodNotFound, and the SDK serialises McpError into a JSON-RPC
+// error carrying the code. Downgrading it told the client "your call ran and
+// failed" when the truth was "there is no such method", which is the one
+// answer a client can act on by re-listing the tools.
+let protocolError = null;
+let unexpectedResult = null;
+try {
+  unexpectedResult = await clientA.callTool('crabcast_no_such_tool', {});
+} catch (err) {
+  protocolError = err.message;
+}
+console.log(`   rejection: ${protocolError ?? '(none — the call resolved)'}`);
+if (unexpectedResult) show('resolved tool result:', unexpectedResult);
+verdict(
+  protocolError !== null &&
+    /-32601/.test(protocolError) &&
+    /Unknown tool: crabcast_no_such_tool/.test(protocolError),
+  'the unknown tool came back as JSON-RPC error -32601 (MethodNotFound) naming the tool',
+  'the unknown tool was downgraded to an ordinary tool result'
+);
+
+// A real tool that fails still travels the other way — the catch-all is not
+// being removed, only made to stop swallowing typed protocol errors.
+const stillFlagged = await clientA.callTool('crabcast_tail_agent', {});
+verdict(
+  stillFlagged.isError === true &&
+    /Missing required argument/.test(
+      stillFlagged?.content?.find((c) => c.type === 'text')?.text ?? ''
+    ),
+  'a real tool\'s own failure is still an isError tool result, as before',
+  'the catch-all stopped reporting ordinary tool failures'
+);
+
+// ------------------------------------------------- 10. the never-spawn path --
+
+rule('10. KAN-88 A4 — the never-spawn resolution answers on the first refused connect');
+
+// The retry budget (20 × 250ms ≈ 5s) exists to wait out a daemon the connect
+// just spawned. On the no-config fallback nothing is being spawned, so every
+// retry after the first refused connect re-asks a question already answered —
+// and the caller paid the whole ~5s to be told there is no daemon.
+//
+// Measured through a tool call, because that is where the cost landed.
+const fastEnv = { ...childEnv };
+delete fastEnv.CRABCAST_CONFIG;
+const fastCwd = path.join(scratch, 'empty-cwd-2');
+fs.mkdirSync(fastCwd, { recursive: true });
+const fastClient = new McpClient('no-daemon client', { config: null, env: fastEnv, cwd: fastCwd });
+clients.push(fastClient);
+await fastClient.initialize();
+
+const startedAt = Date.now();
+const noDaemon = await fastClient.callTool('crabcast_list_agents');
+const elapsed = Date.now() - startedAt;
+const noDaemonText = noDaemon?.content?.find((c) => c.type === 'text')?.text ?? '';
+console.log(`   tool call against a data dir with no daemon took ${elapsed}ms`);
+console.log(`   tool result isError: ${noDaemon.isError}`);
+console.log(`   tool result text: ${noDaemonText}`);
+console.log(`   (the old never-spawn path walked 20 × 250ms ≈ 5000ms before saying this)`);
+verdict(
+  noDaemon.isError === true && /ENOENT|ECONNREFUSED/.test(noDaemonText),
+  'the caller is told there is no daemon, with the connect error that says so',
+  `unexpected answer from the never-spawn path: ${JSON.stringify(noDaemonText)}`
+);
+verdict(
+  elapsed < 2000,
+  `the refusal took ${elapsed}ms — the first refused connect was the answer`,
+  `the refusal took ${elapsed}ms, which is the retry budget being walked`
+);
+// And nothing was spawned on the way: the fallback is connect-only.
+verdict(
+  !fs.existsSync(path.join(fakeHome, '.local', 'share', 'crabcast', 'crabcast.sock')),
+  'and it still spawned nothing — the fast path did not become a spawning path',
+  'the never-spawn path spawned a daemon'
 );
 
 rule(failures === 0 ? 'all sections passed' : `${failures} section(s) FAILED`);

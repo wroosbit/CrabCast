@@ -328,6 +328,39 @@ if (!herdrAvailable) {
     );
 
     const marker = 'kan25-round-trip';
+
+    // Typed only once the shell is provably listening, and this is the fix for
+    // a real flake (KAN-88 item 11): this used to type after a flat 1500ms
+    // sleep, which is a guess about how long bash and herdr's TUI take to
+    // finish starting. On a quiet machine the guess held; in a back-to-back
+    // suite run it did not, the keystrokes were delivered to a pane whose
+    // shell had not yet started reading, and they were simply lost — after
+    // which the six seconds of polling below could only ever confirm that the
+    // marker never arrived. The failure printed as "input reaches the real
+    // PTY" failing with a buffer that had only just finished drawing its
+    // prompt, which is the tell.
+    //
+    // Waiting for evidence instead of for a duration is the same discipline
+    // the nudge machinery uses on a resumed agent (nudge.ts's readyMarkers):
+    // the prompt on screen is the shell saying it is ready for input.
+    const deescape = (text) => text.replace(/\u001b\[[0-9;?]*[a-zA-Z]/g, '');
+    let promptReady = false;
+    let promptTail = '';
+    for (let i = 0; i < 60 && !promptReady; i++) {
+      const snapshot = await call('pty_init', { sessionId: activated.sessionId });
+      const text = deescape(typeof snapshot.buffer === 'string' ? snapshot.buffer : '');
+      promptTail = text.slice(-120);
+      // A bash prompt at the end of the drawn screen: `…user@host:dir$ ` with
+      // nothing typed after it.
+      promptReady = /\$\s*$/.test(text.trimEnd() + ' ');
+      if (!promptReady) await sleep(500);
+    }
+    console.log(
+      promptReady
+        ? `\n  the shell drew its prompt before anything was typed: ${JSON.stringify(promptTail.slice(-40))}`
+        : `\n  WARNING: no shell prompt after 30s; typing anyway. tail: ${JSON.stringify(promptTail)}`
+    );
+
     await call('pty_input', { sessionId: activated.sessionId, data: `echo ${marker}\n` });
 
     // Two separate facts, checked separately. The stream is live if anything

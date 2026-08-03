@@ -381,6 +381,28 @@ export class HerdrBridge {
     return undefined;
   }
 
+  /**
+   * Whether the launcher this activation will use restores a prior
+   * conversation. Resolved the same way {@link initPty} resolves it, so the
+   * question is answered about the launcher that actually runs.
+   *
+   * An unresolvable launcher answers `false` rather than throwing: initPty is
+   * where an unknown name refuses the activation, through `spawnError`, and
+   * this call happens first. Throwing here would move that refusal to a
+   * different channel for no gain — and the answer is about to be irrelevant
+   * anyway, because no agent is going to start.
+   */
+  private launcherRestoresConversation(
+    defaultAgent?: string,
+    typeDefaultLauncher?: string
+  ): boolean {
+    try {
+      return resolveLauncher(defaultAgent, typeDefaultLauncher).launcher.restoresConversation === true;
+    } catch {
+      return false;
+    }
+  }
+
   // `url` is `string | undefined` rather than optional: it sits in front of
   // required parameters, and callers who have no URL must pass nothing rather
   // than a placeholder. `typeDefaultLauncher` is the workspace type's
@@ -427,13 +449,31 @@ export class HerdrBridge {
     // and the launcher is about to write into it. It decides which resume
     // framing the agent gets, and — for the caller — whether the restored agent
     // will need to be told to carry on.
-    const resumedConversation = resume ? hasRestorableConversation(defaultWorkDir) : undefined;
+    //
+    // Through the launcher, because hasRestorableConversation reads *Claude
+    // Code's* transcript directory (see resume.ts) and knows nothing about any
+    // other runtime's. Asked unconditionally, it answered a question about the
+    // wrong program: an `anti-gravity` agent restarted in a workspace a claude
+    // agent had once used came back reported as `resumedConversation: true` —
+    // so it was framed as having its memory back, and the nudge machinery was
+    // told to wait for a prompt it would never recognise, while the agent
+    // itself had actually started fresh. `restoresConversation` is the
+    // launcher's own declaration that its command restores a conversation
+    // *and* that this predictor is evidence about it; a launcher that does not
+    // claim it gets `false`, which is the honest answer — it starts with the
+    // degraded-resume prompt on its command line and is already working.
+    const restores = resume ? this.launcherRestoresConversation(defaultAgent, typeDefaultLauncher) : false;
+    const resumedConversation = resume
+      ? restores && hasRestorableConversation(defaultWorkDir)
+      : undefined;
     if (resume) {
       console.log(
         `[HerdrBridge] Resuming ${agentName} after ${resume}: ` +
         (resumedConversation
           ? 'a conversation is on disk, so --continue will restore it'
-          : 'no conversation on disk, so it will start with the degraded-resume prompt')
+          : restores
+            ? 'no conversation on disk, so it will start with the degraded-resume prompt'
+            : "this launcher does not restore conversations, so it will start with the degraded-resume prompt")
       );
     }
 

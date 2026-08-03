@@ -41,6 +41,12 @@ const server = new Server(
 // the server fall back to the default data dir, and then it never spawns a
 // daemon there: a daemon spawned without a config would refuse to boot, so
 // the spawn could only manufacture a confusing half-failure.
+//
+// That never-spawn path also answers fast: connectToDaemon's retry budget is
+// there to wait out a daemon it started, and with nothing being started the
+// first refused connect is already the final answer (see ipc.ts). It used to
+// take the full 20 × 250ms before saying so, on a path that had nothing to
+// wait for.
 const explicitConfig = process.argv[2] || process.env.CRABCAST_CONFIG;
 const configPath = resolveConfigPath();
 let dataDir: string;
@@ -97,12 +103,31 @@ function daemonLink(): Promise<net.Socket> {
           }
         });
 
-        socket.on('error', () => {});
+        // The cause, kept until the close that follows it can use it.
+        //
+        // A socket 'error' is always followed by 'close', and it is the only
+        // place the *reason* for that close exists: ECONNRESET (the daemon
+        // died), EPIPE (it hung up mid-write), the framing refusal above.
+        // Swallowing it left every pending request rejected with a generic
+        // "connection closed" and left the reason nowhere at all — a caller
+        // debugging a tool that suddenly stops working got the shape of the
+        // failure and none of its content. A handler is still required (an
+        // unhandled 'error' on a socket is a thrown exception that would take
+        // the MCP server down with it); what changed is that it keeps what it
+        // was handed.
+        let socketError: Error | null = null;
+        socket.on('error', (err: Error) => {
+          socketError = err;
+          console.error(`crabcast-mcp: daemon socket error: ${err?.message ?? String(err)}`);
+        });
         socket.on('close', () => {
           daemonSocket = null;
+          const reason = socketError
+            ? `Daemon connection closed: ${(socketError as Error).message}`
+            : 'Daemon connection closed';
           for (const entry of pending.values()) {
             clearTimeout(entry.timer);
-            entry.reject(new Error('Daemon connection closed'));
+            entry.reject(new Error(reason));
           }
           pending.clear();
         });
@@ -287,7 +312,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "crabcast_list_agents",
         description:
-          "Lists every running agent, from herdr's view of what exists rather than the daemon's session map — so agents that outlived a daemon restart are still listed. Each entry carries sessionless: true when the daemon is not attached to it, in which case the session-only fields (sessionId, url, createdAt, status) are null. Panes named like agents but with no agent behind them are reported separately under unbackedPanes and are not counted as agents. ALSO CHECK missingAgents: agents recorded as active that are not running at all — their work has silently stopped while still looking staffed, so treat a non-empty missingAgents as work that needs re-activating or deliberately standing down. ALSO CHECK preemptedAgents: agents stood down to free capacity for higher-priority work, listed until somebody puts them back. Their work was interrupted rather than finished, so whoever supervises each one owes it a decision: re-activate it (which resumes the conversation it was stopped in) or stand it down for good. standbyAgents is NOT a problem to fix: agents somebody switched off on purpose whose workspace is still on disk, listed so they can be started again (crabcast_activate_agent with their type and key, and their recorded defaultAgent so they come back as what they were). standbyTotal is the unclipped count when more exist than are listed.",
+          "Lists every running agent, from herdr's view of what exists rather than the daemon's session map — so agents that outlived a daemon restart are still listed. Each entry carries sessionless: true when the daemon is not attached to it, in which case the session-only fields (sessionId, url, createdAt, status) are null. Panes named like agents but with no agent behind them are reported separately under unbackedPanes and are not counted as agents. ALSO CHECK missingAgents: agents recorded as active that are not running at all — their work has silently stopped while still looking staffed, so treat a non-empty missingAgents as work that needs re-activating or deliberately standing down. ALSO CHECK preemptedAgents: agents stood down to free capacity for higher-priority work, listed until somebody puts them back. Their work was interrupted rather than finished, so whoever supervises each one owes it a decision: re-activate it (which resumes the conversation it was stopped in) or stand it down for good. standbyAgents is NOT a problem to fix: agents somebody switched off on purpose whose workspace is still on disk, listed so they can be started again (crabcast_activate_agent with their type and key, and their recorded defaultAgent so they come back as what they were). All three of those lists are newest-first and clipped at 25; missingTotal, preemptedTotal and standbyTotal are the unclipped counts, so a total larger than its list means there are older entries this response did not carry.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -428,6 +453,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
   } catch (error: any) {
+    // A typed protocol error travels as one. The catch-all below exists for
+    // the *tool's* failures — a daemon that would not answer, a missing
+    // argument — which are results the caller asked for and did not get, and
+    // which belong in the tool result where a model reads them. An unknown
+    // tool name is a different kind of wrong: it is the MCP layer's own error
+    // code, and downgrading it to `isError: true` with the text "Error:
+    // Unknown tool: x" told the client "your call ran and failed" when the
+    // truth was "there is no such method here" — the one answer a client can
+    // act on by re-listing the tools. The SDK serialises McpError into a
+    // JSON-RPC error with its code, so rethrowing is all that is needed.
+    if (error instanceof McpError) throw error;
     return {
       content: [{ type: "text", text: `Error: ${error.message}` }],
       isError: true,

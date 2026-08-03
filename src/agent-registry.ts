@@ -59,6 +59,17 @@ export function registryPathFor(dataDir: string): string {
  */
 const COMPACT_AFTER_RECORDS = 500;
 
+/**
+ * How many stood-down agents a compaction carries across. See
+ * {@link AgentRegistry.standbyToPreserve} for why they are carried at all.
+ *
+ * Far enough below {@link COMPACT_AFTER_RECORDS} that a compacted log is still
+ * a small fraction of the trigger: preserving records is only worth doing if
+ * the next compaction is still hundreds of appends away, or compaction would
+ * run on every write.
+ */
+const COMPACT_STANDBY_LIMIT = 100;
+
 export type AgentEvent = 'activated' | 'deactivated';
 
 /**
@@ -138,6 +149,37 @@ export interface RecordOutcome {
   error?: string;
 }
 
+/**
+ * Write every byte, or say which ones did not go.
+ *
+ * `fs.writeSync` returns how much it wrote, and it is under no obligation for
+ * that to be everything — a full disk, a quota boundary or a signal can stop
+ * it part way. Both write paths here discarded that number, which made a short
+ * write indistinguishable from a complete one: the append path would fsync and
+ * report success over half a record (recoverable, since {@link
+ * AgentRegistry.readLog} skips a line it cannot parse — but recoverable by
+ * losing the event, silently), and the compaction path would rename a
+ * truncated file over the whole log, which is the append-only design's one
+ * unrecoverable move.
+ *
+ * So: loop on the count, and throw when no progress is possible. The throw
+ * lands in each caller's existing catch, which is where "the disk does not
+ * know" already becomes `ok: false` and a degraded-registry broadcast.
+ */
+function writeFully(fd: number, text: string): void {
+  const buf = Buffer.from(text, 'utf8');
+  let offset = 0;
+  while (offset < buf.length) {
+    const written = fs.writeSync(fd, buf, offset, buf.length - offset);
+    if (written <= 0) {
+      throw new Error(
+        `short write: ${offset} of ${buf.length} bytes reached the file before it stopped accepting them`
+      );
+    }
+    offset += written;
+  }
+}
+
 function isUsableEntry(value: any): value is AgentLogEntry {
   return (
     value &&
@@ -191,7 +233,7 @@ export class AgentRegistry {
     try {
       this.ensureDir();
       fd = fs.openSync(this.file, 'a', 0o600);
-      fs.writeSync(fd, JSON.stringify(entry) + '\n');
+      writeFully(fd, JSON.stringify(entry) + '\n');
       fs.fsyncSync(fd);
     } catch (e: any) {
       const error = `Could not record ${event} for ${record.agentName}: ${e?.message ?? String(e)}`;
@@ -289,15 +331,34 @@ export class AgentRegistry {
    * list. That is what makes it safe to report on every `list_agents` poll — it
    * is a queue of decisions still owed, not a log of things that happened.
    *
-   * It does not survive compaction, which rewrites the log as one `activated`
-   * record per expected agent. That is deliberate rather than overlooked: this
-   * is a live signal about work waiting to be re-staffed, and compaction only
+   * It does not survive compaction, which drops the preemption annotation from
+   * every record it carries. That is deliberate rather than overlooked: this is
+   * a live signal about work waiting to be re-staffed, and compaction only
    * happens after 500 records, by which time a preemption nobody acted on is
-   * not news.
+   * not news. (The stand-down itself is a different question, decided the other
+   * way — see {@link AgentRegistry.standbyToPreserve}. A preempted agent whose
+   * annotation is dropped is therefore carried across as an ordinary standby
+   * agent when its workspace still exists: the debt stops being reported, the
+   * way back to the work does not disappear.)
    */
   public preempted(): PreemptedAgent[] {
+    return AgentRegistry.preemptedFrom(this.intents());
+  }
+
+  /**
+   * {@link preempted}, from an intent map the caller already has.
+   *
+   * Reading the log is a whole-file read and parse, and one `list_agents` poll
+   * asks four different questions of the same answer (missing, preempted,
+   * standby, and the priority list). Doing that as four reads meant four passes
+   * over the file per poll on a client that polls continuously — and, worse,
+   * four *different* reads: an append landing between them produced one
+   * response whose categories disagreed with each other about the same agent.
+   * One read per poll fixes both.
+   */
+  public static preemptedFrom(intents: Map<string, AgentIntent>): PreemptedAgent[] {
     const out: PreemptedAgent[] = [];
-    for (const [agentName, intent] of this.intents()) {
+    for (const [agentName, intent] of intents) {
       if (intent.event !== 'deactivated' || !intent.preemption) continue;
       out.push({ agentName, record: intent.record, at: intent.at, preemption: intent.preemption });
     }
@@ -330,7 +391,59 @@ export class AgentRegistry {
   }
 
   /**
-   * Rewrite the log as one `activated` record per expected agent.
+   * The stood-down agents compaction carries across, newest first.
+   *
+   * WHY THIS EXISTS AT ALL — the decision, stated rather than defaulted
+   *
+   * Compaction used to rewrite the log as one `activated` record per expected
+   * agent and nothing else, which silently emptied the standby list: every
+   * agent a person had switched off stopped being reported the moment the
+   * 501st record landed. That was never decided, it was what dropping
+   * `deactivated` records happened to do — and the two things it throws away
+   * are not the same size. A dropped *preemption annotation* costs a note
+   * about a debt nobody acted on for 500 records, which is the deliberate
+   * trade {@link preempted} documents. A dropped *standby* record costs the
+   * only route back: the workspace is still on disk with a conversation in it,
+   * the fleet client's On button is built from exactly this list, and once the
+   * record is gone the agent can be restarted only by someone reconstructing
+   * its activation by hand. Losing the way back to work that still exists is a
+   * different class of loss from forgetting why work stopped.
+   *
+   * So standby records travel and preemption annotations still do not.
+   *
+   * Two bounds keep this from re-growing the file compaction exists to shrink.
+   * A record is carried only when its workspace directory still exists — the
+   * same test the reporting path applies, which is why a `reset` (it deletes
+   * the directory) drops out here exactly as it does there. And
+   * at most {@link COMPACT_STANDBY_LIMIT} of them are kept, newest first,
+   * because "switch it back on" is a thing said about recent work; an agent
+   * switched off two hundred stand-downs ago is history, not a control.
+   */
+  private standbyToPreserve(): AgentLogEntry[] {
+    const out: AgentLogEntry[] = [];
+    for (const [agentName, intent] of this.intents()) {
+      if (intent.event !== 'deactivated') continue;
+      // A preempted agent is carried too, but as a plain stand-down: `record`
+      // is the activation's argument list with the annotation already pulled
+      // out by intents(), so the debt stops being reported (the deliberate
+      // half — see preempted()) while the route back to the work survives.
+      const workDir = intent.record.workDir;
+      if (!workDir) continue;
+      try {
+        if (!fs.existsSync(workDir)) continue;
+      } catch {
+        continue;
+      }
+      out.push({ ...intent.record, agentName, event: 'deactivated', at: intent.at });
+    }
+    out.sort((a, b) => b.at.localeCompare(a.at));
+    return out.slice(0, COMPACT_STANDBY_LIMIT);
+  }
+
+  /**
+   * Rewrite the log as one record per agent worth remembering: `activated` for
+   * every expected agent, `deactivated` for the recent standby agents whose
+   * workspace still exists (see {@link standbyToPreserve}).
    *
    * Atomic, unlike the appends: a whole-file replacement has no torn-tail story
    * available to it, so it gets `write to temp → fsync temp → rename → fsync
@@ -339,11 +452,14 @@ export class AgentRegistry {
    * leaves the *old* log intact, which is a correct answer.
    */
   public compact(): void {
-    const expected = this.expected();
     const now = new Date().toISOString();
-    const body = expected
-      .map((record) => JSON.stringify({ ...record, event: 'activated', at: now } as AgentLogEntry))
-      .join('\n');
+    const kept: AgentLogEntry[] = [
+      ...this.expected().map(
+        (record) => ({ ...record, event: 'activated', at: now } as AgentLogEntry)
+      ),
+      ...this.standbyToPreserve()
+    ];
+    const body = kept.map((entry) => JSON.stringify(entry)).join('\n');
 
     const temp = `${this.file}.compact-${process.pid}`;
     let fd: number | undefined;
@@ -351,7 +467,7 @@ export class AgentRegistry {
     try {
       this.ensureDir();
       fd = fs.openSync(temp, 'w', 0o600);
-      fs.writeSync(fd, expected.length ? body + '\n' : '');
+      writeFully(fd, kept.length ? body + '\n' : '');
       fs.fsyncSync(fd);
       fs.closeSync(fd);
       fd = undefined;
