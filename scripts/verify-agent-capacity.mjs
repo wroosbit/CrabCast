@@ -5,7 +5,7 @@
 // with load, honours per-type gateExempt from config, and can be overridden
 // on purpose.
 //
-// Fifteen sections:
+// Sixteen sections:
 //
 //   1. derivation    — the cap on THIS machine, with the arithmetic
 //   2. reservation   — the removed supervisor reservation, before and after
@@ -19,9 +19,12 @@
 //  10. provenance    — measured cost vs seed: the divisor moves, and says so
 //  11. damping       — step response both directions: up fast, down slow
 //  12. degrade       — the instrument breaks; capacity answers from the seed
-//  13. precedence    — env overrides beat the measurement beats the seed
+//  13. precedence    — env overrides beat the measurement beats the seed,
+//                      and a zero agent COST is rejected where a zero cap is honoured
 //  14. gateExempt gate — exempt types activate at zero headroom, no override
 //  15. refusal headline — the headline names the constraint that bound
+//  16. cores floor  — an idle fleet's measurement cannot round the CPU
+//                      dimension to a zero divisor
 //
 // Sections 5 through 7, 9 and 14 drive the real MessageRouter — handleCapacity
 // and handleActivateByKey, the same calls an MCP caller makes — so what they
@@ -51,7 +54,7 @@ const {
   summarizeCapacity,
   GIB
 } = await import(path.join(distDir, 'capacity.js'));
-const { dampCost, sampleFromMeasurement, ALPHA_UP, ALPHA_DOWN } =
+const { dampCost, sampleFromMeasurement, ALPHA_UP, ALPHA_DOWN, MIN_MEASURED_CORES } =
   await import(path.join(distDir, 'agent-cost-damping.js'));
 const { MessageRouter } = await import(path.join(distDir, 'router.js'));
 const { WorkspaceRegistry } = await import(path.join(distDir, 'registry.js'));
@@ -536,6 +539,20 @@ console.log(
   '\n  → only the dimension actually set becomes an override; an unset variable\n' +
   '    leaves room for the measurement rather than pinning the seed.\n'
 );
+
+// A zero agent COST is a typo, not a decision: a cap of zero means "run no
+// charged agents", but a cost of zero means dividing the budget by nothing.
+// Both cost variables reject non-positive values (with a warning) and fall
+// back as if unset.
+process.env.CRABCAST_AGENT_CORES = '0';
+const zeroCost = optionsFromEnv();
+console.log('optionsFromEnv() with CRABCAST_AGENT_CORES=0:\n');
+console.log(`  ${JSON.stringify(zeroCost)}`);
+console.log(
+  `  → cores override ${zeroCost.overrides.cores === undefined ? 'ignored (undefined)' : 'ACCEPTED — CHECK THIS'}: ` +
+  'a zero divisor is refused where a zero cap is honoured.'
+);
+flag(zeroCost.overrides.cores === undefined && zeroCost.configuredCap === null);
 delete process.env.CRABCAST_AGENT_CORES;
 
 // CRABCAST_MAX_AGENTS accepts zero — "run no charged agents" is an operator
@@ -692,6 +709,46 @@ rule('15. REFUSAL HEADLINE — the headline names the constraint that bound');
       : '  → THE COUNT-BOUND HEADLINE DID NOT SAY AT CAPACITY WITH N OF CAP — CHECK THIS.'
   );
 }
+
+// ------------------------------------------------- 16. cores floor --
+rule('16. CORES FLOOR — an idle fleet cannot measure the CPU dimension away');
+
+// The daemon publishes the damped estimate rounded to 3 decimals; a genuinely
+// idle fleet measures below 0.0005 per tree, which would round to a zero
+// divisor — capByCpu and headroomByLoad become Infinity and the CPU
+// constraint this model exists to enforce goes silently inert while the
+// report prints "÷ 0 core/agent". sampleFromMeasurement floors the figure at
+// MIN_MEASURED_CORES (and the publish site floors again after rounding), so
+// the divisor is always a number.
+const idleWindow = {
+  elapsed: 60,
+  loadStart: 0.1,
+  loadEnd: 0.1,
+  agents: [],
+  // 4 trees, 0.0004 cores TOTAL — 0.0001/tree, far below rounding resolution.
+  totals: { agents: 4, cores: 0.0004, residentMb: 2400 }
+};
+const idleSample = sampleFromMeasurement(idleWindow, FACTS.totalBytes);
+console.log(`an idle fleet's window (0.0001 core/tree) samples as: ${JSON.stringify(idleSample)}\n`);
+
+const flooredCap = computeCapacity(FACTS, 0, {
+  measured: { ...idleSample, sampledAt: Date.parse('2026-08-03T17:00:00Z'), windowSeconds: 60, agentTrees: 4 }
+});
+console.log(describeCapacity(flooredCap));
+console.log(
+  `\n  → cores floored to ${MIN_MEASURED_CORES} (${idleSample.cores === MIN_MEASURED_CORES ? 'exactly' : 'NOT — CHECK THIS'}), ` +
+  `so capByCpu is ${flooredCap.capByCpu} — finite, and huge honestly:\n` +
+  '    agents this cheap really do fit in droves, and the load term still\n' +
+  '    binds the moment they wake. What can never happen is a zero divisor\n' +
+  '    reading as infinite room with the arithmetic unprintable.'
+);
+flag(
+  idleSample !== null &&
+  idleSample.cores === MIN_MEASURED_CORES &&
+  Number.isFinite(flooredCap.capByCpu) &&
+  Number.isFinite(flooredCap.headroomByLoad) &&
+  Number.isFinite(flooredCap.cap)
+);
 
 if (failures > 0) {
   console.log(`\n== ${failures} CHECK(S) FAILED ==`);

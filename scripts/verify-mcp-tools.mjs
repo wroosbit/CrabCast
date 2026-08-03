@@ -381,7 +381,14 @@ const clientB = new McpClient('client B');
 clients.push(clientB);
 await clientB.initialize();
 
-const activated = await clientA.callTool('crabcast_activate_agent', { type: TYPE, key: KEY });
+// `override: true`: the capacity gate measures the real machine, and whether
+// this box is busy is not what is being proved here — the override path is
+// real and recorded, and the gate itself is proven by verify-agent-capacity.
+const activated = await clientA.callTool('crabcast_activate_agent', {
+  type: TYPE,
+  key: KEY,
+  override: true
+});
 const activatedRes = parsedText(activated);
 show('crabcast_activate_agent:', activatedRes);
 verdict(
@@ -468,8 +475,10 @@ verdict(
 rule('5. reset_agent — the workspace is deleted, and a reset of nothing is flagged');
 
 const RESET_KEY = 'kan73-reset-demo';
+// override for the same reason as section 2's activation: the live gate is
+// not what this section proves.
 const resetActivate = parsedText(
-  await clientA.callTool('crabcast_activate_agent', { type: TYPE, key: RESET_KEY }));
+  await clientA.callTool('crabcast_activate_agent', { type: TYPE, key: RESET_KEY, override: true }));
 const resetWorkDir = resetActivate?.workDir;
 console.log(`   activated ${TYPE}/${RESET_KEY} to reset (workDir ${resetWorkDir})`);
 console.log(`   workspace exists before reset: ${fs.existsSync(resetWorkDir ?? '')}`);

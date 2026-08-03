@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { finishMeasurement, startMeasurement, MeasurementStart } from './agent-cost.js';
-import { dampCost, sampleFromMeasurement } from './agent-cost-damping.js';
+import { dampCost, sampleFromMeasurement, MIN_MEASURED_CORES } from './agent-cost-damping.js';
 import { AgentCost, MEASURED_AGENT_COST, setMeasuredAgentCost } from './capacity.js';
 import { ConfigError, CrabcastConfig, loadConfig, resolveConfigPath } from './config.js';
 import { WorkspaceRegistry } from './registry.js';
@@ -302,10 +302,11 @@ function sampleFleetCost() {
   costEstimate = dampCost(costEstimate ?? MEASURED_AGENT_COST, sample);
   // Published rounded (whole MB, 3-decimal cores) so the figures a capacity
   // report prints are exactly the figures the arithmetic divides by — the
-  // hand-reproducibility describeCapacity promises.
+  // hand-reproducibility describeCapacity promises. Cores floored so the
+  // rounding can never publish a zero divisor (see MIN_MEASURED_CORES).
   const published = {
     residentBytes: Math.round(costEstimate.residentBytes / (1024 * 1024)) * 1024 * 1024,
-    cores: Math.round(costEstimate.cores * 1000) / 1000,
+    cores: Math.max(MIN_MEASURED_CORES, Math.round(costEstimate.cores * 1000) / 1000),
     sampledAt: Date.now(),
     windowSeconds: measurement.elapsed,
     agentTrees: measurement.totals.agents

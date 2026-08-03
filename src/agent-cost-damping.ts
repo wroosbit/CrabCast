@@ -36,6 +36,20 @@ export const ALPHA_UP = 0.5;
 export const ALPHA_DOWN = 0.1;
 
 /**
+ * The floor under a measured per-tree core figure.
+ *
+ * The daemon publishes the damped estimate rounded to 3 decimals so the
+ * printed figures are exactly what the arithmetic divides by; a genuinely
+ * idle fleet can measure below 0.0005 and round to 0 — and a zero divisor
+ * turns capByCpu and headroomByLoad into Infinity, silently disabling the
+ * CPU dimension this model exists to enforce while the report prints
+ * "÷ 0 core/agent". One thousandth of a core is the smallest figure the
+ * rounding can represent; flooring here (and at the publish site) keeps the
+ * divisor a number.
+ */
+export const MIN_MEASURED_CORES = 0.001;
+
+/**
  * One damping step: move `previous` toward `sample`, fast upward and slowly
  * downward, per dimension. The first call seeds `previous` with
  * MEASURED_AGENT_COST (the caller does this), so a single flattering window
@@ -77,5 +91,8 @@ export function sampleFromMeasurement(
   if (!Number.isFinite(residentBytes) || residentBytes <= 0) return null;
   if (residentBytes > machineTotalBytes) return null;
 
-  return { cores, residentBytes };
+  // Floored, not rejected: a near-zero reading is a real measurement of an
+  // idle fleet, and the seed would over-charge it — but it must never round
+  // to a zero divisor downstream. See MIN_MEASURED_CORES.
+  return { cores: Math.max(MIN_MEASURED_CORES, cores), residentBytes };
 }

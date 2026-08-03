@@ -1169,13 +1169,20 @@ export class HerdrBridge {
    * The session for an address, if this daemon owns one. An explicit type has
    * to match: a session for a different type is a different agent, and
    * answering with it would silently ignore the address the caller gave.
+   *
+   * A scan, not a filter of the first key match: two types can legitimately
+   * hold sessions for the same key, and a typed caller must get its own —
+   * taking whichever session the map yields first and rejecting it on type
+   * would answer "no session" while the right one sits live beside it.
    */
   public getSessionByAddress(key: string, type?: string): HerdrSession | undefined {
-    const session = this.getSessionByKey(key);
-    if (!session) return undefined;
     const trimmedType = typeof type === 'string' ? type.trim() : '';
-    if (trimmedType && session.type !== trimmedType) return undefined;
-    return session;
+    for (const session of this.sessions.values()) {
+      if (session.key !== key || session.status !== 'active') continue;
+      if (trimmedType && session.type !== trimmedType) continue;
+      return session;
+    }
+    return undefined;
   }
 
   /**
@@ -1250,10 +1257,17 @@ export class HerdrBridge {
    * fallback `sendToAgent` uses. Never throws — the caller is a request
    * handler that owes its client a response either way.
    */
-  public closeAgentByKey(key: string): { success: boolean; agentName?: string; error?: string } {
+  public closeAgentByKey(
+    key: string,
+    type?: string
+  ): { success: boolean; agentName?: string; error?: string } {
     let agentName: string;
     try {
-      agentName = this.resolveAgentName(key);
+      // A caller that knows the type names the agent exactly — the only
+      // unambiguous form when several types share a key, and the form the
+      // preempt path must use: closing by key-suffix there could take down an
+      // agent the refusal never named. A bare key keeps the suffix fallback.
+      agentName = this.agentNameForAddress(key, type);
     } catch (e: any) {
       const error = e?.message ?? String(e);
       console.error(`[HerdrBridge] Could not resolve an agent for key '${key}':`, error);

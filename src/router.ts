@@ -513,13 +513,18 @@ export class MessageRouter {
    * kill one, and a list that disagreed with `running` would offer to free a
    * slot that was never occupied.
    *
-   * gateExempt-type agents are deliberately *included*. An agent of the
-   * highest declared priority can never be selected: nothing outranks the top
-   * of the scale and the comparison is strictly-greater, and leaving exempt
-   * agents in is what makes that a fact about the ordering rather than a
-   * special case somebody has to remember. (Standing one down would not free
-   * a fleet slot anyway — they are never counted against the cap — but the
-   * ordering, not that, is what protects them.)
+   * gateExempt-type agents are *excluded*, and the reason is arithmetic, not
+   * protection: an exempt agent was never counted in `running`, so standing
+   * one down frees no charged slot — the machine would be exactly as full a
+   * moment later, and the preempt path would admit the newcomer over the cap
+   * on the false premise that room was made. In the extraction source the
+   * exempt set was the hardcoded top of the priority scale, so the
+   * strictly-greater ordering happened to protect it; here `gateExempt` and
+   * `priority` are independent config fields — a low-priority exempt type
+   * (a watchdog, say) is legitimate, and only this exclusion keeps it from
+   * being selected as a victim whose death buys nothing. Exemption from the
+   * gate is exemption from its rationing in both directions: never refused,
+   * never a victim.
    */
   private preemptionCandidates(agents: ListedAgent[], exclude?: string): PreemptionCandidate[] {
     const candidates: PreemptionCandidate[] = [];
@@ -527,6 +532,7 @@ export class MessageRouter {
     for (const entry of agents) {
       if (!this.countsAsAgent(entry)) continue;
       if (exclude && entry.agentName === exclude) continue;
+      if (entry.gateExempt) continue;
 
       candidates.push({
         agentName: entry.agentName,
@@ -817,7 +823,15 @@ export class MessageRouter {
     // not the agent's own idea, and it is echoed so the caller can attribute
     // the outcome. Carried opaquely until the registry slice (T4) persists it.
     const preemption = data.preemption;
-    const session = this.deps.herdrBridge.getSessionByKey(key);
+    // By full address when the caller gave one, for the same reason activate
+    // resolves that way (see handleActivateByKey): a session for a different
+    // type is a different agent, and with `task/K` and `hotfix/K` both live a
+    // key-only lookup here would tear down whichever one the map yields —
+    // for the preempt path, that is killing an agent the refusal never named.
+    // A bare key keeps the key-only behaviour for callers that have no type.
+    const type =
+      typeof data.type === 'string' && data.type.trim() ? data.type.trim() : undefined;
+    const session = this.deps.herdrBridge.getSessionByAddress(key, type);
 
     if (session) {
       const { success, error } = this.deps.herdrBridge.terminateSession(session.sessionId);
@@ -860,11 +874,10 @@ export class MessageRouter {
     // durable registry, which is what let "already gone" count as success —
     // the registry write was the real request. That arrives with T4; until
     // then an agent that cannot be found is reported as exactly that.)
-    const result = this.deps.herdrBridge.closeAgentByKey(key);
+    const result = this.deps.herdrBridge.closeAgentByKey(key, type);
 
     const closedType =
-      (typeof data.type === 'string' && data.type.trim() ? data.type.trim() : undefined) ??
-      (result.agentName ? typeFromAgentName(result.agentName, key) : undefined);
+      type ?? (result.agentName ? typeFromAgentName(result.agentName, key) : undefined);
 
     if (result.success) {
       this.deps.broadcast({
