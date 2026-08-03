@@ -9,9 +9,13 @@
   "bin": {
     "crabcast": "dist/cli.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "build": "tsc",
+    "prepare": "tsc"
   },
   "engines": {
     "node": ">=20"
