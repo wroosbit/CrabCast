@@ -152,6 +152,11 @@ function readDispatch(src, bodyOpenIdx) {
   let depth = 0;
   const actions = [];
   let sawDefault = false;
+  // Each label closes the previous one's body, so section 4 can read a single
+  // case's code without re-parsing or guessing where it ends.
+  const closeBody = (at) => {
+    if (actions.length) actions[actions.length - 1].bodyEnd ??= at;
+  };
   while (i < src.length) {
     const c = src[i];
     const two = src.slice(i, i + 2);
@@ -161,7 +166,7 @@ function readDispatch(src, bodyOpenIdx) {
     if (c === '`') { i = skipTemplate(src, i); continue; }
     if (c === '{') { depth += 1; i += 1; continue; }
     if (c === '}') {
-      if (depth === 0) return { actions, sawDefault };
+      if (depth === 0) { closeBody(i); return { actions, sawDefault }; }
       depth -= 1; i += 1; continue;
     }
     // Word-boundary guard: only try the label patterns at the start of an
@@ -170,11 +175,18 @@ function readDispatch(src, bodyOpenIdx) {
       const rest = src.slice(i, i + 64);
       const m = CASE_RE.exec(rest);
       if (m) {
-        actions.push({ action: m[2], line: src.slice(0, i).split('\n').length });
+        closeBody(i);
+        actions.push({
+          action: m[2],
+          line: src.slice(0, i).split('\n').length,
+          bodyStart: i + m[0].length,
+          bodyEnd: undefined
+        });
         i += m[0].length;
         continue;
       }
       if (/^default\s*:/.test(rest)) {
+        closeBody(i);
         sawDefault = true;
         i += rest.indexOf(':') + 1;
         continue;
@@ -183,6 +195,20 @@ function readDispatch(src, bodyOpenIdx) {
     i += 1;
   }
   throw new Error('switch body was not terminated');
+}
+
+/**
+ * The source of one `case` arm, for section 4.
+ *
+ * Answers null when the arm does not reply inline — a `case` that delegates to
+ * a handler puts its `action:` (or its absence) somewhere this cannot see, and
+ * "I could not find one here" must not read as "there is none".
+ */
+function caseBodyFor(dispatch, action) {
+  const arm = dispatch.find((d) => d.action === action);
+  if (!arm || arm.bodyEnd === undefined) return null;
+  const body = source.slice(arm.bodyStart, arm.bodyEnd);
+  return /\brespond\s*\(\s*\{/.test(body) ? body : null;
 }
 
 console.log('=== 1. The router\'s dispatch, read from src/router.ts ===');
@@ -265,66 +291,116 @@ for (const e of EXCLUSIONS) {
 
 console.log('=== 3. Command coverage ===\n');
 
-// TEMPORARY — this branch is deleted, not softened, when KAN-93 lands the CLI
-// (KAN-94 task 6), and it must not reach `main`. Until `dist/cli.js` exports a
-// command table there is nothing to compare against, and the honest thing is
-// to say so loudly rather than to print a green over a half that never ran.
-// After task 6 a missing dist/cli.js is a hard FAIL like any other.
-let pending = 0;
+// A missing build is a hard failure, not a skip. Everything below rests on the
+// built table; skipping it would leave sections 1 and 2 printing PASS lines
+// under a heading that promised coverage, which is the same all-clear-over-a-
+// check-that-never-ran this script exists to make impossible.
 if (!fs.existsSync(cliJs)) {
-  pending += 1;
-  console.log('  PENDING  dist/cli.js does not exist — the CLI has not landed yet (KAN-93).');
-  console.log('           The comparison half of this check is NOT WIRED. Sections 1 and 2 above');
-  console.log('           are the enumerator half and stand on their own; this run proves nothing');
-  console.log('           about command coverage. KAN-94 task 6 replaces this branch.\n');
-} else {
-  const { COMMANDS } = await import(cliJs);
-  check(Array.isArray(COMMANDS) && COMMANDS.length > 0, 'dist/cli.js exports a non-empty COMMANDS table');
+  console.error(
+    'FAIL  dist/cli.js not found — run `npm run build` first. This check compares the router\n' +
+    '      against the BUILT command table; it will not report on coverage it did not measure.'
+  );
+  process.exit(1);
+}
 
-  const byAction = new Map();
-  for (const c of COMMANDS ?? []) {
-    if (!byAction.has(c.action)) byAction.set(c.action, []);
-    byAction.get(c.action).push(c.name);
-  }
+const { COMMANDS } = await import(cliJs);
+check(Array.isArray(COMMANDS) && COMMANDS.length > 0, 'dist/cli.js exports a non-empty COMMANDS table');
 
-  for (const d of dispatched) {
-    const commands = byAction.get(d.action);
-    const excluded = excludedNames.has(d.action);
+const byAction = new Map();
+for (const c of COMMANDS ?? []) {
+  if (!byAction.has(c.action)) byAction.set(c.action, []);
+  byAction.get(c.action).push(c.name);
+}
+
+const coverage = [];
+for (const d of dispatched) {
+  const commands = byAction.get(d.action);
+  const excluded = excludedNames.has(d.action);
+  coverage.push({ action: d.action, commands, excluded });
+  check(
+    Boolean(commands) || excluded,
+    `action '${d.action}' is covered`,
+    commands
+      ? `command: ${commands.map((n) => `crabcast ${n}`).join(', ')}`
+      : excluded
+        ? 'excluded, with a recorded reason'
+        : 'NO CLI command and NO recorded exclusion — add one or the other'
+  );
+  // Both at once means the two halves of this register disagree about the same
+  // action. Whichever is wrong, nobody can read it and come away right.
+  check(
+    !(commands && excluded),
+    `action '${d.action}' is not both a command and an exclusion`
+  );
+}
+
+// A command aimed at an action the router does not serve fails at runtime with
+// the router's "Unknown action", in front of a user, and no amount of green
+// elsewhere would have caught it.
+for (const c of COMMANDS ?? []) {
+  check(
+    dispatchedNames.has(c.action),
+    `command 'crabcast ${c.name}' targets an action the router dispatches`,
+    dispatchedNames.has(c.action) ? c.action : `'${c.action}' is NOT in the dispatch`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 4. `responseAction` against the router, because the client correlates by id.
+//
+// KAN-93 records what each reply is labelled with but does not key on it — the
+// client correlates by `id`, precisely because daemon_status answers with no
+// `action` at all. Recorded-but-unused is exactly the field that rots, so it is
+// checked here against the source rather than believed.
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 4. Reply labels, checked against the router ===\n');
+
+for (const c of COMMANDS ?? []) {
+  if (!dispatchedNames.has(c.action)) continue; // already failed above
+  if (c.responseAction === null || c.responseAction === undefined) {
+    // The claim is that the handler sets no `action` on its reply. Verified
+    // against the case body rather than assumed: this is the one shape in the
+    // API that a client keyed on action names would hang on forever, so a
+    // command that recorded it wrongly would be a hang waiting to happen.
+    const body = caseBodyFor(dispatched, c.action);
     check(
-      Boolean(commands) || excluded,
-      `action '${d.action}' is covered`,
-      commands
-        ? `command: ${commands.join(', ')}`
-        : excluded
-          ? 'excluded, with a recorded reason'
-          : 'NO CLI command and NO recorded exclusion — add one or the other'
+      body !== null && !/\baction:/.test(body),
+      `'${c.action}' really does reply without an action field — 'crabcast ${c.name}' records null`,
+      body === null
+        ? 'this arm does not reply inline, so the claim cannot be checked here — verify it by hand or record the label'
+        : ''
     );
-    // A command for an action that is also on the exclusion list means the two
-    // halves disagree about the same action; whichever is wrong, nobody can
-    // read this register and be right.
+  } else {
     check(
-      !(commands && excluded),
-      `action '${d.action}' is not both a command and an exclusion`
-    );
-  }
-
-  // A command pointing at an action the router does not serve would fail at
-  // runtime with "Unknown action", and would do it in front of a user.
-  for (const c of COMMANDS ?? []) {
-    check(
-      dispatchedNames.has(c.action),
-      `command '${c.name}' targets an action the router dispatches`,
-      dispatchedNames.has(c.action) ? c.action : `'${c.action}' is not in the dispatch`
+      typeof c.responseAction === 'string' &&
+        source.includes(`action: '${c.responseAction}'`),
+      `'crabcast ${c.name}' records reply label '${c.responseAction}', which router.ts sends`
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+
+console.log('\n=== The parity table ===\n');
+const w = Math.max(...coverage.map((c) => c.action.length));
+for (const c of coverage) {
+  console.log(
+    `  ${c.action.padEnd(w)}  ${
+      c.commands
+        ? `crabcast ${c.commands.join(', ')}`
+        : c.excluded
+          ? 'EXCLUDED — see section 2 for the reason'
+          : 'UNCOVERED'
+    }`
+  );
+}
+console.log(
+  `\n  ${dispatched.length} action(s): ${coverage.filter((c) => c.commands).length} with a command, ` +
+    `${coverage.filter((c) => !c.commands && c.excluded).length} excluded with a recorded reason, ` +
+    `${coverage.filter((c) => !c.commands && !c.excluded).length} unaccounted for.`
+);
 
 console.log('');
-if (failures === 0 && pending === 0) {
-  console.log('ALL CHECKS PASSED');
-} else if (failures === 0) {
-  console.log(`INCOMPLETE — ${pending} half/halves of this check are not wired yet; nothing failed in what ran`);
-} else {
-  console.log(`${failures} CHECK(S) FAILED`);
-}
+console.log(failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

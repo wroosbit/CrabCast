@@ -51,11 +51,16 @@ jobs:
       # ---------------------------------------------------------------------
       # WHAT RUNS HERE, AND WHAT CANNOT
       #
-      # Every script below shims the `herdr` binary — a fake on PATH answering
-      # in herdr's own JSON shapes — and scratches its own $HOME and dataDir,
-      # so it needs nothing installed on the runner but node. The daemon,
-      # router, bridge, registry, config loader, MCP server and CLI they drive
-      # are all the real compiled code.
+      # Every script below that starts a daemon shims the `herdr` binary — a
+      # fake on PATH answering in herdr's own JSON shapes — and scratches its
+      # own $HOME and dataDir, so it needs nothing installed on the runner but
+      # node. The daemon, router, bridge, registry, config loader, MCP server
+      # and CLI they drive are all the real compiled code.
+      #
+      # verify-cli-parity is the exception and needs even less: it starts no
+      # daemon and shims nothing. It reads `src/router.ts` and imports the
+      # built COMMANDS table from `dist/cli.js`, and fails when a dispatched
+      # action has neither a command nor a recorded exclusion (KAN-94).
       #
       # DELIBERATELY EXCLUDED — these need a real herdr server and real
       # terminal panes, which no GitHub runner has (herdr's public
@@ -89,6 +94,7 @@ jobs:
             verify-agent-resumption
             verify-mcp-tools
             verify-cli-refusal
+            verify-cli-parity
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,
