@@ -735,6 +735,48 @@ function renderCapacity(reader: ResponseReader): string {
   );
 }
 
+/**
+ * The daemon itself, rather than any agent it is running.
+ *
+ * The one response in the whole API with no `action` field (router.ts), which
+ * costs this renderer nothing — ResponseReader already treats `action` as
+ * framing — but is why the client correlates by `id` alone.
+ *
+ * `workspaceTypes` is the config's type table verbatim, and it is here rather
+ * than summarized because it is the answer to the question people actually
+ * arrive with: not "is a daemon up" but "is the daemon up with the config I
+ * just edited". A count would answer neither.
+ */
+function renderDaemonStatus(reader: ResponseReader): string {
+  if (!reader.success) return lines(failure(reader, 'daemon status'), residue(reader));
+  const types = reader.take<any[]>('workspaceTypes') ?? [];
+  return lines(
+    'daemon: running',
+    field('pid', reader.take('pid')),
+    field('started', reader.take('startedAt')),
+    field('config', reader.take('configPath')),
+    field('data dir', reader.take('dataDir')),
+    `\nworkspace types (${types.length}):`,
+    ...(types.length
+      ? types.map(
+          (t) =>
+            `${INDENT}${String(t?.name)}` +
+            `  priority ${String(t?.priority)}` +
+            `, launcher ${String(t?.defaultLauncher)}` +
+            `, prompt ${String(t?.promptFile)}` +
+            (t?.gateExempt ? ', gate-exempt' : '') +
+            (Array.isArray(t?.mcpServers) && t.mcpServers.length
+              ? `, mcp: ${t.mcpServers.join(' ')}`
+              : '')
+        )
+      : // A daemon with no types is loadable and useless — it can activate
+        // nothing. Said out loud, because an empty list and a renderer that
+        // printed nothing look the same and only one of them is an answer.
+        [`${INDENT}(none — this daemon can activate nothing; its config declares no types)`]),
+    residue(reader)
+  );
+}
+
 // ------------------------------------------------------------------ the table
 
 const TYPE_ARG: PositionalSpec = {
@@ -762,15 +804,21 @@ const TYPE_FLAG: FlagSpec = {
  * What it does today: `--help` renders from this table, so the help cannot
  * describe a command that does not exist.
  *
- * What it is FOR, and what does not exist yet: KAN-94 will add
- * `scripts/verify-cli-parity.mjs`, which will import this table from
- * `dist/cli.js` rather than re-deriving the command set, so that a router
- * action gaining no command will fail a check instead of going unnoticed.
- * **No such check is in this PR** — `verify-cli-refusal` compares `--help`
- * against this table and never reads `router.ts`, so nothing here yet
- * notices a new action. Stated in the future tense deliberately: a comment
- * that claims a check which does not exist is how the next reader stops
- * checking.
+ * What it is FOR, and what now exists: `scripts/verify-cli-parity.mjs`
+ * (KAN-94) imports this table from `dist/cli.js` rather than re-deriving the
+ * command set, enumerates the router's dispatch mechanically from
+ * `src/router.ts`, and fails when an action has neither a command here nor a
+ * recorded exclusion. So a router action gaining no command is now a red
+ * check rather than something nobody notices. It runs in CI's `verify` job,
+ * which is a required check.
+ *
+ * This paragraph was written in the future tense while that was true, and is
+ * changed to the present in the same PR that lands the check — a comment
+ * claiming a check that does not exist is how the next reader stops checking,
+ * and a comment still promising one that does exist is how they stop
+ * believing the comments. `verify-cli-refusal` remains a different check with
+ * a different job: it compares `--help` against this table and never reads
+ * `router.ts`.
  *
  * Either way, inlining any of this into the help text would make the help
  * honest by accident rather than by construction, and would leave the coming
@@ -908,6 +956,37 @@ export const COMMANDS: CommandSpec[] = [
     spawnsDaemon: false,
     build: () => ({}),
     render: renderCapacity
+  },
+  {
+    // One word, not `daemon status`. Every other command in this table is a
+    // single token and the parser resolves exactly one (parseArgv), so a
+    // two-word name would mean teaching it a second shape for one command.
+    //
+    // The whole of the CLI's daemon handling, deliberately (KAN-94 task 3,
+    // answering KAN-92's open question). There is no `crabcast daemon` that
+    // runs one in the foreground: `connectToDaemon` already spawns a detached
+    // daemon on the first failed connect, so nothing needs starting by hand,
+    // and `node dist/daemon.js [configPath]` is the documented foreground
+    // path already. There is no stop or restart either — no such action
+    // exists, and `pid` below is what `kill` needs.
+    name: 'daemon-status',
+    action: 'daemon_status',
+    // The only handler in the API that answers with no `action` field
+    // (router.ts). Null rather than omitted: "answers without one" and "we
+    // did not record what it answers with" are different facts, and the
+    // parity check reads this one.
+    responseAction: null,
+    summary: 'the daemon itself: pid, uptime, the config it loaded, the types it knows',
+    positionals: [],
+    flags: [],
+    // Never. This is the command whose entire question is "is a daemon
+    // running?", and a command that starts one to answer it has destroyed the
+    // only thing it was asked. Exit 3 against no daemon IS the answer here,
+    // which is why it is also the command to reach for when a fleet is
+    // behaving oddly.
+    spawnsDaemon: false,
+    build: () => ({}),
+    render: renderDaemonStatus
   }
 ];
 
