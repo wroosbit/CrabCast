@@ -40,6 +40,35 @@ The config path is the first CLI argument, else the `CRABCAST_CONFIG` environmen
 }
 ```
 
-A type is data, not code — adding one is editing this file. Validation refuses rather than repairs: `priority` is required (a silently-defaulted priority would be preemptable by everything), and a type `name` must not contain a dash (agent names are `<prefix>-<type>-<key>`, split at the first dash after the prefix). `mcpServers` defaults to `[]` and `gateExempt` to `false`; `promptFile` paths resolve relative to the config file's directory.
+A type is data, not code — adding one is editing this file. Validation refuses rather than repairs: `priority` is required (a silently-defaulted priority would be preemptable by everything), and a type `name` must not contain a dash (agent names are `<prefix>-<type>-<key>`, split at the first dash after the prefix). `mcpServers` defaults to `[]` and `gateExempt` to `false`; `promptFile` paths resolve relative to the config file's directory. A `dataDir` whose socket path would exceed 104 characters is refused too: a unix socket address is a fixed buffer and an over-long path is silently *truncated*, so the daemon would bind outside its own data directory, fail to chmod or unlink what it bound, and leave the next daemon reporting a stale socket file in a directory that is empty.
 
 Exactly one daemon owns the socket: a second daemon that finds a live socket exits 0; a stale socket file left by a crash is unlinked and reclaimed. `node scripts/daemon-status.mjs` round-trips a `daemon_status` request over the socket, and `node scripts/verify-config-and-socket.mjs` is the live proof of all of the above.
+
+## The CLI
+
+`crabcast` drives the daemon from a shell, so the system is complete with no browser anywhere. The package is `private: true` and has no install path yet, so it is invoked either as `node dist/cli.js …` after `npm run build`, or as `crabcast …` after `npm link` (which puts the `bin` entry on `PATH`).
+
+```bash
+npm run build
+node dist/cli.js --help          # or: npm link && crabcast --help
+
+crabcast activate shell demo     # start an agent  (--url, --agent, --override, --preempt)
+crabcast list                    # the whole fleet, plus capacity
+crabcast status demo             # one agent       (--type)
+crabcast tail demo --lines 40    # its recent pane text, without attaching
+crabcast send demo 'run the tests'
+crabcast deactivate demo --type shell
+crabcast reset shell demo        # stand down AND delete the workspace
+crabcast capacity                # how many more this machine can carry, and why
+```
+
+The CLI is a client, not a second brain: it parses arguments, sends one action, and renders the answer. It never computes capacity, decides preemption, or infers whether an agent is alive — the daemon owns all of that. What it prints is what the daemon said, and a capacity derivation is printed **verbatim and unindented**, because the figures are the product.
+
+* **`--json`** prints the daemon's response exactly as it arrived — every field, including the `id` the invocation used to correlate it. Nothing is dropped, renamed or reordered. Human-readable output is the default; anything the renderers do not recognise is printed anyway rather than swallowed.
+* **Exit codes** are part of the contract: `0` success · `1` the daemon answered `success: false` (a capacity refusal lands here) · `2` usage error · `3` could not reach or spawn the daemon · `4` a config that was named would not load.
+* **Config resolution** is `--config <path>`, else `$CRABCAST_CONFIG`, else `./crabcast.config.json` — the same rule the daemon and the MCP server use, from the same function. A config that was *named* and will not load is a refusal, never a silent fallback onto some other daemon.
+* **Which commands start a daemon:** `activate`, `deactivate`, `reset` and `send` spawn one if none is running; `list`, `status`, `tail` and `capacity` do not, and exit `3` instead. Spawning the daemon runs its boot reconcile, which re-activates every agent the durable registry expects — a fleet-sized side effect nobody asked for by typing `crabcast list`.
+* **Messages that start with a dash are messages.** Flag parsing stops where `send`'s `<message...>` begins, so `crabcast send demo --help` types the text `--help` into the agent rather than printing this help and sending nothing. Quoting does not help with a leading dash — the shell eats the quotes — which is why the rule is in the parser rather than in a note. The trade is that a flag written *after* the message is message text (`crabcast send demo hi --type shell` sends `hi --type shell`, and says so on stderr); put flags before the operands. `--` still ends flag parsing for the commands with no trailing message, e.g. `crabcast status -- -odd-key`.
+* **Capacity arithmetic:** `capacity` and a refused `activate` carry the daemon's derivation and print it verbatim. `list_agents` ships no derivation, so `list` prints the same figures as numbers — the cap and headroom terms and the machine they were read off — rather than dropping them.
+
+`crabcast --help` is rendered from the command table exported by `src/cli.ts`, so every command it lists exists. `node scripts/verify-cli-refusal.mjs` is the live proof of the refusal, the exit codes, `--json`, and the `--override`/`--preempt` round trip.

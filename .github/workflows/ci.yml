@@ -54,8 +54,8 @@ jobs:
       # Every script below shims the `herdr` binary — a fake on PATH answering
       # in herdr's own JSON shapes — and scratches its own $HOME and dataDir,
       # so it needs nothing installed on the runner but node. The daemon,
-      # router, bridge, registry, config loader and MCP server they drive are
-      # all the real compiled code.
+      # router, bridge, registry, config loader, MCP server and CLI they drive
+      # are all the real compiled code.
       #
       # DELIBERATELY EXCLUDED — these need a real herdr server and real
       # terminal panes, which no GitHub runner has (herdr's public
@@ -88,6 +88,7 @@ jobs:
             verify-agent-power-controls
             verify-agent-resumption
             verify-mcp-tools
+            verify-cli-refusal
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,
