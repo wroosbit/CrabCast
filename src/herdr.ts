@@ -95,8 +95,14 @@ export const AGENT_CONFIRM_TIMEOUT_MS = 5000;
  * poll returns at the first census that shows the runtime, so this ceiling is
  * only ever paid in full when no agent is coming — the case where a slow
  * honest answer beats a fast false one (KAN-58).
+ *
+ * Exported because the census's stale-session release (router.ts) must grant
+ * a freshly spawned session at least this long before reading "no runtime
+ * behind the pane" as death — inside this window that emptiness is the
+ * ordinary state of an agent still booting, and the two deadlines drifting
+ * apart would reopen the race.
  */
-const RUNTIME_CONFIRM_TIMEOUT_MS = 20000;
+export const RUNTIME_CONFIRM_TIMEOUT_MS = 20000;
 
 /** Gap between census checks while waiting for a spawned agent to appear. */
 const AGENT_CONFIRM_POLL_MS = 250;

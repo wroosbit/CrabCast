@@ -37,13 +37,23 @@
 //
 // Run `npm run build` first. Usage: node scripts/verify-agent-preemption.mjs [distDir]
 
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = process.argv[2] ?? path.join(scriptDir, '..', 'dist');
 
+// Scratch home for the durable registry each router carries (T4): the
+// preempt path persists its PreemptionRecord through it, and a scratch file
+// keeps that write out of any real fleet record.
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'kan71-preempt-'));
+process.on('exit', () => fs.rmSync(scratch, { recursive: true, force: true }));
+let registryFile = 0;
+
 const { compareVictims, outranks, selectVictim } = await import(path.join(distDir, 'priority.js'));
+const { AgentRegistry } = await import(path.join(distDir, 'agent-registry.js'));
 const { WorkspaceRegistry } = await import(path.join(distDir, 'registry.js'));
 const { MessageRouter } = await import(path.join(distDir, 'router.js'));
 const { readCapacity, summarizeCapacity } = await import(path.join(distDir, 'capacity.js'));
@@ -158,6 +168,7 @@ function newRouter(bridge) {
     promptLoader: stubPrompts,
     herdrBridge: bridge,
     daemonStartedAt: new Date(),
+    agentRegistry: new AgentRegistry(path.join(scratch, `agents-${++registryFile}.jsonl`)),
     send: () => {},
     broadcast: (msg) => events.push(msg)
   });
