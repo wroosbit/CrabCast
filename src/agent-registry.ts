@@ -80,7 +80,9 @@ export interface AgentRecord {
 
 /**
  * Why a stand-down happened, when it happened *to* an agent rather than
- * because its work was done.
+ * because its work was done. The shape is declared in priority.ts — the
+ * capacity gate is what builds one — and re-exported here because this file
+ * is where it becomes durable.
  *
  * The extraction source's KAN-37 asked the sharpest question this registry has
  * faced: a preempted agent must be recorded either so the next boot resurrects
@@ -93,25 +95,14 @@ export interface AgentRecord {
  * restart.
  *
  * So the event stays `deactivated` and {@link AgentRegistry.intents} needs no
- * new rule. What this annotation adds is the half that "deactivated" throws
+ * new rule. What the annotation adds is the half that "deactivated" throws
  * away: *why*. It is the difference between a human flipping a switch off and
  * work being taken away from an agent that was in the middle of it, and it is
  * what lets `list_agents` keep reporting interrupted work until somebody
  * decides about it.
  */
-export interface PreemptionRecord {
-  /** The agent that took this one's slot. */
-  byAgentName: string;
-  byType: string;
-  byKey: string;
-  byPriority: number;
-  /** What the preempted agent was worth, so the comparison is legible later. */
-  priority: number;
-  /** What herdr said it was doing at the moment it was stood down. */
-  herdrStatus: string;
-  /** The capacity arithmetic that made the slot necessary. */
-  derivation: string;
-}
+export type { PreemptionRecord } from './priority.js';
+import type { PreemptionRecord } from './priority.js';
 
 export interface AgentLogEntry extends AgentRecord {
   event: AgentEvent;

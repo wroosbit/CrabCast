@@ -131,6 +131,7 @@ process.env.PATH = `${shimDir}:${process.env.PATH}`;
 const { HerdrBridge, agentNameFor, AGENT_CONFIRM_TIMEOUT_MS, HERDR_CLI_TIMEOUT_MS } =
   await import(path.join(distDir, 'herdr.js'));
 const { MessageRouter } = await import(path.join(distDir, 'router.js'));
+const { AgentRegistry } = await import(path.join(distDir, 'agent-registry.js'));
 const { WorkspaceRegistry } = await import(path.join(distDir, 'registry.js'));
 const { PromptLoader } = await import(path.join(distDir, 'prompt.js'));
 const { loadConfig } = await import(path.join(distDir, 'config.js'));
@@ -159,6 +160,9 @@ const router = new MessageRouter({
   promptLoader: new PromptLoader(config.baseDir),
   herdrBridge: bridge,
   daemonStartedAt: new Date(),
+  // The durable registry landed with the T4 slice; a scratch log keeps this
+  // script's activations out of any real fleet record.
+  agentRegistry: new AgentRegistry(path.join(stateDir, 'agents.jsonl')),
   send: (msg) => { sent = msg; },
   broadcast: () => {}
 });
@@ -168,12 +172,17 @@ const router = new MessageRouter({
 // the fixture path is deliberate.
 const AS_SHELL = { defaultAgent: 'shell' };
 
+// The capacity gate reads the real machine, and whether this box is busy is
+// not what is being proved here. The override path is real, recorded, and
+// what [Start anyway] sends; verify-agent-capacity.mjs proves the gate.
+const OVERRIDE = { override: true };
+
 /** Drive the real handler and return exactly what the caller would receive. */
 async function activate(key, extra = {}) {
   sent = undefined;
   const startedAt = Date.now();
   await router.handleActivateByKey(
-    { action: 'activate_by_key', type: TYPE, key, ...AS_SHELL, ...extra },
+    { action: 'activate_by_key', type: TYPE, key, ...AS_SHELL, ...OVERRIDE, ...extra },
     (msg) => { sent = msg; }
   );
   return { response: sent, elapsedMs: Date.now() - startedAt };

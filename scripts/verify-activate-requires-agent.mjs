@@ -195,10 +195,15 @@ function cleanup() {
 }
 process.on('exit', cleanup);
 
+// The capacity gate reads the real machine, and whether this box is busy is
+// not what is being proved here. The override path is real, recorded, and
+// what [Start anyway] sends; verify-agent-capacity.mjs proves the gate.
+const PAST_THE_GATE = { override: true };
+
 async function activate(key, extra = {}) {
   sent = undefined;
   await router.handleActivateByKey(
-    { action: 'activate_by_key', type: TYPE, key, ...extra },
+    { action: 'activate_by_key', type: TYPE, key, ...PAST_THE_GATE, ...extra },
     (msg) => { sent = msg; }
   );
   return sent;

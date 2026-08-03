@@ -284,11 +284,26 @@ console.log(`\n  probe present: ${baseline.includes(PROBE_AGENT)}`);
 // ------------------------------------------------------------------- 2. on --
 rule('2. ON — a pane that was not there, and then is');
 
-const started = await call('activate_by_key', {
+// The plain request first, so the real gate answers about the real machine.
+// Whether it refuses depends on what this machine is carrying right now —
+// that is the point of a live proof — and a refusal is not a failure of this
+// script: the refusal's own [Start anyway] (override: true, recorded) is the
+// path a supervisor takes next, and the rest of the proof needs a probe.
+let started = await call('activate_by_key', {
   type: PROBE_TYPE,
   key: PROBE_KEY,
   defaultAgent: 'shell'
 });
+if (started.success === false && started.refusedBy === 'capacity') {
+  console.log(`the real gate refused first: ${started.reason}`);
+  started = await call('activate_by_key', {
+    type: PROBE_TYPE,
+    key: PROBE_KEY,
+    defaultAgent: 'shell',
+    override: true
+  });
+  console.log(`[Start anyway] → activate_by_key with override: true`);
+}
 console.log(`activate_by_key → success: ${started.success}, verified: ${started.verified}, sessionId: ${started.sessionId}`);
 if (!started.success) {
   console.error(`could not start the probe: ${started.error}`);
@@ -396,7 +411,10 @@ console.log(`    defaultAgent: '${standbyRow?.defaultAgent}' }\n`);
 const backOn = await call('activate_by_key', {
   type: standbyRow?.type ?? PROBE_TYPE,
   key: standbyRow?.key ?? PROBE_KEY,
-  defaultAgent: standbyRow?.defaultAgent ?? 'shell'
+  defaultAgent: standbyRow?.defaultAgent ?? 'shell',
+  // Past the gate for the same reason section 2 ends up there: this machine
+  // is busy, and the point being proved here is the round trip, not the gate.
+  override: true
 });
 const returned = await waitForProbe(true);
 const listedBack = await call('list_agents');

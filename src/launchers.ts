@@ -327,6 +327,18 @@ export interface AgentLauncher {
    */
   preSpawnCheck?: (workDir: string) => void;
   /**
+   * The process name (`comm` in /proc) of the agent runtime this launcher
+   * starts, when it starts one. Absent for `shell`, which starts no runtime —
+   * a bare bash prompt is its delivered product.
+   *
+   * This is what the cost sampler (agent-cost.ts) groups process trees under:
+   * an agent's cost is the whole tree rooted at this process. Declared here,
+   * next to the command that spawns it, so the sampler's notion of "agent
+   * tree root" is derived from the launcher table rather than being a second
+   * copy of it that drifts when a launcher is added.
+   */
+  runtimeComm?: string;
+  /**
    * Whether this launcher's command restores a prior conversation when its
    * workspace has one (claude's `--continue`). This is what decides whether a
    * restored agent needs the interrupted-work nudge: a runtime that came back
@@ -408,6 +420,7 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
         throw new Error(`Refusing to spawn claude: ${trust.error}`);
       }
     },
+    runtimeComm: 'claude',
     // The `--continue` branch of the command above is what makes this true;
     // hasRestorableConversation (resume.ts) is what predicts whether it fires.
     restoresConversation: true,
@@ -419,7 +432,8 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
   'anti-gravity': {
     command: (promptCommand = PROMPT_CMD) =>
       `agy --continue || agy -i ${shellQuote(promptCommand)}`,
-    setup: (_workDir, mcpServers) => configureAgyMcp(mcpServers)
+    setup: (_workDir, mcpServers) => configureAgyMcp(mcpServers),
+    runtimeComm: 'agy'
     // No restoresConversation, deliberately, despite the `--continue` above:
     // the restore *predictor* (hasRestorableConversation in resume.ts) reads
     // Claude Code's transcript directory and knows nothing about agy's, so a
@@ -428,6 +442,17 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
     // — a readyMarkers list and a transcript probe for agy — not just the flag.
   }
 };
+
+/**
+ * Every agent-runtime process name the launcher table can start. The cost
+ * sampler treats a process with one of these comms (and no such ancestor) as
+ * the root of an agent tree; everything under it is that agent's cost.
+ */
+export const AGENT_RUNTIME_COMMS: ReadonlySet<string> = new Set(
+  Object.values(AGENT_LAUNCHERS)
+    .map((launcher) => launcher.runtimeComm)
+    .filter((comm): comm is string => typeof comm === 'string')
+);
 
 /**
  * What resolveLauncher falls back to when neither the caller nor the type

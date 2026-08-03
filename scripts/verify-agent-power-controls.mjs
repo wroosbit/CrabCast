@@ -25,9 +25,9 @@
 // What did NOT travel from the extraction source: the work-state confirmation
 // (its git probe stays in Butchr per the story's NOT-ported list), the
 // hardcoded supervisor set (CrabCast marks rows with the type's `gateExempt`
-// from config instead), and the capacity refusal (the measured gate is the
-// capacity slice, T3 of KAN-68 — activation here is admitted by the
-// always-admit seam it will replace).
+// from config instead), and the capacity refusal (the measured gate landed
+// with KAN-71 and has its own proof in verify-agent-capacity.mjs; activations
+// here pass it with the recorded override — see PAST_THE_GATE).
 //
 // Usage:
 //   npm run build
@@ -47,6 +47,17 @@ const verdict = (ok, yes, no) => {
   if (!ok) failures++;
 };
 let failures = 0;
+
+/**
+ * Every activation in this script passes this, and it is not a shortcut. The
+ * capacity gate (KAN-71's slice) reads the real machine — cores, memory, and
+ * a one-minute load average that moves while this script runs — and this
+ * script is about the registry's power controls, not the gate: a proof that
+ * passes on a quiet machine and fails on a busy one proves nothing either
+ * way. The override path is itself real and recorded; the gate has its own
+ * proof in verify-agent-capacity.mjs.
+ */
+const PAST_THE_GATE = { override: true };
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'kan38-'));
 const WORKSPACES = path.join(TMP, 'workspaces');
@@ -281,7 +292,7 @@ rule('2. ON — where the candidates come from, and the agent back');
   const res = await quiet(async () => {
     let out;
     await router.handleActivateByKey(
-      { type: candidate.type, key: candidate.key, defaultAgent: candidate.defaultAgent },
+      { type: candidate.type, key: candidate.key, defaultAgent: candidate.defaultAgent, ...PAST_THE_GATE },
       (msg) => { out = msg; }
     );
     return out;
@@ -343,7 +354,7 @@ rule('3. LAUNCHER — why a stand-down has to carry the activation record with i
 
   await quiet(() =>
     router.handleActivateByKey(
-      { type: 'task', key: 'KAN-38', defaultAgent: intent.record.defaultAgent, url: intent.record.url },
+      { type: 'task', key: 'KAN-38', defaultAgent: intent.record.defaultAgent, url: intent.record.url, ...PAST_THE_GATE },
       () => {}
     )
   );
@@ -393,7 +404,7 @@ rule('4. PREEMPTED — a debt, reported until re-activation, and re-activation i
 
   const res = await quiet(async () => {
     let out;
-    await router.handleActivateByKey({ type: 'task', key: 'KAN-40', defaultAgent: 'claude' }, (m) => { out = m; });
+    await router.handleActivateByKey({ type: 'task', key: 'KAN-40', defaultAgent: 'claude', ...PAST_THE_GATE }, (m) => { out = m; });
     return out;
   });
   const spawned = bridge.spawns[bridge.spawns.length - 1];

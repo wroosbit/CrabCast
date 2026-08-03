@@ -1,7 +1,11 @@
 import * as net from 'net';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
+import { finishMeasurement, startMeasurement, MeasurementStart } from './agent-cost.js';
+import { dampCost, sampleFromMeasurement, MIN_MEASURED_CORES } from './agent-cost-damping.js';
+import { AgentCost, MEASURED_AGENT_COST, setMeasuredAgentCost } from './capacity.js';
 import { ConfigError, CrabcastConfig, loadConfig, resolveConfigPath } from './config.js';
 import { WorkspaceRegistry } from './registry.js';
 import { MessageRouter } from './router.js';
@@ -242,6 +246,92 @@ server.on('error', (err: any) => {
 });
 
 /**
+ * How often the daemon re-measures what its own agents cost (KAN-56).
+ *
+ * Sixty seconds, for two reasons. Long enough that the utime deltas average
+ * over an agent's think/act duty cycle instead of catching one busy or one
+ * idle instant, and that the sampling itself — two /proc sweeps a minute,
+ * single-digit milliseconds each — stays far below anything worth charging
+ * for. Short enough that, with the damping's fast-up alpha, a fleet that
+ * turns busy is mostly believed within three windows, i.e. minutes.
+ */
+const COST_SAMPLE_INTERVAL_MS = 60_000;
+
+/** The open "before" side of the current window; null until the first tick
+ * and after any sampling failure. */
+let costWindow: MeasurementStart | null = null;
+/** The damped estimate, unrounded. Null whenever capacity should answer from
+ * the seed. */
+let costEstimate: AgentCost | null = null;
+/** Transition memory so the log records changes of state, not every quiet
+ * minute of a healthy sampler. */
+let costSamplerState: 'no-measurement' | 'live' = 'no-measurement';
+
+/**
+ * Degrade, never guess: any failure — /proc unreadable, an empty fleet, a
+ * sample that fails validation — clears the live measurement so capacity
+ * falls back to MEASURED_AGENT_COST with the report labelling the figures as
+ * seed. A stale estimate left posing as live would be the exact mislabelling
+ * the provenance labels (KAN-44) exist to correct.
+ */
+function degradeCostMeasurement(reason: string) {
+  costEstimate = null;
+  setMeasuredAgentCost(null);
+  if (costSamplerState !== 'no-measurement') {
+    costSamplerState = 'no-measurement';
+    log(`Agent-cost sampler: ${reason}; capacity answers from the seed constants until sampling recovers`);
+  }
+}
+
+function sampleFleetCost() {
+  let measurement;
+  try {
+    measurement = costWindow ? finishMeasurement(costWindow) : null;
+    costWindow = startMeasurement();
+  } catch (e: any) {
+    costWindow = null;
+    degradeCostMeasurement(`/proc sampling failed (${e?.message ?? String(e)})`);
+    return;
+  }
+  if (!measurement) return; // first tick only opens the window
+
+  const sample = sampleFromMeasurement(measurement, os.totalmem());
+  if (!sample) {
+    degradeCostMeasurement(
+      measurement.totals.agents <= 0
+        ? 'no agent trees running, nothing to measure'
+        : 'sample failed validation'
+    );
+    return;
+  }
+
+  // Damped from the previous estimate, seeded from the constants, so the
+  // first window after a gap starts from the conservative figure rather than
+  // from whatever the window happened to catch. See agent-cost-damping.ts.
+  costEstimate = dampCost(costEstimate ?? MEASURED_AGENT_COST, sample);
+  // Published rounded (whole MB, 3-decimal cores) so the figures a capacity
+  // report prints are exactly the figures the arithmetic divides by — the
+  // hand-reproducibility describeCapacity promises. Cores floored so the
+  // rounding can never publish a zero divisor (see MIN_MEASURED_CORES).
+  const published = {
+    residentBytes: Math.round(costEstimate.residentBytes / (1024 * 1024)) * 1024 * 1024,
+    cores: Math.max(MIN_MEASURED_CORES, Math.round(costEstimate.cores * 1000) / 1000),
+    sampledAt: Date.now(),
+    windowSeconds: measurement.elapsed,
+    agentTrees: measurement.totals.agents
+  };
+  setMeasuredAgentCost(published);
+  if (costSamplerState !== 'live') {
+    costSamplerState = 'live';
+    log(
+      `Agent-cost sampler: live measurement established — damped cost ` +
+      `${Math.round(published.residentBytes / (1024 * 1024))} MB / ${published.cores} core per tree ` +
+      `(${published.agentTrees} tree(s), ${Math.round(published.windowSeconds)}s window)`
+    );
+  }
+}
+
+/**
  * A router with nowhere to answer, for the daemon's own use.
  *
  * Reconciliation and the loss sweep are not requests — nobody is connected at
@@ -356,6 +446,13 @@ function onListen() {
 
   const sweep = setInterval(sweepForMissingAgents, MISSING_SWEEP_INTERVAL_MS);
   sweep.unref();
+
+  // Open the first cost window now rather than a minute from now; the first
+  // damped figure lands one interval later. Until then — and whenever the
+  // sampler degrades — capacity answers from the labelled seed.
+  sampleFleetCost();
+  const costSampler = setInterval(sampleFleetCost, COST_SAMPLE_INTERVAL_MS);
+  costSampler.unref();
 }
 
 const shutdown = () => {
