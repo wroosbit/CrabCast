@@ -1440,9 +1440,19 @@ function describeUnreachable(dataDir: string, spawned: boolean, cause: string): 
       );
     }
   } else {
+    // The instruction has to work for the reader who typed the command, and
+    // since KAN-100 that reader may have `npm i -g`'d this package and have no
+    // checkout at all — `node dist/daemon.js` lives inside their global
+    // node_modules and is not a path anyone is going to find. So the primary
+    // advice is the one that is true either way (run something that spawns
+    // one), the command list is read off COMMANDS rather than retyped here,
+    // and the foreground path is named as what it is: a checkout-only thing.
+    const spawning = COMMANDS.filter((c) => c.spawnsDaemon).map((c) => c.name).join(', ');
     parts.push(
-      `This command does not start a daemon (see \`crabcast --help\`). Start one with an`,
-      `activating command, or directly: node dist/daemon.js [configPath]`,
+      `This command does not start a daemon (see \`crabcast --help\`). Run any of`,
+      `${INDENT}${spawning}`,
+      `and one is spawned if none is running. From a repository checkout you can also`,
+      `run one in the foreground: node dist/daemon.js [configPath]`,
       `If one failed to start earlier, its stderr is in ${errPath}.`
     );
   }
