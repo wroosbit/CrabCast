@@ -31,7 +31,10 @@
 //                     cannot progress is reported instead of fsynced (B7)
 //  12. one read     — one whole-log read per list_agents poll instead of four,
 //                     and all three registry-derived categories capped with
-//                     totals rather than only standby (B9)
+//                     totals rather than only standby (B9); 12b: the daemon's
+//                     missing-sweep reads the UNCAPPED list, so a loss past
+//                     position 25 is still announced rather than silently
+//                     never reported
 //
 // Every section drives the real MessageRouter, the real WorkspaceRegistry, a
 // real config through the real loader and a real on-disk AgentRegistry, so
@@ -758,6 +761,16 @@ rule('9. COMPACTION KEEPS THE WAY BACK — KAN-88 finding B5');
 
   const beforeCompaction = reg.readLog().length;
   const standbyBefore = reg.intents();
+  const atBefore = new Map([...standbyBefore].map(([name, i]) => [name, i.at]));
+  // A second expected agent recorded a measurable moment later, so "all the
+  // carried timestamps collapsed onto one value" is distinguishable from "they
+  // were preserved" rather than being a coin flip on clock resolution.
+  await new Promise((r) => setTimeout(r, 25));
+  const laterDir = path.join(WORKSPACES, 'compact', 'later');
+  fs.mkdirSync(laterDir, { recursive: true });
+  reg.recordActivated({ agentName: 'crabcast-task-later', type: 'task', key: 'LATER', workDir: laterDir, defaultAgent: 'claude' });
+  atBefore.set('crabcast-task-later', reg.intents().get('crabcast-task-later').at);
+  await new Promise((r) => setTimeout(r, 25));
   reg.compact();
   const after = reg.readLog();
   const intentsAfter = reg.intents();
@@ -804,11 +817,61 @@ rule('9. COMPACTION KEEPS THE WAY BACK — KAN-88 finding B5');
     'the preemption annotation outlived compaction, or the victim lost its way back'
   );
   verdict(
-    reg.expected().map((r) => r.agentName).join() === 'crabcast-task-live' &&
-      after.length < beforeCompaction,
+    reg.expected().map((r) => r.agentName).sort().join() === 'crabcast-task-later,crabcast-task-live' &&
+      after.length < beforeCompaction + 1,
     'and compaction still compacts: the expected fleet is exactly what it was, in fewer\n' +
     '    records than it took to get here.',
     `compaction changed the expected fleet or did not shrink the log`
+  );
+
+  // -- 9b. carried records keep their own `at` (KAN-88 round-2 blocker 1) ------
+  //
+  // Compaction used to stamp every carried `activated` record with the time of
+  // the compaction. That is not a cosmetic loss: `missingAgents` reports it as
+  // `since`, and the reporting path sorts newest-first before clipping at 25 —
+  // so one shared timestamp turns that sort into an all-ties comparison and
+  // the clip hides an arbitrary twenty-five instead of the oldest ones. The
+  // ordering guarantee the clip rests on only exists if the timestamps are
+  // real.
+  console.log('\n  9b. carried records keep the timestamp of the event, not of the compaction:\n');
+  const atAfter = new Map([...intentsAfter].map(([name, i]) => [name, i.at]));
+  for (const name of ['crabcast-task-live', 'crabcast-task-later', 'crabcast-task-kept', 'crabcast-task-victim']) {
+    console.log(`  ${name}: before=${atBefore.get(name)} after=${atAfter.get(name)}`);
+  }
+  const preserved = ['crabcast-task-live', 'crabcast-task-later', 'crabcast-task-kept', 'crabcast-task-victim']
+    .every((name) => atBefore.get(name) === atAfter.get(name));
+  const activatedStamps = new Set(
+    ['crabcast-task-live', 'crabcast-task-later'].map((name) => atAfter.get(name))
+  );
+  console.log(`  distinct timestamps among the two expected agents after compaction: ${activatedStamps.size}`);
+  verdict(
+    preserved && activatedStamps.size === 2,
+    'every carried record kept its own `at` — so `since` still says when the agent was\n' +
+    '    activated, and the newest-first clip is still an ordering rather than a tie.',
+    `compaction rewrote timestamps: preserved=${preserved}, distinct=${activatedStamps.size}`
+  );
+
+  // -- 9c. an ex-preempted row does not claim somebody chose it ---------------
+  //
+  // Dropping the debt is the decision this file already argued for. Asserting
+  // that a person switched the agent off is a different thing entirely: its
+  // work was taken to make room, and the row a human reads must not say
+  // otherwise just because the annotation naming the taker has been compacted
+  // away.
+  console.log('\n  9c. the carried ex-preempted row says what actually happened to it:\n');
+  const victimRow = sent9.standbyAgents.find((a) => a.agentName === 'crabcast-task-victim');
+  const keptRow = sent9.standbyAgents.find((a) => a.agentName === 'crabcast-task-kept');
+  console.log(`  victim: wasPreempted=${victimRow?.wasPreempted} reason=${JSON.stringify(victimRow?.reason)}`);
+  console.log(`  kept:   wasPreempted=${keptRow?.wasPreempted} reason=${JSON.stringify(keptRow?.reason)}`);
+  verdict(
+    victimRow?.wasPreempted === true &&
+      !/[Ss]witched off deliberately/.test(victimRow?.reason ?? '') &&
+      /free capacity/.test(victimRow?.reason ?? '') &&
+      keptRow?.wasPreempted === undefined &&
+      /[Ss]witched off deliberately/.test(keptRow?.reason ?? ''),
+    'the ex-preempted row carries wasPreempted and a reason describing a slot that was\n' +
+    '    taken; the genuinely switched-off row is unchanged. One list, two honest rows.',
+    `a carried row misdescribes how its work stopped: ${JSON.stringify({ victim: victimRow?.reason, kept: keptRow?.reason })}`
   );
 }
 
@@ -1078,6 +1141,32 @@ rule('12. ONE REGISTRY READ PER POLL, AND ALL THREE CATEGORIES CAPPED — KAN-88
     'and what is kept is the newest of each — clipping an unordered list would hide an\n' +
     '    arbitrary subset; clipping a newest-first one hides the least urgent.',
     'a clipped category was not ordered newest-first'
+  );
+
+  // -- 12b. the sweep reads the UNCAPPED list ---------------------------------
+  //
+  // The one invariant here whose regression is silent. `list_agents` is a
+  // report and clipping it costs a reader the tail of a list they can see the
+  // total of; the daemon's 30s missing-sweep is not a report, it is the thing
+  // that announces a loss — exactly once, latched — so an agent that fell
+  // past position 25 in a clipped sweep would never be announced at all, and
+  // nothing anywhere would say so. It was protected by code reading alone
+  // until now.
+  console.log('\n  12b. the daemon\'s missing-sweep is not the report, and must not be clipped:\n');
+  const swept = router12.findMissingAgents();
+  const sweptNames = new Set(swept.map((row) => row.agentName));
+  const reportedNames = new Set(sent12.missingAgents.map((row) => row.agentName));
+  const onlyInSweep = [...sweptNames].filter((name) => !reportedNames.has(name));
+  console.log(`  findMissingAgents() returned ${swept.length}; list_agents reported ${sent12.missingAgents.length} of ${sent12.missingTotal}`);
+  console.log(`  agents the sweep can announce that the clipped report omits: ${onlyInSweep.length}`);
+
+  verdict(
+    swept.length === N &&
+      swept.length === sent12.missingTotal &&
+      onlyInSweep.length === N - 25,
+    'the sweep sees every missing agent, including the five the response clipped — so a\n' +
+    '    loss past position 25 is still announced rather than silently never reported.',
+    `the sweep is clipped too: ${swept.length} of ${N} (that is an agent nobody is ever told about)`
   );
 }
 

@@ -739,24 +739,65 @@ const fastClient = new McpClient('no-daemon client', { config: null, env: fastEn
 clients.push(fastClient);
 await fastClient.initialize();
 
-const startedAt = Date.now();
 const noDaemon = await fastClient.callTool('crabcast_list_agents');
-const elapsed = Date.now() - startedAt;
 const noDaemonText = noDaemon?.content?.find((c) => c.type === 'text')?.text ?? '';
-console.log(`   tool call against a data dir with no daemon took ${elapsed}ms`);
 console.log(`   tool result isError: ${noDaemon.isError}`);
 console.log(`   tool result text: ${noDaemonText}`);
-console.log(`   (the old never-spawn path walked 20 × 250ms ≈ 5000ms before saying this)`);
 verdict(
   noDaemon.isError === true && /ENOENT|ECONNREFUSED/.test(noDaemonText),
   'the caller is told there is no daemon, with the connect error that says so',
   `unexpected answer from the never-spawn path: ${JSON.stringify(noDaemonText)}`
 );
+
+// How many connects were attempted, asserted as behaviour rather than as a
+// stopwatch reading.
+//
+// This used to assert `elapsed < 2000ms`, which was right about the intent and
+// wrong as a check: a wall-clock upper bound inside a CI job that also runs
+// seven other daemon-spawning scripts is a red herring waiting to happen — the
+// one assertion in this suite most likely to fail for a reason that has
+// nothing to do with the code.
+//
+// The retry knob answers the same question without a clock. `delayMs` is how
+// long the loop sleeps *between* attempts, so with it set to a minute, a call
+// that took even one retry cannot possibly return inside ten seconds. Coming
+// back at all is therefore proof that the first refused connect was the whole
+// answer — and no amount of CI load can fake it, because load only ever makes
+// things slower.
+const noDaemonDir = path.join(scratch, 'no-daemon-here');
+fs.mkdirSync(noDaemonDir, { recursive: true });
+
+const settled = async (promise, ms) =>
+  Promise.race([
+    promise.then(() => 'resolved', () => 'rejected'),
+    sleep(ms).then(() => 'still-waiting')
+  ]);
+
+const neverSpawn = connectToDaemon(noDaemonDir, { spawnIfMissing: false, delayMs: 60_000 });
+neverSpawn.catch(() => {});
+const neverSpawnOutcome = await settled(neverSpawn, 10_000);
+console.log(`   connectToDaemon(spawnIfMissing: false, delayMs: 60000) after 10s: ${neverSpawnOutcome}`);
+console.log(`   (one retry would have parked it for a minute — returning at all means zero were taken)`);
 verdict(
-  elapsed < 2000,
-  `the refusal took ${elapsed}ms — the first refused connect was the answer`,
-  `the refusal took ${elapsed}ms, which is the retry budget being walked`
+  neverSpawnOutcome === 'rejected',
+  'the never-spawn path took exactly one connect: it answered inside ten seconds while a\n' +
+  '    single retry would have slept for sixty',
+  `the never-spawn path is still walking its retry budget (${neverSpawnOutcome})`
 );
+
+// The other half of the contract: a caller that asks for retries still gets
+// them. A lower bound, which load cannot break — sleeps do not run fast.
+const explicitStart = Date.now();
+const explicit = connectToDaemon(noDaemonDir, { spawnIfMissing: false, retries: 2, delayMs: 400 });
+const explicitOutcome = await settled(explicit, 15_000);
+const explicitElapsed = Date.now() - explicitStart;
+console.log(`   connectToDaemon(spawnIfMissing: false, retries: 2, delayMs: 400): ${explicitOutcome} after ${explicitElapsed}ms`);
+verdict(
+  explicitOutcome === 'rejected' && explicitElapsed >= 700,
+  `an explicit retries still wins — it slept through both retries (${explicitElapsed}ms, and a single attempt is ~0ms)`,
+  `an explicit retries was ignored: ${explicitOutcome} after ${explicitElapsed}ms`
+);
+
 // And nothing was spawned on the way: the fallback is connect-only.
 verdict(
   !fs.existsSync(path.join(fakeHome, '.local', 'share', 'crabcast', 'crabcast.sock')),
