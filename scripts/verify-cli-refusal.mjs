@@ -22,6 +22,15 @@
 //                     non-boolean is a usage error that never reaches the wire
 //   6. help         — `--help` lists exactly the exported command table, and
 //                     every command in it renders its own help
+//   7. dashed text  — an operand that looks like a flag is sent as text: flag
+//                     parsing stops where a `rest` positional begins, so
+//                     `send <key> --help` delivers "--help" instead of
+//                     printing help and exiting 0 having sent nothing
+//   8. unusable dir — a dataDir whose socket path cannot fit in sun_path is
+//                     refused at load, by the CLI and the daemon alike; and
+//                     the bin is runnable through a symlink, which is the
+//                     `npm link` path and the reason the direct-invocation
+//                     guard resolves paths at all
 //
 // Everything on the daemon side is real: the real daemon (spawned by the CLI
 // itself, which is how a human gets one), the real router, capacity model,
@@ -193,6 +202,7 @@ function fixture(name, types, env = {}) {
     name,
     configPath,
     dataDir,
+    state,
     env: {
       ...process.env,
       HOME: fakeHome,
@@ -210,9 +220,17 @@ function fixture(name, types, env = {}) {
   };
 }
 
-/** Run the CLI as a human would, and hand back everything it produced. */
+/**
+ * Run the CLI as a human would, and hand back everything it produced.
+ *
+ * `--config` goes FIRST, not last. It used to be appended, which was fine
+ * until flag parsing learned to stop at a `rest` positional — after which a
+ * trailing `--config …` became part of `send`'s message, and this harness was
+ * testing its own argument order rather than the CLI's. Leading is also what
+ * the help tells a human to do with flags on a rest command.
+ */
 function crabcast(fx, args, extraEnv = {}) {
-  const result = spawnSync(process.execPath, [cliJs, ...args, '--config', fx.configPath], {
+  const result = spawnSync(process.execPath, [cliJs, '--config', fx.configPath, ...args], {
     env: { ...fx.env, ...extraEnv },
     encoding: 'utf8',
     timeout: 120_000
@@ -557,6 +575,146 @@ const helpCommands = help.stdout
 check(
   JSON.stringify(helpCommands) === JSON.stringify(COMMANDS.map((c) => c.name)),
   `every command in the help exists in the table and vice versa: ${helpCommands.join(', ')}`
+);
+
+// ------------------------------------------------------------ 7. dashed text
+
+rule('7. AN OPERAND THAT LOOKS LIKE A FLAG IS SENT AS TEXT, not read as a flag');
+
+// The regression this section exists for: `crabcast send <key> --help` used
+// to print the help, send NOTHING, and exit 0 — a success reported over work
+// that never happened. Flag parsing now stops where a `rest` positional
+// begins, and what the daemon was actually asked to type is read back out of
+// the herdr shim's own invocation log rather than inferred from the exit code.
+const shimSent = () => {
+  const file = path.join(overrides.state, 'invocations.jsonl');
+  if (!fs.existsSync(file)) return [];
+  return fs
+    .readFileSync(file, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .filter((args) => args[0] === 'pane' && args[1] === 'send-text')
+    .map((args) => args[3]);
+};
+
+// shell/kept is the agent section 5 started with --override, and it is still
+// running against the same daemon.
+const before = shimSent().length;
+const sentHelp = crabcast(overrides, ['send', 'kept', '--help']);
+const afterHelp = shimSent();
+show('$ crabcast send kept --help', sentHelp.stdout + sentHelp.stderr);
+show('what herdr was asked to type:', JSON.stringify(afterHelp[afterHelp.length - 1]));
+
+check(
+  afterHelp.length === before + 1 && afterHelp[afterHelp.length - 1] === '--help',
+  'the daemon was asked to type the literal text "--help" — the message was not swallowed'
+);
+check(
+  !/usage: crabcast/.test(sentHelp.stdout) && !/^crabcast send <key>/m.test(sentHelp.stdout),
+  'it did not print help instead'
+);
+check(sentHelp.code === EXIT.OK, `it exits on the daemon's verdict (${sentHelp.code}), not on a phantom success`);
+
+const sentDash = crabcast(overrides, ['send', 'kept', '-x']);
+check(
+  shimSent().pop() === '-x' && sentDash.code === EXIT.OK,
+  'a single-dash message is text too: "-x" was delivered'
+);
+
+const sentAfter = crabcast(overrides, ['send', 'kept', 'hi', '--type', 'shell']);
+check(
+  shimSent().pop() === 'hi --type shell',
+  'a flag written AFTER the message is message text — the documented trade, not a silent reinterpretation'
+);
+check(
+  /is part of the message, not a flag/.test(sentAfter.stderr),
+  'and the CLI says so on stderr rather than leaving the caller to wonder'
+);
+show('the note:', sentAfter.stderr.trim());
+
+const sentTimeout = crabcast(overrides, ['send', 'kept', '--timeout', '5000']);
+check(
+  shimSent().pop() === '--timeout 5000',
+  'a global flag inside a message no longer retunes the client: "--timeout 5000" was delivered as text'
+);
+
+// `--` still does its job for the commands that have no rest positional.
+const dashedKey = crabcast(capped, ['status', '--', '-odd-key']);
+check(
+  dashedKey.code === EXIT.REFUSED && /-odd-key/.test(dashedKey.stdout),
+  '`--` still ends flag parsing where there is no rest positional: `status -- -odd-key` asked about "-odd-key"'
+);
+
+// And the command's own help is still reachable, because the rest positional
+// has not started consuming when the flag appears first.
+const sendHelp = crabcast(capped, ['send', '--help']);
+check(
+  sendHelp.code === EXIT.OK && sendHelp.stdout.includes('send_to_agent'),
+  '`crabcast send --help` (no key yet) still prints the command help'
+);
+check(
+  /flag parsing STOPS where it begins/.test(sendHelp.stdout),
+  "and that help states the rule, so the behaviour is documented where it is met"
+);
+
+const hexLines = crabcast(capped, ['tail', 'x', '--lines', '0x10']);
+check(
+  hexLines.code === EXIT.USAGE && /plain decimal/.test(hexLines.stderr),
+  '--lines 0x10 is a usage error rather than a silent 16'
+);
+
+// ----------------------------------------------------------- 8. unusable dir
+
+rule('8. A dataDir WHOSE SOCKET CANNOT FIT IS REFUSED AT LOAD, by both consumers');
+
+// A unix socket address is a fixed buffer and an over-long path is truncated,
+// not rejected: the daemon then binds outside its own data directory, cannot
+// chmod or unlink what it bound, and the NEXT daemon reports a stale socket
+// file in a directory that is empty. The config loader refuses rather than
+// repairs, so it refuses this too.
+const longDir = path.join(scratch, 'x'.repeat(120));
+fs.mkdirSync(path.join(longDir, 'prompts'), { recursive: true });
+fs.writeFileSync(path.join(longDir, 'prompts', 'shell.md'), 'KAN-93 {{KEY}}\n');
+const longConfig = path.join(longDir, 'crabcast.config.json');
+fs.writeFileSync(longConfig, JSON.stringify({
+  dataDir: path.join(longDir, 'data'),
+  workspaceTypes: [
+    { name: 'shell', priority: 1, promptFile: 'prompts/shell.md', defaultLauncher: 'shell' }
+  ]
+}));
+
+const cliLong = spawnSync(process.execPath, [cliJs, 'list', '--config', longConfig], {
+  env: capped.env, encoding: 'utf8'
+});
+show('$ crabcast list --config <150-byte socket path>', cliLong.stderr.trim());
+check(cliLong.status === EXIT.CONFIG, `the CLI refuses with exit ${EXIT.CONFIG} (got ${cliLong.status})`);
+check(
+  /socket path is \d+ characters/.test(cliLong.stderr) && /at most 104/.test(cliLong.stderr),
+  'the refusal names the length it measured and the limit it broke'
+);
+
+const daemonLong = spawnSync(process.execPath, [path.join(distDir, 'daemon.js'), longConfig], {
+  env: capped.env, encoding: 'utf8'
+});
+check(
+  daemonLong.status === 1 && /"dataDir" is too long/.test(daemonLong.stderr),
+  'and the daemon refuses to start on the same config, rather than binding a truncated address'
+);
+check(
+  !fs.existsSync(path.join(longDir, 'data')),
+  'nothing was created for it — the refusal happens before any directory is made'
+);
+
+// The `npm link` shape: the bin is a symlink to dist/cli.js, so the
+// direct-invocation guard only agrees with itself after resolving paths.
+// Proven by running through one rather than by reasoning about it.
+const linkPath = path.join(scratch, 'crabcast-link');
+fs.symlinkSync(cliJs, linkPath);
+const viaLink = spawnSync(process.execPath, [linkPath, '--help'], { env: capped.env, encoding: 'utf8' });
+check(
+  viaLink.status === EXIT.OK && viaLink.stdout.trim() === renderHelp().trim(),
+  'invoked through a symlink (the npm link path) the CLI runs — it does not exit 0 having done nothing'
 );
 
 // ------------------------------------------------------------------- verdict

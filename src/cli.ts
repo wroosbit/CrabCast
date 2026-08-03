@@ -79,9 +79,23 @@ export interface PositionalSpec {
   name: string;
   required: boolean;
   /**
-   * Joins every remaining operand with a single space. Only `send`'s message
-   * uses it, so `crabcast send demo run the tests` does what it looks like it
-   * does; quote the message, or use `--`, when the spacing matters.
+   * Joins every remaining operand with a single space, and **stops flag
+   * parsing** where it begins — see {@link restStartsAt}. Only `send`'s
+   * message uses it, so `crabcast send demo run the tests` does what it looks
+   * like it does, and so does `crabcast send demo --help`, which sends the
+   * text `--help`.
+   *
+   * The consequence, and it is the whole trade: a flag written *after* the
+   * message is message text. `crabcast send demo hi --type shell` sends
+   * "hi --type shell". Flags for a `rest` command go before the operands
+   * (`crabcast send --type shell demo hi`), the help says so, and a message
+   * that contains something spelled like one of that command's own flags gets
+   * a note on stderr rather than being silently mistaken for one.
+   *
+   * Quoting does **not** help with a leading dash — `"--help"` reaches the
+   * parser as `--help`, quotes consumed by the shell. That is why the stop
+   * rule exists rather than a documented workaround; `--` also still works
+   * and is documented in `--help`.
    */
   rest?: boolean;
   help: string;
@@ -304,6 +318,19 @@ function failure(reader: ResponseReader, what: string): string {
  * The capacity DTO, rendered as figures. The derivation is separate and
  * verbatim; this is the summary line a reader skims first.
  */
+/**
+ * Every field of `capacityDto` (router.ts), so this block can be checked
+ * against the object it is handed and so the flat `capacity_response` can
+ * mark exactly these read.
+ */
+const CAPACITY_FIELDS = [
+  'cap', 'running', 'exemptAgents', 'headroom', 'atCapacity', 'capBoundBy',
+  'headroomBoundBy', 'reason', 'cores', 'load1', 'totalMb', 'availableMb',
+  'agentMemoryMb', 'agentCores', 'agentMemorySource', 'agentCoresSource',
+  'measuredAt', 'measuredWindowSeconds', 'measuredAgentTrees', 'capByCpu',
+  'capByMemory', 'headroomByCap', 'headroomByLoad', 'headroomByMemory', 'summary'
+] as const;
+
 function capacityBlock(capacity: any): string | null {
   if (!capacity || typeof capacity !== 'object') return null;
   const numbers =
@@ -311,16 +338,41 @@ function capacityBlock(capacity: any): string | null {
     `running ${capacity.running} · exempt ${capacity.exemptAgents} · ` +
     `headroom ${capacity.headroom} (bound by ${capacity.headroomBoundBy})` +
     (capacity.atCapacity ? ' · AT CAPACITY' : '');
+
+  // The terms behind the two bound-by verdicts, and the machine they were
+  // read off. `activate` refusals and `capacity` also carry a derivation that
+  // spells this out in prose, but `list_agents` ships no derivation — so on
+  // `crabcast list` these nine figures were reaching nobody: this block was
+  // handed the whole object, which marked it read, so the residue guard could
+  // not surface what the block itself left out. A guard that can be silenced
+  // by the code it guards is not a guard.
+  const terms = `${INDENT}cap terms: cpu allows ${capacity.capByCpu}, memory allows ${capacity.capByMemory}` +
+    `  ·  headroom terms: count allows ${capacity.headroomByCap}, ` +
+    `load allows ${capacity.headroomByLoad}, memory allows ${capacity.headroomByMemory}`;
+  const machine =
+    `${INDENT}machine: ${capacity.cores} cores, load ${capacity.load1}, ` +
+    `${capacity.availableMb} MB available of ${capacity.totalMb} MB`;
+
+  // Anything capacityDto grows that this block has not been taught. Nested
+  // objects are outside the top-level reader's reach, so they get their own
+  // leftovers pass rather than none.
+  const unknown = Object.keys(capacity).filter(
+    (key) => !(CAPACITY_FIELDS as readonly string[]).includes(key)
+  );
+
   return lines(
     capacity.summary ? `${INDENT}${capacity.summary}` : null,
     numbers,
     capacity.reason ? `${INDENT}reason: ${capacity.reason}` : null,
+    terms,
+    machine,
     `${INDENT}agent cost: ${capacity.agentMemoryMb} MB (${capacity.agentMemorySource}), ` +
       `${capacity.agentCores} core (${capacity.agentCoresSource})` +
       (capacity.measuredAt
         ? `, measured over ${capacity.measuredWindowSeconds}s across ` +
           `${capacity.measuredAgentTrees} tree(s) ending ${capacity.measuredAt}`
-        : '')
+        : ''),
+    ...unknown.map((key) => `${INDENT}${key}: ${compact(capacity[key])}`)
   );
 }
 
@@ -670,13 +722,9 @@ function renderCapacity(reader: ResponseReader): string {
   delete dto.derivation;
   delete dto.priorities;
   delete dto.fleetPriorities;
-  reader.seen(
-    'cap', 'running', 'exemptAgents', 'headroom', 'atCapacity', 'capBoundBy',
-    'headroomBoundBy', 'reason', 'cores', 'load1', 'totalMb', 'availableMb',
-    'agentMemoryMb', 'agentCores', 'agentMemorySource', 'agentCoresSource',
-    'measuredAt', 'measuredWindowSeconds', 'measuredAgentTrees', 'capByCpu',
-    'capByMemory', 'headroomByCap', 'headroomByLoad', 'headroomByMemory', 'summary'
-  );
+  // Exactly the fields capacityBlock renders, and no others: a capacity field
+  // this CLI has not been taught stays unread and lands in the residue.
+  reader.seen(...CAPACITY_FIELDS);
   return lines(
     'capacity:',
     capacityBlock(dto),
@@ -710,12 +758,23 @@ const TYPE_FLAG: FlagSpec = {
  * Command → action → argument spec → one-line help.
  *
  * A NAMED EXPORT ON PURPOSE, and the seam between this task and KAN-94.
- * `--help` renders from this table, so the help cannot describe a command
- * that does not exist; and the parity check imports it from `dist/cli.js`
- * rather than re-deriving the command set, so a router action that gains no
- * command fails a check instead of going unnoticed. Inlining any of this into
- * the help text would make the help honest by accident rather than by
- * construction, and would leave the parity check reading prose.
+ *
+ * What it does today: `--help` renders from this table, so the help cannot
+ * describe a command that does not exist.
+ *
+ * What it is FOR, and what does not exist yet: KAN-94 will add
+ * `scripts/verify-cli-parity.mjs`, which will import this table from
+ * `dist/cli.js` rather than re-deriving the command set, so that a router
+ * action gaining no command will fail a check instead of going unnoticed.
+ * **No such check is in this PR** — `verify-cli-refusal` compares `--help`
+ * against this table and never reads `router.ts`, so nothing here yet
+ * notices a new action. Stated in the future tense deliberately: a comment
+ * that claims a check which does not exist is how the next reader stops
+ * checking.
+ *
+ * Either way, inlining any of this into the help text would make the help
+ * honest by accident rather than by construction, and would leave the coming
+ * parity check reading prose.
  */
 export const COMMANDS: CommandSpec[] = [
   {
@@ -744,6 +803,17 @@ export const COMMANDS: CommandSpec[] = [
     render: renderActivate
   },
   {
+    // `deactivate_by_key`, not the bare `deactivate` the router also
+    // dispatches (router.ts). Both spellings exist and they are different
+    // handlers: the bare one requires a `sessionId` and resolves through the
+    // session map alone, so it cannot address any agent that outlived a
+    // daemon restart — `sessionId` is null on every `sessionless: true` row,
+    // which is exactly the agent a human most needs to stand down.
+    // `deactivate_by_key` is a strict superset and is what `src/mcp.ts` uses,
+    // so the by-session form gets no CLI command. That is a deliberate
+    // omission rather than an oversight; KAN-94 owns the mechanism that
+    // records such exclusions formally, and this note is here so the gap is
+    // not a silent one in the meantime.
     name: 'deactivate',
     action: 'deactivate_by_key',
     responseAction: 'deactivate_response',
@@ -878,11 +948,22 @@ function flagHelp(flags: FlagSpec[]): string[] {
 }
 
 export function renderCommandHelp(spec: CommandSpec): string {
+  const rest = spec.positionals.find((p) => p.rest);
   return lines(
     usageLine(spec),
     `\n${INDENT}${spec.summary}`,
     spec.positionals.length ? '\narguments:' : null,
     ...spec.positionals.map((p) => `${INDENT}${p.name.padEnd(10)}  ${p.help}`),
+    rest
+      ? lines(
+          `\n${INDENT}<${rest.name}...> takes every remaining argument, joined with single spaces,`,
+          `${INDENT}and flag parsing STOPS where it begins. \`crabcast ${spec.name} … --help\` sends the`,
+          `${INDENT}text "--help"; it does not print this. Put flags BEFORE the ${rest.name}:`,
+          `${INDENT}  ${usageLine(spec)}`,
+          `${INDENT}A ${rest.name} written after a flag-looking word gets a note on stderr saying`,
+          `${INDENT}it was sent as text.`
+        )
+      : null,
     spec.flags.length ? '\nflags:' : null,
     ...flagHelp(spec.flags),
     `\nsocket action: ${spec.action}` +
@@ -923,10 +1004,20 @@ export function renderHelp(): string {
     `${INDENT}A config that was NAMED and will not load is a refusal (exit 4), never a silent`,
     `${INDENT}fallback onto some other daemon. With nothing named, the default data dir is used`,
     `${INDENT}and no daemon is ever spawned into it.`,
+    '\narguments that start with a dash:',
+    `${INDENT}\`--\` ends flag parsing: everything after it is an operand, however it is spelled.`,
+    `${INDENT}Use it for a dashed operand — \`crabcast status -- -odd-key\`.`,
+    `${INDENT}\`send\` does not need it: flag parsing stops where <message...> begins, so`,
+    `${INDENT}\`crabcast send demo --help\` already sends the text "--help" — and a \`--\` typed`,
+    `${INDENT}there is sent as part of the message, because that is what "stops" means.`,
+    `${INDENT}The trade: a flag written AFTER the message is message text. Put flags first.`,
+    `${INDENT}Quoting does not help: the shell eats the quotes, so "--help" arrives as --help.`,
     '\noutput:',
     `${INDENT}Human-readable by default. --json prints the daemon's response exactly as it`,
     `${INDENT}arrived — every field, including the \`id\` this invocation used to correlate it.`,
-    `${INDENT}Capacity derivations print verbatim and unindented in both modes.`,
+    `${INDENT}Capacity derivations print verbatim and unindented in both modes; \`capacity\` and`,
+    `${INDENT}a refused \`activate\` carry one, \`list\` does not — it reports the same figures as`,
+    `${INDENT}numbers instead. Anything a renderer does not recognise is printed anyway.`,
     `\nrun \`crabcast <command> --help\` for one command's arguments.`
   );
 }
@@ -959,6 +1050,25 @@ interface ParsedCommandLine {
   wantsHelp: boolean;
 }
 
+/**
+ * The index at which a command stops having flags and starts having text.
+ *
+ * A `rest` positional consumes everything from its own index onward, and once
+ * it has started, a token beginning with `-` is part of the message rather
+ * than a flag. Without this, `crabcast send demo "--help"` was read as a
+ * request for help: it printed the help, sent nothing, and exited 0 — a
+ * success reported over work that never happened, which is the one failure
+ * this epic has paid for most often.
+ *
+ * Returns Infinity for a command with no `rest` positional, so nothing about
+ * the other seven changes.
+ */
+function restStartsAt(spec: CommandSpec | null): number {
+  if (!spec) return Infinity;
+  const index = spec.positionals.findIndex((p) => p.rest);
+  return index === -1 ? Infinity : index;
+}
+
 export function parseArgs(argv: string[]): ParsedCommandLine {
   const flags: Record<string, string | number | boolean> = {};
   const positionals: string[] = [];
@@ -967,6 +1077,14 @@ export function parseArgs(argv: string[]): ParsedCommandLine {
 
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
+
+    // Everything from the rest positional's index onward is text. Checked
+    // before `--` as well as before the flag branch: a message that is
+    // literally `--` is a message.
+    if (positionals.length >= restStartsAt(spec)) {
+      positionals.push(token);
+      continue;
+    }
 
     if (!noMoreFlags && token === '--') {
       noMoreFlags = true;
@@ -999,6 +1117,15 @@ export function parseArgs(argv: string[]): ParsedCommandLine {
       const raw = inline !== undefined ? inline : argv[++i];
       if (raw === undefined) throw new UsageError(`--${name} needs a value.`);
       if (flag.kind === 'number') {
+        // Plain decimal only. `Number()` alone reads `--lines 0x10` as 16 and
+        // `--timeout 1e9` as a billion — a typo silently becoming a number
+        // nobody typed, on flags that decide how much output comes back and
+        // how long a caller waits for it.
+        if (!/^-?(\d+|\d*\.\d+)$/.test(raw.trim())) {
+          throw new UsageError(
+            `--${name} takes a plain decimal number, not ${JSON.stringify(raw)}.`
+          );
+        }
         const value = Number(raw);
         if (!Number.isFinite(value)) {
           throw new UsageError(`--${name} takes a number, not ${JSON.stringify(raw)}.`);
@@ -1034,9 +1161,28 @@ function operandsFor(spec: CommandSpec, given: string[]): string[] {
   for (let i = 0; i < spec.positionals.length; i++) {
     const p = spec.positionals[i];
     if (p.rest) {
-      const joined = given.slice(i).join(' ');
+      const rest = given.slice(i);
+      const joined = rest.join(' ');
       if (!joined && p.required) {
         throw new UsageError(`\`crabcast ${spec.name}\` needs <${p.name}...>.\n${usageLine(spec)}`);
+      }
+      // Said out loud rather than guessed at. Flag parsing stops here by
+      // design, so `send demo hi --type shell` sends the words "--type shell"
+      // — which is right when they are the message and wrong when they were
+      // meant as a flag, and the CLI cannot know which. It can say what it
+      // did: a note on stderr, no change to what is sent and no change to the
+      // exit code, because the message WAS delivered and reporting otherwise
+      // would be its own lie.
+      const mistakable = rest.filter((token) =>
+        spec.flags.some((f) => token === `--${f.name}` || token.startsWith(`--${f.name}=`))
+      );
+      if (mistakable.length) {
+        process.stderr.write(
+          `crabcast: note: ${mistakable.join(' ')} is part of the ${p.name}, not a flag — ` +
+            `everything after <${spec.positionals[i - 1]?.name ?? 'the operands'}> is ${p.name} text. ` +
+            `Put flags before it: crabcast ${spec.name} --${spec.flags[0]?.name ?? 'flag'} … ` +
+            `${spec.positionals.slice(0, i).map((q) => `<${q.name}>`).join(' ')} <${p.name}...>\n`
+        );
       }
       out.push(joined);
       return out;
@@ -1198,11 +1344,22 @@ function describeUnreachable(dataDir: string, spawned: boolean, cause: string): 
   ];
   if (spawned) {
     parts.push(
-      `A daemon was spawned and did not come up. Anything it printed on the way out is in:`,
+      `A daemon was spawned and did not come up. Its stderr, if it printed any, is in:`,
       `${INDENT}${errPath}`
     );
     const tail = tailFile(errPath, 20);
-    if (tail) parts.push('', `last ${tail.split('\n').length} line(s) of that file:`, tail);
+    if (tail) {
+      parts.push(
+        '',
+        // The file is opened append-only (ipc.ts), so it accumulates across
+        // spawns and this tail may belong to an earlier one. Said rather than
+        // implied: attributing a previous run's stderr to this failure would
+        // send a reader after a bug that was already fixed.
+        `last ${tail.split('\n').length} line(s) of that file — it is APPEND-ONLY across`,
+        `spawns, so these may be from an earlier attempt; check the timestamps:`,
+        tail
+      );
+    }
   } else {
     parts.push(
       `This command does not start a daemon (see \`crabcast --help\`). Start one with an`,
@@ -1343,17 +1500,51 @@ export async function main(argv: string[]): Promise<ExitCode> {
 /**
  * Run only when this file is the program.
  *
- * KAN-94's parity check imports COMMANDS from `dist/cli.js`; without this
+ * KAN-94's parity check will import COMMANDS from `dist/cli.js`; without this
  * guard, importing the table would run the CLI.
+ *
+ * **It fails open, loudly.** `realpathSync` is what makes `npm link` work —
+ * the bin is a symlink to `dist/cli.js`, so the two paths are only equal
+ * after they are resolved — and it can throw (a deleted entry, a permission
+ * wall, a broken link). Returning `false` there meant the CLI did nothing at
+ * all: no output, no diagnostic, exit 0, which a shell script reads as the
+ * command having worked. Silence indistinguishable from success is the exact
+ * failure this whole file is written against, so when the question cannot be
+ * answered the answer is to run and say why — a wrong run is visible, and a
+ * silent no-op is not.
  */
 function invokedDirectly(): boolean {
   const entry = process.argv[1];
+  // No program at all: an embedder ran this module with no script path. That
+  // is not an unanswerable question, it is a definite "not the program".
   if (!entry) return false;
-  try {
-    return fs.realpathSync(entry) === fs.realpathSync(fileURLToPath(import.meta.url));
-  } catch {
-    return false;
-  }
+
+  const self = fileURLToPath(import.meta.url);
+  const resolve = (p: string): string | null => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const realEntry = resolve(entry);
+  const realSelf = resolve(self);
+  if (realEntry !== null && realSelf !== null) return realEntry === realSelf;
+
+  // One of them would not resolve. A plain comparison still answers the
+  // common case (an entry that is not a symlink), and a match is a match.
+  if (path.resolve(entry) === path.resolve(self)) return true;
+
+  // Genuinely undecidable: the paths differ textually, but a symlink we
+  // could not follow may still make them the same file. Run, and say so.
+  process.stderr.write(
+    `crabcast: could not resolve whether this file is the program being run ` +
+      `(argv[1] is ${entry}, this module is ${self}; realpath failed for ` +
+      `${realEntry === null ? entry : self}). Running the CLI rather than ` +
+      `exiting silently — if you meant to import the command table, import it ` +
+      `and ignore this.\n`
+  );
+  return true;
 }
 
 if (invokedDirectly()) {
