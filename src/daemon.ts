@@ -1,11 +1,21 @@
 import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import { ConfigError, CrabcastConfig, loadConfig, resolveConfigPath } from './config.js';
 import { WorkspaceRegistry } from './registry.js';
 import { MessageRouter } from './router.js';
+import { PromptLoader } from './prompt.js';
+import { HerdrBridge } from './herdr.js';
+import {
+  checkHerdrVersion,
+  describeFdCeiling,
+  isFdCeilingUnraised,
+  readFdUsage
+} from './herdr-health.js';
 import { ensureDataDir, onJsonLines, socketPathFor, writeJsonLine } from './ipc.js';
 import { resolveUserPath, which } from './env.js';
+import { AGENT_LAUNCHERS } from './launchers.js';
 
 // The single long-lived CrabCast daemon. Owns all sessions and the workspace
 // registry. Clients (the CLI, the MCP server) connect over a Unix domain
@@ -24,6 +34,25 @@ try {
     process.exit(1);
   }
   throw err;
+}
+
+// Each type's defaultLauncher checked against the launcher table now, at
+// boot, not at first activation: the config loader's contract is that a
+// config it accepts is a config the daemon can run, and a typo'd launcher
+// surviving to activation time breaks that in the one field the loader
+// cannot check itself (the table lives here, not in config.ts — validating
+// there would couple the loader to the launchers). Same channel as a
+// ConfigError: stderr, where the operator who just edited the config is
+// looking.
+for (const type of config.workspaceTypes) {
+  if (!AGENT_LAUNCHERS[type.defaultLauncher]) {
+    process.stderr.write(
+      `crabcast: refusing to start: workspace type "${type.name}": defaultLauncher ` +
+      `"${type.defaultLauncher}" is not a known launcher. Valid launchers: ` +
+      `${Object.keys(AGENT_LAUNCHERS).join(', ')}\n`
+    );
+    process.exit(1);
+  }
 }
 
 const SOCKET_PATH = socketPathFor(config.dataDir);
@@ -59,16 +88,49 @@ process.on('unhandledRejection', (err) => {
 // started it, and its environment is inherited by every herdr pane and agent.
 process.env.PATH = resolveUserPath();
 log(`PATH resolved to: ${process.env.PATH}`);
-// Presence only; the version check and fd-ceiling warning arrive with the
-// rest of herdr-health in the herdr-bridge slice (T2).
 const herdrPath = which('herdr');
 if (herdrPath) {
   log(`herdr found at ${herdrPath}`);
+  // Which herdr, not just whether there is one: 0.7 changed `agent start`
+  // incompatibly, and without this the only symptom is `unknown option: --cwd`
+  // on every activation.
+  try {
+    const version = execFileSync(herdrPath, ['--version'], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    log(`herdr version: ${version.trim()}`);
+    const versionWarning = checkHerdrVersion(version);
+    if (versionWarning) log(`WARNING: ${versionWarning}`);
+  } catch (e: any) {
+    log(`Could not read herdr's version: ${e?.message ?? String(e)}`);
+  }
 } else {
   log('WARNING: herdr not found on PATH; agent sessions will fail to attach');
 }
 
+// The pane ceiling, checked once at startup rather than left to be discovered
+// as a total spawn outage. A herdr on the stock 1024 soft limit runs out of
+// descriptors at ~205 panes, and a limit nobody verified is folklore.
+const fdUsage = readFdUsage();
+if (!fdUsage) {
+  log('herdr fd limit: no running herdr server to inspect (or no /proc); skipping the check');
+} else if (isFdCeilingUnraised(fdUsage)) {
+  log(`WARNING: ${describeFdCeiling(fdUsage)}`);
+} else {
+  log(
+    `herdr fd limit: soft ${fdUsage.softLimit}, ${fdUsage.openFds} open, ` +
+    `headroom ≈ ${fdUsage.headroomPanes} panes (pid ${fdUsage.pid})`
+  );
+}
+
 const registry = new WorkspaceRegistry(config.workspaceTypes);
+// Prompt paths belong to the config that names them, so they resolve from the
+// config file's directory rather than from any install location.
+const promptLoader = new PromptLoader(config.baseDir);
+const herdrBridge = new HerdrBridge(config.dataDir);
+
 log(`Config loaded from ${config.configPath} (dataDir ${config.dataDir})`);
 log(`Loaded ${config.workspaceTypes.length} workspace type(s):`);
 for (const type of config.workspaceTypes) {
@@ -83,16 +145,37 @@ const daemonStartedAt = new Date();
 
 const connections = new Set<net.Socket>();
 
+const broadcast = (msg: any) => {
+  for (const conn of connections) {
+    writeJsonLine(conn, msg);
+  }
+};
+
+// A PTY that dies takes the terminal with it, and the client has no other way
+// to find out: output simply stops. Announcing it is what lets a client show
+// a disconnected state instead of a frozen last frame.
+herdrBridge.setSessionEndedListener((event) => {
+  log(
+    `Session ended: ${event.sessionId} (${event.type}/${event.key}) ` +
+    `reason=${event.reason} exitCode=${event.exitCode}`
+  );
+  broadcast({ action: 'agent_detached_event', success: true, ...event });
+});
+
 const server = net.createServer((socket) => {
   connections.add(socket);
   log(`Client connected (${connections.size} total)`);
 
-  // One router per connection: responses go back to the requesting client.
+  // One router per connection: responses go back to the requesting client,
+  // and PTY listeners registered by this client die with its connection.
   const router = new MessageRouter({
     registry,
     config,
+    promptLoader,
+    herdrBridge,
     daemonStartedAt,
-    send: (msg) => writeJsonLine(socket, msg)
+    send: (msg) => writeJsonLine(socket, msg),
+    broadcast
   });
 
   onJsonLines(
@@ -114,6 +197,7 @@ const server = net.createServer((socket) => {
 
   socket.on('error', (err) => log('Client socket error:', err.message));
   socket.on('close', () => {
+    router.cleanup();
     connections.delete(socket);
     log(`Client disconnected (${connections.size} total)`);
   });
