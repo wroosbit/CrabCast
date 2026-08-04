@@ -1128,6 +1128,30 @@ export class HerdrBridge {
           TERM: 'xterm-256color',
           // The agent's own address, for an MCP server spawned inside it. One
           // variable now, because there is one thing to say.
+          //
+          // THIS IS THE ATTACH PTY, AND IT IS NOT WHERE `activatedBy` COMES
+          // FROM. Worth saying explicitly, because a variable of this name in
+          // this position is precisely the shape of the bug Butchr filed
+          // against their own build (KAN-145): identity read off the attaching
+          // side answers "who is looking at this agent" rather than "who stood
+          // it up".
+          //
+          // It is not that bug here, for two reasons, and both are load-bearing:
+          //
+          //  - The value is `session.path` — the agent this terminal is FOR,
+          //    never the party doing the attaching. It cannot name an attacher,
+          //    so it cannot answer the wrong question.
+          //  - Nothing downstream reads it. The supervisor-of-record channel is
+          //    the `crabcast` server definition written into the agent's own
+          //    `.mcp.json` (see `builtinMcpServer`), which the agent's runtime
+          //    spawns inside the agent's OWN pane. This pty runs `herdr agent
+          //    attach`; what a human types into it executes over there, not here.
+          //
+          // The behavioural guarantee is enforced one layer up rather than by
+          // this line: only a `configure` that creates an agent and an
+          // `activate` that actually starts one pass a caller identity at all.
+          // `verify-activated-by.mjs` §5 activates as A, converges and attaches
+          // as B, and asserts the record still says A.
           CRABCAST_AGENT_PATH: session.path
         } as Record<string, string>
       });

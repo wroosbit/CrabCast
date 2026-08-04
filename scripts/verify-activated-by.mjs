@@ -34,7 +34,7 @@
 // that server say who it is. File → env → process → wire → durable record, with
 // no step supplied by the script.
 //
-//   §2-§7 DO supply their own input: they hand the in-process router an
+//   §2-§8 DO supply their own input: they hand the in-process router an
 //   `agentPath` directly, because producing a preempted agent, a 500-record
 //   compaction and a failed registry write through four real MCP servers would
 //   be a slower proof of the same properties. What that leaves uncovered is
@@ -51,9 +51,11 @@
 //      asserted non-empty, and each value checked rather than merely present
 //   4. no identity records NO parent; a malformed claim becomes no parent
 //      rather than half a one; and an agent cannot be its own supervisor
-//   5. parentage survives compaction past the 500-record threshold
-//   6. the durable record and the response agree when the write fails
-//   7. THE CHECKS CAN FAIL — the compiled daemon is mutated and they go red,
+//   5. an ATTACH by a different supervisor does not re-parent — the KAN-145
+//      question, asked of our own build: activate as A, converge as B, still A
+//   6. parentage survives compaction past the 500-record threshold
+//   7. the durable record and the response agree when the write fails
+//   8. THE CHECKS CAN FAIL — the compiled daemon is mutated and they go red,
 //      with each mutation's own preconditions asserted first
 //
 // Usage:
@@ -528,20 +530,51 @@ const config = loadConfig(configPath);
 const bin = path.join(tmp, 'bin');
 fs.mkdirSync(bin, { recursive: true });
 const CENSUS_FILE = path.join(tmp, 'census.json');
+
+// STATEFUL, like the live one, and it has to be: §5 and two of §8's mutations
+// turn on the difference between an activation that STARTS an agent and one
+// that converges on a running one. A shim whose `agent start` does nothing can
+// never produce the first, so those sections would have had no world to make
+// their claim about — which their preconditions said out loud rather than
+// passing over. `agent start` really appends to the census this daemon then
+// joins its registry against, so `started: true` is a measurement.
+const shimImplLocal = path.join(bin, 'herdr-shim.mjs');
+fs.writeFileSync(shimImplLocal, `
+import fs from 'fs';
+const censusFile = ${JSON.stringify(CENSUS_FILE)};
+const args = process.argv.slice(2);
+const load = () => { try { return JSON.parse(fs.readFileSync(censusFile, 'utf8')).result.agents; } catch { return []; } };
+const save = (agents) => fs.writeFileSync(censusFile,
+  JSON.stringify({ id: 'cli:agent:list', result: { type: 'agent_list', agents } }));
+const out = (o) => { process.stdout.write(JSON.stringify(o)); process.exit(0); };
+const [a, b] = args;
+if (a === '--version') { process.stdout.write('herdr 0.6.4\\n'); process.exit(0); }
+if (a === 'agent' && b === 'list') out({ id: 'cli:agent:list', result: { type: 'agent_list', agents: load() } });
+if (a === 'agent' && b === 'get') {
+  const f = load().find((s) => s.name === args[2]);
+  if (f) out({ result: { agent: f } });
+  process.stderr.write('{"error":{"code":"agent_not_found","message":"no such agent"}}');
+  process.exit(1);
+}
+if (a === 'agent' && b === 'start') {
+  const agents = load();
+  const cwdIdx = args.indexOf('--cwd');
+  agents.push({
+    name: args[2], pane_id: '%' + (500 + agents.length),
+    agent: 'shell', agent_status: 'working',
+    cwd: cwdIdx === -1 ? '' : args[cwdIdx + 1]
+  });
+  save(agents);
+  out({ result: { agent: { name: args[2], pane_id: agents[agents.length - 1].pane_id } } });
+}
+if (a === 'agent' && b === 'attach') { setInterval(() => {}, 60000); }
+else if (a === 'pane' && b === 'close') { save(load().filter((s) => s.pane_id !== args[2])); out({ result: {} }); }
+else if (a === 'tab' && b === 'create') { out({ result: { tab: { tab_id: '7' }, root_pane: { workspace_id: 'w1', terminal_id: 't1' } } }); }
+else if (a !== 'agent') { out({ result: {} }); }
+`);
 fs.writeFileSync(
   path.join(bin, 'herdr'),
-  `#!/bin/sh
-if [ "$1" = "agent" ] && [ "$2" = "list" ]; then
-  cat ${JSON.stringify(CENSUS_FILE)}
-  exit 0
-fi
-if [ "$1" = "agent" ] && [ "$2" = "get" ]; then
-  echo '{"error":{"code":"agent_not_found","message":"no such agent"}}'
-  exit 1
-fi
-echo '{"result":{}}'
-exit 0
-`,
+  `#!/bin/bash\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(shimImplLocal)} "$@"\n`,
   { mode: 0o755 }
 );
 process.env.PATH = `${bin}:${realPath}`;
@@ -821,7 +854,130 @@ rule('4. no identity records NO parent — and the negative case has earned it')
 }
 
 // ===========================================================================
-rule('5. parentage survives compaction past the 500-record threshold');
+rule('5. an ATTACH by a different supervisor does not re-parent');
+// ===========================================================================
+//
+// THE QUESTION BUTCHR FILED AGAINST THEIR OWN BUILD (KAN-145), asked of ours.
+// Their defect: the caller identity was read from the ATTACH side, so
+// `activatedBy` answered "who is looking at this agent" rather than "who stood
+// it up". The two coincide often enough to pass a casual test and diverge the
+// moment anyone touches a pane they did not create.
+//
+// Under path identity the consequence would be worse than a wrong label: a
+// reconciler that polls `activate` to hold desired state converges on every
+// agent in the fleet, so it would quietly become the supervisor of record for
+// all of them and the org chart would redraw itself to say so.
+//
+// The shape of the answer is that only two calls pass a caller identity at all
+// — the `configure` that creates an agent and the `activate` that STARTS one.
+// This section is the behaviour that rule buys.
+
+{
+  const h = harness('s5-attach');
+  const A = ownedDir('s5a', 'supervisor-a');
+  const B = ownedDir('s5a', 'supervisor-b');
+  const worker = ownedDir('s5a', 'worker');
+
+  // A stands the worker up. This is the only call in this section that may
+  // mint, and it is what every assertion below is a difference from.
+  //
+  // `override: true` throughout: the capacity gate reads the REAL machine load,
+  // and a box that is busy would refuse these activations and leave this
+  // section asserting nothing. The override is about capacity and touches
+  // nothing this section is about.
+  await h.invoke({ action: 'configure_agent', path: worker, ...KNOBS, agentPath: A });
+  setCensus([]);
+  const started = await h.invoke({ action: 'activate_agent', path: worker, agentPath: A, override: true });
+  given(
+    started.success === true && started.started === true,
+    'GIVEN: A actually STARTED the worker — `started: true`, not a converge on something ' +
+      'already up. If this were a no-op the section would be comparing two carry-forwards',
+    `started: ${JSON.stringify(started.started)}`
+  );
+  given(
+    started.activatedBy === A,
+    'GIVEN: and the record names A. Everything below asserts this value does NOT move',
+    `activatedBy: ${JSON.stringify(started.activatedBy)}`
+  );
+
+  const reads = async (label) => (await h.invoke({ action: 'agent_status', path: worker })).activatedBy;
+
+  // --- B converges on the running agent: the re-attach path ----------------
+  //
+  // `activate` on a running agent is how a terminal is re-attached in this
+  // daemon, so this IS the attach case, driven through the verb that performs
+  // it rather than simulated.
+  const converged = await h.invoke({ action: 'activate_agent', path: worker, agentPath: B, override: true });
+  check(
+    converged.success === true && converged.alreadyRunning === true,
+    'B\'s activate finds the worker already running and re-attaches rather than spawning',
+    `alreadyRunning: ${JSON.stringify(converged.alreadyRunning)}, started: ${JSON.stringify(converged.started)}`
+  );
+  check(
+    converged.activatedBy === A,
+    'THE KAN-145 CASE — and it still says A. A converging activate by a DIFFERENT supervisor ' +
+      'does not re-parent: it re-attaches a terminal and repairs a record, it does not stand ' +
+      'anything up',
+    `A is ${path.basename(A)}, B is ${path.basename(B)}, the record says ${JSON.stringify(converged.activatedBy)}`
+  );
+  check(await reads() === A, 'and the durable record agrees on the next read');
+
+  // --- B reads and messages it: the other things "attach" can mean ---------
+  for (const action of ['agent_status', 'tail_agent', 'send_to_agent']) {
+    await h.invoke({
+      action, path: worker, agentPath: B,
+      ...(action === 'send_to_agent' ? { message: 'hello from B' } : {})
+    });
+  }
+  check(
+    await reads() === A,
+    'nor do B\'s reads and messages move it — status, tail and send write no record at all, ' +
+      'so "who is looking" has no path to the field in the first place',
+    `activatedBy: ${JSON.stringify(await reads())}`
+  );
+
+  // --- B reconfigures it: the same theft through a different verb ----------
+  //
+  // T4 made `configure` something you may call on a RUNNING agent to move a
+  // knob, which opened a second door onto this. It is closed the same way.
+  const reconfigured = await h.invoke({
+    action: 'configure_agent', path: worker, ...KNOBS, priority: 9, agentPath: B
+  });
+  check(
+    reconfigured.success === true,
+    'B may still reconfigure the worker — this is not a refusal, the knob moves',
+    reconfigured.error
+  );
+  check(
+    await reads() === A,
+    'but changing an agent\'s priority is not standing it up, so the supervisor of record is ' +
+      'still A: the second door onto the same theft is closed too',
+    `activatedBy: ${JSON.stringify(await reads())}`
+  );
+
+  // --- and a genuine restart BY B does re-parent, which is the control -----
+  //
+  // Without this the section would be satisfied by an implementation where
+  // parentage simply never changes, which is a different bug.
+  await h.invoke({ action: 'deactivate_agent', path: worker });
+  setCensus([]);
+  const restarted = await h.invoke({ action: 'activate_agent', path: worker, agentPath: B, override: true });
+  given(
+    restarted.started === true,
+    'GIVEN: B now genuinely STARTS the stopped worker, rather than converging on it'
+  );
+  check(
+    restarted.activatedBy === B,
+    'THE CONTROL — and THAT does re-parent to B. The rule is "who stood it up", not "never ' +
+      'changes": an implementation that froze parentage forever would pass every check above ' +
+      'and fail this one',
+    `activatedBy: ${JSON.stringify(restarted.activatedBy)}`
+  );
+  setCensus([]);
+}
+
+// ===========================================================================
+rule('6. parentage survives compaction past the 500-record threshold');
 // ===========================================================================
 //
 // Criterion 4. Compaction's preserve set is an allowlist over ROWS — T1's rule
@@ -895,7 +1051,7 @@ rule('5. parentage survives compaction past the 500-record threshold');
 }
 
 // ===========================================================================
-rule('6. the durable record and the response agree when the write fails');
+rule('7. the durable record and the response agree when the write fails');
 // ===========================================================================
 //
 // Criterion 5. A failed registry write must not appear as a successful
@@ -986,7 +1142,7 @@ rule('6. the durable record and the response agree when the write fails');
 }
 
 // ===========================================================================
-rule('7. THE CHECKS CAN FAIL — the compiled daemon is mutated, and they go red');
+rule('8. THE CHECKS CAN FAIL — the compiled daemon is mutated, and they go red');
 // ===========================================================================
 //
 // A check that cannot fail is not a check, and a field that is always null
@@ -1012,21 +1168,28 @@ try {
  * pass against an UNMUTATED daemon, and the section reads exactly like
  * coverage. So a mutation that did not apply is a hard error, not a warning.
  */
-function mutantDist(name, file, from, to) {
+function mutantDist(name, file, ...edits) {
   const dir = path.join(tmp, `mutant-${name}`);
   fs.cpSync(distDir, dir, { recursive: true });
   const target = path.join(dir, file);
-  const before = fs.readFileSync(target, 'utf8');
-  const occurrences = before.split(from).length - 1;
-  if (occurrences !== 1) {
-    throw new Error(
-      `mutation '${name}' expected exactly one occurrence of ${JSON.stringify(from)} in ` +
-        `${file}, found ${occurrences}. THE BUILD WAS NOT MUTATED, so the section using it ` +
-        `would have proved nothing. Fix the mutation, not this check — an un-mutatable check ` +
-        `is an unproven one.`
-    );
+  let text = fs.readFileSync(target, 'utf8');
+  // EVERY edit is checked, not just the first. A compound mutation whose second
+  // replacement silently found nothing is a mutant missing half its damage, and
+  // the assertion against it would then be measuring the wrong thing while
+  // looking exactly like coverage.
+  for (const [from, to] of edits) {
+    const occurrences = text.split(from).length - 1;
+    if (occurrences !== 1) {
+      throw new Error(
+        `mutation '${name}' expected exactly one occurrence of ${JSON.stringify(from)} in ` +
+          `${file}, found ${occurrences}. THE BUILD WAS NOT MUTATED, so the section using it ` +
+          `would have proved nothing. Fix the mutation, not this check — an un-mutatable check ` +
+          `is an unproven one.`
+      );
+    }
+    text = text.replace(from, to);
   }
-  fs.writeFileSync(target, before.replace(from, to));
+  fs.writeFileSync(target, text);
   return dir;
 }
 
@@ -1038,8 +1201,8 @@ function mutantDist(name, file, from, to) {
   // calling. This is the mutation that matters most in this file.
   const dir = mutantDist(
     'identity-never-issued', 'launchers.js',
-    '...(agentPath ? { CRABCAST_AGENT_PATH: agentPath } : {})',
-    '...(false ? { CRABCAST_AGENT_PATH: agentPath } : {})'
+    ['...(agentPath ? { CRABCAST_AGENT_PATH: agentPath } : {})',
+     '...(false ? { CRABCAST_AGENT_PATH: agentPath } : {})']
   );
   const { builtinMcpServer: Broken } = await import(path.join(dir, 'launchers.js'));
   const { builtinMcpServer: Real } = await import(path.join(distDir, 'launchers.js'));
@@ -1071,8 +1234,7 @@ function mutantDist(name, file, from, to) {
   // one, which is what §3 asserts VALUES rather than presence to catch.
   const dir = mutantDist(
     'echo-drops-parent', 'router.js',
-    'activatedBy: intent.record.activatedBy',
-    'activatedBy: null'
+    ['activatedBy: intent.record.activatedBy', 'activatedBy: null']
   );
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
@@ -1108,8 +1270,8 @@ function mutantDist(name, file, from, to) {
   // compaction. Named in the comment on that destructure.
   const dir = mutantDist(
     'intents-strips-parent', 'agent-registry.js',
-    'const { v, event, at, preemption, wasPreempted, everActivated, ...record } = entry;',
-    'const { v, event, at, preemption, wasPreempted, everActivated, activatedBy, ...record } = entry;'
+    ['const { v, event, at, preemption, wasPreempted, everActivated, ...record } = entry;',
+     'const { v, event, at, preemption, wasPreempted, everActivated, activatedBy, ...record } = entry;']
   );
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
@@ -1136,20 +1298,30 @@ function mutantDist(name, file, from, to) {
 }
 
 {
-  // MUTATION D — self-parentage is allowed. The refusal is a decision, not
-  // incidental behaviour, so it gets its own mutation.
+  // MUTATION D — self-parentage, and it takes TWO edits to reach, which is
+  // itself the finding.
+  //
+  // Once only a `configure` that CREATES an agent and an `activate` that STARTS
+  // one pass a caller identity, a self-claim is structurally unreachable: an
+  // agent must be running to call anything, and neither of those two calls can
+  // come from an agent that is already up at the path they name. The guard in
+  // `parentFor` is therefore defence in depth rather than a live gate, and this
+  // mutation is honest about that by removing BOTH the rule that makes it
+  // unreachable and the guard itself. With both gone an agent becomes its own
+  // supervisor — a cycle of length one, which any consumer walking to a root
+  // walks forever.
   const dir = mutantDist(
     'self-parentage-allowed', 'router.js',
-    // Anchored on the emitted form: tsc puts the `return` on its own line, so
-    // the source text is not what lands in dist.
-    'if (caller !== null && caller !== target)',
-    'if (caller !== null && caller !== target || caller !== null)'
+    ['const durable = this.rememberActivated(intent.record, null);',
+     'const durable = this.rememberActivated(intent.record, callerIdentity(data));'],
+    ['if (caller !== null && caller !== target)',
+     'if (caller !== null && caller !== target || caller !== null)']
   );
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
-  const h = harness('s7d', Broken, BrokenReg);
-  const parent = ownedDir('s7d', 'parent');
-  const selfish = ownedDir('s7d', 'selfish');
+  const h = harness('s8d', Broken, BrokenReg);
+  const parent = ownedDir('s8d', 'parent');
+  const selfish = ownedDir('s8d', 'selfish');
 
   await h.invoke({ action: 'configure_agent', path: selfish, ...KNOBS, agentPath: parent });
   given(
@@ -1158,57 +1330,125 @@ function mutantDist(name, file, from, to) {
   );
   setCensus([ourPane(selfish, '%70')]);
   const selfActivated = await h.invoke({ action: 'activate_agent', path: selfish, agentPath: selfish });
+  given(
+    selfActivated.alreadyRunning === true,
+    'PRECONDITION: and its self-claim arrives on the converge path, which is the only path an ' +
+      'agent that is already running can call from'
+  );
   check(
     selfActivated.activatedBy === selfish,
-    'the mutant lets an agent become its own supervisor — a cycle of length one, which any ' +
-      'consumer walking to a root walks forever. §4 goes red',
+    'with BOTH rules removed the mutant lets an agent become its own supervisor. The real ' +
+      'daemon refuses it twice over — §4 asserts the behaviour, and this is what says the ' +
+      'guard is not the only thing holding it',
     `activatedBy: ${JSON.stringify(selfActivated.activatedBy)}`
   );
   setCensus([]);
 }
 
 {
-  // MUTATION E — the no-op short-circuit stops comparing the parent, so the one
-  // call that establishes a NEW supervisor over a running agent is swallowed.
-  // A quiet one, and it was a real risk while writing this: the short-circuit
-  // predates the field.
+  // MUTATION E — the no-op short-circuit stops comparing the parent. The one
+  // call that establishes a supervisor over an agent the record already calls
+  // `activated` is exactly the call this would swallow. A quiet one, and it was
+  // a real risk while writing this: the short-circuit predates the field.
   const dir = mutantDist(
     'noop-ignores-new-supervisor', 'router.js',
-    'current.record.activatedBy === toWrite.activatedBy',
-    'true'
+    ['current.record.activatedBy === toWrite.activatedBy', 'true']
   );
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
 
+  // THE SCENARIO IS THE MISSING-AGENT RESTART, and it has to be, because it is
+  // the only shape that reaches the short-circuit with a caller in hand:
+  //
+  //   - the record's last event must be `activated` and its config unchanged,
+  //     or the no-op never fires and the mutation measures nothing;
+  //   - the agent must NOT actually be running, so the activation takes the
+  //     spawn path — the one path that passes a caller identity at all;
+  //   - and the caller must be a different supervisor, so the only thing that
+  //     differs between the row on disk and the row to write is the parent.
+  //
+  // The registry is seeded rather than driven through A, because "recorded
+  // active and absent anyway" is a state a crash produces, not a verb.
   const runScenario = async (Router, Registry, logName) => {
     const h = harness(logName, Router, Registry);
     const first = ownedDir(logName, 'first');
     const second = ownedDir(logName, 'second');
     const agent = ownedDir(logName, 'agent');
-    await h.invoke({ action: 'configure_agent', path: agent, ...KNOBS, agentPath: first });
-    setCensus([ourPane(agent, '%80')]);
-    await h.invoke({ action: 'activate_agent', path: agent, agentPath: first });
-    // A DIFFERENT supervisor re-activates the already-running agent.
-    await h.invoke({ action: 'activate_agent', path: agent, agentPath: second });
+    const seeded = {
+      path: agent, config: { ...KNOBS }, configVersion: 1,
+      configuredAt: new Date().toISOString(), activatedBy: first
+    };
+    h.agentRegistry.recordConfigured(seeded);
+    h.agentRegistry.recordActivated(seeded);
+    setCensus([]);
+    await h.invoke({ action: 'activate_agent', path: agent, agentPath: second, override: true });
     const status = await h.invoke({ action: 'agent_status', path: agent });
     setCensus([]);
-    return { got: status.activatedBy, first, second };
+    return { got: status.activatedBy, state: status.state, first, second };
   };
 
-  const real = await runScenario(MessageRouter, AgentRegistry, 's7e-real');
+  const real = await runScenario(MessageRouter, AgentRegistry, 's8e-real');
+  given(
+    real.state === 'running',
+    'PRECONDITION: the activation actually STARTED the agent — if it had been refused there ' +
+      'would be no write for the short-circuit to swallow',
+    `state: ${real.state}`
+  );
   given(
     real.got === real.second,
-    'PRECONDITION: the real daemon re-parents a running agent when a different supervisor ' +
-      'activates it — otherwise the mutant below would match it by accident',
+    'PRECONDITION: and the real daemon re-parents it to the supervisor that restarted it — ' +
+      'otherwise the mutant below would match it by accident',
     `real: ${JSON.stringify(real.got)} (second is ${real.second})`
   );
-  const broken = await runScenario(Broken, BrokenReg, 's7e-broken');
+  const broken = await runScenario(Broken, BrokenReg, 's8e-broken');
   check(
     broken.got === broken.first,
-    'the mutant treats the re-activation as a no-op and keeps the OLD supervisor: the only ' +
-      'call that could establish a new one is exactly the call it swallows',
+    'the mutant swallows that write as a no-op and keeps the OLD supervisor — §5\'s control ' +
+      'assertion goes red',
     `mutant: ${JSON.stringify(broken.got)} (first is ${broken.first})`
   );
+}
+
+{
+  // MUTATION F — KAN-145 ITSELF, REINTRODUCED. The converging `activate` branch
+  // takes its caller from whoever is calling instead of passing `null`, so an
+  // agent re-parents to whoever last attached to it. This is the mutation the
+  // epic's question asked for, and §5 is what it turns red.
+  const dir = mutantDist(
+    'converge-steals-parentage', 'router.js',
+    ['const durable = this.rememberActivated(intent.record, null);',
+     'const durable = this.rememberActivated(intent.record, callerIdentity(data));']
+  );
+  const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
+  const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
+  const h = harness('s8f', Broken, BrokenReg);
+  const A = ownedDir('s8f', 'a');
+  const B = ownedDir('s8f', 'b');
+  const worker = ownedDir('s8f', 'worker');
+
+  await h.invoke({ action: 'configure_agent', path: worker, ...KNOBS, agentPath: A });
+  setCensus([]);
+  const started = await h.invoke({ action: 'activate_agent', path: worker, agentPath: A, override: true });
+  given(
+    started.started === true && started.activatedBy === A,
+    'PRECONDITION: A started the worker and the mutant recorded A — so what follows is B ' +
+      'TAKING it, not B being there all along',
+    `started ${started.started}, activatedBy ${JSON.stringify(started.activatedBy)}`
+  );
+  const converged = await h.invoke({ action: 'activate_agent', path: worker, agentPath: B, override: true });
+  given(
+    converged.alreadyRunning === true,
+    'PRECONDITION: and B\'s call is a CONVERGE on a running agent, not a start',
+    `alreadyRunning: ${JSON.stringify(converged.alreadyRunning)}`
+  );
+  check(
+    converged.activatedBy === B,
+    'the mutant re-parents the worker to B for merely converging on it — Butchr\'s KAN-145 ' +
+      'reproduced in this codebase, where a reconciler that polls `activate` would become the ' +
+      'supervisor of record for the whole fleet. §5 goes red',
+    `A is ${path.basename(A)}, B is ${path.basename(B)}, the mutant says ${JSON.stringify(converged.activatedBy)}`
+  );
+  setCensus([]);
 }
 
 // ------------------------------------------------------------------- verdict

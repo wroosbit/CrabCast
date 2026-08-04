@@ -1091,6 +1091,22 @@ function callerIdentity(data: any): string | null {
  *     this daemon issued (see {@link callerIdentity}). A caller with no
  *     identity derives NOTHING; it does not derive a plausible default, and it
  *     does not derive "the last one we saw".
+ *
+ *     **AND ONLY TWO CALLS EVER PASS A CALLER AT ALL**, which is the rule that
+ *     makes this field mean what its name says. `activatedBy` is *who stood
+ *     this agent up* — so a caller is offered only by the `configure` that
+ *     brings the agent into existence and by the `activate` that actually
+ *     STARTS it. Every other path passes `null` and lands on carry-forward: a
+ *     converging `activate` on an already-running agent, a reconfigure of a
+ *     live one, a stand-down, a boot-time restoration.
+ *
+ *     That distinction is not a refinement, it is the defect Butchr filed
+ *     against their own version (KAN-145): identity taken from whoever is
+ *     converging or attaching answers "who is looking at this agent", which
+ *     coincides with "who started it" exactly often enough to pass a casual
+ *     test and diverges the moment anyone touches a pane they did not create.
+ *     A reconciler that polls `activate` to hold desired state would otherwise
+ *     become the supervisor of record for the entire fleet.
  *  2. **Carry-forward** — what the record already says. Every verb after
  *     `configure` re-records the whole agent, so without this a stand-down, a
  *     converging `activate` or a reconfigure by a human would write a fresh row
@@ -1647,9 +1663,15 @@ export class MessageRouter {
       // A reconfigure by a HUMAN must not orphan an agent its supervisor
       // created, which is what `parentFor`'s carry-forward branch is for: this
       // call re-records the whole agent, and the parent travels with it.
+      // AND ONLY ON THE CALL THAT CREATES THE AGENT, which is why the caller is
+      // `null` when a record already exists. T4 made `configure` something you
+      // may call on a RUNNING agent to move a knob, so without this a
+      // reconfigure by anyone would re-parent it — the same theft the converging
+      // `activate` branch refuses, through a different verb. Changing an
+      // agent's priority is not standing it up.
       activatedBy: parentFor({
         target: agentPath,
-        caller: callerIdentity(data),
+        caller: existing ? null : callerIdentity(data),
         current: existing?.record.activatedBy
       })
     };
@@ -2552,7 +2574,28 @@ export class MessageRouter {
       // REPAIRING the record would silently reset the compare-and-set token a
       // reconciler diffs on, on an agent that had been configured seven times.
       // A converging write that loses a field is not a repair.
-      const durable = this.rememberActivated(intent.record, callerIdentity(data));
+      //
+      // AND `null` FOR THE CALLER, WHICH IS THE WHOLE OF KAN-145'S LESSON IN
+      // ONE ARGUMENT. This is the branch that runs when the agent is ALREADY
+      // RUNNING — it re-attaches a terminal and repairs a record; it does not
+      // stand anything up. So the caller here is whoever is *looking at* this
+      // agent, not whoever *started* it, and those are different questions that
+      // coincide often enough to look identical in testing.
+      //
+      // Butchr filed exactly this against their own implementation: identity
+      // taken from the attaching side answers "who is attached" and silently
+      // re-parents an agent to whoever last converged on it. Under path
+      // identity that would be worse than cosmetic — a reconciler polling
+      // `activate` to hold desired state would quietly become the supervisor of
+      // record for every agent in the fleet, and the org chart the customer
+      // wants would redraw itself to say so.
+      //
+      // Passing `null` sends `parentFor` down its carry-forward branch: the
+      // record keeps the supervisor that actually started the agent. Only the
+      // spawn path below may mint one. See `parentFor`, and
+      // `verify-activated-by.mjs` §5, which activates as A, converges as B, and
+      // asserts it still says A.
+      const durable = this.rememberActivated(intent.record, null);
 
       // THE SECOND QUESTION, ASKED SEPARATELY (KAN-136). `occupancy.ours`
       // answers "is this pane ours"; it says nothing about whether THIS daemon
