@@ -1593,6 +1593,47 @@ function deactivationCause(data: any, preemption?: PreemptionRecord) {
   };
 }
 
+/**
+ * THE DURABILITY ANSWER A LIFECYCLE EVENT CARRIES (KAN-165).
+ *
+ * `agent.configured`, `agent.activated` and `agent.deactivated` all fire after
+ * a durable write that the registry is not allowed to throw on — an unwritable
+ * log must not fail the operation in flight — and all three used to fire
+ * IDENTICALLY whether or not that write landed, while the contract's sentence
+ * for each said the record had been written. The daemon knew; it carried the
+ * answer to the response and withheld it from the event.
+ *
+ * This is the answer, in one place, spread by all six emission sites. One
+ * function rather than six ternaries for the same reason `rememberActivated`
+ * states the parentage rule once: the sixth copy is where the wording quietly
+ * stops matching the first, and this one is a published field.
+ *
+ * WHAT `undefined` MEANS, because it is a real case and not a defensive
+ * default. Exactly one site reaches this without an outcome: the
+ * session-addressed stand-down of an agent this daemon holds NO RECORD for.
+ * Nothing was written because there was nothing to write against — and the
+ * postcondition every one of these events is about ("a restart will see what
+ * this event describes") already holds, since a registry with no row for the
+ * path will not restore it. So that is `durable: true`, and it is true in the
+ * same sense as a write that landed rather than in a weaker one.
+ *
+ * The other true-without-a-write case is inside `rememberActivated`, which
+ * returns `ok: true` when the disk already says exactly this and it skips the
+ * restatement. Same reading: the record agrees.
+ *
+ * `durabilityError` is defaulted rather than left possibly-undefined, so
+ * `durable: false` never arrives on the wire without a reason attached — the
+ * contract says it is present exactly when `durable` is false, and an optional
+ * field set to `undefined` is dropped by the projection.
+ */
+function durability(outcome: RecordOutcome | undefined): {
+  durable: boolean;
+  durabilityError?: string;
+} {
+  if (outcome === undefined || outcome.ok) return { durable: true };
+  return { durable: false, durabilityError: outcome.error ?? 'registry write failed' };
+}
+
 export class MessageRouter {
   private activePtyListeners = new Map<string, () => void>();
 
@@ -2155,7 +2196,14 @@ export class MessageRouter {
       // the field that slice's table already specifies for this event, carried
       // by the call that computes it.)
       changed,
-      outcomes: outcomesWith(true)
+      outcomes: outcomesWith(true),
+      // WHETHER THE WRITE ABOVE LANDED, said on the event and not only on the
+      // response (KAN-165). This broadcast fires either way — the registry does
+      // not throw, by design — so without this the event's own contract sentence
+      // ("and the record was written") was asserting a thing it had not checked.
+      // The response carries the same answer at the bottom of this handler; the
+      // two now agree, which is KAN-72's rule ported to the event path.
+      ...durability(durable)
     });
 
     // WHAT ACTIVATION WILL WRITE INTO THE CALLER'S DIRECTORY, said now.
@@ -3139,7 +3187,15 @@ export class MessageRouter {
           // subscriber can tell from the event alone whether the agent that
           // just came up is the one it configured — without a second call, and
           // without keeping a shadow copy that is wrong after a reconfigure.
-          configVersion: intent.configVersion
+          configVersion: intent.configVersion,
+          // From the CONVERGING write above, which is the one this branch exists
+          // to make. `durable: false` here is the sharpest form this field takes
+          // anywhere: the agent is running, this call re-took its terminal, and
+          // the repair the caller made precisely to get it back into `expected()`
+          // did not reach the disk. Announcing the re-attach without that would
+          // tell a fleet client the agent is restored when the next boot will
+          // still not know about it.
+          ...durability(durable)
         });
       }
 
@@ -3344,7 +3400,12 @@ export class MessageRouter {
       paneId: confirmed.paneId,
       sessionId: session.sessionId,
       status: session.status,
-      configVersion: intent.configVersion
+      configVersion: intent.configVersion,
+      // The spawn path's durability answer. `verified: true` on the response
+      // below answers "does this agent exist"; this answers "will a restart know
+      // it does", and they are different questions that a single event asserting
+      // both by implication used to conflate.
+      ...durability(durable)
     });
 
     respond({
@@ -3460,7 +3521,14 @@ export class MessageRouter {
         // Session-addressed stand-downs are never the preempt path — that one
         // goes through `handleDeactivateAgent` by path, because a preemption
         // has to work on an agent that outlived the daemon holding its session.
-        reason: 'requested'
+        reason: 'requested',
+        // THE ONE SITE THAT CAN REACH `durability` WITHOUT AN OUTCOME, and the
+        // case is real rather than defensive: a session we hold whose path has
+        // no registry record. Nothing was written because there is nothing to
+        // write against, and a registry with no row for this path will not
+        // restore it — so the record agrees with the event, which is what
+        // `durable` says. See `durability` for the rule stated once.
+        ...durability(durable)
       });
     }
 
@@ -3568,7 +3636,13 @@ export class MessageRouter {
           path: agentPath,
           paneName: session.paneName,
           sessionId: session.sessionId,
-          ...deactivationCause(data, preemption)
+          ...deactivationCause(data, preemption),
+          // ON THE PREEMPT PATH THIS IS THE FIELD THAT MATTERS MOST. A
+          // preemption is a debt the machine owes the victim, and the record of
+          // it is what a supervisor reads to decide whether to re-staff. A
+          // stand-down written down nowhere is a debt nobody can find, and the
+          // event that announced it used to look identical to one that was.
+          ...durability(durable)
         });
       }
 
@@ -3658,7 +3732,13 @@ export class MessageRouter {
         action: 'agent.deactivated',
         path: agentPath,
         paneName: result.paneName,
-        ...deactivationCause(data, preemption)
+        ...deactivationCause(data, preemption),
+        // The close path — no session of ours, the pane closed by name or
+        // already gone. `durable` is computed under the same guard as the
+        // broadcast (`(result.success || goneAlready) && !alreadyStandby`), so
+        // it is never `undefined` here; the already-standby case writes nothing
+        // AND broadcasts nothing, because nothing changed.
+        ...durability(durable)
       });
     }
 
