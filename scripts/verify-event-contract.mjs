@@ -914,6 +914,76 @@ for (const d of durableFalse) {
 }
 console.log(`   any that arrived WITHOUT a reason: ${bareDurableFalse.length}`);
 
+// ---- THE OTHER HALF OF THE PAIR: an absent optional is DROPPED, not published -
+//
+// The block above guards `durability()`. This one guards the PROJECTION, and it
+// exists because the block above did not — which was found by doing exactly
+// what the comment in `src/events.ts` invites a reader to do.
+//
+// That comment sits over the optional-field loop and says "change the handling
+// here — publish `null`, keep the key, anything — and read that helper before
+// you do", then names THIS FILE as where the pair is asserted. Review made the
+// change it names: publish `null` for an absent optional instead of dropping
+// it. `durable: false` still carried its reason, so the block above stayed
+// green and this whole script passed. The pair was caught only by
+// `verify-event-durability.mjs`, a different slice's script — so the sentence
+// naming this file was FALSE, in the comment written to stop precisely this,
+// and a reader who did the invited thing, ran the named proof and saw green
+// would have shipped it.
+//
+// So the guard now lives with the code it guards. `durability()` defaults
+// `durabilityError` BECAUSE an optional set to `undefined` is dropped here; if
+// dropping ever becomes publishing, that default stops being load-bearing and
+// nothing else in this file would have noticed.
+//
+// CORRELATED BY `seq`, which is unique per boot and on both paths, so the
+// comparison is between the frame the daemon broadcast and the payload the
+// forwarder built from THAT frame — not between two events that happen to share
+// an action name. The socket frame is the pre-projection truth: `broadcast`
+// filters nothing.
+//
+// TWO-SIDED, so neither lazy direction passes: an optional the daemon did NOT
+// send must be absent from the payload (no key, not `null`), and one it DID
+// send must be present. A projector that dropped every optional would satisfy
+// the first alone.
+const socketBySeq = new Map();
+for (const e of sub.events) if (typeof e.seq === 'number') socketBySeq.set(e.seq, e);
+
+const optionalProblems = [];
+let absentOptionalsChecked = 0;
+let presentOptionalsChecked = 0;
+for (const payload of mcp.eventPayloads()) {
+  const frame = socketBySeq.get(payload?.seq);
+  if (!frame) continue;
+  for (const field of EVENT_CONTRACT[payload.action].optional) {
+    if (frame[field] === undefined) {
+      absentOptionalsChecked++;
+      if (field in payload) {
+        optionalProblems.push(
+          `${payload.action}(seq ${payload.seq}): the daemon sent no \`${field}\`, but the ` +
+          `projection published it as ${JSON.stringify(payload[field])} — an absent optional ` +
+          `must be DROPPED, and durability() depends on that`);
+      }
+    } else {
+      presentOptionalsChecked++;
+      if (!(field in payload)) {
+        optionalProblems.push(
+          `${payload.action}(seq ${payload.seq}): the daemon sent \`${field}\` and the ` +
+          `projection dropped it`);
+      }
+    }
+  }
+}
+
+// NEITHER SIDE MAY PASS VACUOUSLY. A run in which no optional was ever absent —
+// or never present — would satisfy its half over an empty set.
+console.log(`\n   optional fields checked against the frame that produced them ` +
+  `(correlated by seq):`);
+console.log(`     absent on the wire, so must NOT appear in the payload: ${absentOptionalsChecked}`);
+console.log(`     present on the wire, so MUST appear in the payload:    ${presentOptionalsChecked}`);
+console.log(`   projections disagreeing with their own frame: ` +
+  `${optionalProblems.length ? '\n     ' + optionalProblems.join('\n     ') : '(none)'}`);
+
 // `seq` is monotonic and there are no duplicates: a subscriber's gap detection
 // is only worth anything if the numbers really increase.
 // CONTIGUOUS, not merely increasing — and the difference is load-bearing.
@@ -975,6 +1045,10 @@ verdict(
     sub.events.every((e) => e.success === undefined) &&
     // The joint property, and its own vacuity guard. See the block above.
     durableFalse.length >= 1 && bareDurableFalse.length === 0 &&
+    // The projection half of that same pair, two-sided, each side guarded
+    // against passing over an empty set.
+    optionalProblems.length === 0 &&
+    absentOptionalsChecked >= 1 && presentOptionalsChecked >= 1 &&
     driftLines.length === 0,
   `all ${EVENT_NAMES.length} published events were produced by real operations and arrived on\n` +
   '    BOTH paths — the socket frames and the MCP notifications carry the same structured\n' +
@@ -982,12 +1056,18 @@ verdict(
   '    reported no drift in either direction between the wire and the published table.\n' +
   `    ${durableFalse.length} of them carried \`durable: false\` from a real failed write, and every\n` +
   '    one carried a reason with it — the property that belongs to `durability()` and the\n' +
-  '    projection jointly and lives in neither',
+  '    projection jointly and lives in neither. Both halves of that pair are asserted\n' +
+  `    here: ${absentOptionalsChecked} optional field(s) the daemon did not send were DROPPED rather than\n` +
+  `    published as null, and ${presentOptionalsChecked} it did send were carried — checked against the frame\n` +
+  '    that produced each payload, correlated by seq',
   `socket missing [${missingSocket}], mcp missing [${missingMcp}], ` +
   `payload problems [${payloadProblems.join('; ')}], seqMonotonic=${seqMonotonic}, ` +
   `seqGaps=[${seqGaps.join(' ')}], ` +
   `durable:false seen=${durableFalse.length} (0 would be vacuous), ` +
   `without a reason=[${bareDurableFalse.map((d) => d.action).join(' ')}], ` +
+  `optionals absent/present checked=${absentOptionalsChecked}/${presentOptionalsChecked} ` +
+  `(0 either side would be vacuous), ` +
+  `optional problems [${optionalProblems.join(' | ')}], ` +
   `drift [${driftLines.join(' | ')}]`
 );
 

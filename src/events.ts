@@ -790,8 +790,18 @@ export function projectEvent(msg: any): ProjectedEvent | null {
   // this line would otherwise let `durable: false` go out with no reason
   // attached, on the one path a subscriber cannot re-request. Change the
   // handling here — publish `null`, keep the key, anything — and read that
-  // helper before you do. The pair is asserted on real traffic by
-  // `verify-event-contract.mjs` §2 rather than trusted to these two comments.
+  // helper before you do.
+  //
+  // WHAT ACTUALLY STOPS YOU, named exactly, because an earlier version of this
+  // comment named a guard that did not cover this case. `verify-event-contract.mjs`
+  // §2 asserts BOTH halves of the pair on real traffic: that no published
+  // `durable: false` arrives without a reason, and — the half that guards this
+  // line — that every optional the daemon did not send is ABSENT from the
+  // projected payload, correlated to the frame that produced it by `seq`, with
+  // the converse asserted too so dropping every optional does not pass instead.
+  // Review made the exact edit this comment invites, and the earlier assertion
+  // stayed green; the sentence claiming coverage was wrong before the coverage
+  // was added, which is the failure this file exists to make loud.
   for (const field of spec.optional) {
     if (msg[field] === undefined) continue;
     const projected = projectValue(msg[field], shapeOf(field), field, nested);

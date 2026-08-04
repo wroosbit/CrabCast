@@ -1684,9 +1684,11 @@ const _preemptionByMatchesTheContract: Exact<
  * `durable: false` with no reason at all, on the one path that cannot be
  * re-requested. Two independently correct designs, correct together — which is
  * the composition this epic has already shipped wrong once, so it is written on
- * both sides and asserted on real traffic by `verify-event-contract.mjs` §2,
+ * both sides and asserted on real traffic by `verify-event-contract.mjs` §2 —
  * which produces a real `durable: false` against a sealed registry and fails if
- * any published event carries one without a reason.
+ * any published event carries one without a reason, AND separately fails if the
+ * projection ever publishes an optional the daemon did not send. Both halves,
+ * because the first alone stayed green when review changed the projection.
  */
 function durability(outcome: RecordOutcome | undefined): {
   durable: boolean;
