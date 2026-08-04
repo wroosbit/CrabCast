@@ -160,7 +160,7 @@ const { HerdrBridge } = await import(path.join(dist, 'herdr.js'));
 const { MessageRouter } = await import(path.join(dist, 'router.js'));
 const { AgentRegistry } = await import(path.join(dist, 'agent-registry.js'));
 const { loadConfig } = await import(path.join(dist, 'config.js'));
-const { paneNameFor } = await import(path.join(dist, 'identity.js'));
+const { paneNameFor, sidecarDirFor } = await import(path.join(dist, 'identity.js'));
 const { claudeTranscriptDir } = await import(path.join(dist, 'resume.js'));
 const { AGENT_LAUNCHERS } = await import(path.join(dist, 'launchers.js'));
 
@@ -184,6 +184,34 @@ function listing(dir) {
   walk('');
   return out;
 }
+
+/**
+ * Read a file this suite expects to exist, answering `null` when it does not.
+ *
+ * THE SAFE FORM MADE THE EASY FORM, after the same defect was found in three
+ * separate places across two review rounds. Nearly every read in this script
+ * backs an assertion of the form "the caller's file is still there, unchanged"
+ * — and written as a bare `readFileSync`, the ONE regression each of those
+ * assertions exists to catch (the file being deleted) makes it throw instead of
+ * report. The suite still goes red, which is the right colour for the wrong
+ * reason and from the wrong line: the named property never gets evaluated, and
+ * a refactor moving the crash would leave it silently unguarded.
+ *
+ * `null` compares false against every expected value, so an absent file FAILS
+ * the check that names it and the rest of the script keeps running.
+ */
+const readIfPresent = (file) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null);
+
+/** {@link readIfPresent} for JSON, `null` when absent or unparseable. */
+const parseIfPresent = (file) => {
+  const text = readIfPresent(file);
+  if (text === null) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
 
 const show = (label, rows) =>
   console.log(`    ${label}\n${rows.length ? rows.map((r) => `      ${r}`).join('\n') : '      (empty)'}`);
@@ -278,9 +306,23 @@ console.log('\n  1a. an agent configured with no provisioning at all');
   const homeBefore = fs.existsSync(claudeJson) ? fs.readFileSync(claudeJson, 'utf8') : '(no file)';
   show('BEFORE (dotfiles included):', before);
 
+  // THIS ACTIVATION CARRIES A PROMPT, and that is what gives the
+  // bootstrap-prompt assertion below something to be wrong about.
+  //
+  // It did not, and the check was VACUOUS: with no `prompt` configured
+  // `writeSidecarPrompt` is never called, so `.crabcast-prompt.md` could not
+  // have appeared however badly the daemon misbehaved. Mutating the daemon to
+  // write the prompt straight into the caller's directory left this whole
+  // script ALL PASS — an assertion that cannot fail, sitting inside the proof
+  // of this slice's central invariant.
+  //
+  // (The property was never unprotected: verify-prompt-is-not-a-template and
+  // verify-activate-requires-agent both go red on that mutation. But coverage
+  // living elsewhere is not a reason for a check here to LOOK like coverage.)
+  const promptBytes = 'You are the agent for ac1-nothing. A literal {{KEY}} rides along.';
   const deps = newCase();
   resetShim();
-  const { activated } = await bringUp(deps, dir, CLAUDE);
+  const { activated } = await bringUp(deps, dir, { ...CLAUDE, prompt: promptBytes });
   const after = listing(dir);
   show('AFTER:', after);
 
@@ -299,10 +341,24 @@ console.log('\n  1a. an agent configured with no provisioning at all');
   check(
     "their own .claude/settings.local.json is byte-identical — CrabCast never writes a " +
       'permission policy into somebody\'s repository',
-    fs.readFileSync(path.join(dir, '.claude/settings.local.json'), 'utf8') === theirSettings
+    readIfPresent(path.join(dir, '.claude/settings.local.json')) === theirSettings
   );
-  check('and the bootstrap prompt is in CrabCast\'s sidecar, not here',
-    !fs.existsSync(path.join(dir, '.crabcast-prompt.md')));
+  // BOTH HALVES, because the negative one alone cannot tell "it went to the
+  // sidecar" from "no prompt was ever rendered".
+  const sidecar = sidecarDirFor(config.dataDir, dir);
+  const promptFile = path.join(sidecar, 'prompt.md');
+  check(
+    'the bootstrap prompt is NOT in the caller\'s directory — under any of its names',
+    !fs.existsSync(path.join(dir, '.crabcast-prompt.md')) &&
+      !fs.existsSync(path.join(dir, 'prompt.md')) &&
+      !after.some((f) => /prompt/i.test(f))
+  );
+  check(
+    "and it IS in CrabCast's sidecar, byte-for-byte — which is what makes the line above a " +
+      'check rather than a statement about a file nobody wrote',
+    fs.existsSync(promptFile) && fs.readFileSync(promptFile, 'utf8') === promptBytes,
+    `${promptFile}: ${fs.existsSync(promptFile) ? 'present' : 'ABSENT'}`
+  );
 
   // The global file. It DID change — the trust entry — and that is the one
   // artifact this agent did not opt into, because without it the agent wedges
@@ -371,7 +427,7 @@ section('2. An existing .mcp.json is MERGED, not replaced (AC 2)');
   const { activated } = await bringUp(deps, dir, {
     ...CLAUDE, mcpServers: { crabcast: 'builtin' }
   });
-  const merged = JSON.parse(fs.readFileSync(path.join(dir, '.mcp.json'), 'utf8'));
+  const merged = parseIfPresent(path.join(dir, '.mcp.json')) ?? { mcpServers: {} };
   console.log('    AFTER activation:');
   console.log(JSON.stringify(merged, null, 2).split('\n').map((l) => `      ${l}`).join('\n'));
 
@@ -525,8 +581,8 @@ section('4. forget removes exactly what we wrote, and nothing else (AC 4)');
   check('the directory is back exactly as it was', JSON.stringify(before) === JSON.stringify(after),
     `difference: ${JSON.stringify(after.filter((f) => !before.includes(f)))}`);
   check('every one of their files is still there and unread-modified',
-    fs.readFileSync(path.join(dir, '.env'), 'utf8') === 'THEIR_SECRET=1\n' &&
-      fs.readFileSync(path.join(dir, 'src/main.ts'), 'utf8') === 'export const theirs = true;\n');
+    readIfPresent(path.join(dir, '.env')) === 'THEIR_SECRET=1\n' &&
+      readIfPresent(path.join(dir, 'src/main.ts')) === 'export const theirs = true;\n');
   check('THE DIRECTORY ITSELF IS UNTOUCHED — CrabCast never created one, so it never deletes one',
     fs.existsSync(dir) && fs.statSync(dir).isDirectory());
   check('their git repository is intact', fs.existsSync(path.join(dir, '.git', 'HEAD')));
@@ -554,9 +610,23 @@ section('4. forget removes exactly what we wrote, and nothing else (AC 4)');
   resetShim();
   await bringUp(deps2, edited, { ...CLAUDE, mcpServers: { crabcast: 'builtin' } });
   const mcpFile = path.join(edited, '.mcp.json');
-  const tampered = JSON.parse(fs.readFileSync(mcpFile, 'utf8'));
-  tampered.mcpServers.crabcast.args = ['/somebody/changed/this.js'];
-  fs.writeFileSync(mcpFile, JSON.stringify(tampered, null, 2));
+  // SETUP, ASSERTED RATHER THAN ASSUMED. Reaching straight through
+  // `tampered.mcpServers.crabcast.args` throws a TypeError under exactly the
+  // regression this section exists to catch — one that drops definitions — and
+  // an unguarded setup line that throws kills the script before §9 runs at all.
+  // The precondition is a check now, so a missing key reports itself and the
+  // rest of the suite still executes.
+  const tampered = fs.existsSync(mcpFile) ? JSON.parse(fs.readFileSync(mcpFile, 'utf8')) : {};
+  const tamperable = tampered?.mcpServers?.crabcast !== undefined;
+  check(
+    'setup precondition: the server CrabCast wrote is on disk to be edited',
+    tamperable,
+    `${mcpFile}: ${JSON.stringify(tampered?.mcpServers ?? null)}`
+  );
+  if (tamperable) {
+    tampered.mcpServers.crabcast.args = ['/somebody/changed/this.js'];
+    fs.writeFileSync(mcpFile, JSON.stringify(tampered, null, 2));
+  }
 
   await invoke(deps2, { action: 'deactivate_agent', path: edited });
   const forgot = await invoke(deps2, { action: 'forget_agent', path: edited });
@@ -564,7 +634,7 @@ section('4. forget removes exactly what we wrote, and nothing else (AC 4)');
     'a server key EDITED since CrabCast wrote it is left in place — removing it would destroy ' +
       "somebody's change rather than undo ours",
     fs.existsSync(mcpFile) &&
-      JSON.parse(fs.readFileSync(mcpFile, 'utf8')).mcpServers.crabcast?.args[0] === '/somebody/changed/this.js'
+      parseIfPresent(mcpFile)?.mcpServers?.crabcast?.args?.[0] === '/somebody/changed/this.js'
   );
   check('and forget says so, with the reason',
     (forgot.left ?? []).some((l) => /edited since CrabCast wrote it/.test(l)),
@@ -589,10 +659,22 @@ section('4. forget removes exactly what we wrote, and nothing else (AC 4)');
   fs.writeFileSync(untouchedFile, theirFormatting);
   await invoke(deps3, { action: 'deactivate_agent', path: untouched });
   await invoke(deps3, { action: 'forget_agent', path: untouched });
+  // Existence first, read guarded — the third instance of the shape fixed at
+  // §2 and §4's exclude file, and the one I missed both times. Under a
+  // regression where `forget` deletes a file it took nothing out of, the
+  // unguarded read died with ENOENT and this section never reported the
+  // property it names.
+  const untouchedSurvives = fs.existsSync(untouchedFile);
   check(
-    'a forget that removes nothing from the file leaves it BYTE-IDENTICAL, formatting and all',
-    fs.readFileSync(untouchedFile, 'utf8') === theirFormatting,
-    JSON.stringify(fs.readFileSync(untouchedFile, 'utf8'))
+    'a forget that removes nothing from the file leaves the file THERE',
+    untouchedSurvives,
+    `${untouchedFile} was deleted — it holds only a server the caller edited, so there was ` +
+      `nothing in it for CrabCast to remove`
+  );
+  check(
+    'and BYTE-IDENTICAL, formatting and all',
+    untouchedSurvives && fs.readFileSync(untouchedFile, 'utf8') === theirFormatting,
+    untouchedSurvives ? JSON.stringify(fs.readFileSync(untouchedFile, 'utf8')) : '(file gone)'
   );
 }
 
@@ -629,7 +711,7 @@ section('5. THE RESUME HAZARD IS CLOSED (AC 5)');
     command
   );
   check("and the human's transcript was not read, moved or touched",
-    fs.readFileSync(path.join(transcripts, 'a-humans-session.jsonl'), 'utf8').includes('salary review'));
+    (readIfPresent(path.join(transcripts, 'a-humans-session.jsonl')) ?? '').includes('salary review'));
   check('the response says so in words: a NEW conversation was started',
     activated.resumedExistingConversation === false);
 
@@ -691,7 +773,7 @@ console.log('\n  6a. an unparseable .mcp.json of the caller\'s');
   check('and NO agent was started — asserted against the shim\'s argv log',
     agentStartIssued() === false, JSON.stringify(invocations()));
   check('THEIR FILE WAS NOT REPLACED — this is the behaviour that changed',
-    fs.readFileSync(path.join(dir, '.mcp.json'), 'utf8') === junk);
+    readIfPresent(path.join(dir, '.mcp.json')) === junk);
   check('the refusal says the file was not replaced, rather than just failing',
     /NOT REPLACED/i.test(activated.error ?? ''), activated.error);
 }
@@ -707,7 +789,7 @@ console.log('\n  6b. a server key that is already theirs');
   });
   check('the activation is REFUSED rather than taking the key over', activated.success === false);
   check('their definition is untouched',
-    JSON.parse(fs.readFileSync(path.join(dir, '.mcp.json'), 'utf8')).mcpServers.crabcast.command ===
+    parseIfPresent(path.join(dir, '.mcp.json'))?.mcpServers?.crabcast?.command ===
       '/their/own/crabcast-thing');
   check('and the refusal names the colliding server', /'crabcast'/.test(activated.error ?? ''),
     activated.error);
@@ -743,8 +825,8 @@ console.log('\n  6b. a server key that is already theirs');
   );
   check(
     'and THEIR definition is untouched on disk',
-    JSON.parse(fs.readFileSync(path.join(protoDir, '.mcp.json'), 'utf8'))
-      .mcpServers.toString.command === '/their/own/thing'
+    parseIfPresent(path.join(protoDir, '.mcp.json'))?.mcpServers?.toString?.command ===
+      '/their/own/thing'
   );
   check('nothing was started for it', agentStartIssued() === false);
 }
@@ -879,7 +961,7 @@ section('7. Definitions are written through byte-for-byte (KAN-120)');
   const deps = newCase();
   resetShim();
   const { activated } = await bringUp(deps, dir, { ...CLAUDE, mcpServers: supplied });
-  const written = JSON.parse(fs.readFileSync(path.join(dir, '.mcp.json'), 'utf8'));
+  const written = parseIfPresent(path.join(dir, '.mcp.json')) ?? { mcpServers: {} };
   console.log('    what appeared in .mcp.json for `atlassian`:');
   console.log(JSON.stringify(written.mcpServers.atlassian, null, 2).split('\n').map((l) => `      ${l}`).join('\n'));
 
@@ -951,7 +1033,7 @@ section('8. The opt-in and the definitions are ONE decision');
   const activated = await invoke(deps, { action: 'activate_agent', path: dir, override: true });
   check('and activation writes them, with no second step',
     activated.success === true &&
-      JSON.parse(fs.readFileSync(path.join(dir, '.mcp.json'), 'utf8')).mcpServers.atlassian?.command === 'npx',
+      parseIfPresent(path.join(dir, '.mcp.json'))?.mcpServers?.atlassian?.command === 'npx',
     activated.error);
 
   // THE PROOF THAT THERE IS NO SILENT PATH. Exhaustive rather than
@@ -1078,7 +1160,7 @@ section('9. The checks above can actually fail (mutation)');
     sidecarDir: path.join(tmp, 'mutation-merge-sidecar'),
     definitions: { crabcast: { command: 'node' } }
   });
-  const merged = JSON.parse(fs.readFileSync(path.join(noTheirs, '.mcp.json'), 'utf8'));
+  const merged = parseIfPresent(path.join(noTheirs, '.mcp.json')) ?? { mcpServers: {} };
   check(
     'the merge check goes RED on a real written file that does not carry their server — the ' +
       'predicate discriminates rather than always agreeing',
@@ -1112,8 +1194,7 @@ section('9. The checks above can actually fail (mutation)');
     sidecarDir: path.join(tmp, 'mutation-verbatim-sidecar'),
     definitions: { theirs: suppliedDef }
   });
-  const onDisk = JSON.parse(fs.readFileSync(path.join(verbatimDir, '.mcp.json'), 'utf8'))
-    .mcpServers.theirs;
+  const onDisk = parseIfPresent(path.join(verbatimDir, '.mcp.json'))?.mcpServers?.theirs;
   const normalised = { command: 'x', args: [] };
   check(
     'the verbatim check AGREES with the real written file and DISAGREES with a normalised ' +
