@@ -58,7 +58,7 @@ cd ..              # from here on nothing needs the clone
 crabcast --help    # every command it lists exists
 ```
 
-**You never run a build step by hand.** `package.json` declares `"prepare": "tsc"`, and npm runs `prepare` as part of `npm install` — so the first command leaves you with a compiled `dist/`, and the second packs and installs it. `npm run build` exists, but it is for contributors iterating on the source, not a step in this sequence.
+**You never run a build step by hand.** `package.json` declares `"prepare": "npm run build"` — `tsc`, then a `postbuild` step that writes `dist/build-stamp.json` so the daemon can say which build it is running (see [Which build is running](#which-build-is-running)) — and npm runs `prepare` as part of `npm install`. So the first command leaves you with a compiled, stamped `dist/`, and the second packs and installs it. `npm run build` exists, but it is for contributors iterating on the source, not a step in this sequence.
 
 **Both commands are needed, in that order.** `npm install -g .` on a clone that has never had `npm install` run in it fails with `sh: 1: tsc: not found`: installing a directory globally does not install that directory's devDependencies, so `prepare` has no compiler to call. That is a real limitation of this install path rather than a step worth skipping.
 
@@ -353,7 +353,7 @@ crabcast send <dir> 'run the tests'
 crabcast deactivate <dir>        # stop it; the record survives
 crabcast forget <dir>            # make it stop EXISTING; deletes no directory
 crabcast capacity                # how many more this machine can carry, and why
-crabcast daemon-status           # pid, uptime, the config it loaded, where the registry lives
+crabcast daemon-status           # pid, uptime, config, registry — and WHICH BUILD is running
 ```
 
 Every agent-addressing command takes exactly one operand: the directory. There is nothing to disambiguate — two agents cannot share a directory the way they could share a key — so there is no `--type` flag and no ambiguity to resolve.
@@ -396,6 +396,29 @@ Validation still refuses rather than repairs, on the two things that remain. A c
 
 Exactly one daemon owns the socket: a second daemon that finds a live socket exits 0; a stale socket file left by a crash is unlinked and reclaimed. `node scripts/daemon-status.mjs` round-trips a `daemon_status` request over the socket, and `node scripts/verify-config-and-socket.mjs` is the live proof of all of the above.
 
+### Which build is running
+
+`crabcast daemon-status` answers what the **running process** was built from — not what is in the directory it was started from. CrabCast is consumed as a linked local checkout (`file:../crabcast`), so there is no published artifact and no version string to ask for; without this, a fleet that misbehaves has nothing that can name the build that did it.
+
+```
+build — what THIS process was loaded from, read when it started:
+  commit:          5657bfbb87bb8ddd3605c47d87643784b0bbfd0f
+  checkout:        clean when this build was made
+  built:           2026-08-04T07:44:47.072Z
+
+freshness: PROCESS-PREDATES-BUILD
+  THE RUNNING DAEMON IS NOT THE BUILD ON DISK. …/dist was rebuilt after this process loaded
+  it, and the process is still executing what it read at boot … restart the daemon.
+```
+
+`npm run build` writes `dist/build-stamp.json` (its `postbuild` step, `scripts/stamp-build.mjs`); the daemon reads it **once, at boot**, out of the `dist/` it was itself loaded from. Three freshness states are told apart, and each is measured rather than assumed:
+
+* **`current`** — this daemon is running the build on disk, and that build is newer than `src/`.
+* **`process-predates-build`** — somebody rebuilt under a live daemon. It is still serving the old `dist/`. **No filesystem check can see this**: the tree on disk looks entirely current, which is exactly why the process has to answer it.
+* **`build-predates-sources`** — `src/` has changed since `dist/` was built. Run `npm run build`.
+
+**"I don't know" is a first-class answer and never renders as "clean".** A tree with no `.git`, a `dist/` built by running `tsc` directly (no stamp), a stamp whose `dist/` was rewritten under it, a machine with no `git` — each reports `UNKNOWN` with the reason that made it unknown, under a heading that says so. A check that reports success when it could not run is worse than no check. `node scripts/verify-daemon-provenance.mjs` is the live proof, including that the unknowns are unknowns.
+
 ## Development setup
 
 ```bash
@@ -403,7 +426,9 @@ gh repo clone wroosbit/crabcast   # or: git clone https://github.com/wroosbit/cr
 cd crabcast
 npm install         # runs `prepare`, so this already builds dist/
 npm run typecheck   # tsc --noEmit
-npm run build       # tsc → dist/
+npm run build       # tsc → dist/, then dist/build-stamp.json
 ```
+
+`npm run build` is `tsc` plus a `postbuild` step (`scripts/stamp-build.mjs`) that records the commit, whether the checkout was clean, and the time into `dist/build-stamp.json`. Running `tsc` directly still works and is still a valid build — it just produces an *unstamped* one, which the daemon reports as `UNKNOWN` rather than guessing at.
 
 The verify scripts under `scripts/` are the live proofs of this daemon's behavioural invariants. The isolatable ones run in CI (the `verify` check) against a shimmed `herdr`; the rest need a real herdr and real panes and are run by hand, with their output going on the pull request. See the comments in `.github/workflows/ci.yml` for which are which and why.
