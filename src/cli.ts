@@ -448,7 +448,7 @@ function categoryHeading(
   rows: unknown,
   total: unknown,
   gloss: string,
-  page?: { category: string; nextCursor?: string | null; limit?: number }
+  page?: { category: string; nextCursor?: string | null; askedLimit?: number }
 ): string {
   const shown = Array.isArray(rows) ? rows.length : 0;
   const count = typeof total === 'number' ? total : shown;
@@ -456,7 +456,11 @@ function categoryHeading(
   const more =
     page && typeof page.nextCursor === 'string'
       ? `\n${INDENT}more: crabcast list --category ${page.category} --after ${page.nextCursor}` +
-        (page.limit && page.limit !== 25 ? ` --limit ${page.limit}` : '')
+        // `--limit` is repeated only when THIS invocation passed one. The
+        // daemon's default is the daemon's to know, so there is no copy of it
+        // here to drift — and a command echoing back `--limit 25` would read
+        // as a choice the caller made.
+        (page.askedLimit ? ` --limit ${page.askedLimit}` : '')
       : '';
   return `\n${label} (${count})${clipped}${count ? ` — ${gloss}` : ''}${more}`;
 }
@@ -1012,7 +1016,7 @@ function renderForget(reader: ResponseReader, request: Record<string, unknown>):
   );
 }
 
-function renderList(reader: ResponseReader): string {
+function renderList(reader: ResponseReader, request: Record<string, unknown>): string {
   if (!reader.success) return lines(failure(reader, 'list agents'), residue(reader));
 
   const agents = reader.take<any[]>('agents') ?? [];
@@ -1032,7 +1036,12 @@ function renderList(reader: ResponseReader): string {
   // handed its own entry, so a truncated category prints the command that
   // continues it rather than only the size of what it withheld.
   const pages = reader.take<Record<string, any>>('pages') ?? {};
-  const pageOf = (category: string) => ({ category, ...(pages[category] ?? {}) });
+  const askedPages = (request?.pages ?? {}) as Record<string, any>;
+  const pageOf = (category: string) => ({
+    category,
+    ...(pages[category] ?? {}),
+    askedLimit: askedPages[category]?.limit
+  });
   const provenance = reader.take('provenance');
   const capacity = reader.take('capacity');
   const priorities = reader.take('priorities');
