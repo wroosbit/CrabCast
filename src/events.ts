@@ -101,7 +101,16 @@ export const EVENT_CONTRACT: Record<CrabcastEventName, EventSpec> = {
   'agent.configured': {
     formerly: 'agent_configured_event',
     fires: '`configure` was accepted and the record was written',
-    required: ['path', 'config', 'configVersion', 'configuredAt'],
+    // `changed` and `outcomes` ARRIVED WITH T4 AND THE DRIFT CHECK FOUND THEM.
+    // T4 (reconfiguration) added both to this broadcast — correctly, and the
+    // design's own table specifies `changed[]` for this event — but a payload
+    // field that is not declared here is dropped by the MCP forwarder. So an
+    // MCP subscriber was silently losing which attributes moved, which is the
+    // whole point of the event for a reconciler. Caught on the merge, by the
+    // undeclared-field half of the warning, on real traffic rather than a
+    // mutation. Both are unconditional at the emitting site, so both are
+    // required rather than optional.
+    required: ['path', 'config', 'configVersion', 'configuredAt', 'changed', 'outcomes'],
     optional: [],
     subject: 'path'
   },

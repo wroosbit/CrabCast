@@ -29,7 +29,7 @@ payload below.
 
 | event | was | fires | payload |
 | --- | --- | --- | --- |
-| `agent.configured` | `agent_configured_event` **(breaking)** | `configure` accepted and the record written | `path`, `config`, `configVersion`, `configuredAt` |
+| `agent.configured` | `agent_configured_event` **(breaking)** | `configure` accepted and the record written | `path`, `config`, `configVersion`, `configuredAt`, `changed[]`, `outcomes` |
 | `agent.activated` | `agent_activated_event` **(breaking)** | an activation confirmed against herdr's census — a fresh spawn, or this daemon re-taking the terminal of an agent that outlived it | `path`, `paneName`, `paneId`, `sessionId`, `status`, `configVersion` |
 | `agent.deactivated` | `agent_deactivated_event` **(breaking)**, with `agent_preempted_event` **merged in** | a stand-down confirmed | `path`, `reason` (`requested` \| `preempted`); `paneName`, `sessionId`, `preemption` when they exist |
 | `agent.forgotten` | `agent_forgotten_event` **(breaking)** | `forget` accepted | `path`, `removed[]` |
@@ -55,6 +55,21 @@ are the same objects `list_agents` publishes under `missingAgents` and renaming
 the field there would break a read that shipped in T3 for cosmetic gain. It is
 prose explaining why the daemon says the agent is absent. `agent.deactivated`'s
 `reason` is a different field on a different event and takes one of two words.
+
+### `agent.configured`'s `changed` and `outcomes`
+
+`changed` is the attribute names this `configure` moved — the whole set on a
+first configure, the diff on a reconfiguration. `outcomes` is every knob with
+what this call did to it: `unchanged`, `applied`, `applied-in-place`,
+`withheld`, or `refused-restart-required`. Together they are why a reconciler
+diffing per path does not have to re-read after seeing this event to find out
+whether it touched anything it cares about.
+
+Both were added by the reconfiguration slice and were **not** in this table
+until the drift check caught them — declared nowhere, they were reaching socket
+subscribers and being dropped on the MCP path, which is the asymmetry §4 exists
+to make legible. Named here now, and required rather than optional, because the
+emitting site sends both unconditionally.
 
 ### `agent.deactivated`'s `reason` is NOT optional, and this is the one to read twice
 
