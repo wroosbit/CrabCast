@@ -723,9 +723,7 @@ export class MessageRouter {
 
     // ONE census read, shared by the running check and the advisory below.
     const census = this.deps.herdrBridge.listHerdrAgentsChecked();
-    const occupancy = this.deps.herdrBridge.occupancyOf(
-      census, agentPath, existing?.record.config.launcher ?? parsed.config.launcher
-    );
+    const occupancy = this.deps.herdrBridge.occupancyOf(census, agentPath);
     const session = this.deps.herdrBridge.getSessionByPath(agentPath);
     const running = Boolean(session) || (occupancy.reachable && occupancy.ours !== null);
 
@@ -853,9 +851,7 @@ export class MessageRouter {
     }
 
     const census = this.deps.herdrBridge.listHerdrAgentsChecked();
-    const occupancy = this.deps.herdrBridge.occupancyOf(
-      census, agentPath, existing.record.config.launcher
-    );
+    const occupancy = this.deps.herdrBridge.occupancyOf(census, agentPath);
     const session = this.deps.herdrBridge.getSessionByPath(agentPath);
 
     if (session || (occupancy.reachable && occupancy.ours)) {
@@ -1420,7 +1416,7 @@ export class MessageRouter {
 
     // ONE census read, answering both "is anything live here" and "is it ours".
     const census = herdrBridge.listHerdrAgentsChecked();
-    const occupancy = herdrBridge.occupancyOf(census, agentPath, config.launcher);
+    const occupancy = herdrBridge.occupancyOf(census, agentPath);
 
     if (!occupancy.reachable) {
       fail(
@@ -1735,9 +1731,7 @@ export class MessageRouter {
     // "nothing was running" without looking is the claim-without-looking this
     // daemon refuses everywhere else.
     const census = this.deps.herdrBridge.listHerdrAgentsChecked();
-    const occupancy = this.deps.herdrBridge.occupancyOf(
-      census, agentPath, intent.record.config.launcher
-    );
+    const occupancy = this.deps.herdrBridge.occupancyOf(census, agentPath);
     const oursIsLive = occupancy.reachable && occupancy.ours !== null;
 
     if (session) {
@@ -2423,7 +2417,7 @@ export class MessageRouter {
     // the one that could go wrong.
     for (const [agentPath, intent] of intents) {
       if (covered.has(agentPath)) continue;
-      const pane = ourPaneIn(census, agentPath, intent.record.config.launcher);
+      const pane = ourPaneIn(census, agentPath);
       if (!pane) continue;
       covered.add(agentPath);
       agents.push(this.rowFrom(agentPath, pane.name, pane, undefined, intent));
@@ -2433,9 +2427,7 @@ export class MessageRouter {
       const cwd = record.canonicalWorkDir;
       // Ours by the same single test, asked of this pane's own directory.
       const ours =
-        cwd !== null &&
-        intents.has(cwd) &&
-        ourPaneIn(census, cwd, intents.get(cwd)!.record.config.launcher)?.name === record.name;
+        cwd !== null && intents.has(cwd) && ourPaneIn(census, cwd)?.name === record.name;
 
       if (!ours) {
         // Only live ones. A bare shell somebody left open elsewhere on the
@@ -2465,9 +2457,6 @@ export class MessageRouter {
       if (covered.has(agentPath)) continue;
       const paneName = paneNameFor(agentPath);
       const record = census.agents.find((a) => a.name === paneName);
-      // Only a runtime-bearing launcher can have an UNBACKED pane; for `shell`
-      // an empty pane is the product, and `ourPaneIn` has already claimed it
-      // above.
       if (!record || record.agentRuntime) continue;
       unbackedPanes.push({
         paneName: record.name,

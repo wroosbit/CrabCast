@@ -42,6 +42,7 @@ import {
   writeJsonLine
 } from './ipc.js';
 import { HERDR_VERSION_NOTICE_FIELD } from './herdr-health.js';
+import { MAX_PROMPT_CHARS } from './router.js';
 
 // ---------------------------------------------------------------- exit codes
 
@@ -902,6 +903,26 @@ const PATH_ARG: PositionalSpec = {
 };
 
 /**
+ * The path operand, resolved against THIS process's working directory.
+ *
+ * Resolved here rather than in the daemon, and that is not a style choice. The
+ * daemon is spawned detached by whichever client first needed it, so its cwd
+ * is some other shell's from some other day; `crabcast configure ./svc` run
+ * from two different projects would resolve to the same directory there, and
+ * which one would depend on where the daemon happened to be started. The only
+ * cwd that answers the caller's question is the caller's, and this process is
+ * the only one that has it.
+ *
+ * This is not the CLI computing anything the daemon owns — it is the CLI
+ * supplying a fact only it possesses, the same way `--prompt-file` reads a
+ * file the daemon cannot see. The daemon refuses a relative path outright, so
+ * a client that skipped this gets told rather than silently misrouted.
+ */
+function agentPathOf(positionals: string[]): string {
+  return path.resolve(positionals[0]);
+}
+
+/**
  * `configure`'s knobs.
  *
  * Nothing here is validated by the CLI beyond its own type. `priority` and
@@ -958,16 +979,38 @@ function promptText(flags: Record<string, string | number | boolean>): string | 
         'which of them won would be a silent choice about the instructions the agent acts on.'
     );
   }
-  if (typeof literal === 'string') return literal;
-  if (typeof file !== 'string') return undefined;
-  try {
-    return fs.readFileSync(file, 'utf8');
-  } catch (err: any) {
+  let text: string;
+  if (typeof literal === 'string') {
+    text = literal;
+  } else if (typeof file === 'string') {
+    try {
+      text = fs.readFileSync(file, 'utf8');
+    } catch (err: any) {
+      throw new UsageError(
+        `--prompt-file ${JSON.stringify(file)} could not be read: ${err?.message ?? String(err)}. ` +
+          `The file is read here and its bytes are what cross the wire, so nothing was sent.`
+      );
+    }
+  } else {
+    return undefined;
+  }
+
+  // Checked HERE as well as in the daemon, because this flag is the one that
+  // can produce an over-large prompt by accident — a caller types a filename
+  // and the size is whatever the file happens to be. The daemon's refusal is
+  // the real one and says the same thing; this one just means a 4 MB file is
+  // answered by the process that read it instead of being pushed at a socket
+  // whose framing bound would answer with something about line lengths.
+  if (text.length > MAX_PROMPT_CHARS) {
     throw new UsageError(
-      `--prompt-file ${JSON.stringify(file)} could not be read: ${err?.message ?? String(err)}. ` +
-        `The file is read here and its bytes are what cross the wire, so nothing was sent.`
+      `the prompt is ${text.length} characters and the limit is ${MAX_PROMPT_CHARS}` +
+        (typeof file === 'string' ? ` (read from ${file})` : '') +
+        `. It travels inline over the daemon socket, so an over-large one cannot be ` +
+        `delivered. NOTHING WAS SENT and nothing was truncated — an agent given half its ` +
+        `instructions is worse than one that was refused.`
     );
   }
+  return text;
 }
 
 /**
@@ -1008,7 +1051,7 @@ export const COMMANDS: CommandSpec[] = [
     flags: CONFIGURE_FLAGS,
     spawnsDaemon: true,
     build: ({ positionals, flags }) => ({
-      path: positionals[0],
+      path: agentPathOf(positionals),
       priority: flags.priority,
       launcher: flags.launcher,
       prompt: promptText(flags),
@@ -1039,7 +1082,7 @@ export const COMMANDS: CommandSpec[] = [
     ],
     spawnsDaemon: true,
     build: ({ positionals, flags }) => ({
-      path: positionals[0],
+      path: agentPathOf(positionals),
       override: flags.override,
       preempt: flags.preempt
     }),
@@ -1063,7 +1106,7 @@ export const COMMANDS: CommandSpec[] = [
     positionals: [PATH_ARG],
     flags: [],
     spawnsDaemon: true,
-    build: ({ positionals }) => ({ path: positionals[0] }),
+    build: ({ positionals }) => ({ path: agentPathOf(positionals) }),
     render: renderDeactivate
   },
   {
@@ -1079,7 +1122,7 @@ export const COMMANDS: CommandSpec[] = [
     positionals: [PATH_ARG],
     flags: [],
     spawnsDaemon: true,
-    build: ({ positionals }) => ({ path: positionals[0] }),
+    build: ({ positionals }) => ({ path: agentPathOf(positionals) }),
     render: renderForget
   },
   {
@@ -1101,7 +1144,7 @@ export const COMMANDS: CommandSpec[] = [
     positionals: [PATH_ARG],
     flags: [],
     spawnsDaemon: false,
-    build: ({ positionals }) => ({ path: positionals[0] }),
+    build: ({ positionals }) => ({ path: agentPathOf(positionals) }),
     render: renderStatus
   },
   {
@@ -1115,7 +1158,7 @@ export const COMMANDS: CommandSpec[] = [
     ],
     spawnsDaemon: false,
     build: ({ positionals, flags }) => ({
-      path: positionals[0],
+      path: agentPathOf(positionals),
       lines: flags.lines
     }),
     render: renderTail
@@ -1137,7 +1180,7 @@ export const COMMANDS: CommandSpec[] = [
     flags: [],
     spawnsDaemon: true,
     build: ({ positionals }) => ({
-      path: positionals[0],
+      path: agentPathOf(positionals),
       message: positionals[1]
     }),
     render: renderSend
@@ -1441,24 +1484,24 @@ function operandsFor(spec: CommandSpec, given: string[]): string[] {
       if (!joined && p.required) {
         throw new UsageError(`\`crabcast ${spec.name}\` needs <${p.name}...>.\n${usageLine(spec)}`);
       }
-      // Said out loud rather than guessed at. Flag parsing stops here by
-      // design, so `send demo hi --type shell` sends the words "--type shell"
-      // — which is right when they are the message and wrong when they were
-      // meant as a flag, and the CLI cannot know which. It can say what it
-      // did: a note on stderr, no change to what is sent and no change to the
-      // exit code, because the message WAS delivered and reporting otherwise
-      // would be its own lie.
-      const mistakable = rest.filter((token) =>
-        spec.flags.some((f) => token === `--${f.name}` || token.startsWith(`--${f.name}=`))
-      );
-      if (mistakable.length) {
-        process.stderr.write(
-          `crabcast: note: ${mistakable.join(' ')} is part of the ${p.name}, not a flag — ` +
-            `everything after <${spec.positionals[i - 1]?.name ?? 'the operands'}> is ${p.name} text. ` +
-            `Put flags before it: crabcast ${spec.name} --${spec.flags[0]?.name ?? 'flag'} … ` +
-            `${spec.positionals.slice(0, i).map((q) => `<${q.name}>`).join(' ')} <${p.name}...>\n`
-        );
-      }
+      // WHAT USED TO BE HERE, and why it is gone rather than merely unused.
+      //
+      // A note on stderr fired when a word inside the message matched one of
+      // THIS COMMAND's own flags — `crabcast send <dir> hi --type shell` would
+      // say "--type shell is part of the message, not a flag".
+      //
+      // `send` is the only command with a `rest` positional, and since the
+      // re-key it has no flags of its own: `--type` was the disambiguator for
+      // a key, and a path cannot be ambiguous. So `spec.flags` is empty here,
+      // the filter can never match, and the branch was unreachable code
+      // printing a note nobody could trigger.
+      //
+      // It is deleted rather than widened to global flags. Widening would make
+      // `crabcast send <dir> --timeout 5000` — a perfectly ordinary message
+      // that happens to contain a word — print a warning about a mistake the
+      // caller did not make, and this CLI's rule is that what it prints is
+      // what happened. The trade is documented where it is met: in `--help`,
+      // and in the `rest` field's own doc comment.
       out.push(joined);
       return out;
     }

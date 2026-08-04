@@ -7,6 +7,7 @@ import {
   McpError
 } from "@modelcontextprotocol/sdk/types.js";
 import * as net from 'net';
+import * as nodePath from 'path';
 import { DEFAULT_DATA_DIR, loadConfig, resolveConfigSource } from './config.js';
 import { connectToDaemon, onJsonLines, writeJsonLine } from './ipc.js';
 
@@ -193,11 +194,26 @@ async function callDaemonAPI(action: string, data: any = {}): Promise<any> {
 const PATH_PROPERTY = {
   type: "string",
   description:
-    "The directory the agent runs in — its whole address. Absolute, or relative to this " +
-    "server's working directory; it is canonicalized (symlinks resolved) daemon-side, so a " +
-    "symlink and its target are the same agent. It must already exist: CrabCast never " +
-    "creates a directory.",
+    "The directory the agent runs in — its whole address. Absolute, or relative to THIS " +
+    "MCP server's working directory, which is resolved here before the request is sent — " +
+    "the daemon refuses a relative path, because it runs detached and its own working " +
+    "directory belongs to whichever client first spawned it. The result is canonicalized " +
+    "(symlinks resolved) daemon-side, so a symlink and its target are the same agent. It " +
+    "must already exist: CrabCast never creates a directory.",
 } as const;
+
+/**
+ * A path operand, resolved against this server's working directory.
+ *
+ * The description above used to promise this and nothing did it: the string
+ * went to the daemon unchanged and `path.resolve` ran THERE, against a cwd
+ * inherited from whichever client first spawned the daemon. Two projects could
+ * send `./svc` and reach the same directory, and which one depended on where
+ * the daemon was started.
+ */
+function agentPath(value: unknown): unknown {
+  return typeof value === 'string' && value.trim() ? nodePath.resolve(value.trim()) : value;
+}
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
@@ -396,7 +412,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // says why each one has no default; a check here would be a second copy
       // of that rule with a worse message.
       const res = await callDaemonAPI('configure_agent', {
-        path, priority, launcher, prompt, mcpServers, label,
+        path: agentPath(path), priority, launcher, prompt, mcpServers, label,
         refusable, chargeable, preemptable, gateExempt
       });
       return {
@@ -409,7 +425,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { path, override, preempt } = args as any;
       if (!path) throw new Error("Missing required argument: path");
 
-      const res = await callDaemonAPI('activate_agent', { path, override, preempt });
+      const res = await callDaemonAPI('activate_agent', {
+        path: agentPath(path), override, preempt });
       return {
         content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
         // Without it a failed activation arrives as ordinary text, which is
@@ -424,7 +441,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { path } = args as any;
       if (!path) throw new Error("Missing required argument: path");
 
-      const res = await callDaemonAPI('deactivate_agent', { path });
+      const res = await callDaemonAPI('deactivate_agent', { path: agentPath(path) });
       return {
         content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
         // The extraction source left this one tool without the mapping. The
@@ -439,7 +456,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { path } = args as any;
       if (!path) throw new Error("Missing required argument: path");
 
-      const res = await callDaemonAPI('forget_agent', { path });
+      const res = await callDaemonAPI('forget_agent', { path: agentPath(path) });
       return {
         content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
         // A refused forget — the agent is still running, or herdr could not
@@ -452,7 +469,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { path, message } = args as any;
       if (!path || !message) throw new Error("Missing required arguments: path, message");
 
-      const res = await callDaemonAPI('send_to_agent', { path, message });
+      const res = await callDaemonAPI('send_to_agent', {
+        path: agentPath(path), message });
       return {
         content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
         isError: res?.success === false,
@@ -463,7 +481,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { path, lines } = args as any;
       if (!path) throw new Error("Missing required argument: path");
 
-      const res = await callDaemonAPI('tail_agent', { path, lines });
+      const res = await callDaemonAPI('tail_agent', {
+        path: agentPath(path), lines });
       return {
         content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
         isError: res?.success === false,
@@ -474,7 +493,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { path } = args as any;
       if (!path) throw new Error("Missing required argument: path");
 
-      const res = await callDaemonAPI('agent_status', { path });
+      const res = await callDaemonAPI('agent_status', { path: agentPath(path) });
       return {
         content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
         isError: res?.success === false,

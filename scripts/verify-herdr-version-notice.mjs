@@ -341,7 +341,10 @@ const eightFx = fixture('untested', 'herdr 0.8.0');
 // a record first. It is a separate call and its own daemon round trip, which
 // is also the first response of the connection — the notice rides that one.
 crabcast(eightFx, ['configure', eightFx.agentPath, '--priority', '1', '--launcher', 'shell']);
-const eightArgs = ['activate', eightFx.agentPath];
+// `--override`: the capacity gate reads the real machine, and this script is
+// about a version notice. An activation refused because the runner was busy
+// would be a red check about the machine rather than about the notice.
+const eightArgs = ['activate', eightFx.agentPath, '--override'];
 const eightRun = crabcast(eightFx, eightArgs);
 await trackDaemon(eightFx);
 
@@ -397,7 +400,10 @@ rule('3. 0.6.4 LIVE — the supported release produces NO notice anywhere');
 
 const goodFx = fixture('verified', 'herdr 0.6.4');
 crabcast(goodFx, ['configure', goodFx.agentPath, '--priority', '1', '--launcher', 'shell']);
-const goodArgs = ['activate', goodFx.agentPath];
+// `--override`: the capacity gate reads the real machine, and this script is
+// about a version notice. An activation refused because the runner was busy
+// would be a red check about the machine rather than about the notice.
+const goodArgs = ['activate', goodFx.agentPath, '--override'];
 const goodRun = crabcast(goodFx, goodArgs);
 await trackDaemon(goodFx);
 
@@ -429,7 +435,10 @@ rule('4. 0.7.5 LIVE — the specific, evidenced claim still arrives');
 
 const sevenFx = fixture('redesign', 'herdr 0.7.5');
 crabcast(sevenFx, ['configure', sevenFx.agentPath, '--priority', '1', '--launcher', 'shell']);
-const sevenArgs = ['activate', sevenFx.agentPath];
+// `--override`: the capacity gate reads the real machine, and this script is
+// about a version notice. An activation refused because the runner was busy
+// would be a red check about the machine rather than about the notice.
+const sevenArgs = ['activate', sevenFx.agentPath, '--override'];
 const sevenRun = crabcast(sevenFx, sevenArgs);
 await trackDaemon(sevenFx);
 

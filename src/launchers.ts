@@ -486,6 +486,34 @@ export function knownLaunchers(): string[] {
 }
 
 /**
+ * Whether a launcher delivers a live agent RUNTIME behind its pane.
+ *
+ * False only for `shell`, where a bare prompt with nothing running in it is
+ * the delivered product. Everywhere this daemon asks "does an agent exist
+ * here?", the answer for every other launcher is "only if herdr reports a
+ * runtime" — a name registration over a dead pane must not verify (KAN-58) —
+ * and for `shell` the name is all there is to see.
+ *
+ * One function rather than a `!== 'shell'` at each site: `initPty` decides it
+ * for a session, `confirmAgentPresent` is passed it, `ourPaneIn` needs it to
+ * recognise a shell agent as ours, and the census's stale-session release
+ * reads it back. Four places that must agree, and did not: `ourPaneIn`
+ * originally required a runtime unconditionally, which made a `shell` agent
+ * permanently unrecognisable as its own — the same class of always-false
+ * ownership answer as the pane-id one, and found by running the live proof
+ * rather than by reading.
+ */
+export function launcherDeliversRuntime(launcherName?: string): boolean {
+  try {
+    return resolveLauncher(launcherName).name !== 'shell';
+  } catch {
+    // An unresolvable launcher never starts anything, so nothing can be ours
+    // under it. The strict reading is the safe one.
+    return true;
+  }
+}
+
+/**
  * Map a requested launcher name to its launcher.
  *
  * An unknown name throws, and the message names the valid launchers — the rule

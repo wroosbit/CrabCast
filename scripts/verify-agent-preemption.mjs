@@ -158,11 +158,15 @@ function stubHerdr(running, { statuses = {} } = {}) {
     terminateSession: () => ({ success: true }),
     occupancyOf: (census, agentPath) => ({
       reachable: true,
-      // Whatever the census says is live in that directory. The stub's agents
-      // all have runtimes, so this is the honest reading of its own census —
-      // and it is what makes the "already running" branch reachable below.
+      // The honest reading of this stub's own census: whatever it says is live
+      // in that directory, and ours when the pane bearing this path's derived
+      // name is among them. Same shape as the real one, which is what makes
+      // the "already running" branch reachable below.
+      //
+      // Like verify-agent-capacity's, this stub is not coverage of the
+      // occupancy guard — verify-refuses-occupied-directory.mjs is.
       occupants: census.agents.filter((a) => a.canonicalWorkDir === agentPath),
-      ours: census.agents.some((a) => a.canonicalWorkDir === agentPath)
+      ours: census.agents.find((a) => a.name === paneNameFor(agentPath)) ?? null
     }),
     closeAgentByPath: (agentPath) => {
       const i = alive.findIndex((n) => agentDir(n) === agentPath);
@@ -292,28 +296,50 @@ console.log(
   'record cannot be activated at all, so the failure that fallback contained has\n' +
   'no way to occur.\n'
 );
-console.log('  agent      priority   refusable  chargeable  preemptable');
+// READ BACK THROUGH THE REAL REGISTRY, not out of this script's own object.
+//
+// An earlier revision printed `knobsFor(...)` and asserted on it — a script
+// literal compared against itself, with no `dist/` code in the loop at all,
+// under a verdict whose text said "read back". It passed and asserted nothing.
+// The version before the re-key called `registry.priorityFor()` on production
+// code; this restores that property by putting the knobs through the durable
+// registry and reading what comes out.
+const scaleReg = new AgentRegistry(path.join(scratch, `agents-scale.jsonl`));
 for (const kind of ['epic', 'story', 'hotfix', 'task', 'watchdog']) {
-  const k = knobsFor(`${kind}-sample`);
+  scaleReg.recordConfigured({ path: agentDir(`${kind}-scale`), config: knobsFor(`${kind}-scale`) });
+}
+const readBack = (kind) => scaleReg.intents().get(agentDir(`${kind}-scale`))?.record.config;
+
+console.log('  agent      priority   refusable  chargeable  preemptable   (from the registry)');
+for (const kind of ['epic', 'story', 'hotfix', 'task', 'watchdog']) {
+  const k = readBack(kind);
   console.log(
-    `  ${kind.padEnd(10)} ${String(k.priority).padStart(4)}       ` +
-    `${String(k.refusable).padEnd(10)} ${String(k.chargeable).padEnd(11)} ${k.preemptable}`
+    `  ${kind.padEnd(10)} ${String(k?.priority).padStart(4)}       ` +
+    `${String(k?.refusable).padEnd(10)} ${String(k?.chargeable).padEnd(11)} ${k?.preemptable}`
   );
 }
 
 const scaleOk =
-  knobsFor('epic-x').priority === 3 &&
-  knobsFor('story-x').priority === 2 &&
-  knobsFor('hotfix-x').priority === 2 &&
-  knobsFor('task-x').priority === 1 &&
-  knobsFor('watchdog-x').preemptable === false &&
-  knobsFor('watchdog-x').chargeable === true;
+  readBack('epic')?.priority === 3 &&
+  readBack('story')?.priority === 2 &&
+  readBack('hotfix')?.priority === 2 &&
+  readBack('task')?.priority === 1 &&
+  readBack('watchdog')?.preemptable === false &&
+  readBack('watchdog')?.chargeable === true;
+// And the floor is gone rather than merely unused: an unconfigured path has no
+// priority to fall back to, which is what `priorityFor`'s floor used to
+// supply. The registry answers "nothing" instead of "the lowest declared".
+const unconfigured = scaleReg.intents().get(agentDir('never-configured'));
+console.log(`  ${'(unknown)'.padEnd(10)} ${unconfigured === undefined ? 'no record at all — there is no floor to fall to' : 'HAS A RECORD, which is wrong'}`);
+
 verdict(
-  scaleOk,
-  'the scale is what each agent was configured with, read back: epic 3 > {story,\n' +
-  '    hotfix} 2 > task 1 — and `watchdog` is CHARGED yet unpreemptable, which the\n' +
-  '    single gateExempt boolean could not express.',
-  'the scale is not what the agents were configured with.'
+  scaleOk && unconfigured === undefined,
+  'the scale is what each agent was configured with, read back OUT OF THE DURABLE\n' +
+  '    REGISTRY: epic 3 > {story, hotfix} 2 > task 1 — and `watchdog` is CHARGED yet\n' +
+  '    unpreemptable, which the single gateExempt boolean could not express. An\n' +
+  '    unconfigured path has no record and therefore no priority: the floor is gone\n' +
+  '    rather than unreached.',
+  'the scale is not what the registry holds.'
 );
 
 console.log(
@@ -613,17 +639,22 @@ rule('7. PROTECTED VICTIMS — a low-priority unpreemptable agent is never offer
 }
 
 // ------------------------------------------------- 8. victim address --
-rule('8. VICTIM ADDRESS — two agents share a basename; the stand-down takes the named one');
+rule('8. VICTIM ADDRESS — the stand-down takes the agent the refusal named');
 
 {
-  // Two directories whose basenames are identical: under the old model these
-  // would have been task/SHARED and hotfix/SHARED, told apart only by a type
-  // the caller had to remember. The gate selects the idle one and stands it
-  // down BY PATH; a resolution that fell back to a name suffix could tear
-  // down its neighbour instead — killing an agent the refusal never named.
+  // WHAT THIS STILL PROVES, AND WHAT IT NO LONGER CAN.
   //
-  // The collision cannot be expressed any more, and this section is what
-  // proves the property survived the deletion of the thing that caused it.
+  // Under the old model these were task/SHARED and hotfix/SHARED — one key,
+  // told apart only by a type flag the caller had to remember — and the
+  // hazard was real: a stand-down that fell back to a suffix match could tear
+  // down the neighbour, killing an agent the refusal never named.
+  //
+  // That hazard is designed away rather than defended against, so this section
+  // can no longer discriminate the way it did: there is no resolver left to
+  // pick wrongly. It is kept because the PROPERTY still has to hold — the
+  // agent named in the refusal is the agent that dies — and the fixture uses
+  // two different directory names because two identical ones would suggest the
+  // old collision is still expressible. It is not.
   const SHARED_FLEET = [
     'task-shared',
     'hotfix-shared',

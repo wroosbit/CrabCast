@@ -824,6 +824,78 @@ rule('7. FORGET — the verb that replaced `reset`, and what it will not do');
     `forget refused a postcondition that already held: ${JSON.stringify(noRecord)}`
   );
 
+  // -- 7c. forget asks "is anything live here", not only "is it mine" ---------
+  console.log('\n  7c. a live pane this daemon cannot claim still blocks a forget:\n');
+  console.log('  The running-check read `ours` and never `occupants` — it computed the whole');
+  console.log('  occupancy result and consulted one field. Herdr reachable + a live pane in');
+  console.log('  the directory + not recognised as ours meant forget SUCCEEDED and deleted');
+  console.log('  the record, which is the outcome its own refusal text names as the reason');
+  console.log('  it exists: a live agent, with bypassPermissions, in a caller\'s repository,');
+  console.log('  that nothing can any longer address.\n');
+  console.log('  This daemon states the rule for `activate`: "not ours" and "nothing is');
+  console.log('  there" are different facts. It has to hold one verb over.\n');
+
+  const shared = owned('forget', 'shared');
+  const strangerBridge = stubHerdr([]);
+  // A live pane in the directory that is NOT ours: a foreign name, a runtime,
+  // our cwd. `ours` is null; `occupants` is not empty.
+  strangerBridge.listHerdrAgentsChecked = () => ({
+    reachable: true,
+    agents: [{
+      name: 'butchr-task-kan-77',
+      paneId: '%stranger',
+      agentRuntime: 'claude',
+      workDir: shared,
+      canonicalWorkDir: canonicalizeOrNull(shared),
+      herdrStatus: 'working'
+    }]
+  });
+  strangerBridge.listHerdrAgents = () => strangerBridge.listHerdrAgentsChecked().agents;
+  const h7c = newRouter(strangerBridge, seedOf([shared]));
+  const refusedForget = await quiet(async () => {
+    h7c.router.handle({ action: 'forget_agent', path: shared });
+    return h7c.sent();
+  });
+  console.log(`  forget → ${JSON.stringify({ success: refusedForget.success, refused: refusedForget.refused })}`);
+  console.log(`    ${refusedForget.error?.split('\n')[0]}`);
+
+  verdict(
+    refusedForget.success === false &&
+      refusedForget.refused === 'occupied' &&
+      h7c.agentRegistry.intents().has(shared) &&
+      /different facts/.test(refusedForget.error ?? ''),
+    'the record is KEPT and the live pane is named. Dropping the only record of an agent\n' +
+    '    while something is live where it runs is the one way to produce a live agent\n' +
+    '    nothing can address.',
+    `forget deleted the record with a live pane in the directory: ${JSON.stringify(refusedForget)}`
+  );
+
+  // -- 7d. deactivate does not answer "unstarted" without looking -------------
+  console.log('\n  7d. `unstarted` is a claim about the world, so it is checked against one:\n');
+  console.log('  A record whose last event is `configured` is not evidence that nothing is');
+  console.log('  running — a durable write that failed after an activation leaves exactly');
+  console.log('  that state over a live pane. Answering "nothing was running" without a');
+  console.log('  census read is the claim-without-looking this daemon refuses everywhere.\n');
+
+  const stale = owned('forget', 'stale-record');
+  const staleBridge = stubHerdr([stale]);
+  const h7d = newRouter(staleBridge);
+  // The record says `configured`. The census says our agent is live there.
+  h7d.agentRegistry.recordConfigured({ path: stale, config: knobs() });
+  const stood = await quiet(async () => {
+    h7d.router.handle({ action: 'deactivate_agent', path: stale });
+    return h7d.sent();
+  });
+  console.log(`  deactivate → ${JSON.stringify({ success: stood.success, wasRunning: stood.wasRunning, state: stood.state })}`);
+
+  verdict(
+    stood.success === true && stood.state !== 'unstarted' &&
+      !staleBridge.alive.some((a) => a.path === stale),
+    'it took the close path instead: the pane is what is real, and the stale record does\n' +
+    '    not get to answer a question about the world on its own.',
+    `deactivate reported "${stood.state}" over a live pane: ${JSON.stringify(stood)}`
+  );
+
   // -- 7b. a deleted directory is not offered a way back ----------------------
   console.log('\n  7b. a directory the caller deleted is not offered a way back:\n');
   const doomed = owned('forget', 'doomed');
@@ -1028,10 +1100,13 @@ rule('9. COMPACTION KEEPS EVERY AGENT — including the ones that never ran (AC 
     `the standby row was lost to compaction: ${JSON.stringify(standbyPaths)}`
   );
   verdict(
-    !standbyPaths.includes(gone) && !intentsAfter.has(gone),
-    'a stood-down agent whose directory is gone is not carried — the bound on what\n' +
-    '    compaction preserves is "the work still exists".',
-    'compaction carried a record whose directory had been deleted'
+    !standbyPaths.includes(gone) && intentsAfter.has(gone),
+    'a stood-down agent whose directory is gone is NOT OFFERED a way back — but its record\n' +
+    '    survives compaction. Those are different decisions and they belong in different\n' +
+    '    places: what to show a person is a reporting question (standbyAgents checks the\n' +
+    '    disk), and whether the agent exists is not. Compaction dropping it would delete\n' +
+    '    the agent because a mount was slow.',
+    'compaction deleted an agent whose directory happened to be missing'
   );
   verdict(
     !intentsAfter.get(victim)?.preemption &&
@@ -1089,6 +1164,143 @@ rule('9. COMPACTION KEEPS EVERY AGENT — including the ones that never ran (AC 
   );
 }
 
+// ------------------------------------- 9e. a compacted preemption still resumes --
+rule('9e. A COMPACTED PREEMPTION IS STILL A RESUME');
+
+{
+  console.log('Compaction forgets the DEBT — who took the slot, at what priority — and keeps');
+  console.log('the FACT as `wasPreempted`. This file already argues that split: "How the');
+  console.log('agent stopped is not a debt, it is a fact about the work."\n');
+  console.log('But the resume path read only the annotation. So a preempted agent that had');
+  console.log('been through a compaction came back with NO resume cause: Claude Code');
+  console.log('restored its whole conversation, nothing thought this was a resume, the nudge');
+  console.log('never fired, and it sat at an empty prompt with all of its memory and no turn');
+  console.log('to take — while standbyAgents told the reader that switching it on "resumes');
+  console.log('the conversation it was stopped in". That is the KAN-21 idle-forever failure.\n');
+
+  const victim = owned('resume', 'compacted-victim');
+  const boss = owned('resume', 'boss');
+  const reg = new AgentRegistry(path.join(TMP, 'compacted-preemption.jsonl'));
+  reg.recordActivated({ path: victim, config: knobs() });
+  reg.recordDeactivated({ path: victim, config: knobs() }, {
+    byPath: boss, byPaneName: paneNameFor(boss), byPriority: 10,
+    priority: 1, herdrStatus: 'working', derivation: 'at capacity'
+  });
+
+  console.log(`  before compaction: preemption annotation present = ` +
+    `${Boolean(reg.intents().get(victim)?.preemption)}, ` +
+    `stoppedByPreemption = ${reg.stoppedByPreemption(victim)}`);
+  reg.compact();
+  const after = reg.intents().get(victim);
+  console.log(`  after  compaction: preemption annotation present = ${Boolean(after?.preemption)}, ` +
+    `wasPreempted = ${after?.wasPreempted}, stoppedByPreemption = ${reg.stoppedByPreemption(victim)}`);
+
+  const bridge = stubHerdr([]);
+  const router9e = new MessageRouter({
+    config, herdrBridge: bridge, daemonStartedAt: new Date(), agentRegistry: reg,
+    send: () => {}, broadcast: () => {}
+  });
+  await quiet(async () => router9e.handleActivate({ path: victim, ...PAST_THE_GATE }, () => {}));
+  const spawned = bridge.spawns[bridge.spawns.length - 1];
+  console.log(`  re-activated after compaction: spawnSession was told resume='${spawned?.resume}'`);
+
+  verdict(
+    Boolean(reg.intents().get(victim)) &&
+      after?.preemption === undefined &&
+      after?.wasPreempted === true &&
+      spawned?.resume === 'preempted',
+    'the debt is forgotten and the FACT is not: an agent whose annotation compaction\n' +
+    '    dropped still comes back framed as interrupted work, so it is told to carry on\n' +
+    '    instead of sitting on a restored conversation with no turn to take.',
+    `a compacted preemption lost its resume framing: resume=${spawned?.resume}, ` +
+    `wasPreempted=${after?.wasPreempted}`
+  );
+}
+
+// ------------------------------------------------ 9d. the standby clip (AC 6's branch) --
+rule('9d. COMPACTION KEEPS EVERY STOOD-DOWN AGENT — the clip that deleted them');
+
+{
+  console.log('The same defect as 9, in the branch next door, and it did not need a new');
+  console.log('event to introduce it — it was reachable at 101 stood-down agents.\n');
+  console.log('`standbyToPreserve` clipped to the newest 100. A `deactivated`-last row is');
+  console.log('matched by NEITHER of the other two preserve sets, so it is that agent\'s only');
+  console.log('record: clipping it does not cost the route back, it DELETES THE AGENT —');
+  console.log('priority, launcher, prompt, gate flags — and a later activate(path) answers');
+  console.log('"no agent is configured" for a directory whose work is still on disk.\n');
+  console.log('It was safe under the type model, where priority and launcher lived in');
+  console.log('config and anyone could rebuild the activation. There is no config now.\n');
+
+  // 170 agents × 3 rows = 510, past the 500-record compaction threshold, and
+  // 70 past the clip that used to be there.
+  const N = 170;
+  const reg = new AgentRegistry(path.join(TMP, 'standby-clip.jsonl'));
+  const dirs = [];
+  for (let i = 0; i < N; i++) {
+    const dir = owned('clip', `agent-${i}`);
+    dirs.push(dir);
+    const record = { path: dir, config: knobs({ priority: i, label: `agent ${i}` }) };
+    reg.recordConfigured(record);
+    reg.recordActivated(record);
+    reg.recordDeactivated(record);
+  }
+
+  const rows = reg.readLog().length;
+  const before = reg.intents();
+  console.log(`  ${N} agents configured, activated and stood down → ${rows} records ` +
+    `(threshold is 500)`);
+  console.log(`  agents known BEFORE compaction: ${before.size}`);
+
+  reg.compact();
+  const after = reg.intents();
+  console.log(`  agents known AFTER  compaction: ${after.size}`);
+  console.log(`  records after compaction:       ${reg.readLog().length}`);
+
+  const missing = dirs.filter((d) => !after.has(d));
+  console.log(`  agents that stopped existing:    ${missing.length}` +
+    (missing.length ? ` (e.g. ${missing[0]})` : ''));
+
+  // The oldest one is the one a clip would take first, so it is the one to
+  // prove is still usable — not merely still listed.
+  const oldest = after.get(dirs[0]);
+  const bridge = stubHerdr([]);
+  let sent9d;
+  const router9d = new MessageRouter({
+    config, herdrBridge: bridge, daemonStartedAt: new Date(), agentRegistry: reg,
+    send: (msg) => { sent9d = msg; }, broadcast: () => {}
+  });
+  const revived = await quiet(async () => {
+    let out;
+    await router9d.handleActivate({ path: dirs[0], ...PAST_THE_GATE }, (m) => { out = m; });
+    return out;
+  });
+  console.log(`  the OLDEST stood-down agent still activates: ${revived?.success === true}`);
+  console.log(`  and its knobs survived: priority ${oldest?.record.config.priority}, ` +
+    `label ${JSON.stringify(oldest?.record.config.label)}`);
+
+  verdict(
+    missing.length === 0 && after.size === N,
+    `every one of the ${N} stood-down agents survived compaction. Compaction drops\n` +
+    '    HISTORY — superseded rows — which is its whole job; it never drops an AGENT. The\n' +
+    '    output is one row per agent that exists, a bound proportional to the fleet rather\n' +
+    '    than to how long the daemon has been running.',
+    `compaction deleted ${missing.length} agent(s) outright`
+  );
+  verdict(
+    revived?.success === true &&
+      oldest?.record.config.priority === 0 &&
+      oldest?.record.config.label === 'agent 0',
+    'and the oldest of them is still a usable agent afterwards, with the knobs it was\n' +
+    '    configured with — not merely a row that survived a count.',
+    `the oldest stood-down agent did not survive usefully: ${JSON.stringify(oldest?.record.config)}`
+  );
+  verdict(
+    reg.readLog().length < rows,
+    'while compaction still compacts.',
+    `the log did not shrink: ${rows} → ${reg.readLog().length}`
+  );
+}
+
 // ----------------------------------------------------------- 10. restatement --
 rule('10. AN ACTIVATION THAT CHANGES NOTHING WRITES NOTHING');
 
@@ -1098,50 +1310,67 @@ rule('10. AN ACTIVATION THAT CHANGES NOTHING WRITES NOTHING');
   console.log('list, so an agent whose TYPE gained a server in config was still "exactly');
   console.log('this", the restatement was skipped, and a restart replayed the list the agent');
   console.log('first started with.\n');
-  console.log('That drift is now impossible by construction, and saying so is the point:');
-  console.log('`activate` takes NO attributes, and every value lives on the record — so');
-  console.log('there is no second source for the record to fall out of step with. The');
-  console.log('invariant that replaces it is the one thing an activation CAN change about a');
-  console.log('record: which pane it is bound to.\n');
+  console.log('That drift is now impossible by construction: `activate` takes NO attributes,');
+  console.log('and every value lives on the record, so there is no second source for the');
+  console.log('record to fall out of step with. What is left to check is that the dedupe');
+  console.log('still discriminates — it skips a restatement of the same configuration and');
+  console.log('does NOT skip a genuine change.\n');
+  console.log('It deliberately does not key on the pane. An earlier revision compared the');
+  console.log('pane id an activation landed in, which meant a herdr renumber (see section 0');
+  console.log('and verify-refuses-occupied-directory case c3) wrote a spurious row every');
+  console.log('time an unrelated agent finished.\n');
 
   const dir = owned('restate', 'agent');
   const agentRegistry = new AgentRegistry(path.join(TMP, 'restatement.jsonl'));
   const bridge = stubHerdr([]);
   let last;
-  const router = new MessageRouter({
+  const routerFor = () => new MessageRouter({
     config, herdrBridge: bridge, daemonStartedAt: new Date(), agentRegistry,
     send: (msg) => { last = msg; }, broadcast: () => {}
   });
 
   await quiet(async () => {
-    router.handle({ action: 'configure_agent', path: dir, ...knobs() });
+    routerFor().handle({ action: 'configure_agent', path: dir, ...knobs() });
   });
   const afterConfigure = agentRegistry.readLog().length;
 
-  await quiet(async () => router.handleActivate({ path: dir, ...PAST_THE_GATE }, () => {}));
+  await quiet(async () => routerFor().handleActivate({ path: dir, ...PAST_THE_GATE }, () => {}));
   const afterFirst = agentRegistry.readLog().length;
 
-  // Re-activating an agent that is already running is answered `alreadyRunning`
-  // without touching the log — a fleet client reconciling towards desired state
+  // Re-activating an agent that is already running: answered `alreadyRunning`
+  // without touching the log. A fleet client reconciling towards desired state
   // does this on every pass.
-  await quiet(async () => router.handleActivate({ path: dir, ...PAST_THE_GATE }, () => {}));
-  const afterSame = agentRegistry.readLog().length;
+  await quiet(async () => routerFor().handleActivate({ path: dir, ...PAST_THE_GATE }, () => {}));
+  const afterSame = afterFirst === agentRegistry.readLog().length
+    ? agentRegistry.readLog().length
+    : agentRegistry.readLog().length;
 
-  // Now the pane changes underneath it: the agent died and came back somewhere
-  // else. The binding is stale, and a restart that trusted it would be checking
-  // the wrong pane.
+  // The pane renumbers underneath it. Nothing about the agent changed, so
+  // nothing may be written.
+  bridge.alive[0].paneId = '%RENUMBERED';
+  await quiet(async () => routerFor().handleActivate({ path: dir, ...PAST_THE_GATE }, () => {}));
+  const afterRenumber = agentRegistry.readLog().length;
+
+  // Now a genuine change: the agent is stood down and reconfigured, then
+  // activated. The configuration on the record is different, so the
+  // activation is not a restatement of anything.
+  await quiet(async () => routerFor().handle({ action: 'deactivate_agent', path: dir }));
   bridge.alive.length = 0;
-  const before = agentRegistry.intents().get(dir).record.paneId;
-  bridge.confirmAgentPresent = async () => ({ present: true, paneId: '%NEWPANE', waitedMs: 0, checks: 1 });
-  await quiet(async () => router.handleActivate({ path: dir, ...PAST_THE_GATE }, () => {}));
-  const afterRebind = agentRegistry.readLog().length;
-  const rebound = agentRegistry.intents().get(dir).record.paneId;
+  await quiet(async () => {
+    routerFor().handle({ action: 'configure_agent', path: dir, ...knobs({ priority: 9 }) });
+  });
+  const afterReconfigure = agentRegistry.readLog().length;
+  await quiet(async () => routerFor().handleActivate({ path: dir, ...PAST_THE_GATE }, () => {}));
+  const afterChanged = agentRegistry.readLog().length;
+  const recorded = agentRegistry.intents().get(dir);
 
-  console.log(`  configure                                  → ${afterConfigure} record(s)`);
-  console.log(`  activate                                   → ${afterFirst} record(s)`);
-  console.log(`  activate again, already running            → ${afterSame} record(s) (restatement skipped)`);
-  console.log(`  activate after the pane changed underneath → ${afterRebind} record(s)`);
-  console.log(`  recorded paneId: ${before} → ${rebound}`);
+  console.log(`  configure                                   → ${afterConfigure} record(s)`);
+  console.log(`  activate                                    → ${afterFirst} record(s)`);
+  console.log(`  activate again, already running             → ${afterSame} record(s) (skipped)`);
+  console.log(`  activate again after herdr RENUMBERED it    → ${afterRenumber} record(s) (skipped)`);
+  console.log(`  deactivate + configure(priority 9)          → ${afterReconfigure} record(s)`);
+  console.log(`  activate with the new configuration         → ${afterChanged} record(s)`);
+  console.log(`  what a restart would replay: priority ${recorded?.record.config.priority}`);
 
   verdict(
     afterSame === afterFirst,
@@ -1150,10 +1379,19 @@ rule('10. AN ACTIVATION THAT CHANGES NOTHING WRITES NOTHING');
     `an unchanged re-activation appended a record: ${afterFirst} → ${afterSame}`
   );
   verdict(
-    afterRebind > afterSame && rebound === '%NEWPANE',
-    'and a re-activation that lands in a DIFFERENT pane IS recorded, so the durable\n' +
-    '    binding names the pane the agent is actually in rather than one it used to be.',
-    `the new pane binding was not recorded: ${afterSame} → ${afterRebind}, paneId ${rebound}`
+    afterRenumber === afterSame,
+    'and a herdr RENUMBER writes nothing either: the pane an agent happens to be in is\n' +
+    '    not part of what the record says, so a position that moved is not a change.',
+    `a renumber appended a record: ${afterSame} → ${afterRenumber}`
+  );
+  verdict(
+    afterChanged > afterReconfigure &&
+      recorded?.event === 'activated' &&
+      recorded?.record.config.priority === 9,
+    'a genuine configuration change IS recorded, so a restart replays what the agent is\n' +
+    '    now rather than what it was — the dedupe discriminates rather than just skipping.',
+    `the changed configuration was not recorded: ${afterReconfigure} → ${afterChanged}, ` +
+    `priority ${recorded?.record.config.priority}`
   );
 }
 

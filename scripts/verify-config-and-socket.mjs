@@ -229,6 +229,78 @@ console.log('\n=== 1b. A durable log this daemon cannot fully read (KAN-124 AC 5
   );
 }
 
+console.log('\n=== 1c. A hand-edit that follows the refusal\'s own advice and drops a field ===');
+{
+  // The gate used to ask only "is `v` current?", while `readLog` additionally
+  // requires a `path` and a complete `config`. Remedy 2 in the refusal above
+  // tells an operator to HAND-EDIT the rows — so an operator doing exactly
+  // what the daemon told them, who misses one of the five required config
+  // fields, produced a row that passed the gate and was then dropped SILENTLY
+  // by the loader. That silence is deliberate and correct for torn tails, so
+  // the daemon would have started clean and reported a fleet with a hole in
+  // it — through the recovery procedure it recommended itself.
+  const dir = path.join(tmp, 'handedit-data');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const log = path.join(dir, 'agents.jsonl');
+  const full = {
+    priority: 1, refusable: true, chargeable: true, preemptable: true, launcher: 'claude'
+  };
+  const { chargeable, ...missingOne } = full;
+  fs.writeFileSync(log, [
+    // A good row, so the file is not uniformly broken.
+    JSON.stringify({ v: 1, event: 'activated', path: '/tmp/kan124-good', config: full, at: '2026-08-01T10:00:00.000Z' }),
+    // The hand-edit casualty: version-current, `chargeable` dropped.
+    JSON.stringify({ v: 1, event: 'activated', path: '/tmp/kan124-handedited', config: missingOne, at: '2026-08-01T10:01:00.000Z' })
+  ].join('\n') + '\n');
+
+  const cfg = writeConfig('handedit.config.json', (c) => { c.dataDir = dir; });
+  const result = startDaemonSync(cfg);
+  console.log(result.stderr.trim());
+
+  check(result.status === 1, 'a version-current row the loader would drop refuses the boot too', `exit ${result.status}`);
+  check(
+    /1 row\(s\) are version v1 and still unreadable/.test(result.stderr),
+    'the refusal counts them separately from pre-migration rows — different problem, different fix'
+  );
+  check(
+    /kan124-handedited/.test(result.stderr) && /unusable/.test(result.stderr),
+    'and names the offending row rather than only the count'
+  );
+  check(
+    /"chargeable"/.test(result.stderr) && /hand-edit/.test(result.stderr),
+    'naming the exact fields a row needs, because this is reached BY hand-editing'
+  );
+  check(
+    !/were written by a CrabCast that addressed agents by/.test(result.stderr),
+    'and it does NOT describe a v1 row as a pre-migration <type>/<key> log, which would ' +
+      'send the operator to the wrong remedy'
+  );
+  check(
+    !fs.existsSync(path.join(dir, 'crabcast.sock')),
+    'no partial load: the good row was not loaded on its own either'
+  );
+}
+
+console.log('\n=== 1d. A log from a NEWER daemon ===');
+{
+  // Not a pre-migration log — the opposite. Describing it as one would send an
+  // operator to "delete it and re-configure" when the fix is to stop
+  // downgrading.
+  const dir = path.join(tmp, 'newer-data');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dir, 'agents.jsonl'),
+    JSON.stringify({ v: 99, event: 'activated', path: '/tmp/kan124-future', config: {}, at: 'x' }) + '\n');
+  const cfg = writeConfig('newer.config.json', (c) => { c.dataDir = dir; });
+  const result = startDaemonSync(cfg);
+  console.log(result.stderr.trim().split('\n').slice(0, 8).join('\n'));
+  check(result.status === 1, 'a newer-format log refuses the boot', `exit ${result.status}`);
+  check(
+    /NEWER than this daemon writes/.test(result.stderr) && /downgrading/.test(result.stderr),
+    'and says so — it names downgrading as what put you here, rather than calling it a ' +
+      'pre-migration log and sending you to the wrong remedy'
+  );
+}
+
 console.log('\n=== 2. Daemon starts from config; daemon_status round-trips ===');
 const first = startDaemon(configPath);
 {

@@ -645,14 +645,27 @@ check(
   'a single-dash message is text too: "-x" was delivered'
 );
 
-// A flag written after the message is message text. `send` has no flags of
-// its own now — the `--type` disambiguator went with the types, because a path
-// cannot be ambiguous — so the note about a mistakable word can only fire for
-// a GLOBAL flag, which is what the next case covers.
+// A flag written after the message is message text, and there is no longer a
+// note about it — the assertion that used to be here is deleted along with the
+// code it checked, for a reason worth stating precisely rather than gesturing
+// at.
+//
+// The note fired when a word in the message matched one of the COMMAND's own
+// flags. `send` is the only command with a `rest` positional and it now has no
+// flags of its own (`--type` went with the types, because a path cannot be
+// ambiguous), so the branch was unreachable: it could not fire for any input.
+// Widening it to global flags was the alternative and would have been worse —
+// `send <dir> --timeout 5000` is an ordinary message, and warning about a
+// mistake the caller did not make is the opposite of this CLI's rule that what
+// it prints is what happened.
 const sentAfter = crabcast(overrides, ['send', keptDir, 'hi', 'there']);
 check(
-  shimSent().pop() === 'hi there',
+  shimSent().pop() === 'hi there' && sentAfter.code === EXIT.OK,
   'the whole message is joined and delivered, not clipped at the first word'
+);
+check(
+  sentAfter.stderr.trim() === '' || !/is part of the/.test(sentAfter.stderr),
+  'and no note is printed about it, because there is no longer a branch that could'
 );
 
 const sentTimeout = crabcast(overrides, ['send', keptDir, '--timeout', '5000']);

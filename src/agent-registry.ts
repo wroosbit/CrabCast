@@ -98,42 +98,45 @@ export const LOG_VERSION = 1;
  */
 const COMPACT_AFTER_RECORDS = 500;
 
-/**
- * How many stood-down agents a compaction carries across. See
- * {@link AgentRegistry.standbyToPreserve} for why they are carried at all.
- *
- * Far enough below {@link COMPACT_AFTER_RECORDS} that a compacted log is still
- * a small fraction of the trigger: preserving records is only worth doing if
- * the next compaction is still hundreds of appends away, or compaction would
- * run on every write.
- */
-const COMPACT_STANDBY_LIMIT = 100;
-
 export type AgentEvent = 'configured' | 'activated' | 'deactivated' | 'forgotten';
 
 const AGENT_EVENTS: AgentEvent[] = ['configured', 'activated', 'deactivated', 'forgotten'];
 
 /**
  * Everything needed to bring an agent back without asking anyone: the
- * directory it is, the knobs a caller froze onto it, and the pane it was last
- * bound to.
+ * directory it is, and the knobs a caller froze onto it.
  */
 export interface AgentRecord {
   /** The canonical real path. This is the identity; nothing else is. */
   path: string;
   /** The whole of `configure`'s argument list, verbatim. */
   config: AgentConfig;
-  /**
-   * The herdr pane this agent was last confirmed running in.
-   *
-   * The durable half of the binding. It is never read on its own — see
-   * `HerdrBridge.occupancyOf`, where it is one of three facts that must agree
-   * before a pane is claimed as ours — and it is deliberately not cleared on a
-   * stand-down, so a stale-but-recorded pane id can still be recognised as our
-   * own dead pane rather than as a stranger's live one.
-   */
-  paneId?: string;
 }
+
+/**
+ * WHAT IS DELIBERATELY NOT ON THIS RECORD: `paneId`.
+ *
+ * An earlier revision persisted the herdr pane an agent was last confirmed in,
+ * as the durable half of a three-fact ownership test. That was wrong in a way
+ * worth leaving a note about, because the field is an obvious one to add back.
+ *
+ * herdr pane ids are POSITIONS IN A LIST THAT COMPACTS whenever any pane
+ * anywhere closes — this repository documents that itself, in
+ * `HerdrBridge.closeTabPlaceholder`, which re-resolves by terminal id for
+ * exactly that reason. Persisting one and comparing it against a later census
+ * therefore answers "is this pane ours" with NO about our own live agent as
+ * soon as an unrelated agent two tabs over finishes. Under refuse-on-occupied
+ * that is not a cosmetic wrong answer: `activate` reports our own agent as a
+ * foreign occupant and refuses to start it, permanently.
+ *
+ * Measured rather than deduced: activating two agents and deactivating the
+ * first renumbered the second's pane from `…-12` to `…-11` on herdr 0.6.4.
+ *
+ * A volatile value has no business in durable storage. Ownership is decided by
+ * `ourPaneIn` (herdr.ts) from the pane NAME, which is forward-computed from
+ * the path and fixed for the life of the pane; every pane id this daemon
+ * reports is read live from the census that produced it.
+ */
 
 /**
  * Why a stand-down happened, when it happened *to* an agent rather than
@@ -289,9 +292,23 @@ export interface LogVersionScan {
   file: string;
   /** Lines that parsed as JSON objects. Torn and blank lines are not counted. */
   rows: number;
-  /** Rows carrying no `v`, or a `v` this daemon does not write. */
+  /** Rows carrying no `v`, or an OLDER `v` — written before agents had paths. */
   preMigration: number;
-  /** A few pre-migration rows, identified however they identify themselves. */
+  /** Rows carrying a `v` from a NEWER daemon than this one. */
+  fromNewer: number;
+  /**
+   * Rows this daemon's own format claims, and that {@link AgentRegistry.readLog}
+   * would nonetheless drop.
+   *
+   * These are the hand-edit casualties. The refusal prints "hand-edit the
+   * file" as a supported remedy, and an operator following it who omits one of
+   * the required `config` fields produces a row that passes a version check
+   * and fails `isUsableEntry` — which drops it SILENTLY, on purpose, for
+   * torn-tail tolerance. The daemon would then start clean and report a fleet
+   * with a hole in it, through the recovery procedure it recommended itself.
+   */
+  unusable: number;
+  /** A few offending rows, identified however they identify themselves. */
   samples: string[];
 }
 
@@ -327,7 +344,9 @@ const VERSION_SCAN_SAMPLES = 3;
  * cannot finish its own job.
  */
 export function scanLogVersions(file: string): LogVersionScan {
-  const scan: LogVersionScan = { file, rows: 0, preMigration: 0, samples: [] };
+  const scan: LogVersionScan = {
+    file, rows: 0, preMigration: 0, fromNewer: 0, unusable: 0, samples: []
+  };
 
   let text: string;
   try {
@@ -352,8 +371,24 @@ export function scanLogVersions(file: string): LogVersionScan {
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
     scan.rows++;
-    if (parsed.v === LOG_VERSION) continue;
-    scan.preMigration++;
+
+    let problem: 'pre-migration' | 'newer' | 'unusable' | null = null;
+    if (typeof parsed.v === 'number' && parsed.v > LOG_VERSION) {
+      problem = 'newer';
+      scan.fromNewer++;
+    } else if (parsed.v !== LOG_VERSION) {
+      problem = 'pre-migration';
+      scan.preMigration++;
+    } else if (!isUsableEntry(parsed)) {
+      // Versioned as ours and still unreadable: the hand-edit case. Checked
+      // against the SAME predicate readLog applies, because a boot gate that
+      // validated less than the loader would let exactly the rows the loader
+      // silently drops through the gate that exists to catch them.
+      problem = 'unusable';
+      scan.unusable++;
+    }
+    if (problem === null) continue;
+
     if (scan.samples.length < VERSION_SCAN_SAMPLES) {
       // Identified in whatever vocabulary the row itself uses: an old row says
       // `type`/`key`, and quoting it back is what lets a human find the line.
@@ -365,7 +400,9 @@ export function scanLogVersions(file: string): LogVersionScan {
             : typeof parsed.path === 'string'
               ? parsed.path
               : '(unidentifiable row)';
-      scan.samples.push(`${who} — ${parsed.event ?? 'no event'} at ${parsed.at ?? 'no timestamp'}`);
+      scan.samples.push(
+        `${who} — ${parsed.event ?? 'no event'} at ${parsed.at ?? 'no timestamp'} (${problem})`
+      );
     }
   }
 
@@ -381,24 +418,54 @@ export function scanLogVersions(file: string): LogVersionScan {
  * restored, some silently absent, and no line anywhere saying which.
  */
 export function describeUnreadableLog(scan: LogVersionScan): string {
-  return [
-    `refusing to start: ${scan.preMigration} of ${scan.rows} record(s) in the agent registry ` +
-      `were written by a CrabCast that addressed agents by <type>/<key>, and this daemon ` +
-      `addresses them by path.`,
+  const bad = scan.preMigration + scan.fromNewer + scan.unusable;
+  const parts: string[] = [
+    `refusing to start: ${bad} of ${scan.rows} record(s) in the agent registry cannot be ` +
+      `read by this daemon.`,
     `  registry: ${scan.file}`,
-    ...scan.samples.map((s) => `    ${s}`),
-    ...(scan.preMigration > scan.samples.length
-      ? [`    …and ${scan.preMigration - scan.samples.length} more`]
-      : []),
-    ``,
-    `Those rows cannot be converted. Their \`workDir\` gives the path, but \`priority\`, the`,
-    `gate flags and \`prompt\` came from the \`workspaceTypes\` config that no longer exists —`,
-    `so a converted row would be a configured agent missing three required \`configure\``,
-    `parameters, which this API could not have produced. Inventing them is the one thing`,
-    `this daemon refuses to do about a value nobody decided.`,
-    ``,
-    `Loading the file part-way is not offered either: the agents in those rows would simply`,
-    `not exist, and nothing would say so.`,
+    ...scan.samples.map((line) => `    ${line}`),
+    ...(bad > scan.samples.length ? [`    …and ${bad - scan.samples.length} more`] : []),
+    ``
+  ];
+
+  // Three different problems with three different remedies. Saying
+  // "unreadable" over all of them would send an operator to the wrong fix.
+  if (scan.preMigration > 0) {
+    parts.push(
+      `${scan.preMigration} row(s) were written by a CrabCast that addressed agents by`,
+      `<type>/<key>. Their \`workDir\` gives the path, but \`priority\`, the gate flags and`,
+      `\`prompt\` came from the \`workspaceTypes\` config that no longer exists — so a converted`,
+      `row would be a configured agent missing three required \`configure\` parameters, which`,
+      `this API could not have produced. Inventing them is the one thing this daemon refuses`,
+      `to do about a value nobody decided.`,
+      ``
+    );
+  }
+  if (scan.fromNewer > 0) {
+    parts.push(
+      `${scan.fromNewer} row(s) carry a format version NEWER than this daemon writes (this`,
+      `daemon is at v${LOG_VERSION}). They were not written by an older CrabCast — they were`,
+      `written by a newer one, and downgrading is what put you here. Run the newer daemon`,
+      `against this data directory, or start from an empty log.`,
+      ``
+    );
+  }
+  if (scan.unusable > 0) {
+    parts.push(
+      `${scan.unusable} row(s) are version v${LOG_VERSION} and still unreadable: a row needs a`,
+      `non-empty "path" and a "config" carrying a finite "priority", a non-empty "launcher"`,
+      `and all three of "refusable", "chargeable" and "preemptable" as booleans. This is`,
+      `almost always a hand-edit that dropped a field. It is caught HERE rather than at load`,
+      `because the loader drops such rows silently and on purpose — that silence is what`,
+      `makes a torn tail survivable — so an unnoticed hand-edit would otherwise come back as`,
+      `a fleet with a hole in it and nothing anywhere saying so.`,
+      ``
+    );
+  }
+
+  parts.push(
+    `Loading the file part-way is not offered: the agents in those rows would simply not`,
+    `exist, and nothing would say so.`,
     ``,
     `Two remedies, both supported:`,
     `  1. Delete ${scan.file} and \`configure\` the fleet again. This is the right answer`,
@@ -406,11 +473,15 @@ export function describeUnreadableLog(scan: LogVersionScan): string {
     `     reconciler pass re-creates every record.`,
     `  2. Hand-edit the file: each row needs "v": ${LOG_VERSION}, a "path" (the old`,
     `     "workDir"), and a "config" object carrying priority, launcher, refusable,`,
-    `     chargeable and preemptable — the values you would pass to \`configure\`.`,
+    `     chargeable and preemptable — the values you would pass to \`configure\`. Re-run the`,
+    `     daemon afterwards: it validates every row against the same predicate the loader`,
+    `     uses, so a field you miss is refused here rather than dropped later.`,
     ``,
     `There is deliberately no \`migrate-log\` command: it could recover the path and`,
     `sometimes the launcher, and would have to ask you for the rest regardless.`
-  ].join('\n');
+  );
+
+  return parts.join('\n');
 }
 
 export class AgentRegistry {
@@ -635,6 +706,34 @@ export class AgentRegistry {
   }
 
   /**
+   * Whether this agent's last stand-down was a preemption AT ALL — including
+   * after compaction has dropped the annotation naming who took the slot.
+   *
+   * This is the question the resume path must ask, and asking
+   * {@link preemptionFor} instead was a live idle-forever bug. Compaction
+   * deliberately forgets the *debt* and deliberately keeps the *fact* as
+   * `wasPreempted` — the comment on {@link AgentLogEntry.wasPreempted} says
+   * exactly that: "How the agent stopped is not a debt, it is a fact about the
+   * work."
+   *
+   * But `resumeCauseFor` read only the annotation. So a preempted agent that
+   * had been through a compaction came back with NO resume cause: Claude Code
+   * restored its whole conversation, the nudge never fired because nothing
+   * thought this was a resume, and it sat at an empty prompt with all of its
+   * memory and no turn to take. That is the KAN-21 idle-forever failure,
+   * reached through the one path that was supposed to have been made safe —
+   * and `standbyAgents` was meanwhile telling the reader that switching it on
+   * "resumes the conversation it was stopped in."
+   *
+   * The debt may be forgotten. That the work was interrupted may not.
+   */
+  public stoppedByPreemption(agentPath: string): boolean {
+    const intent = this.intents().get(agentPath);
+    if (intent?.event !== 'deactivated') return false;
+    return intent.preemption !== undefined || intent.wasPreempted === true;
+  }
+
+  /**
    * The agents that should be running: those whose last event was `activated`.
    * This is the input to boot-time reconciliation and to the missing-agent
    * sweep, and both must read the same list or they would disagree about what
@@ -698,32 +797,42 @@ export class AgentRegistry {
   }
 
   /**
-   * The stood-down agents compaction carries across, newest first.
+   * The stood-down agents compaction carries across. ALL of them.
    *
-   * WHY THIS EXISTS AT ALL — the decision, stated rather than defaulted
+   * WHY THIS CARRIES EVERYTHING NOW, which is a correction rather than a
+   * preference.
    *
-   * Compaction used to rewrite the log as one `activated` record per expected
-   * agent and nothing else, which silently emptied the standby list: every
-   * agent a person had switched off stopped being reported the moment the
-   * 501st record landed. That was never decided, it was what dropping
-   * `deactivated` records happened to do — and the two things it throws away
-   * are not the same size. A dropped *preemption annotation* costs a note
-   * about a debt nobody acted on for 500 records, which is the deliberate
-   * trade {@link preempted} documents. A dropped *standby* record costs the
-   * only route back: the directory is still on disk with a conversation in it,
-   * the fleet client's On button is built from exactly this list, and once the
-   * record is gone the agent can be restarted only by someone reconstructing
-   * its configuration by hand. Losing the way back to work that still exists is
-   * a different class of loss from forgetting why work stopped.
+   * Compaction originally rewrote the log as one `activated` record per
+   * expected agent and nothing else, which silently emptied the standby list.
+   * That was fixed by carrying stood-down rows — bounded two ways: only when
+   * the directory still existed, and only the newest 100.
    *
-   * So standby records travel and preemption annotations still do not.
+   * BOTH BOUNDS WERE SAFE UNDER THE TYPE MODEL AND ARE NOT SAFE NOW. Then, a
+   * dropped standby row cost the *route back*: the agent's priority, prompt
+   * and launcher lived in `workspaceTypes`, so anyone could reconstruct the
+   * activation from config. There is no config any more. A `deactivated`-last
+   * row is matched by neither {@link configuredToPreserve} nor
+   * {@link activatedToPreserve}, so it is that agent's ONLY record — and
+   * dropping it does not cost the route back, it DELETES THE AGENT. A later
+   * `activate(path)` then answers "no agent is configured" for a directory
+   * whose work and conversation are still sitting on disk.
    *
-   * Two bounds keep this from re-growing the file compaction exists to shrink.
-   * A record is carried only when its directory still exists — the same test
-   * the reporting path applies. And at most {@link COMPACT_STANDBY_LIMIT} of
-   * them are kept, newest first, because "switch it back on" is a thing said
-   * about recent work; an agent switched off two hundred stand-downs ago is
-   * history, not a control.
+   * That is the same defect as the `configured`-row one, in the branch next
+   * door, and it was reachable at 101 stood-down agents rather than needing a
+   * new event to introduce it.
+   *
+   * So: **compaction never drops an agent.** It drops HISTORY — superseded
+   * rows — which is the whole of its job. The output is one row per agent that
+   * exists, a bound proportional to the fleet rather than to how long the
+   * daemon has been running, and the same bound the other two preserve sets
+   * already had.
+   *
+   * The filesystem check went with the clip, deliberately: a directory can be
+   * temporarily unmounted, and "your agent stopped existing because a mount
+   * was slow" is not a trade anyone offered. Whether a stood-down agent is
+   * OFFERED as a way back is a reporting question, and `standbyAgents`
+   * (router.ts) still answers it with exactly that `existsSync` — which is
+   * where a question about what to show a person belongs.
    */
   private standbyToPreserve(): AgentLogEntry[] {
     const out: AgentLogEntry[] = [];
@@ -733,11 +842,6 @@ export class AgentRegistry {
       // is the configuration with the annotation already pulled out by
       // intents(), so the debt stops being reported (the deliberate half — see
       // preempted()) while the route back to the work survives.
-      try {
-        if (!fs.existsSync(intent.record.path)) continue;
-      } catch {
-        continue;
-      }
       out.push({
         v: LOG_VERSION,
         ...intent.record,
@@ -753,7 +857,7 @@ export class AgentRegistry {
       });
     }
     out.sort((a, b) => b.at.localeCompare(a.at));
-    return out.slice(0, COMPACT_STANDBY_LIMIT);
+    return out;
   }
 
   /**

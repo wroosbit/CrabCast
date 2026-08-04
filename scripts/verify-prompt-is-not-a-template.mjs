@@ -197,6 +197,19 @@ function invoke(deps, request) {
 
 const KNOBS = { priority: 1, launcher: 'shell' };
 
+/**
+ * Every activation here passes this, for the reason the rest of the suite
+ * does. The capacity gate reads the real machine — cores, memory, and a
+ * one-minute load average that moves while this script runs — and this script
+ * is about where prompt bytes go, not about the gate. A proof that passes on a
+ * quiet machine and fails on a busy one proves nothing either way; the gate
+ * has its own proof in verify-agent-capacity.mjs.
+ *
+ * It was missing, and this script duly failed on a loaded machine while
+ * proving nothing about prompts.
+ */
+const PAST_THE_GATE = { override: true };
+
 {
   const dir = path.join(tmp, 'owned');
   fs.mkdirSync(dir, { recursive: true });
@@ -216,7 +229,7 @@ const KNOBS = { priority: 1, launcher: 'shell' };
   );
 
   fs.writeFileSync(ARGV_LOG, '');
-  await invoke(deps, { action: 'activate_agent', path: agentPath });
+  await invoke(deps, { action: 'activate_agent', path: agentPath, ...PAST_THE_GATE });
 
   // The sidecar, which is where the prompt actually lands.
   const sidecar = sidecarDirFor(config.dataDir, agentPath);

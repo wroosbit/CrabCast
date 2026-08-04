@@ -61,7 +61,7 @@ try {
 // stderr, like a ConfigError: the operator who just upgraded is looking there,
 // and daemon.log does not exist yet at this point.
 const logScan = scanLogVersions(registryPathFor(config.dataDir));
-if (logScan.preMigration > 0) {
+if (logScan.preMigration + logScan.fromNewer + logScan.unusable > 0) {
   process.stderr.write(`crabcast: ${describeUnreadableLog(logScan)}\n`);
   process.exit(1);
 }

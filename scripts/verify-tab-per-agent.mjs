@@ -17,7 +17,9 @@
 //                     first two. This is the assertion that fails on the old
 //                     code, and it is the whole point of the change.
 //
-// Usage: node scripts/verify-tab-per-agent.mjs [scratch-root]
+// Usage: node scripts/verify-tab-per-agent.mjs
+//
+// It takes NO arguments. See the SCRATCH note below.
 //
 // Run it after `npm run build`, against the live herdr. It creates and
 // removes its own scratch agents and touches nothing else; agents that were
@@ -35,7 +37,30 @@ import { DEFAULT_DATA_DIR } from '../dist/config.js';
 // so the scratch agents are scratch DIRECTORIES — and the script creates them
 // itself, because `configure` refuses a path that is not there and CrabCast
 // creates none of its own.
-const SCRATCH = process.argv[2] ?? fs.mkdtempSync(path.join(os.tmpdir(), 'kan32-verify-'));
+//
+// THE ROOT IS NOT AN ARGUMENT, and that is a deliberate removal.
+//
+// An earlier revision accepted `process.argv[2]` as the scratch root and then
+// `rm -rf`'d it in the `finally` block. The operand it replaced was a key
+// PREFIX, so on the old code cleanup only ever removed CrabCast's own
+// subtrees; re-keying it onto a directory turned the same line into "delete
+// whatever you were handed". This project's hardest rule is that it never
+// deletes a directory it did not create — `configure` refuses to `mkdir` for
+// exactly that reason — and a script in its own suite that recursively deletes
+// its argument is that rule broken one layer out, on the machine of whoever
+// runs the proof.
+//
+// So the root is minted here and nowhere else. There is nothing to pass, and
+// therefore nothing to pass by mistake.
+const SCRATCH = fs.mkdtempSync(path.join(os.tmpdir(), 'kan32-verify-'));
+if (process.argv[2]) {
+  console.error(
+    `refusing to run: this script takes no arguments, and it used to take a scratch root ` +
+    `that it then deleted recursively. Got ${JSON.stringify(process.argv[2])}. It makes ` +
+    `its own scratch directory under ${os.tmpdir()} and removes only that.`
+  );
+  process.exit(2);
+}
 const DIRS = ['a', 'b', 'c'].map((suffix) => {
   const dir = path.join(SCRATCH, suffix);
   fs.mkdirSync(dir, { recursive: true });
@@ -95,6 +120,7 @@ for (const a of before) console.log(`  ${a.name} (${a.terminalId})`);
 // this, and far cheaper than launching a real one.
 const REPORT_WIDTH = 'while true; do echo "COLS=$COLUMNS"; sleep 1; done';
 
+let threw = null;
 try {
   console.log('\n== spawn two agents ==');
   for (const dir of DIRS.slice(0, 2)) {
@@ -160,6 +186,9 @@ try {
   const ok = distinctTabs && alone && readable && unchanged && survivors.length === before.length;
   console.log(`\nRESULT: ${ok ? 'PASS' : 'FAIL'}`);
   process.exitCode = ok ? 0 : 1;
+} catch (e) {
+  threw = e;
+  console.error(`\nRESULT: FAIL — the run threw before reaching its verdict: ${e?.stack ?? e}`);
 } finally {
   console.log('\n== cleanup ==');
   for (const dir of DIRS) {
@@ -168,11 +197,17 @@ try {
     // no tab to tidy up separately.
     console.log(`  ${dir}: ${r.success ? 'closed' : r.error}`);
   }
-  // The scratch directories are THIS SCRIPT's, not CrabCast's — it created
-  // them and so it removes them. CrabCast neither made nor may delete them,
+  // The scratch directory is THIS SCRIPT's — it minted it two lines into the
+  // run and nothing else can name it, so removing it recursively can only
+  // remove what this run created. CrabCast neither made nor may delete these,
   // which is the point of `configure` refusing a path that does not exist.
   fs.rmSync(SCRATCH, { recursive: true, force: true });
   // The bridge still holds attach PTYs, which would keep the loop alive.
   await sleep(500);
-  process.exit(process.exitCode ?? 0);
+  // `process.exitCode ?? 0` in a `finally` exits 0 when the `try` THREW —
+  // a thrown error never reaches the RESULT line above, so `exitCode` is
+  // still unset and the script reports success for a run that crashed. That
+  // is a false PASS in a proof, which is the one thing a proof may not do.
+  // `threw` is set by the catch below, so a crash exits non-zero and says so.
+  process.exit(threw ? 1 : (process.exitCode ?? 0));
 }

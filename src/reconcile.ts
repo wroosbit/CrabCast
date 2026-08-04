@@ -1,5 +1,5 @@
 import { AgentRegistry } from './agent-registry.js';
-import { HerdrBridge } from './herdr.js';
+import { HerdrBridge, ourPaneIn } from './herdr.js';
 import { MessageRouter } from './router.js';
 import { paneNameFor } from './identity.js';
 import { ResumeCause } from './resume.js';
@@ -143,13 +143,17 @@ export async function reconcileAgents(opts: {
     return { expected: expected.length, outcomes: [] };
   }
 
-  // herdr's own view, taken once: what actually survived. Joined on the pane's
-  // canonical cwd against the registry, not by parsing a name.
+  // herdr's own view, taken once: what actually survived.
+  //
+  // Through the SAME ownership test everything else uses. Joining on the
+  // pane's cwd alone — which this did — treats any live pane in an agent's
+  // directory as that agent: a stranger's pane in a directory we hold a record
+  // for would mark our agent "already running", reconcile would leave it
+  // alone, and the fleet would come back short with a line in the log saying
+  // it did not.
+  const census = herdrBridge.listHerdrAgentsChecked();
   const alive = new Set(
-    herdrBridge
-      .listHerdrAgents()
-      .filter((agent) => agent.agentRuntime && agent.canonicalWorkDir)
-      .map((agent) => agent.canonicalWorkDir as string)
+    expected.filter((r) => ourPaneIn(census, r.path, r.config.launcher) !== null).map((r) => r.path)
   );
 
   const outcomes: RestoreOutcome[] = [];
@@ -266,7 +270,12 @@ export async function reconcileAgents(opts: {
       for (const entry of deferred) {
         await delay(RESTORE_STAGGER_MS);
         const retried = await restore(entry.path);
-        // Rewritten in place so the summary counts each agent once.
+        // REPLACED in place, not merged. `Object.assign` left the first
+        // attempt's `error` on an outcome the retry had succeeded — so a
+        // restored agent came back carrying "herdr did not answer the
+        // occupancy check", which reads as a failure that did not happen.
+        // Every key of an outcome belongs to one attempt.
+        for (const key of Object.keys(entry)) delete (entry as any)[key];
         Object.assign(entry, retried);
       }
     } else {

@@ -998,12 +998,14 @@ section('8. A mid-restore herdr blip is deferred, never a loss and never a skip'
     const clearRegistry = new AgentRegistry(path.join(clearData, 'agents.jsonl'));
     clearRegistry.recordActivated({ path: target, config: knobs() });
 
-    // Down for the first census, up for every one after it.
-    let censusCalls = 0;
+    // Down until reconcile announces the retry, then up. Flipped from the log
+    // callback rather than counted, so the fixture cannot drift out of step
+    // with how many census reads the restore path happens to take.
+    let censusDown = true;
     const spawned = [];
     const flakyBridge = {
       herdrReachable: () => true,
-      listHerdrAgentsChecked: () => (++censusCalls === 1
+      listHerdrAgentsChecked: () => (censusDown
         ? { reachable: false, agents: [] }
         : { reachable: true, agents: [] }),
       listHerdrAgents: () => [],
@@ -1031,7 +1033,12 @@ section('8. A mid-restore herdr blip is deferred, never a loss and never a skip'
     const clearLog = [];
     const clearResult = await reconcileAgents({
       registry: clearRegistry, herdrBridge: flakyBridge, router: clearRouter,
-      cause: 'reboot', log: (...a) => clearLog.push(a.join(' '))
+      cause: 'reboot',
+      log: (...a) => {
+        const line = a.join(' ');
+        clearLog.push(line);
+        if (/retrying them once/.test(line)) censusDown = false;
+      }
     });
 
     check('a blip that CLEARS costs one extra pass rather than an agent', () => {

@@ -2,7 +2,13 @@ import * as pty from 'node-pty';
 import * as path from 'path';
 import * as fs from 'fs';
 import { execSync, spawnSync } from 'child_process';
-import { PROMPT_FILENAME, promptInstruction, resolveLauncher, writeWorkspaceMcpConfig } from './launchers.js';
+import {
+  PROMPT_FILENAME,
+  launcherDeliversRuntime,
+  promptInstruction,
+  resolveLauncher,
+  writeWorkspaceMcpConfig
+} from './launchers.js';
 import type { AgentLauncher } from './launchers.js';
 import { diagnoseSpawnFailure } from './herdr-health.js';
 import { canonicalizeOrNull, paneNameFor, sidecarDirFor } from './identity.js';
@@ -308,15 +314,93 @@ export type Occupancy =
   | { reachable: false }
   | {
       reachable: true;
-      /** Live panes whose canonical cwd is this directory. */
+      /**
+       * Live panes whose canonical cwd is this directory, whosever they are.
+       * This answers "is anything running HERE" and nothing else.
+       */
       occupants: PaneOccupant[];
       /**
-       * Whether one of them is ours, by THREE FACTS AGREEING: the record's
-       * `paneId` is in the census, that pane's canonical `cwd` equals our
-       * recorded path, and it has a runtime. Never `cwd` alone.
+       * OUR pane, when the census has one — the single ownership test in this
+       * daemon. Null means the census answered and this agent is not running.
+       *
+       * It is deliberately NOT drawn from `occupants`: see
+       * {@link HerdrBridge.occupancyOf} for why "is this ours" and "is
+       * anything here" are different questions with different evidence.
        */
-      ours: boolean;
+      ours: HerdrAgentRecord | null;
     };
+
+/**
+ * THE ownership test. One function, one answer, and nothing else in this
+ * daemon may decide whether a pane is ours.
+ *
+ * A pane is ours when the census holds one whose herdr NAME is the name this
+ * path derives, and it has a live runtime. The name is forward-computed from
+ * the path we already hold ({@link paneNameFor}), it is minted by nothing but
+ * this daemon, and herdr keeps names unique — so at most one pane can answer,
+ * and the answer does not depend on anything that can move.
+ *
+ * WHAT THIS REPLACED, AND WHY, because the replaced version looked more
+ * careful and was not.
+ *
+ * The design specified three facts agreeing: the RECORDED `paneId` appears in
+ * the census, that pane's canonical `cwd` equals our recorded path, and it has
+ * a runtime. It was guarding against a stale id pointing at a stranger's pane
+ * — a false positive, which three facts do catch.
+ *
+ * The failure it walked into is the opposite one. **herdr pane ids are
+ * positions in a list that compacts whenever any pane anywhere closes** — this
+ * file says so itself, in {@link HerdrBridge.closeTabPlaceholder}, which
+ * re-resolves by terminal id for exactly that reason. So an unrelated agent
+ * finishing two tabs over renumbers ours, the persisted id stops matching, and
+ * "is this ours" answers NO about our own live agent. With refuse-on-occupied
+ * built on top, that is not a cosmetic wrong answer: `activate` then reports
+ * our own agent as a foreign occupant and refuses to start it, permanently,
+ * while telling the caller that CrabCast never closes a pane it did not start.
+ * `confirmAgentPresent` answering `paneId: null` — a legitimate answer —
+ * reached the same dead end with no renumbering at all.
+ *
+ * It was measured, not deduced: activating two agents and deactivating the
+ * first renumbered the second's pane from `…-12` to `…-11` on herdr 0.6.4.
+ *
+ * SO THE TWO QUESTIONS ARE SPLIT, and that is the substance of the fix rather
+ * than a smaller version of the old test:
+ *
+ *   - **"Is this pane ours?"** is answered by the NAME. A name is fixed when
+ *     the pane is created and cannot be changed by anything happening
+ *     elsewhere — including by the agent itself.
+ *   - **"Is anything live in this directory?"** is answered by the canonical
+ *     `cwd`, and only ever by that. It is a property of a running process,
+ *     which can `cd`; using it to decide ownership meant an agent could
+ *     disown itself by changing directory.
+ *
+ * The design's rule survives and is strengthened: a pane is still never
+ * claimed on `cwd` alone. It is now never claimed on `cwd` at all.
+ *
+ * `paneId` is consequently NOT stored on the durable record any more. A
+ * volatile value in durable storage is the defect itself, not a detail of it;
+ * every pane id this daemon reports is read live from the census that produced
+ * it.
+ */
+export function ourPaneIn(
+  census: HerdrCensus,
+  agentPath: string,
+  launcher?: string
+): HerdrAgentRecord | null {
+  if (!census.reachable) return null;
+  const paneName = paneNameFor(agentPath);
+  const pane = census.agents.find((a) => a.name === paneName);
+  if (!pane) return null;
+  // What "alive" means depends on the launcher, exactly as it does for
+  // `confirmAgentPresent`: for everything but `shell`, a name registration
+  // over a pane with no runtime is not an agent (KAN-58). For `shell` the name
+  // IS all there is to see, and requiring a runtime unconditionally made every
+  // shell agent permanently unrecognisable as its own — the same shape of
+  // always-false ownership answer as the pane-id bug, found by running the
+  // live proof rather than by reading.
+  if (launcherDeliversRuntime(launcher) && pane.agentRuntime === null) return null;
+  return pane;
+}
 
 export class HerdrBridge {
   private sessions: Map<string, HerdrSession> = new Map();
@@ -627,7 +711,7 @@ export class HerdrBridge {
     // activation-confirmation path needs to know whether "no runtime behind
     // the pane" means "not an agent" (every real launcher) or "working as
     // asked" (`shell`).
-    session.expectsRuntime = launcherName !== 'shell';
+    session.expectsRuntime = launcherDeliversRuntime(launcherName);
 
     // Workspace-scoped MCP config, and now only when the caller asked for one:
     // `mcpServers` is a `configure` parameter rather than a property of a type,
@@ -984,16 +1068,10 @@ export class HerdrBridge {
    * both tests, and `activate` spawns (through initPty's stale-registration
    * release, which clears the name first).
    */
-  public occupancyOf(
-    census: HerdrCensus,
-    agentPath: string,
-    recordedPaneId?: string
-  ): Occupancy {
+  public occupancyOf(census: HerdrCensus, agentPath: string, launcher?: string): Occupancy {
     if (!census.reachable) return { reachable: false };
 
     const occupants: PaneOccupant[] = [];
-    let ours = false;
-
     for (const record of census.agents) {
       if (record.canonicalWorkDir !== agentPath) continue;
       if (record.agentRuntime === null) continue;
@@ -1003,13 +1081,9 @@ export class HerdrBridge {
         agentStatus: record.herdrStatus,
         workDir: record.workDir
       });
-      // The third fact. The other two are the two `continue`s above: this
-      // record is in the census, and its canonical cwd is our path, and it has
-      // a runtime. All three, or the pane is not claimed.
-      if (recordedPaneId && record.paneId === recordedPaneId) ours = true;
     }
 
-    return { reachable: true, occupants, ours };
+    return { reachable: true, occupants, ours: ourPaneIn(census, agentPath, launcher) };
   }
 
   /**
@@ -1144,6 +1218,19 @@ export class HerdrBridge {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * The pane id herdr currently reports for a pane name, or null.
+   *
+   * READ LIVE, never remembered: a pane id is a position in a list that
+   * compacts whenever any pane anywhere closes, so a stored one goes stale
+   * without anything happening to the agent it named. Callers that report a
+   * pane id take it from the census that answered the question they were
+   * actually asking.
+   */
+  public paneIdFor(paneName: string): string | null {
+    return this.listHerdrAgents().find((a) => a.name === paneName)?.paneId ?? null;
   }
 
   /**

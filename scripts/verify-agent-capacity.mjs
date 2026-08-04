@@ -264,7 +264,16 @@ function stubBridge(running) {
     listActiveSessions: () => [],
     getSessionByPath: () => undefined,
     abandonSession: () => {},
-    occupancyOf: () => ({ reachable: true, occupants: [], ours: false }),
+    // PERMANENTLY OPEN, and that is correct for a capacity proof — but it
+    // means every section in this file is BLIND TO THE OCCUPANCY GUARD. These
+    // sections prove what the gate does once an activation reaches it; they
+    // prove nothing about whether it should have. `activate` checks occupancy
+    // BEFORE the gate, so a refusal there would never reach the arithmetic
+    // under test here. The guard has its own proof, with all five outcomes
+    // and a mutation-tested unreachable-herdr case, in
+    // verify-refuses-occupied-directory.mjs — do not read this file as
+    // coverage of it.
+    occupancyOf: () => ({ reachable: true, occupants: [], ours: null }),
     spawnSession: () => {
       throw new Error('spawnSession must not be reached when capacity refuses');
     }

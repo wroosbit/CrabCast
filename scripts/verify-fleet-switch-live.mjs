@@ -43,7 +43,8 @@
 // Run it on a machine with herdr running.
 
 import { execFileSync, spawn } from 'child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
+import * as fs from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import net from 'net';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -60,9 +61,23 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(scriptDir, '..');
 
 // The probe is a DIRECTORY now — that is the whole address — and its pane
-// name is a one-way function of it. Both are filled in once the scratch exists.
-let PROBE_DIR;
-let PROBE_AGENT;
+// name is a one-way function of it.
+//
+// STABLE ACROSS RUNS, deliberately. An earlier revision put the probe under a
+// per-run `mkdtempSync`, which made section 2's `!baseline.includes(...)`
+// conjunct constant-true: a freshly-minted path cannot appear in a census
+// taken before it existed. That conjunct is there to catch a probe LEAKED by a
+// crashed previous run, which is exactly the case a per-run path hides — and
+// leaking one is what a live script that spawns real panes does when it dies
+// halfway.
+const PROBE_DIR = fs.realpathSync(
+  (() => {
+    const d = path.join(tmpdir(), 'kan72-live-probe');
+    mkdirSync(d, { recursive: true });
+    return d;
+  })()
+);
+const PROBE_AGENT = paneNameFor(PROBE_DIR);
 
 if (!existsSync(path.join(rootDir, 'dist', 'daemon.js'))) {
   console.error('dist/daemon.js is missing — run `npm run build` first.');
@@ -137,11 +152,8 @@ const configPath = path.join(scratch, 'crabcast.config.json');
 // A dataDir and nothing else: no type table left to declare.
 writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
 
-// The probe's directory. THIS SCRIPT creates it, because CrabCast creates none
-// — and removes it at the end, because CrabCast may not.
-mkdirSync(path.join(scratch, 'owned', 'probe'), { recursive: true });
-PROBE_DIR = realpathSync(path.join(scratch, 'owned', 'probe'));
-PROBE_AGENT = paneNameFor(PROBE_DIR);
+// The probe directory is created above, outside the per-run scratch, so that
+// a leak from a crashed run is visible to the next one's baseline census.
 
 const socketPath = path.join(dataDir, 'crabcast.sock');
 const registryPath = path.join(dataDir, 'agents.jsonl');
