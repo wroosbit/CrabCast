@@ -13,6 +13,12 @@
 // event; section 4 mutates the daemon to emit an off-contract action and
 // watches the allowlist refuse it out loud rather than forward it malformed.
 //
+// And, since KAN-164, the same failure one level down: the projection used to
+// copy a declared field's VALUE wholesale, so a field added inside `config`
+// was published to an MCP subscriber and did not appear in the drift report
+// that exists to catch exactly that. Section 7 injects one at a real emission
+// site and rebuilds the pre-fix projector beside the current one.
+//
 // Sections, against the ticket's acceptance criteria:
 //
 //   1. the contract    — the published set is what docs/event-contract.md says
@@ -38,6 +44,25 @@
 //   6. resync          — a subscriber reconnecting across a daemon restart
 //                        sees a NEW bootId and recovers the fleet from the
 //                        authoritative `list` without missing an agent. (AC 5)
+//   7. depth           — the projection runs to the bottom of every declared
+//                        composite (KAN-164). Two undeclared fields are
+//                        injected at ONE real emission site, one at the top
+//                        level and one inside `config`; the current forwarder
+//                        drops and names both, the rebuilt pre-fix projector
+//                        catches only the shallow one, and the socket gets
+//                        both because its payload is a minimum. Also shows the
+//                        one hole §4 declares — `config.mcpServers`, the
+//                        caller's own bytes — arriving whole.
+//
+//                        THIS SECTION SUPPLIES ITS OWN INPUT and says so: it
+//                        proves undeclared fields ARE caught at depth, not
+//                        that none exist today. "Nothing is drifting right
+//                        now" is section 2's claim, asserted over all nine
+//                        events on the unmutated build, and section 2 reads
+//                        the recursive projector — so a composite that really
+//                        did grow an undeclared field turns section 2 red
+//                        without this section changing. Neither covers the
+//                        other; the split is stated in section 7's own header.
 //
 // Everything on the daemon side is real: real daemon processes, real router,
 // bridge, registry and config loader, real NDJSON over a real unix socket, a
@@ -855,6 +880,110 @@ for (const [name, payload] of mcpByName) {
   }
 }
 
+// ---- `durable: false` NEVER TRAVELS WITHOUT A REASON -------------------------
+//
+// A JOINT PROPERTY THAT NEITHER HALF OWNS, which is why it is asserted rather
+// than left to the two comments that describe it (KAN-164/KAN-165).
+//
+// `durability()` in `src/router.ts` defaults `durabilityError` to a string on a
+// failed write. `projectEvent` in `src/events.ts` drops an optional field whose
+// value is `undefined`. Each is correct alone; the CONSEQUENCE — that a
+// subscriber told "the disk does not know about this" is always told why —
+// belongs to the pair, and it lives in neither file. Remove the default and the
+// projection silently publishes a bare `durable: false`; change the projection
+// to keep undefined optionals and the default stops being load-bearing without
+// anyone noticing it ever was. Two independently correct designs, correct
+// together, with the dependency written down nowhere: the composition failure
+// this epic has already shipped once.
+//
+// OVER EVERY PAYLOAD, not one per action, because the failed write is one
+// `agent.configured` among several and `mcpByName` keeps the first of each.
+//
+// IT MUST NOT PASS VACUOUSLY. A run that produced no failed write at all would
+// satisfy "every durable:false carries a reason" over an empty set — the exact
+// shape of check this epic keeps finding. The sealed-registry configure above
+// produces a real one, and the count is asserted to be at least 1 and printed.
+const durableFalse = mcp.eventPayloads().filter((d) => d?.durable === false);
+const bareDurableFalse = durableFalse.filter(
+  (d) => typeof d.durabilityError !== 'string' || d.durabilityError.length === 0);
+console.log(`\n   published events carrying \`durable: false\`: ${durableFalse.length} ` +
+  `(from the sealed-registry configure above — 0 would make the next line vacuous)`);
+for (const d of durableFalse) {
+  console.log(`     ${d.action} ${d.path ?? d.what} → durabilityError: ` +
+    `${JSON.stringify(d.durabilityError ?? null)}`);
+}
+console.log(`   any that arrived WITHOUT a reason: ${bareDurableFalse.length}`);
+
+// ---- THE OTHER HALF OF THE PAIR: an absent optional is DROPPED, not published -
+//
+// The block above guards `durability()`. This one guards the PROJECTION, and it
+// exists because the block above did not — which was found by doing exactly
+// what the comment in `src/events.ts` invites a reader to do.
+//
+// That comment sits over the optional-field loop and says "change the handling
+// here — publish `null`, keep the key, anything — and read that helper before
+// you do", then names THIS FILE as where the pair is asserted. Review made the
+// change it names: publish `null` for an absent optional instead of dropping
+// it. `durable: false` still carried its reason, so the block above stayed
+// green and this whole script passed. The pair was caught only by
+// `verify-event-durability.mjs`, a different slice's script — so the sentence
+// naming this file was FALSE, in the comment written to stop precisely this,
+// and a reader who did the invited thing, ran the named proof and saw green
+// would have shipped it.
+//
+// So the guard now lives with the code it guards. `durability()` defaults
+// `durabilityError` BECAUSE an optional set to `undefined` is dropped here; if
+// dropping ever becomes publishing, that default stops being load-bearing and
+// nothing else in this file would have noticed.
+//
+// CORRELATED BY `seq`, which is unique per boot and on both paths, so the
+// comparison is between the frame the daemon broadcast and the payload the
+// forwarder built from THAT frame — not between two events that happen to share
+// an action name. The socket frame is the pre-projection truth: `broadcast`
+// filters nothing.
+//
+// TWO-SIDED, so neither lazy direction passes: an optional the daemon did NOT
+// send must be absent from the payload (no key, not `null`), and one it DID
+// send must be present. A projector that dropped every optional would satisfy
+// the first alone.
+const socketBySeq = new Map();
+for (const e of sub.events) if (typeof e.seq === 'number') socketBySeq.set(e.seq, e);
+
+const optionalProblems = [];
+let absentOptionalsChecked = 0;
+let presentOptionalsChecked = 0;
+for (const payload of mcp.eventPayloads()) {
+  const frame = socketBySeq.get(payload?.seq);
+  if (!frame) continue;
+  for (const field of EVENT_CONTRACT[payload.action].optional) {
+    if (frame[field] === undefined) {
+      absentOptionalsChecked++;
+      if (field in payload) {
+        optionalProblems.push(
+          `${payload.action}(seq ${payload.seq}): the daemon sent no \`${field}\`, but the ` +
+          `projection published it as ${JSON.stringify(payload[field])} — an absent optional ` +
+          `must be DROPPED, and durability() depends on that`);
+      }
+    } else {
+      presentOptionalsChecked++;
+      if (!(field in payload)) {
+        optionalProblems.push(
+          `${payload.action}(seq ${payload.seq}): the daemon sent \`${field}\` and the ` +
+          `projection dropped it`);
+      }
+    }
+  }
+}
+
+// NEITHER SIDE MAY PASS VACUOUSLY. A run in which no optional was ever absent —
+// or never present — would satisfy its half over an empty set.
+console.log(`\n   optional fields checked against the frame that produced them ` +
+  `(correlated by seq):`);
+console.log(`     absent on the wire, so must NOT appear in the payload: ${absentOptionalsChecked}`);
+console.log(`     present on the wire, so MUST appear in the payload:    ${presentOptionalsChecked}`);
+console.log(`   projections disagreeing with their own frame: ` +
+  `${optionalProblems.length ? '\n     ' + optionalProblems.join('\n     ') : '(none)'}`);
+
 // `seq` is monotonic and there are no duplicates: a subscriber's gap detection
 // is only worth anything if the numbers really increase.
 // CONTIGUOUS, not merely increasing — and the difference is load-bearing.
@@ -914,14 +1043,31 @@ verdict(
     typeof preempted.preemption?.derivation === 'string' &&
     typeof preempted.preemption?.at === 'string' &&
     sub.events.every((e) => e.success === undefined) &&
+    // The joint property, and its own vacuity guard. See the block above.
+    durableFalse.length >= 1 && bareDurableFalse.length === 0 &&
+    // The projection half of that same pair, two-sided, each side guarded
+    // against passing over an empty set.
+    optionalProblems.length === 0 &&
+    absentOptionalsChecked >= 1 && presentOptionalsChecked >= 1 &&
     driftLines.length === 0,
   `all ${EVENT_NAMES.length} published events were produced by real operations and arrived on\n` +
   '    BOTH paths — the socket frames and the MCP notifications carry the same structured\n' +
   '    payload, envelope and all, none of them is a rendered string, and the forwarder\n' +
-  '    reported no drift in either direction between the wire and the published table',
+  '    reported no drift in either direction between the wire and the published table.\n' +
+  `    ${durableFalse.length} of them carried \`durable: false\` from a real failed write, and every\n` +
+  '    one carried a reason with it — the property that belongs to `durability()` and the\n' +
+  '    projection jointly and lives in neither. Both halves of that pair are asserted\n' +
+  `    here: ${absentOptionalsChecked} optional field(s) the daemon did not send were DROPPED rather than\n` +
+  `    published as null, and ${presentOptionalsChecked} it did send were carried — checked against the frame\n` +
+  '    that produced each payload, correlated by seq',
   `socket missing [${missingSocket}], mcp missing [${missingMcp}], ` +
   `payload problems [${payloadProblems.join('; ')}], seqMonotonic=${seqMonotonic}, ` +
   `seqGaps=[${seqGaps.join(' ')}], ` +
+  `durable:false seen=${durableFalse.length} (0 would be vacuous), ` +
+  `without a reason=[${bareDurableFalse.map((d) => d.action).join(' ')}], ` +
+  `optionals absent/present checked=${absentOptionalsChecked}/${presentOptionalsChecked} ` +
+  `(0 either side would be vacuous), ` +
+  `optional problems [${optionalProblems.join(' | ')}], ` +
   `drift [${driftLines.join(' | ')}]`
 );
 
@@ -1172,6 +1318,226 @@ verdict(
 );
 sub2.close();
 stopDaemon(restarted.pid);
+
+// ======================================= 7. DEPTH — inside a composite field --
+
+rule('7. DEPTH — a field added INSIDE `config`, at a real emission site (KAN-164)');
+
+// WHY THIS SECTION EXISTS. §4 of the document said, without qualification,
+// that on the MCP path "anything undeclared is dropped before it leaves". The
+// forwarder projected ONE level: `payload[field] = msg[field]` copied a nested
+// object by reference, entire, and `Object.keys(msg)` enumerated the top. So a
+// field added inside `config` reached an MCP subscriber AND did not appear in
+// `undeclared` — delivered, unexamined, by the mechanism whose entire job was
+// to catch it. The sentence was true at depth 1 and written as though true at
+// every depth.
+//
+// WHAT THIS SECTION SUPPLIES AND WHAT IT THEREFORE DOES NOT TEST, said here
+// rather than left to be inferred. The undeclared knob is INJECTED by this
+// script, into a compiled build, at the place `configure` assembles the config
+// object — so what is proven is "an undeclared field arriving inside `config`
+// is dropped and named", not "no undeclared field exists in `config` today".
+// The second is what §2's drift check covers, on the unmutated build, on real
+// traffic: it asserts ZERO drift lines across all nine events, and it now
+// reads a projector that walks the composites — so a knob that really did grow
+// inside `config` without a declaration turns §2 red without anything here
+// being touched. The two are different claims and neither substitutes for the
+// other; §2 is where "nothing is drifting" lives, and this is where "drift
+// would be caught if it happened" lives.
+//
+// The injection is at a REAL emission site rather than a hand-built frame,
+// which is the KAN-145 lesson: a proof that constructs the record it then
+// asserts on has not tested that the field arrives. Here the field travels the
+// whole path — parse → durable record → broadcast → forwarder — and this
+// script only reads the far end.
+//
+// TWO fields are injected, one at each depth, and that pairing is the point.
+// Acceptance criterion 3 of KAN-164 is that the TOP-LEVEL drift check still
+// works — the one that really caught `activatedBy` arriving on `agent.lost`
+// from a slice written by a different agent — and "still passes" is a weaker
+// claim than "still catches", because a check that has stopped being able to
+// fail also still passes. So the same build grows a field at the top level and
+// a field inside `config`, and the current forwarder has to name BOTH. The
+// depth that already worked is measured, not assumed.
+const driftDist = mutatedBuild('config-drift', [
+  {
+    file: 'router.js',
+    find: 'launcher: launcher.trim(),',
+    replace:
+      `launcher: launcher.trim(),\n` +
+      `            /* KAN-164 section 7: a knob a future slice added and forgot to declare */\n` +
+      `            telemetryToken: 'sk-live-UNDECLARED',`
+  },
+  {
+    file: 'router.js',
+    find: "action: 'agent.configured',",
+    replace:
+      `action: 'agent.configured',\n` +
+      `            /* KAN-164 section 7: the activatedBy-shaped catch, at the top level */\n` +
+      `            sessionCookie: 'TOP-LEVEL-UNDECLARED',`
+  }
+]);
+
+// THE RED HALF, and it is the pre-fix mechanism rather than a description of
+// it: `projectValue` returning its argument untouched IS
+// `payload[field] = msg[field]`, with no nested walk and nothing appended to
+// `undeclared`. Built from the CURRENT dist, so the only difference between
+// this forwarder and the one beside it is the fix under test.
+const depth1Dist = mutatedBuild('depth-1', [{
+  file: 'events.js',
+  find: 'function projectValue(value, shape, at, drift) {',
+  replace:
+    `function projectValue(value, shape, at, drift) {\n` +
+    `    /* KAN-164 section 7: the pre-fix depth-1 projection, restored */\n` +
+    `    return value;`
+}]);
+
+// A THIRD BUILD for the other half of the design: a declared field with no
+// interior written down is a SCALAR, and a composite that reaches one is
+// reported and dropped rather than passed through. This is what makes
+// forgetting to declare an interior loud instead of quiet, and it is the
+// property the whole scheme rests on — without it, a composite added later
+// silently reacquires the depth-1 behaviour.
+const noShapeDist = mutatedBuild('config-unshaped', [{
+  file: 'events.js',
+  find: 'shapes: { config: CONFIG_SHAPE, changed: SCALARS, outcomes: OUTCOMES_SHAPE },',
+  replace: 'shapes: { changed: SCALARS, outcomes: OUTCOMES_SHAPE }, /* KAN-164 §7: config undeclared */'
+}]);
+
+const driftCfg = makeConfig('config-drift');
+const driftStatus = await startDaemon(driftCfg, driftDist, 'config-drift');
+const driftSub = await new SocketClient(driftCfg, 'drift-sub').ready();
+const fixedMcp = new McpClient('fixed', { config: driftCfg.configPath });
+const depth1Mcp = new McpClient('depth-1', { dist: depth1Dist, config: driftCfg.configPath });
+const noShapeMcp = new McpClient('unshaped', { dist: noShapeDist, config: driftCfg.configPath });
+await fixedMcp.initialize();
+await depth1Mcp.initialize();
+await noShapeMcp.initialize();
+await sleep(700);
+
+// The caller's own MCP server definition, which the contract promises is
+// written verbatim and never read. It rides along so the ONE deliberate hole
+// in the recursion is observed rather than only asserted in prose.
+const CALLER_SERVERS = { 'consumer-private': { command: 'true', args: ['--their-flag'] } };
+
+const DEPTH_PATH = owned('depth-subject');
+await parsedText(await fixedMcp.callTool('crabcast_configure_agent', {
+  path: DEPTH_PATH, priority: 1, launcher: LAUNCHER, mcpServers: CALLER_SERVERS
+}));
+await waitFor(
+  () => driftSub.eventsNamed('agent.configured').some((e) => e.path === DEPTH_PATH) &&
+    [fixedMcp, depth1Mcp, noShapeMcp].every((c) =>
+      c.eventPayloads().some((d) => d?.action === 'agent.configured' && d?.path === DEPTH_PATH)),
+  15_000,
+  'agent.configured on the socket and all three forwarders'
+);
+
+const configuredOn = (client) => client.eventPayloads()
+  .find((d) => d?.action === 'agent.configured' && d?.path === DEPTH_PATH);
+const socketFrame = driftSub.eventsNamed('agent.configured').find((e) => e.path === DEPTH_PATH);
+const fixedFrame = configuredOn(fixedMcp);
+const depth1Frame = configuredOn(depth1Mcp);
+const noShapeFrame = configuredOn(noShapeMcp);
+
+const driftNamed = (client) => client.stderr.split('\n')
+  .filter((l) => /carried undeclared field/.test(l));
+const fixedDrift = driftNamed(fixedMcp);
+const depth1Drift = driftNamed(depth1Mcp);
+const noShapeDrift = driftNamed(noShapeMcp);
+
+console.log(`\n   two fields injected at the emission site, one at each depth:`);
+console.log(`     sessionCookie          — top level, the shape the activatedBy catch had`);
+console.log(`     config.telemetryToken  — one level down, invisible before this change\n`);
+show('SOCKET subscriber — a MINIMUM, so it arrives (§4):', socketFrame?.config);
+show('MCP, CURRENT forwarder — EXACTLY the declared fields:', fixedFrame?.config);
+show('MCP, pre-fix depth-1 forwarder — the defect:', depth1Frame?.config);
+console.log(`\n   drift reported by the current forwarder:`);
+console.log(`     ${fixedDrift.join('\n     ') || '(NONE)'}`);
+console.log(`\n   drift reported by the pre-fix depth-1 forwarder:`);
+console.log(`     ${depth1Drift.join('\n     ') || '(NONE — it could not see inside `config`)'}`);
+console.log(`\n   the one deliberate hole, observed rather than asserted: config.mcpServers is`);
+console.log(`   the caller's own bytes and travels WHOLE.`);
+show('   sent by the caller:', CALLER_SERVERS);
+show('   received on the MCP path:', fixedFrame?.config?.mcpServers);
+console.log(`\n   a composite whose interior is NOT declared (the shapes entry removed):`);
+show('   config, as the unshaped forwarder published it:', noShapeFrame?.config ?? '(dropped entirely)');
+console.log(`   drift it reported: ${noShapeDrift.length ? '\n     ' + noShapeDrift.join('\n     ') : '(NONE)'}`);
+
+const namesTheKnob = (lines) => lines.some((l) => /config\.telemetryToken/.test(l));
+// The top-level catch, named as a BARE field rather than a path — the same
+// report `activatedBy` produced. Anchored so `config.sessionCookie` could not
+// satisfy it: what is being asserted is that the shallow check still fires,
+// not that the string appears somewhere.
+const namesTheTopLevel = (lines) =>
+  lines.some((l) => /field\(s\)[^;]*(?:^|[\s,])sessionCookie(?:,|;|\s)/.test(l));
+// Every knob of the config that WAS declared still went out. A projector that
+// dropped the undeclared field by dropping the whole composite would pass the
+// assertion above and destroy the payload, which is the failure this line is
+// here to exclude.
+const declaredKnobsSurvived =
+  fixedFrame?.config?.launcher === LAUNCHER &&
+  fixedFrame?.config?.priority === 1 &&
+  fixedFrame?.config?.refusable === true &&
+  Object.keys(fixedFrame?.outcomes ?? {}).length === 8 &&
+  Array.isArray(fixedFrame?.changed) && fixedFrame.changed.includes('launcher');
+
+verdict(
+  // The socket half is unchanged: broadcast filters nothing, so the injected
+  // field reaches a socket subscriber. §4 says so, and the asymmetry is the
+  // reason that clause is contract rather than advice.
+  socketFrame?.config?.telemetryToken === 'sk-live-UNDECLARED' &&
+    // The fix: dropped on the MCP path, and NAMED by its path rather than
+    // silently absent.
+    fixedFrame?.config?.telemetryToken === undefined &&
+    namesTheKnob(fixedDrift) &&
+    declaredKnobsSurvived &&
+    // CRITERION 3, as evidence rather than inference: the top-level catch is
+    // not merely still green, it still FIRES — the undeclared field at depth 0
+    // is dropped and named as a bare field, exactly as `activatedBy` was.
+    fixedFrame?.sessionCookie === undefined &&
+    namesTheTopLevel(fixedDrift) &&
+    // And the pre-fix forwarder catches THAT one too — which is what makes the
+    // comparison beneath it a measurement of depth rather than of two
+    // different builds: the only thing the old projector missed was the field
+    // one level down.
+    depth1Frame?.sessionCookie === undefined &&
+    namesTheTopLevel(depth1Drift) &&
+    // The deliberate exception, observed on the wire.
+    JSON.stringify(fixedFrame?.config?.mcpServers) === JSON.stringify(CALLER_SERVERS) &&
+    // THE RED HALF: the pre-fix forwarder, against the SAME broadcast, both
+    // delivers the undeclared field and reports nothing. Without this the
+    // section above proves only that a green check is green.
+    depth1Frame?.config?.telemetryToken === 'sk-live-UNDECLARED' &&
+    !namesTheKnob(depth1Drift) &&
+    // A composite with no declared interior is reported and dropped, so
+    // forgetting to declare one cannot quietly restore depth-1 behaviour.
+    noShapeFrame?.config === undefined &&
+    namesTheKnob(noShapeDrift),
+  'a field injected INSIDE `config` at a real emission site reached a socket subscriber\n' +
+  '    and was DROPPED from the MCP notification and named as `config.telemetryToken` —\n' +
+  '    while every declared knob, `changed[]` and all eight `outcomes` went out intact.\n' +
+  '    The pre-fix depth-1 forwarder, rebuilt and pointed at the SAME daemon, delivered\n' +
+  '    that field and reported nothing, which is the defect. BOTH forwarders caught the\n' +
+  '    field injected at the TOP level, so the activatedBy-shaped catch still fires and\n' +
+  '    the difference between them is depth and nothing else. `config.mcpServers` — the\n' +
+  "    caller's own bytes — travelled whole, which is the one hole §4 declares; and a\n" +
+  '    composite whose interior is undeclared was dropped and named rather than passed',
+  `depth not proven: socket=${JSON.stringify(socketFrame?.config?.telemetryToken)}, ` +
+  `fixed=${JSON.stringify(fixedFrame?.config?.telemetryToken)}, ` +
+  `topLevelCaught=${namesTheTopLevel(fixedDrift)}/${namesTheTopLevel(depth1Drift)}, ` +
+  `fixedDrift=[${fixedDrift.join(' | ')}], declaredKnobsSurvived=${declaredKnobsSurvived}, ` +
+  `mcpServers=${JSON.stringify(fixedFrame?.config?.mcpServers)}, ` +
+  `depth1=${JSON.stringify(depth1Frame?.config?.telemetryToken)}, ` +
+  `depth1Drift=[${depth1Drift.join(' | ')}], ` +
+  `unshapedConfig=${JSON.stringify(noShapeFrame?.config)}, ` +
+  `unshapedDrift=[${noShapeDrift.join(' | ')}]`
+);
+
+fixedMcp.kill();
+depth1Mcp.kill();
+noShapeMcp.kill();
+driftSub.close();
+stopDaemon(driftStatus.pid);
 
 // ------------------------------------------------------------------ verdict --
 
