@@ -60,8 +60,50 @@ const HASH_CHARS = 16;
 /** How much of the directory's own name survives into the pane name. */
 const SLUG_CHARS = 24;
 
+/**
+ * Why a path is not usable as an agent identity — discriminable, not prose.
+ *
+ * These five have nothing in common but their type, and one caller needs to
+ * tell them apart. `router.ts`'s `addressOfRequest` falls back to a LEXICAL
+ * resolve for `deactivate`, `forget` and `status`, because a caller who has
+ * deleted a directory must still be able to say "stop expecting this" about
+ * the record — and the record is keyed by what the path canonicalized to when
+ * it existed. That fallback is right for exactly ONE of these problems.
+ *
+ * Written as a message-matching `catch` it was right for one and wrong for
+ * four: `not-absolute` fell through the same branch and got resolved against
+ * the DAEMON's cwd, which is the failure the absolute-path rule exists to
+ * prevent, surviving in three verbs after being fixed in the others. A
+ * discriminator is what makes "recover from this one" expressible without
+ * also meaning "recover from whatever else lands here" — including problems
+ * added later, which default to refusal rather than to the fallback.
+ */
+export type PathProblem =
+  /** Not a string, or empty. Nothing to resolve and nothing to key on. */
+  | 'not-a-string'
+  /** Relative. Refused by every verb — see {@link canonicalPath}. */
+  | 'not-absolute'
+  /**
+   * Absolute and well-formed, but nothing is there. THE ONE that may fall back
+   * to a lexical resolve: a deleted directory is the normal way an agent ends,
+   * and its record outlives it.
+   */
+  | 'does-not-exist'
+  /** It resolved and then could not be stat'd — a race or a permission wall. */
+  | 'uninspectable'
+  /** It exists and is a file, a socket, something. An agent runs in a directory. */
+  | 'not-a-directory';
+
 /** A path that is not usable as an agent identity, with the reason. */
-export class PathError extends Error {}
+export class PathError extends Error {
+  constructor(
+    readonly problem: PathProblem,
+    message: string
+  ) {
+    super(message);
+    this.name = 'PathError';
+  }
+}
 
 /**
  * The canonical real path of a caller-supplied directory, or a refusal.
@@ -76,6 +118,7 @@ export class PathError extends Error {}
 export function canonicalPath(input: unknown): string {
   if (typeof input !== 'string' || !input.trim()) {
     throw new PathError(
+      'not-a-string',
       'Missing or invalid path: an agent is addressed by the directory it runs in, ' +
         'given as a non-empty string.'
     );
@@ -96,8 +139,18 @@ export function canonicalPath(input: unknown): string {
   // arrives here is therefore already absolute, and anything that is not is a
   // caller that skipped that step — refused by name rather than silently
   // resolved somewhere plausible.
+  //
+  // THAT SENTENCE WAS FALSE IN THREE VERBS. `forget`, `deactivate` and
+  // `status` fall back to a lexical resolve so an agent whose directory has
+  // been deleted can still be addressed, and the fallback caught every
+  // PathError — so a relative path skipped this refusal and got resolved
+  // against the daemon's cwd after all, in exactly the three verbs that read
+  // or destroy a record. Which is why {@link PathProblem} exists: the fallback
+  // now names the one problem it was reasoned out for, and this refusal is
+  // universal because nothing can catch it by accident.
   if (!path.isAbsolute(raw)) {
     throw new PathError(
+      'not-absolute',
       `Path '${raw}' is not absolute. An agent is addressed by an absolute path: this ` +
         `daemon runs detached and its working directory belongs to whichever client first ` +
         `spawned it, so resolving a relative path here would answer a different question ` +
@@ -110,6 +163,7 @@ export function canonicalPath(input: unknown): string {
     real = fs.realpathSync(resolved);
   } catch (e: any) {
     throw new PathError(
+      'does-not-exist',
       `Path '${resolved}' does not exist or could not be resolved (${e?.message ?? String(e)}). ` +
         `CrabCast never creates a directory — create it first, then configure it. ` +
         `Requiring it to exist is what makes the filesystem the typo-checker: every path ` +
@@ -121,10 +175,10 @@ export function canonicalPath(input: unknown): string {
   try {
     stat = fs.statSync(real);
   } catch (e: any) {
-    throw new PathError(`Path '${real}' could not be inspected (${e?.message ?? String(e)}).`);
+    throw new PathError('uninspectable', `Path '${real}' could not be inspected (${e?.message ?? String(e)}).`);
   }
   if (!stat.isDirectory()) {
-    throw new PathError(`Path '${real}' is not a directory. An agent runs in a directory.`);
+    throw new PathError('not-a-directory', `Path '${real}' is not a directory. An agent runs in a directory.`);
   }
   return real;
 }

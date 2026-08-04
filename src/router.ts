@@ -665,21 +665,42 @@ export class MessageRouter {
    *
    * `strict` is the difference between "run something here" and "say something
    * about a record". An activation needs a directory that exists — it is about
-   * to spawn a process into it. `deactivate` and `forget` must keep working
-   * after the caller has deleted the directory, because that is exactly when
-   * "stop expecting this" is asked for; they fall back to the lexical resolve
-   * so the record can still be addressed.
+   * to spawn a process into it. `deactivate`, `forget` and `status` must keep
+   * working after the caller has deleted the directory, because that is exactly
+   * when "stop expecting this" is asked for; they fall back to the lexical
+   * resolve so the record can still be addressed.
+   *
+   * THE FALLBACK IS SCOPED TO ONE PROBLEM, and it took a review to make that
+   * true. `strict: false` used to mean "on any PathError, resolve it
+   * lexically" — but PathError has five causes, and the fallback was reasoned
+   * out for exactly one of them (the directory is gone). `not-absolute` landed
+   * in the same branch, so a relative path reached `path.resolve` HERE, in a
+   * detached daemon whose cwd belongs to whichever client first spawned it.
+   * That is the precise failure identity.ts refuses by name, still live in
+   * three verbs after being fixed everywhere else — and refusing it in one
+   * place while silently resolving it in another is worse than either, because
+   * the refusal is what teaches a caller to resolve their own paths.
+   *
+   * So the discriminator decides, not the flag alone. `does-not-exist` is
+   * recoverable; every other problem is refused by every verb, always. A cause
+   * added to {@link PathProblem} later is refused until somebody argues it into
+   * this switch, which is the direction a default should fail in.
    */
   private addressOfRequest(input: unknown, strict: boolean): { path: string } | { error: string } {
     try {
       return { path: canonicalPath(input) };
     } catch (e: any) {
-      if (strict || !(e instanceof PathError) || typeof input !== 'string' || !input.trim()) {
+      const recoverable =
+        !strict && e instanceof PathError && e.problem === 'does-not-exist' && typeof input === 'string';
+      if (!recoverable) {
         return { error: e?.message ?? String(e) };
       }
-      // Lexical only. It is what the record would have been keyed by if the
-      // directory were still there, and looking it up is harmless — the record
-      // either exists under that string or it does not.
+      // Lexical only, and safe precisely because we got here: the path is
+      // absolute (`not-absolute` is refused above), so this resolve cannot
+      // consult the daemon's cwd — it only normalizes `..` and `.` segments.
+      // It is what the record would have been keyed by if the directory were
+      // still there, and looking it up is harmless: the record either exists
+      // under that string or it does not.
       return { path: path.resolve(input.trim()) };
     }
   }

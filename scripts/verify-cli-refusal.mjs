@@ -5,7 +5,7 @@
 // says they mean, and `--override`/`--preempt` cross the wire as real
 // booleans.
 //
-// Six sections:
+// Nine sections:
 //
 //   1. refusal      — at CRABCAST_MAX_AGENTS=0, `crabcast activate shell demo`
 //                     exits non-zero and its stdout carries the daemon's
@@ -31,6 +31,12 @@
 //                     the bin is runnable through a symlink, which is the
 //                     `npm link` path and the reason the direct-invocation
 //                     guard resolves paths at all
+//   9. relative paths — a relative path is refused BY NAME by every verb that
+//                     takes one, including the three that fall back to a
+//                     lexical resolve for a deleted directory; the fallback
+//                     still works for the case it exists for; and both
+//                     clients (CLI and MCP) resolve against THEIR OWN cwd
+//                     before the request goes on the wire
 //
 // Everything on the daemon side is real: the real daemon (spawned by the CLI
 // itself, which is how a human gets one), the real router, capacity model,
@@ -48,7 +54,7 @@
 //   npm run build
 //   node scripts/verify-cli-refusal.mjs [distDir]
 
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -223,9 +229,14 @@ function fixture(name, _unusedTypes, env = {}) {
  * testing its own argument order rather than the CLI's. Leading is also what
  * the help tells a human to do with flags on a rest command.
  */
-function crabcast(fx, args, extraEnv = {}) {
+function crabcast(fx, args, extraEnv = {}, cwd = undefined) {
   const result = spawnSync(process.execPath, [cliJs, '--config', fx.configPath, ...args], {
     env: { ...fx.env, ...extraEnv },
+    // Section 9 is the only caller that sets this, and it needs both ends of
+    // it: the CLI's own cwd is what a relative operand must resolve against,
+    // and the daemon — spawned by whichever call finds none running, with no
+    // `cwd` of its own (ipc.ts) — inherits it from that first call.
+    ...(cwd ? { cwd } : {}),
     encoding: 'utf8',
     timeout: 120_000
   });
@@ -747,6 +758,236 @@ const viaLink = spawnSync(process.execPath, [linkPath, '--help'], { env: capped.
 check(
   viaLink.status === EXIT.OK && viaLink.stdout.trim() === renderHelp().trim(),
   'invoked through a symlink (the npm link path) the CLI runs — it does not exit 0 having done nothing'
+);
+
+// =============================================================================
+rule('9. A relative path is refused by every verb, and each client resolves against ITS OWN cwd');
+// =============================================================================
+//
+// This section exists because the fix it covers had no test. Two mutations
+// against a fresh clone proved that rather than argued it: deleting the
+// `isAbsolute` refusal from identity.js, and reverting the CLI's
+// `agentPathOf` and the MCP server's `agentPath()` to return the raw string —
+// the exact round-1 blocker — and the whole CI suite stayed green through
+// both. A fix for a verified defect rested entirely on a reviewer having read
+// it. A check that cannot fail is not a check.
+//
+// The fixture is the failure itself rather than a proxy for it. TWO
+// directories are named `victim`: one under the daemon's cwd, one under a
+// client's. The daemon is detached and inherits its cwd from whichever call
+// first spawned it — here, deliberately, the first one — so if a relative
+// path ever reaches `path.resolve` on the daemon side, `victim` means the
+// daemon's namesake no matter who asked. Every check below is about which of
+// those two directories a request lands on.
+//
+// It also covers the narrower half of the same bug: `addressOfRequest`'s
+// lexical fallback. `forget`, `deactivate` and `status` must keep working
+// after a caller deletes a directory, so they fall back to a lexical resolve
+// — and that fallback caught every PathError, including `not-absolute`. So
+// the rule identity.ts states by name was true in seven verbs and false in
+// three, and the three were the ones that mutate or read a record without
+// needing the directory to exist. `PathError` now carries a discriminable
+// `problem`; only `does-not-exist` may fall back. Both halves are here
+// because they are one question — does a relative path ever get resolved
+// somewhere other than the caller's own cwd — and it has to be answered no in
+// every verb and every client at once.
+
+const rel = fixture('relative-paths');
+
+const daemonCwd = path.join(scratch, 'relative-daemon-cwd');
+const clientCwd = path.join(scratch, 'relative-client-cwd');
+fs.mkdirSync(path.join(daemonCwd, 'victim'), { recursive: true });
+fs.mkdirSync(path.join(clientCwd, 'victim'), { recursive: true });
+const daemonVictim = fs.realpathSync(path.join(daemonCwd, 'victim'));
+const clientVictim = fs.realpathSync(path.join(clientCwd, 'victim'));
+
+// The FIRST call, from the daemon's cwd — this is what spawns the daemon
+// there. Absolute path, so it is a legitimate configure; the label is how
+// every later check names which directory it reached.
+const cfgDaemonSide = crabcast(
+  rel,
+  ['configure', daemonVictim, '--priority', '5', '--launcher', 'shell', '--label', 'DAEMON-CWD VICTIM'],
+  {},
+  daemonCwd
+);
+check(cfgDaemonSide.code === EXIT.OK, 'a real agent is configured at <daemon cwd>/victim');
+
+const cfgClientSide = crabcast(
+  rel,
+  ['configure', clientVictim, '--priority', '5', '--launcher', 'shell', '--label', 'CLIENT-CWD VICTIM'],
+  {},
+  clientCwd
+);
+check(cfgClientSide.code === EXIT.OK, 'and a second, different agent at <client cwd>/victim');
+show(
+  'two agents, same relative name, different directories:',
+  `${daemonVictim}   (DAEMON-CWD VICTIM)\n${clientVictim}   (CLIENT-CWD VICTIM)`
+);
+
+// The premise, measured rather than assumed. If the daemon did NOT inherit
+// daemonCwd then every check below would pass for the wrong reason — a
+// relative path would resolve somewhere neither directory is, and "it did not
+// reach the daemon-cwd victim" would be true by accident.
+const dstatus = await raw(rel, 'daemon_status', {});
+const procCwd = `/proc/${dstatus.pid}/cwd`;
+if (fs.existsSync(procCwd)) {
+  check(
+    fs.realpathSync(fs.readlinkSync(procCwd)) === fs.realpathSync(daemonCwd),
+    `the daemon's own cwd IS ${daemonCwd} — so a daemon-side resolve would land on its victim`
+  );
+} else {
+  console.log('  SKIP  /proc unavailable; cannot read the daemon cwd directly on this platform');
+}
+
+// --- 9a. The three verbs that fall back. -------------------------------------
+//
+// Raw socket, so no client is between the relative string and the router.
+// Each one is checked twice: refused BY NAME, and the daemon-cwd record still
+// there afterwards. The second check is the one that describes the damage —
+// before the fix, `forget_agent` with `path: 'victim'` resolved onto a
+// stranger's real agent and deleted its record.
+
+for (const action of ['forget_agent', 'deactivate_agent', 'agent_status']) {
+  const res = await raw(rel, action, { path: 'victim' });
+  check(
+    res.success === false && /is not absolute/.test(String(res.error)),
+    `${action} refuses a relative path by name (it falls back lexically, and must not for this)`
+  );
+}
+
+// `success` is false for both of these and says so about herdr, not about the
+// record: neither agent was ever activated, so no pane exists to describe.
+// `configured` and `state` are the record, and the record is the subject here
+// — `agent_status` reports it on the failure branch precisely so that "this
+// agent is configured and not running" stays distinguishable from "there is
+// no such agent" (router.ts).
+const survived = await raw(rel, 'agent_status', { path: daemonVictim });
+check(
+  survived.configured === true && survived.state === 'unstarted' && survived.path === daemonVictim,
+  'and the daemon-cwd agent still has its record — no relative request ever landed on it'
+);
+
+// --- 9b. Every other verb that takes a path. ---------------------------------
+//
+// These were already strict, and the point of listing them is universality:
+// identity.ts:96-98 promises a relative path is "refused by name rather than
+// silently resolved somewhere plausible", and a promise that holds in seven
+// verbs out of ten is the shape this whole section is about.
+
+for (const [action, extra] of [
+  ['configure_agent', { priority: 5, launcher: 'shell' }],
+  ['activate_agent', {}],
+  ['send_to_agent', { message: 'hello' }],
+  ['tail_agent', { lines: 5 }]
+]) {
+  const res = await raw(rel, action, { path: 'victim', ...extra });
+  check(
+    res.success === false && /is not absolute/.test(String(res.error)),
+    `${action} refuses a relative path by name`
+  );
+}
+
+// The refusal is worth reading once: it is what teaches a caller to resolve
+// their own paths, and it has to say why rather than just no.
+show('the refusal, verbatim:', (await raw(rel, 'forget_agent', { path: 'victim' })).error);
+
+// --- 9c. The fallback still does the job it was written for. -----------------
+//
+// Narrowing it would be no fix at all if it broke this: a caller who has
+// deleted a directory must still be able to say "stop expecting this", and
+// that is precisely when they ask. Absolute path, directory gone.
+
+const goneParent = path.join(scratch, 'relative-gone');
+fs.mkdirSync(path.join(goneParent, 'temp'), { recursive: true });
+const gonePath = fs.realpathSync(path.join(goneParent, 'temp'));
+crabcast(rel, ['configure', gonePath, '--priority', '5', '--launcher', 'shell', '--label', 'DELETED']);
+fs.rmSync(gonePath, { recursive: true, force: true });
+
+const statusOfGone = await raw(rel, 'agent_status', { path: gonePath });
+check(
+  statusOfGone.configured === true && statusOfGone.path === gonePath,
+  'status on a DELETED directory still finds the record — the fallback is narrowed, not removed'
+);
+const forgetGone = await raw(rel, 'forget_agent', { path: gonePath });
+check(
+  forgetGone.success === true,
+  'and forget on a deleted directory still succeeds, which is the whole reason the fallback exists'
+);
+
+// --- 9d. The CLI resolves before the wire. -----------------------------------
+//
+// The same relative operand, from the client's cwd. The daemon can no longer
+// resolve it at all, so the only way this can succeed is if the CLI did.
+
+const relViaCli = crabcast(rel, ['status', 'victim', '--json'], {}, clientCwd);
+let cliJson = null;
+try { cliJson = JSON.parse(relViaCli.stdout); } catch {}
+check(
+  cliJson?.path === clientVictim,
+  `the CLI resolves 'victim' against its own cwd before sending: got ${cliJson?.path}`
+);
+check(
+  cliJson?.configured === true && cliJson?.path !== daemonVictim,
+  'and it reached the CLIENT-cwd agent — a real, different record — not the daemon-cwd namesake'
+);
+
+// --- 9e. The MCP server resolves before the wire. ----------------------------
+//
+// A second client, with its own cwd, and the same question. Both clients were
+// reverted together in the mutation that stayed green, so both are covered.
+
+class MiniMcp {
+  constructor(cwd, env) {
+    this.child = spawn(process.execPath, [path.join(distDir, 'mcp.js')], {
+      cwd, env, stdio: ['pipe', 'pipe', 'pipe']
+    });
+    this.id = 0;
+    this.pending = new Map();
+    this.child.stderr.on('data', () => {});
+    let buf = '';
+    this.child.stdout.on('data', (c) => {
+      buf += c.toString();
+      let i;
+      while ((i = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 1);
+        if (!line.trim()) continue;
+        let m; try { m = JSON.parse(line); } catch { continue; }
+        if (m.id !== undefined && this.pending.has(m.id)) {
+          const { resolve, timer } = this.pending.get(m.id);
+          this.pending.delete(m.id); clearTimeout(timer); resolve(m.result ?? m.error);
+        }
+      }
+    });
+  }
+  request(method, params = {}) {
+    const id = ++this.id;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`mcp ${method} timed out`)), 30_000);
+      this.pending.set(id, { resolve, timer });
+      this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    });
+  }
+  kill() { try { this.child.kill(); } catch {} }
+}
+
+const mcp = new MiniMcp(clientCwd, { ...rel.env, CRABCAST_CONFIG: rel.configPath });
+await mcp.request('initialize', {
+  protocolVersion: '2024-11-05', capabilities: {},
+  clientInfo: { name: 'verify-cli-refusal §9', version: '0.0.0' }
+});
+mcp.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+const mcpRes = await mcp.request('tools/call', {
+  name: 'crabcast_agent_status', arguments: { path: 'victim' }
+});
+mcp.kill();
+const mcpText = String(mcpRes?.content?.[0]?.text ?? JSON.stringify(mcpRes));
+check(
+  mcpText.includes(clientVictim) && !mcpText.includes(daemonVictim),
+  'the MCP server resolves against ITS cwd too — it reached the client-cwd agent, not the namesake'
+);
+check(
+  !/is not absolute/.test(mcpText),
+  'and the daemon never saw a relative path from it, so the refusal never fired'
 );
 
 // ------------------------------------------------------------------- verdict
