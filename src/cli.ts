@@ -424,6 +424,106 @@ function gateFlags(a: any): string {
   return off.length ? `  ${off.map((f) => `not-${f}`).join(' ')}` : '';
 }
 
+/**
+ * Every field of a `config` block (types.ts, AgentConfig), so this renderer can
+ * be checked against the object it is handed.
+ *
+ * The same guard `CAPACITY_FIELDS` exists for, and for a sharper reason: this
+ * block is the whole point of the state read, so a knob `configure` grows that
+ * nothing here prints would be a field the CLI silently drops from the one
+ * surface a human uses to check what an agent is running with. The top-level
+ * residue guard cannot see it — nested objects are outside its reach — so the
+ * block does its own leftovers pass.
+ */
+const CONFIG_FIELDS = [
+  'priority', 'refusable', 'chargeable', 'preemptable', 'launcher',
+  'prompt', 'mcpServers', 'label'
+] as const;
+
+/**
+ * An agent's frozen configuration, as read back from the durable record.
+ *
+ * `null` is printed rather than skipped: a row with no record is saying
+ * something, and a renderer that prints nothing for it looks identical to one
+ * that has not been taught about the field.
+ */
+function configBlock(row: any, pad = INDENT + INDENT): string | null {
+  const config = row?.config;
+  if (config === undefined) return null;
+  if (config === null) {
+    return `${pad}config: (none — no durable record backs this row)`;
+  }
+
+  const unknown = Object.keys(config).filter(
+    (key) => !(CONFIG_FIELDS as readonly string[]).includes(key)
+  );
+
+  return lines(
+    `${pad}config v${row.configVersion ?? '?'}` +
+      (row.configuredAt ? ` frozen ${row.configuredAt}` : ' (configured before versions were recorded)') +
+      `: priority ${config.priority}, launcher ${config.launcher}, ` +
+      `refusable ${config.refusable}, chargeable ${config.chargeable}, ` +
+      `preemptable ${config.preemptable}`,
+    // The size, not the text: a prompt is finished bytes of arbitrary length
+    // and reprinting it here would bury every other field.
+    typeof config.prompt === 'string'
+      ? `${pad}prompt: ${config.prompt.length} characters`
+      : `${pad}prompt: (none — it starts at its runtime's own prompt)`,
+    Array.isArray(config.mcpServers) && config.mcpServers.length
+      ? `${pad}mcp servers: ${config.mcpServers.join(', ')}`
+      : null,
+    config.label !== undefined ? `${pad}label: ${config.label}` : null,
+    // The fact that decides what the next activation does, said in the words
+    // of the thing a reader is deciding about. Only where the daemon answered
+    // it: absent is not `false`, and printing "has never run" for a field
+    // nobody sent would be inventing the answer.
+    typeof row.everActivated === 'boolean'
+      ? `${pad}next activate: ${row.everActivated
+          ? 'RESUMES the conversation it was stopped in'
+          : 'starts FRESH — this agent has never run'}`
+      : null,
+    ...unknown.map((key) => `${pad}${key}: ${compact(config[key])}`)
+  );
+}
+
+/**
+ * {@link configBlock} over a whole response, marking the four fields it read.
+ *
+ * The pairing is the point: a renderer that printed the block and forgot to
+ * mark the fields would print each of them twice — once here and once in the
+ * residue — and one that marked them without printing would hide them
+ * entirely, which is precisely what the residue guard exists to prevent.
+ */
+function configBlockSeen(reader: ResponseReader, pad?: string): string | null {
+  const block = configBlock(reader.res, pad);
+  reader.seen('config', 'configVersion', 'configuredAt', 'everActivated');
+  return block;
+}
+
+/**
+ * Which of the fields above the daemon holds on disk and which it read a
+ * moment ago.
+ *
+ * Printed rather than dropped because it is the answer to a question a reader
+ * of this output will otherwise answer wrongly: `pane id` looks exactly as
+ * durable as `priority` on a terminal, and it is not — herdr renumbers panes
+ * whenever any pane anywhere closes. A reader who copies one into a script has
+ * copied a value with a shelf life.
+ */
+function provenanceBlock(p: any): string | null {
+  if (!p || typeof p !== 'object') return null;
+  const list = (v: unknown) => (Array.isArray(v) ? v.join(', ') : '(none)');
+  return lines(
+    `\nwhere these fields came from — read at ${p.observedAt}` +
+      (p.censusReachable === false
+        ? ', and herdr DID NOT ANSWER, so every observed field below is unread rather than false'
+        : ''),
+    `${INDENT}durable  (from the registry, survives a restart): ${list(p.durable)}`,
+    `${INDENT}observed (read from herdr just now):              ${list(p.observed)}`,
+    `${INDENT}derived  (computed from the two):                 ${list(p.derived)}`
+  );
+}
+
 function agentRow(a: any): string {
   const head =
     `${INDENT}${a.path}  [${a.herdrStatus}]` +
@@ -436,7 +536,8 @@ function agentRow(a: any): string {
     head,
     session,
     a.label ? `${INDENT}${INDENT}label ${a.label}` : null,
-    a.paneId ? `${INDENT}${INDENT}pane ${a.paneName} (${a.paneId})` : null
+    a.paneId ? `${INDENT}${INDENT}pane ${a.paneName} (${a.paneId})` : null,
+    configBlock(a)
   );
 }
 
@@ -487,9 +588,11 @@ function renderActivate(reader: ResponseReader, request: Record<string, unknown>
       `${what} is already running — nothing was started`,
       field('pane', `${reader.take('paneName')} (${reader.take('paneId')})`),
       field('verified', reader.take('verified')),
+      configBlockSeen(reader, INDENT),
       residue(reader)
     );
   }
+  const echo = configBlockSeen(reader, INDENT);
   return lines(
     `activated ${what}`,
     field('session', `${reader.take('sessionId')} (${reader.take('status')})`),
@@ -497,6 +600,7 @@ function renderActivate(reader: ResponseReader, request: Record<string, unknown>
     field('created', reader.take('createdAt')),
     field('priority', reader.take('priority')),
     field('launcher', reader.take('launcher')),
+    echo,
     // `verified: true` is the difference between this response and a false
     // success (KAN-23): the agent was found in herdr's census before the
     // daemon answered. Printed rather than assumed.
@@ -591,6 +695,15 @@ function renderConfigure(reader: ResponseReader, request: Record<string, unknown
       reader.take('applied') !== undefined
         ? `${INDENT}applied:       nothing — configure is all-or-nothing`
         : null,
+      // UNCHANGED, and said so: nothing was applied, so the version the caller
+      // already holds is still current.
+      field(
+        'version',
+        reader.take('configVersion') === undefined
+          ? null
+          : `${reader.res.configVersion} — unchanged, because nothing was applied`
+      ),
+      configBlockSeen(reader, INDENT),
       field('pane', reader.take('paneId')),
       durability(reader),
       residue(reader)
@@ -599,9 +712,20 @@ function renderConfigure(reader: ResponseReader, request: Record<string, unknown
   const config = reader.take<any>('config') ?? {};
   const occupied = reader.take('occupiedBy');
   const note = reader.take('note');
+  const version = reader.take('configVersion');
+  const previous = reader.take('previousConfigVersion');
   return lines(
     `${reader.take('reconfigured') ? 'reconfigured' : 'configured'} ${what}`,
     field('pane name', reader.take('paneName')),
+    // The compare-and-set token, on the call that minted it. A caller
+    // reconciling against this daemon needs it without a second read.
+    field(
+      'version',
+      version === undefined
+        ? null
+        : `${version}${previous !== undefined ? ` (was ${previous})` : ''}` +
+          `, frozen ${reader.take('configuredAt') ?? '(not reported)'}`
+    ),
     field('priority', config.priority),
     field('launcher', config.launcher),
     field('gate', `refusable ${config.refusable}, chargeable ${config.chargeable}, preemptable ${config.preemptable}`),
@@ -663,6 +787,9 @@ function renderList(reader: ResponseReader): string {
   const preemptedTotal = reader.take('preemptedTotal');
   const standby = reader.take<any[]>('standbyAgents') ?? [];
   const standbyTotal = reader.take('standbyTotal');
+  const unstarted = reader.take<any[]>('unstartedAgents') ?? [];
+  const unstartedTotal = reader.take('unstartedTotal');
+  const provenance = reader.take('provenance');
   const capacity = reader.take('capacity');
   const priorities = reader.take('priorities');
   const health = reader.take('herdrHealth');
@@ -674,8 +801,11 @@ function renderList(reader: ResponseReader): string {
     unbacked.length
       ? lines(
           `\nunbacked panes (${unbacked.length}) — our panes, nothing behind them:`,
-          ...unbacked.map(
-            (p: any) => `${INDENT}${p.path} (${p.paneName}) [${p.herdrStatus}] — ${p.reason}`
+          ...unbacked.map((p: any) =>
+            lines(
+              `${INDENT}${p.path} (${p.paneName}) [${p.herdrStatus}] — ${p.reason}`,
+              configBlock(p)
+            )
           )
         )
       : null,
@@ -699,6 +829,15 @@ function renderList(reader: ResponseReader): string {
               p.occupies
                 ? `${INDENT}${INDENT}OCCUPIES ${p.occupies} — activating that agent will be refused ` +
                   `until this pane is gone`
+                : null,
+              // OUR agent for that directory, named as such. This pane has no
+              // CrabCast configuration of its own and the block must not read
+              // as though it did.
+              p.occupiedAgent
+                ? lines(
+                    `${INDENT}${INDENT}the agent it is blocking (${p.occupiedAgent.state}):`,
+                    configBlock(p.occupiedAgent, INDENT + INDENT + INDENT)
+                  )
                 : null
             )
           )
@@ -719,7 +858,8 @@ function renderList(reader: ResponseReader): string {
         ? missing.map((m: any) =>
             lines(
               `${INDENT}${m.path} — since ${m.since}` + (m.label ? ` (${m.label})` : ''),
-              `${INDENT}${INDENT}${m.reason}`
+              `${INDENT}${INDENT}${m.reason}`,
+              configBlock(m)
             )
           )
         : [`${INDENT}(none)`])
@@ -738,6 +878,7 @@ function renderList(reader: ResponseReader): string {
               `${INDENT}${p.path} — at ${p.at}, priority ${p.priority}, ` +
                 `for ${p.by?.path} (priority ${p.by?.priority})`,
               `${INDENT}${INDENT}${p.reason}`,
+              configBlock(p),
               p.derivation ? verbatim(`the capacity figures that took it (${p.path}):`, p.derivation) : null
             )
           )
@@ -757,11 +898,38 @@ function renderList(reader: ResponseReader): string {
               `${INDENT}${s.path} — since ${s.since}` +
                 (s.launcher ? `, launcher ${s.launcher}` : '') +
                 (s.wasPreempted ? ' [its work was taken, not switched off]' : ''),
-              `${INDENT}${INDENT}${s.reason}`
+              `${INDENT}${INDENT}${s.reason}`,
+              configBlock(s)
             )
           )
         : [`${INDENT}(none)`])
     ),
+
+    // The fifth answer to "not running", and the one that used to appear
+    // nowhere. Printed always, even at zero, for the same reason the others
+    // are: a suppressed heading and an empty category look identical.
+    lines(
+      categoryHeading(
+        'unstarted agents',
+        unstarted,
+        unstartedTotal,
+        'configured and never run — activating one starts a FRESH conversation, ' +
+          'unlike standby, where it resumes'
+      ),
+      ...(unstarted.length
+        ? unstarted.map((u: any) =>
+            lines(
+              `${INDENT}${u.path} — configured ${u.since}` +
+                (u.launcher ? `, launcher ${u.launcher}` : '') +
+                (u.label ? ` (${u.label})` : ''),
+              `${INDENT}${INDENT}${u.reason}`,
+              configBlock(u)
+            )
+          )
+        : [`${INDENT}(none)`])
+    ),
+
+    provenanceBlock(provenance),
 
     capacity ? lines('\ncapacity:', capacityBlock(capacity)) : null,
     priorityRows(priorities),
@@ -782,15 +950,35 @@ function renderList(reader: ResponseReader): string {
 
 function renderStatus(reader: ResponseReader, request: Record<string, unknown>): string {
   const what = addressed(reader, request);
-  if (!reader.success) return lines(failure(reader, `status ${what}`), residue(reader));
+  if (!reader.success) {
+    // The record is on the refusal too, when there is one. `status` only fails
+    // now for a path with neither a record nor a pane, so this branch is
+    // ordinarily empty of config — but printing it when it is there is what
+    // keeps "configured and not running" distinguishable from "no such agent".
+    const echo = configBlockSeen(reader, INDENT);
+    return lines(
+      failure(reader, `status ${what}`),
+      field('state', reader.take('state')),
+      field('configured', reader.take('configured')),
+      field('pane name', reader.take('paneName')),
+      echo,
+      residue(reader)
+    );
+  }
 
   const sessionless = reader.take('sessionless');
+  const echo = configBlockSeen(reader, INDENT);
   return lines(
     `${what} — ${reader.take('herdrStatus')}`,
+    // The category, first, because it is what a reader is asking for: running,
+    // missing, standby, unstarted or preempted are five different situations
+    // and only one of them is "fine".
+    field('state', reader.take('state')),
     field('pane name', reader.take('paneName')),
     field('pane id', reader.take('paneId')),
     field('label', reader.take('label')),
     field('configured', reader.take('configured')),
+    echo,
     // The sessionless shape is not a degraded answer, and must not read as
     // one: the agent is alive in herdr and this daemon simply does not hold
     // its session — which is every agent that outlived a daemon restart, and
@@ -803,6 +991,10 @@ function renderStatus(reader: ResponseReader, request: Record<string, unknown>):
     field('status', reader.take('status')),
     field('created', reader.take('createdAt')),
     field('pane cwd', reader.take('workDir')),
+    // What herdr said when it was asked and had nothing. Evidence for the
+    // second half of "configured and not running", rather than an error.
+    field('herdr', reader.take('herdrNote')),
+    provenanceBlock(reader.take('provenance')),
     residue(reader)
   );
 }

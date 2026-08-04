@@ -77,6 +77,23 @@ jobs:
       #                                      and an over-large one is refused
       #                                      legibly rather than truncated.
       #
+      # And one more, for the same class of reason — a state read that omits
+      # a field fails silently, since the caller gets a well-formed response
+      # with less in it than it should have:
+      #
+      #   verify-state-read-echoes-config    every fleet category echoes the
+      #                                      agent's frozen configuration, and
+      #                                      `unstartedAgents` is distinct from
+      #                                      standby. It PRODUCES every category
+      #                                      before asserting on it (a
+      #                                      completeness check over an empty
+      #                                      list passes vacuously) and then
+      #                                      MUTATES the compiled daemon to
+      #                                      prove its own assertions can go
+      #                                      red. It also spawns a real daemon
+      #                                      and drives the real CLI and MCP
+      #                                      server against the herdr shim.
+      #
       # DELIBERATELY EXCLUDED — these need a real herdr server and real
       # terminal panes, which no GitHub runner has (herdr's public
       # availability is itself an open question on this project). Running
@@ -113,6 +130,7 @@ jobs:
             verify-herdr-version-notice
             verify-refuses-occupied-directory
             verify-prompt-is-not-a-template
+            verify-state-read-echoes-config
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,
