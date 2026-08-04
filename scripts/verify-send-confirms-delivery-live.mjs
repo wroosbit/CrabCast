@@ -324,21 +324,43 @@ rule('1b. A CONTENDED RECIPIENT — the condition this ticket is actually about'
 // whether it has 25 seconds of work left or 120 — a confirmed send answers in
 // about a second either way — so the fixture buys nothing by being slow.
 
-/** Wait until Claude Code's pane says it is actually working. */
-async function waitUntilBusy(what, timeoutMs = 60_000) {
+/**
+ * Wait until the pane satisfies `ready`, or give up and show why.
+ *
+ * TWO DIFFERENT PREDICATES, AND CONFLATING THEM COST THIS SECTION A ROUND.
+ * The first version waited on `esc to interrupt` for BOTH states. That marker
+ * proves a turn is in flight and nothing more — so the "blocked in a shell
+ * command" precondition passed while the agent was merely generating, no
+ * `sleep` was ever running, and the assertion about terminating a tool call
+ * went red having had no tool call to terminate. It is the same error as the
+ * trust-modal `❯` one section up: the right glyph, read in the wrong state.
+ */
+async function waitForPane(what, ready, timeoutMs = 90_000) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const t = bridge.tailAgent(AGENT_PATH, 60);
-    // "esc to interrupt" is drawn only while a turn is in flight.
-    if (t.success && typeof t.text === 'string' && /esc to interrupt/i.test(t.text)) return true;
+    if (t.success && typeof t.text === 'string' && ready(t.text)) return true;
     if (Date.now() >= deadline) {
-      console.log(`   never became busy (${what}); last pane:`);
+      console.log(`   never reached the state (${what}); last pane:`);
       showPane('', t.text);
       return false;
     }
     await sleep(1500);
   }
 }
+
+/** A turn is in flight. Drawn only while Claude Code is working. */
+const turnInFlight = (text) => /esc to interrupt/i.test(text);
+
+/**
+ * A SHELL COMMAND IS ACTUALLY RUNNING, which is a different claim.
+ *
+ * Matched on the tool-invocation echo — Claude Code renders an executing Bash
+ * call as `⎿  $ <command>` — rather than on the word `sleep`, which also
+ * appears in the instruction WE typed. Matching that would be the proof
+ * reading its own input back and calling it evidence.
+ */
+const shellRunning = (text) => /⎿\s+\$\s.*sleep/.test(text) && turnInFlight(text);
 
 /** One contended send, asserted the same way whatever put the agent to work. */
 async function contendedSend(label, message) {
@@ -362,8 +384,11 @@ let busyResult;
   // --- 1b-i: mid-task, generating -----------------------------------------
   dropEnters(0);
   setUnreadable(false);
-  await send('live 1b-i setup: count slowly from 1 to 40, one number per line, nothing else');
-  const busyGenerating = await waitUntilBusy('mid-task');
+  const setupI = await send('live 1b-i setup: count slowly from 1 to 40, one number per line, nothing else');
+  check(setupI.verdict === 'delivered',
+    'SETUP 1b-i: the setup instruction itself landed as its own submission',
+    JSON.stringify({ verdict: setupI.verdict }));
+  const busyGenerating = await waitForPane('mid-task', turnInFlight);
   check(busyGenerating,
     'PRECONDITION 1b-i: the agent is genuinely mid-task — its pane offers "esc to interrupt"');
   if (busyGenerating) {
@@ -371,11 +396,25 @@ let busyResult;
   }
 
   // --- 1b-ii: blocked in a long shell command ------------------------------
-  await sleep(3000);
-  await send('live 1b-ii setup: run `sleep 25` with your Bash tool right now, nothing else');
-  const busyInShell = await waitUntilBusy('blocked in a shell command');
+  //
+  // The setup is waited out to COMPLETION before the next one is typed, and
+  // that is this ticket's own disclosed limit applied to its own fixture: two
+  // sends in quick succession can be submitted as one concatenated line. The
+  // first version of this section did exactly that — the setup and the
+  // contended message arrived as `…nothing elselive 1b-ii: reply with…`, so
+  // `sleep 25` never ran at all. The limit is real, and this is what respecting
+  // it looks like.
+  await waitForPane('the previous turn to finish', (t) => !turnInFlight(t), 120_000);
+  await sleep(2000);
+  const setupII = await send('live 1b-ii setup: run `sleep 25` with your Bash tool right now, nothing else');
+  check(setupII.verdict === 'delivered',
+    'SETUP 1b-ii: the setup instruction itself landed as its own submission, NOT concatenated ' +
+    'onto the next one — the failure mode this ticket documents, respected in its own fixture',
+    JSON.stringify({ verdict: setupII.verdict }));
+  const busyInShell = await waitForPane('blocked in a shell command', shellRunning);
   check(busyInShell,
-    'PRECONDITION 1b-ii: the agent is BLOCKED IN A SHELL COMMAND — the state never tested before');
+    'PRECONDITION 1b-ii: a SHELL COMMAND IS ACTUALLY RUNNING — matched on the `⎿  $ …` tool ' +
+    'invocation echo rather than on the word "sleep" in the instruction we typed');
   if (busyInShell) {
     busyResult = await contendedSend(
       '1b-ii in-shell', 'live 1b-ii: reply with the single word SHELLACK and nothing else');
@@ -431,9 +470,26 @@ let notDeliveredResult;
   check(flat(r.evidence.tail).includes(deliveryFingerprint(message)),
     'the message IS in the real pane buffer once wrapping is flattened — which is what a ' +
     'substring check would have called a delivery');
-  check(r.evidence.tail.includes(message) === false,
-    'and the RAW substring check does not even find it, because Claude Code wraps the echo — ' +
-    'so flattening is load-bearing rather than tidiness');
+
+  // THE RAW RESULT IS REPORTED, NOT ASSERTED, and that is a correction. This
+  // used to assert `raw === false` — "Claude Code wraps the echo, so the raw
+  // check cannot find it" — which is true only when the message is longer than
+  // the pane is wide. It held at the 19- and 43-column panes this proof ran on
+  // earlier and went red at 80 columns, where the message fits on one line.
+  // That made it an assertion about the terminal's width rather than about the
+  // daemon: a check that stops measuring the thing it names as soon as the
+  // window changes. What is invariant is the direction — flattening can only
+  // ever find MORE than the raw check — so that is what is asserted.
+  const rawFound = r.evidence.tail.includes(message);
+  const flatFound = flat(r.evidence.tail).includes(deliveryFingerprint(message));
+  check(!(rawFound && !flatFound),
+    'and flattening never finds LESS than a raw substring check would — the invariant that ' +
+    'makes it safe, as opposed to the width-dependent case where it finds more',
+    `raw=${rawFound} flattened=${flatFound}`);
+  if (!rawFound) {
+    console.log('   (and on THIS pane the raw check missed a message that is plainly there — ' +
+      'the width-dependent case that makes flattening load-bearing rather than tidiness)');
+  }
   check(keysSince(mark).filter((l) => l.endsWith(' C-c')).length === 1,
     'still exactly one Ctrl+C', JSON.stringify(keysSince(mark)));
 }
