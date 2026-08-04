@@ -188,6 +188,31 @@ jobs:
       #                                      losing the registry while the
       #                                      stub's panes survive.
       #
+      # And one for the SUITE ITSELF, which is the only script here whose
+      # subject is another script:
+      #
+      #   verify-proof-cleans-up-when-interrupted
+      #                                      a proof that cleans up only when it
+      #                                      FINISHES is not a proof that cleans
+      #                                      up. It spawns
+      #                                      verify-send-confirms-delivery,
+      #                                      waits until that run really has a
+      #                                      daemon up, SIGINTs it, and counts
+      #                                      what survived — because a script
+      #                                      cannot meaningfully interrupt
+      #                                      itself. Two orphaned daemons were
+      #                                      found in the wild before this
+      #                                      existed, holding sockets in scratch
+      #                                      directories that had been deleted.
+      #                                      Its second section strips the
+      #                                      signal handler and shows the leak
+      #                                      come back, so the absence asserted
+      #                                      in the first is measuring something.
+      #                                      Each run gets its own TMPDIR, so the
+      #                                      count can never be confused by a
+      #                                      concurrent run and this can never
+      #                                      kill a process it did not cause.
+      #
       # And one for the send path, whose regression is silent in the worst way
       # available — it does not fail, it CLAIMS:
       #
@@ -338,6 +363,7 @@ jobs:
             verify-reconfiguration-refuses
             verify-event-contract
             verify-send-confirms-delivery
+            verify-proof-cleans-up-when-interrupted
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,
