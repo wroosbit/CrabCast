@@ -29,9 +29,9 @@ payload below.
 
 | event | was | fires | payload |
 | --- | --- | --- | --- |
-| `agent.configured` | `agent_configured_event` **(breaking)** | `configure` accepted and the record written | `path`, `config`, `configVersion`, `configuredAt`, `changed[]`, `outcomes` |
-| `agent.activated` | `agent_activated_event` **(breaking)** | an activation confirmed against herdr's census — a fresh spawn, or this daemon re-taking the terminal of an agent that outlived it | `path`, `paneName`, `paneId`, `sessionId`, `status`, `configVersion` |
-| `agent.deactivated` | `agent_deactivated_event` **(breaking)**, with `agent_preempted_event` **merged in** | a stand-down confirmed | `path`, `reason` (`requested` \| `preempted`); `paneName`, `sessionId`, `preemption` when they exist |
+| `agent.configured` | `agent_configured_event` **(breaking)** | `configure` accepted. The record write is **attempted before this is sent and reported in `durable`** — it is not asserted | `path`, `config`, `configVersion`, `configuredAt`, `changed[]`, `outcomes`, `durable`; `durabilityError` when `durable` is false |
+| `agent.activated` | `agent_activated_event` **(breaking)** | an activation confirmed against herdr's census — a fresh spawn, or this daemon re-taking the terminal of an agent that outlived it | `path`, `paneName`, `paneId`, `sessionId`, `status`, `configVersion`, `durable`; `durabilityError` when `durable` is false |
+| `agent.deactivated` | `agent_deactivated_event` **(breaking)**, with `agent_preempted_event` **merged in** | a stand-down confirmed | `path`, `reason` (`requested` \| `preempted`), `durable`; `paneName`, `sessionId`, `preemption` when they exist; `durabilityError` when `durable` is false |
 | `agent.forgotten` | `agent_forgotten_event` **(breaking)** | `forget` accepted | `path`, `removed[]` |
 | `agent.status_changed` | — **(new)** | the fleet sweep observed a different herdr status than it last observed | `path`, `paneName`, `paneId`, `from`, `to` |
 | `agent.lost` | `agent_lost_event` **(breaking)** | an agent the registry records as active has no live agent in its directory | `path`, `paneName`, `label`, `config`, `configVersion`, `configuredAt`, `everActivated`, `activatedBy`, `since`, `reason` |
@@ -55,6 +55,68 @@ are the same objects `list_agents` publishes under `missingAgents` and renaming
 the field there would break a read that shipped in T3 for cosmetic gain. It is
 prose explaining why the daemon says the agent is absent. `agent.deactivated`'s
 `reason` is a different field on a different event and takes one of two words.
+
+### `durable` on the three lifecycle events, and why it is never absent
+
+`agent.configured`, `agent.activated` and `agent.deactivated` sit on the durable
+write path, and **all three carry `durable`, always, both values.**
+
+> **`durable: true`** — the daemon's durable record agrees with this event. A
+> restart will see what this event describes.
+>
+> **`durable: false`** — the operation happened and the registry write did not.
+> The event is true about the world; **the disk does not know it**, and a
+> restart will not. `durabilityError` carries the reason, and a
+> `registry.degraded` also fires.
+
+That sentence is deliberately about the relationship between **this event and
+the record**, not about this daemon or this transport. If these events are ever
+carried somewhere else, it is already true there.
+
+**Read `durable: false` as work that is live and unrecorded**, and the three
+events say three different things by it: a configuration this daemon will honour
+and the next one will not have; an agent that is running, verified, and outside
+the set a restart restores; a stand-down that a restart will try to undo. In all
+three the daemon is telling you the truth about a gap it cannot close on its own
+— re-issuing the operation once the data directory is writable is what closes
+it, and for `agent.activated` specifically, calling `activate` again is the
+documented repair (it converges the record and answers `recordReconciled: true`).
+
+**Why it is required rather than present-only-on-failure.** Reading durability
+out of an *absence* is the defect this field exists to remove, not a shorter way
+to spell it. An absent `durable` is already produced for two reasons that have
+nothing to do with a successful write: a daemon of an older vintage that never
+published the field — which you *will* meet, because §2's `bootId` exists
+precisely for the reconnect where the daemon on the other end is not the one you
+were talking to — and the MCP projection, which carries exactly the fields this
+section declares and drops anything it does not. So it is on every one of these
+events, `true` or `false`, and never inferred.
+
+**The responses are asymmetric with this, on purpose.** `configure_response`,
+`activate_response` and `deactivate_response` still carry `durable: false` only
+when the write failed. A response answers a call you can simply make again, so
+an absence there is recoverable by asking; an event is **at-most-once with no
+second copy and no way to re-request it** (§2), so an absence on the wire cannot
+be allowed to mean anything. The two surfaces now *agree on the answer* — which
+is the property that was missing — without being obliged to agree on the shape.
+
+Historically this is one defect, found twice. KAN-72 recorded it against the
+response surface: *"the durable record and the response must agree; a swallowed
+registry write behind `verified: true` is restart-amnesia re-entering through the
+error path."* The event path was built afterwards and did not inherit it — the
+events fired identically whether or not the write landed, while this table's own
+sentence for `agent.configured` said "and the record written". KAN-165 ported the
+lesson rather than the line, which is why all three events changed and not the
+one a consumer happened to be reading.
+
+**`registry.degraded` is not a substitute for this field, and that is why this
+field exists.** It fires on the same failure, but it deliberately carries no
+`path` — only `what`, which is free prose like `configured /home/you/svc` — and
+ordering is total *per path* (§2), which puts this event on no path at all.
+Correlating a degradation back to the operation it invalidates therefore means
+parsing prose and assuming an ordering this document explicitly does not promise.
+`registry.degraded` remains the machine-level alarm: something is wrong with the
+data directory. `durable` is the per-operation answer.
 
 ### `agent.configured`'s `changed` and `outcomes`
 
@@ -508,6 +570,27 @@ Three changes beyond the names:
 ---
 
 ## 7. Where this is proven
+
+`scripts/verify-event-durability.mjs` — the `durable` field above, proven by
+**making the registry write genuinely fail**: it seals the log file and then
+attempts the same append itself, requiring it to throw, so a run where the
+sealing did not take is refused rather than quietly exercising the healthy path.
+It drives all three lifecycle operations on a real daemon against a working
+registry and then against a sealed one, asserts the answer on the socket **and**
+on the MCP projection, and checks each event against **its own response** — the
+agreement that was the whole point. Its static half scans every emission site in
+`src/router.ts` and reports an uncovered one by name and line, so "all three, not
+just the one somebody named" is a measurement. Three mutations are run and each
+watched going red: the unconditional claim restored, the field removed, and one
+site's spread deleted.
+
+One limit of that script, stated here rather than left to be discovered: **it
+injects the write failure rather than encountering one.** It proves a failed
+append is reported truthfully; it does not prove that a full disk, a quota
+boundary or a short write reaches the same code path. The failure it does
+reproduce faithfully is permissions, which is the one the daemon's own remedy
+text names. And it says nothing about whether a *subscriber* acts on `durable:
+false` — that is the consumer's half, and nobody on this side covers it.
 
 `scripts/verify-event-contract.mjs` — a real daemon, a real MCP server over
 real stdio, a real socket subscriber, against a herdr shim. It proves the

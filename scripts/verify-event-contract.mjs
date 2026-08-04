@@ -880,6 +880,40 @@ for (const [name, payload] of mcpByName) {
   }
 }
 
+// ---- `durable: false` NEVER TRAVELS WITHOUT A REASON -------------------------
+//
+// A JOINT PROPERTY THAT NEITHER HALF OWNS, which is why it is asserted rather
+// than left to the two comments that describe it (KAN-164/KAN-165).
+//
+// `durability()` in `src/router.ts` defaults `durabilityError` to a string on a
+// failed write. `projectEvent` in `src/events.ts` drops an optional field whose
+// value is `undefined`. Each is correct alone; the CONSEQUENCE — that a
+// subscriber told "the disk does not know about this" is always told why —
+// belongs to the pair, and it lives in neither file. Remove the default and the
+// projection silently publishes a bare `durable: false`; change the projection
+// to keep undefined optionals and the default stops being load-bearing without
+// anyone noticing it ever was. Two independently correct designs, correct
+// together, with the dependency written down nowhere: the composition failure
+// this epic has already shipped once.
+//
+// OVER EVERY PAYLOAD, not one per action, because the failed write is one
+// `agent.configured` among several and `mcpByName` keeps the first of each.
+//
+// IT MUST NOT PASS VACUOUSLY. A run that produced no failed write at all would
+// satisfy "every durable:false carries a reason" over an empty set — the exact
+// shape of check this epic keeps finding. The sealed-registry configure above
+// produces a real one, and the count is asserted to be at least 1 and printed.
+const durableFalse = mcp.eventPayloads().filter((d) => d?.durable === false);
+const bareDurableFalse = durableFalse.filter(
+  (d) => typeof d.durabilityError !== 'string' || d.durabilityError.length === 0);
+console.log(`\n   published events carrying \`durable: false\`: ${durableFalse.length} ` +
+  `(from the sealed-registry configure above — 0 would make the next line vacuous)`);
+for (const d of durableFalse) {
+  console.log(`     ${d.action} ${d.path ?? d.what} → durabilityError: ` +
+    `${JSON.stringify(d.durabilityError ?? null)}`);
+}
+console.log(`   any that arrived WITHOUT a reason: ${bareDurableFalse.length}`);
+
 // `seq` is monotonic and there are no duplicates: a subscriber's gap detection
 // is only worth anything if the numbers really increase.
 // CONTIGUOUS, not merely increasing — and the difference is load-bearing.
@@ -939,14 +973,21 @@ verdict(
     typeof preempted.preemption?.derivation === 'string' &&
     typeof preempted.preemption?.at === 'string' &&
     sub.events.every((e) => e.success === undefined) &&
+    // The joint property, and its own vacuity guard. See the block above.
+    durableFalse.length >= 1 && bareDurableFalse.length === 0 &&
     driftLines.length === 0,
   `all ${EVENT_NAMES.length} published events were produced by real operations and arrived on\n` +
   '    BOTH paths — the socket frames and the MCP notifications carry the same structured\n' +
   '    payload, envelope and all, none of them is a rendered string, and the forwarder\n' +
-  '    reported no drift in either direction between the wire and the published table',
+  '    reported no drift in either direction between the wire and the published table.\n' +
+  `    ${durableFalse.length} of them carried \`durable: false\` from a real failed write, and every\n` +
+  '    one carried a reason with it — the property that belongs to `durability()` and the\n' +
+  '    projection jointly and lives in neither',
   `socket missing [${missingSocket}], mcp missing [${missingMcp}], ` +
   `payload problems [${payloadProblems.join('; ')}], seqMonotonic=${seqMonotonic}, ` +
   `seqGaps=[${seqGaps.join(' ')}], ` +
+  `durable:false seen=${durableFalse.length} (0 would be vacuous), ` +
+  `without a reason=[${bareDurableFalse.map((d) => d.action).join(' ')}], ` +
   `drift [${driftLines.join(' | ')}]`
 );
 
