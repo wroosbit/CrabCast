@@ -326,6 +326,40 @@ jobs:
       #                                      not wait would be proving
       #                                      something else.
       #
+      # And one for the three events that sit on the DURABLE WRITE PATH, whose
+      # failure mode is an event that is true about the daemon and false about
+      # the disk:
+      #
+      #   verify-event-durability            `agent.configured`, `agent.activated` and
+      #                                      `agent.deactivated` REPORT whether the
+      #                                      registry write landed instead of
+      #                                      asserting that it did. It seals the
+      #                                      registry log to 0400 and PROVES the
+      #                                      seal took — attempting the same
+      #                                      append itself and requiring it to
+      #                                      throw — so a run as root fails
+      #                                      loudly rather than exercising the
+      #                                      healthy path and reporting green.
+      #                                      All three events, because the defect
+      #                                      as filed named one; its static half
+      #                                      scans every emission site in
+      #                                      router.ts and reports an uncovered
+      #                                      one by name and line. Three
+      #                                      mutations, each watched going red:
+      #                                      the unconditional claim restored
+      #                                      (events say written, responses say
+      #                                      not — the defect reproduced), the
+      #                                      field removed (what `origin/main`
+      #                                      sends), and one site's spread
+      #                                      deleted from the source so the
+      #                                      static scan is shown to be
+      #                                      measuring rather than counting.
+      #                                      WHAT IT CANNOT SEE: it INJECTS the
+      #                                      write failure rather than meeting
+      #                                      one, so it proves a failed append is
+      #                                      reported truthfully and NOT that a
+      #                                      full disk reaches the same path.
+      #
       # verify-daemon-provenance starts daemons but needs no herdr either: it
       # drives `daemon_status`, which touches neither panes nor the herdr
       # binary. It builds its OWN fixture trees under the system temp dir — one
@@ -379,6 +413,7 @@ jobs:
             verify-event-contract
             verify-send-confirms-delivery
             verify-proof-cleans-up-when-interrupted
+            verify-event-durability
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

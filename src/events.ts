@@ -96,11 +96,58 @@ export interface EventSpec {
  * twice and dedupe, which is worse than a clean break, and `bootId` already
  * forces a resync on reconnect. The rename lands at once and is logged once at
  * daemon boot.
+ *
+ * ---------------------------------------------------------------------------
+ * `durable`, ON ALL THREE LIFECYCLE EVENTS (KAN-165)
+ *
+ * `agent.configured`, `agent.activated` and `agent.deactivated` are the three
+ * events that sit on the durable write path, and all three used to fire whether
+ * or not the write landed while their `fires` sentence said the record had been
+ * written. The registry deliberately never throws — an unwritable log must not
+ * fail the lifecycle operation in flight — so the failure was swallowed on the
+ * event surface and answered only on the response. That is KAN-72's defect one
+ * surface over: *the durable record and the response must agree*, ported to the
+ * event path, where it had not been carried.
+ *
+ * SO EACH OF THE THREE CARRIES `durable`, and it is stated as a property of the
+ * relationship between the event and the disk rather than of this transport, so
+ * the sentence stays true if these events are ever carried somewhere else:
+ *
+ *   `durable: true`  — the daemon's durable record agrees with this event. A
+ *                      restart will see what this event describes.
+ *   `durable: false` — the operation happened and the registry write did not.
+ *                      The event is true about the world; the disk does not know
+ *                      it, and a restart will not. `durabilityError` says why,
+ *                      and a `registry.degraded` also fires.
+ *
+ * REQUIRED RATHER THAN PRESENT-WHEN-FALSE, which is the whole point and not a
+ * detail. A field that appears only on failure asks a subscriber to read
+ * durability out of an ABSENCE — and an absence is exactly what this daemon
+ * already produces for two other reasons: an older daemon that never published
+ * the field (§2's `bootId` exists because a subscriber does meet daemons of
+ * different vintages across a reconnect), and the MCP projection, which carries
+ * EXACTLY the declared fields and would drop it. A fix for "the event asserts by
+ * silence" that itself asserts by silence is the same defect with a shorter
+ * name. So it is on every one of these events, both values.
+ *
+ * The RESPONSES keep `durable: false` present-only-on-failure, deliberately and
+ * asymmetrically: a response answers a call the caller can simply make again,
+ * so an absence there is recoverable by asking. An event is at-most-once with
+ * no second copy and no way to re-request it, so an absence on the wire cannot
+ * be allowed to mean anything.
+ * ---------------------------------------------------------------------------
  */
 export const EVENT_CONTRACT: Record<CrabcastEventName, EventSpec> = {
   'agent.configured': {
     formerly: 'agent_configured_event',
-    fires: '`configure` was accepted and the record was written',
+    // WAS "`configure` was accepted and the record was written", which fired
+    // whether or not the second half had happened. It now says what it does:
+    // the acceptance is asserted, and the write is REPORTED rather than
+    // claimed. See the `durable` block above the table.
+    fires:
+      '`configure` was accepted. The durable write is attempted before this event is sent ' +
+      'and `durable` reports its outcome — `false` means the configuration is live in this ' +
+      'daemon and a restart will not know about it',
     // `changed` and `outcomes` ARRIVED WITH T4 AND THE DRIFT CHECK FOUND THEM.
     // T4 (reconfiguration) added both to this broadcast — correctly, and the
     // design's own table specifies `changed[]` for this event — but a payload
@@ -110,8 +157,11 @@ export const EVENT_CONTRACT: Record<CrabcastEventName, EventSpec> = {
     // undeclared-field half of the warning, on real traffic rather than a
     // mutation. Both are unconditional at the emitting site, so both are
     // required rather than optional.
-    required: ['path', 'config', 'configVersion', 'configuredAt', 'changed', 'outcomes'],
-    optional: [],
+    required: [
+      'path', 'config', 'configVersion', 'configuredAt', 'changed', 'outcomes',
+      'durable'
+    ],
+    optional: ['durabilityError'],
     subject: 'path'
   },
   'agent.activated': {
@@ -120,9 +170,14 @@ export const EVENT_CONTRACT: Record<CrabcastEventName, EventSpec> = {
       'an activation was confirmed against herdr\'s census — either a fresh spawn or ' +
       'this daemon re-taking the terminal of an agent that outlived it. A repeat call ' +
       'on an agent that was already running and already attached broadcasts nothing, ' +
-      'because nothing changed',
-    required: ['path', 'paneName', 'paneId', 'sessionId', 'status', 'configVersion'],
-    optional: [],
+      'because nothing changed. `durable` reports whether the activation reached the ' +
+      'registry — `false` means the agent is running, verified, and outside the set a ' +
+      'restart restores',
+    required: [
+      'path', 'paneName', 'paneId', 'sessionId', 'status', 'configVersion',
+      'durable'
+    ],
+    optional: ['durabilityError'],
     subject: 'path'
   },
   'agent.deactivated': {
@@ -130,13 +185,15 @@ export const EVENT_CONTRACT: Record<CrabcastEventName, EventSpec> = {
     fires:
       'a stand-down was confirmed. Never on an unconfirmed teardown: announcing an ' +
       'agent deactivated while it may still be running is the false claim verified ' +
-      'activation exists to prevent, arriving as an event instead of as a response',
-    required: ['path', 'reason'],
+      'activation exists to prevent, arriving as an event instead of as a response. ' +
+      '`durable` reports whether the stand-down reached the registry — `false` means the ' +
+      'agent is down and a restart will try to bring it back',
+    required: ['path', 'reason', 'durable'],
     // `agent_preempted_event` MERGED IN HERE as `reason: 'preempted'`. It used
     // to be a second broadcast on the same stand-down, which made a preemption
     // two events describing one thing and left a subscriber to correlate them.
     // Everything it carried is on `preemption` below.
-    optional: ['paneName', 'sessionId', 'preemption'],
+    optional: ['paneName', 'sessionId', 'preemption', 'durabilityError'],
     subject: 'path'
   },
   'agent.forgotten': {
