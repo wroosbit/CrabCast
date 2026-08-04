@@ -45,7 +45,16 @@ const DEFERRED_RETRY_WAIT_MS = 15_000;
 export interface RestoreOutcome {
   path: string;
   paneName: string;
-  result: 'already-running' | 'restored' | 'failed' | 'deferred';
+  /**
+   * `restored` — nothing was there and this pass started it.
+   * `reattached` — the PANE survived and this pass took its terminal back.
+   *   The agent never stopped, so there is nothing to resume and nothing to
+   *   nudge; what was missing was this daemon's grip on it.
+   * `already-running` — running AND already attached, so there was nothing to
+   *   do. At boot this is unreachable by construction: a daemon that has just
+   *   started holds no sessions.
+   */
+  result: 'already-running' | 'reattached' | 'restored' | 'failed' | 'deferred';
   /** True when the agent's prior conversation was there to continue. */
   resumedConversation?: boolean;
   /** Whether the interrupted-work message was delivered, and why not. */
@@ -151,9 +160,27 @@ export async function reconcileAgents(opts: {
   // for would mark our agent "already running", reconcile would leave it
   // alone, and the fleet would come back short with a line in the log saying
   // it did not.
+  //
+  // AND ATTACHED, WHICH IS A SECOND FACT (KAN-136). "Leave it alone" is only
+  // right about an agent this daemon can still reach, and a daemon that just
+  // booted can reach nothing: herdr owns the panes, the session map died with
+  // the process that held it. Built on ownership alone, this set contained
+  // every surviving agent at boot — so reconcile skipped the whole fleet, no
+  // terminal was attached, and restart survival, the one behaviour this file
+  // exists for, was a log line saying the agents were fine and nothing else.
+  //
+  // At boot the session map is empty, so this reduces to "re-attach
+  // everything", which is the intent. It stays meaningful for any later caller
+  // — an agent we are already carrying is genuinely nothing to do.
   const census = herdrBridge.listHerdrAgentsChecked();
   const alive = new Set(
-    expected.filter((r) => ourPaneIn(census, r.path, r.config.launcher) !== null).map((r) => r.path)
+    expected
+      .filter(
+        (r) =>
+          ourPaneIn(census, r.path, r.config.launcher) !== null &&
+          herdrBridge.getSessionByPath(r.path) !== undefined
+      )
+      .map((r) => r.path)
   );
 
   const outcomes: RestoreOutcome[] = [];
@@ -203,6 +230,21 @@ export async function reconcileAgents(opts: {
       }
       log(`[reconcile] Could not restore ${agentPath}: ${error}`);
       return { path: agentPath, paneName, result: 'failed', error };
+    }
+
+    // THE PANE WAS STILL THERE, and `activate` re-attached to it rather than
+    // starting anything (KAN-136). Told apart from a restore by the response's
+    // own `alreadyRunning`, not guessed at: an agent whose process never died
+    // has all of its memory, is mid-turn on whatever it was doing, and has
+    // nothing to resume. Nudging it would type "carry on with your work" at an
+    // agent that never stopped — and calling it `restored` would put a line in
+    // the boot summary claiming this daemon started something it did not.
+    if (response.alreadyRunning === true) {
+      log(
+        `[reconcile] ${agentPath} survived with its pane intact; re-attached to it ` +
+        `(session ${response.sessionId}). Nothing was started and it has nothing to resume.`
+      );
+      return { path: agentPath, paneName, result: 'reattached' };
     }
 
     const outcome: RestoreOutcome = {

@@ -1429,6 +1429,12 @@ export class MessageRouter {
    *   - starts no second pane, and says `started: false`;
    *   - never touches the capacity gate, because nothing new is being
    *     charged for — an agent already running is already counted;
+   *   - ATTACHES IF WE HOLD NO TERMINAL FOR IT, and always answers with a
+   *     `sessionId`. Ownership and attachment are different facts (see
+   *     `ourPaneIn`), and a daemon restart is where they part company: the
+   *     panes survive, the session map does not. Attaching is not starting —
+   *     it is `herdr agent attach` and nothing else — which is why this stays
+   *     on the no-op side of the contract above;
    *   - and CONVERGES THE RECORD: if the disk says this agent was never
    *     started while our pane is live, this call writes the activation, so
    *     calling again is what repairs a durability failure rather than
@@ -1544,6 +1550,66 @@ export class MessageRouter {
       const recordWasBehind = intent.event !== 'activated';
       const durable = this.rememberActivated({ path: agentPath, config });
 
+      // THE SECOND QUESTION, ASKED SEPARATELY (KAN-136). `occupancy.ours`
+      // answers "is this pane ours"; it says nothing about whether THIS daemon
+      // holds its terminal, and a daemon restart is exactly the state where
+      // the two disagree — herdr owns the panes, the session map died with the
+      // process. Returning from here on ownership alone left every restored
+      // agent recognised and unreachable: `list_agents` reported it
+      // `sessionless`, the response carried no `sessionId`, and this daemon's
+      // own advice to a client whose session died — "ask for the agent again
+      // by path and use the session id that comes back" — had no session id to
+      // come back. The only route to a live attach was `deactivate` →
+      // `activate`: killing the agent you were trying to reach.
+      //
+      // ATTACHING IS NOT STARTING, and the distinction is the whole reason
+      // this is safe. `attachSession` runs `herdr agent attach` and nothing
+      // else: no `agent start`, no provisioning, no second pane. `started`
+      // below is still `false`, the capacity gate is still untouched — an
+      // agent already running is already counted — and the foreign-occupant
+      // refusal below is still the branch a pane that is not ours takes.
+      let session = herdrBridge.getSessionByPath(agentPath);
+      const reattached = session === undefined;
+      if (!session) {
+        session = herdrBridge.attachSession(agentPath, config.launcher);
+
+        // An attach that threw leaves the agent running and this daemon
+        // without a terminal for it, which is not a success however healthy
+        // the pane is. Reported on the same channel a refused spawn uses — a
+        // response carrying `success: true` and no usable session is the
+        // KAN-23 false success in its other direction.
+        if (session.spawnError) {
+          fail(session.spawnError, {
+            path: agentPath,
+            paneName,
+            paneId: occupancy.ours.paneId,
+            alreadyRunning: true,
+            started: false,
+            // The record was converged above and stays converged: the agent
+            // IS running, so `expected()` must contain it whether or not we
+            // managed to take its terminal.
+            ...(recordWasBehind ? { recordReconciled: true } : {})
+          });
+          return;
+        }
+      }
+
+      // Only when this call produced the session. A client rendering a fleet
+      // learns that an agent it could not reach is reachable again from the
+      // same event a fresh activation sends; the steady-state no-op still
+      // broadcasts nothing, because nothing changed.
+      if (reattached) {
+        this.deps.broadcast({
+          action: 'agent_activated_event',
+          success: true,
+          path: agentPath,
+          paneName,
+          paneId: occupancy.ours.paneId,
+          sessionId: session.sessionId,
+          status: session.status
+        });
+      }
+
       respond({
         action: 'activate_response',
         success: true,
@@ -1556,7 +1622,18 @@ export class MessageRouter {
         alreadyRunning: true,
         started: false,
         paneId: occupancy.ours.paneId,
+        // ON EVERY SUCCESSFUL ACTIVATE RESPONSE, both branches, for the same
+        // reason `alreadyRunning` is: a caller must be able to reach the
+        // agent it just asked about without a second call, and a field that
+        // appears on one branch only asks it to guess which branch ran.
+        sessionId: session.sessionId,
+        status: session.status,
+        createdAt: session.createdAt.toISOString(),
         verified: true,
+        // Present only when THIS call took the terminal back — the agent was
+        // running and unreachable, and now is not. Silent on the steady-state
+        // no-op, where the session was already ours.
+        ...(reattached ? { reattached: true } : {}),
         // Present only when the disk disagreed with the world and this call
         // settled it. Silent when there was nothing to repair.
         ...(recordWasBehind ? { recordReconciled: true } : {}),
