@@ -20,6 +20,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { findAnywhere, findRunInvocations } from './ci-workflow.mjs';
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const routerTs = path.join(repoRoot, 'src', 'router.ts');
 const cliJs = path.join(repoRoot, 'dist', 'cli.js');
@@ -466,6 +468,12 @@ if (fs.existsSync(distDir)) {
 // requires every array entry to exist; the audit requires its own job to
 // exist. Dropping either one turns the other red. Two lines of coupling buy a
 // ratchet that only turns one way.
+//
+// LIVE, not merely present. This assertion shipped in round 1 as a regex over
+// the raw workflow text, and passed on a commented-out invocation and on
+// `if: false` — the job gone, the string still there. It now asks
+// scripts/ci-workflow.mjs whether the invocation is the `run` value of a step
+// that will actually execute.
 // ---------------------------------------------------------------------------
 
 console.log('\n=== 6. The proof-list audit is still run by CI ===\n');
@@ -474,10 +482,31 @@ const ciYml = path.join(repoRoot, '.github', 'workflows', 'ci.yml');
 const registry = path.join(repoRoot, 'scripts', 'verify-proof-registry.mjs');
 
 check(fs.existsSync(registry), 'scripts/verify-proof-registry.mjs exists');
+
+const registryRun = /node\s+scripts\/verify-proof-registry\.mjs/;
+const ciText = fs.existsSync(ciYml) ? fs.readFileSync(ciYml, 'utf8') : '';
+const registryCalls = findRunInvocations(ciText, registryRun);
+const registryLive = registryCalls.filter((f) => f.disabled.length === 0);
+const registryOff = registryCalls.filter((f) => f.disabled.length > 0);
+
 check(
-  fs.existsSync(ciYml) && /node\s+scripts\/verify-proof-registry\.mjs/.test(fs.readFileSync(ciYml, 'utf8')),
-  'ci.yml runs it',
-  'without this, a proof can leave the CI array with nothing left to say so'
+  registryLive.length > 0,
+  'ci.yml runs it from a live step',
+  registryLive.length
+    ? registryLive.map((f) => `ci.yml:${f.line} in job '${f.job}'`).join(', ')
+    : registryOff.length
+      ? `the step is at ci.yml:${registryOff.map((f) => f.line).join(', ci.yml:')} but will not run — ` +
+        `${registryOff.flatMap((f) => f.disabled).join('; ')}. A proof can now leave the CI array ` +
+        'with nothing left to say so'
+      : findAnywhere(ciText, registryRun).length
+        ? `the text appears at ci.yml:${findAnywhere(ciText, registryRun).join(', ci.yml:')} but not as a step ` +
+          'at all — a proof can now leave the CI array with nothing left to say so'
+        : 'without this, a proof can leave the CI array with nothing left to say so'
+);
+check(
+  registryOff.length === 0,
+  'and that step is not switched off while left in place',
+  registryOff.length ? registryOff.map((f) => `ci.yml:${f.line} — ${f.disabled.join('; ')}`).join(' | ') : ''
 );
 
 // ---------------------------------------------------------------------------

@@ -31,8 +31,10 @@ jobs:
       - run: npm run build
 
   # The proof list in the `verify` job below is hand-maintained, and it is the
-  # one line every concurrent slice edits — it has conflicted twice in one
-  # evening already. Resolving such a hunk by taking one side rather than the
+  # one line every concurrent slice edits — it conflicted SIX times in one
+  # evening, four of them on the same PR (#15 after T5, T9, KAN-136 and T2;
+  # #17 after T5, where this file was the ONLY conflict in an otherwise clean
+  # PR; #16 after T9). Resolving such a hunk by taking one side rather than the
   # union silently retires whichever proof lost: no error, no red check, and
   # the script sits in scripts/ looking exactly like coverage.
   #
@@ -50,6 +52,11 @@ jobs:
   # resolve. Removing it also turns verify-cli-parity §6 red, which is itself
   # an array entry the audit requires; neither can go quietly without the
   # other complaining.
+  #
+  # That guard is about EXECUTION, not text. Deleting this step, commenting it
+  # out, or switching it off with `if:` or `continue-on-error: true` each fail
+  # both checks by name. Do not disable it to iterate — the red check is the
+  # point, and a `# TODO restore` is exactly the edit nobody restores.
   #
   # It needs no build and no npm install: it reads this file and asks git what
   # is tracked, so it stays green (or usefully red) even when the build is not.

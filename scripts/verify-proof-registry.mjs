@@ -3,9 +3,16 @@
 //
 // THE DEFECT. Every slice that adds a proof adds a line to the `scripts=(...)`
 // array in the `verify` job of `.github/workflows/ci.yml`. That array is the
-// one line every concurrent slice touches, and it has already conflicted twice
-// in one evening (PR #15 and PR #17, both against the same entry). Resolving
-// such a hunk by taking one side rather than the union silently and
+// one line every concurrent slice touches, and it conflicted SIX times in one
+// evening — four of them on the same PR:
+//
+//   #15 after T5, again after T9, a third time after KAN-136, a fourth after T2
+//   #17 after T5, where ci.yml was the ONLY conflicting file in an otherwise
+//       clean PR — a thirty-second resolution, which is exactly the kind
+//       nobody slows down for
+//   #16 after T9
+//
+// Resolving such a hunk by taking one side rather than the union silently and
 // permanently retires whichever proof lost. There is no error and no red
 // check: the script stays in `scripts/`, looking exactly like coverage, and
 // nothing anywhere compares the directory to the list.
@@ -36,6 +43,14 @@
 // now, and section 2 holds them to the same standard verify-cli-parity holds
 // its own register to: a reason a future reader can act on, and a citation.
 //
+// WHAT THIS DOES NOT SEE. The proof set comes from `git ls-files`, so a
+// verify script that has never been `git add`ed is neither run nor flagged by
+// this check. That is deliberate rather than overlooked: an uncommitted file
+// is not part of the repository, it reaches no reviewer and no runner, and the
+// hazard above is a merge resolution — which by definition only happens to
+// tracked files. It is written down here so the boundary is a decision on the
+// record instead of a gap somebody rediscovers.
+//
 // Needs no daemon, no herdr, no network and no build: it reads `ci.yml` and
 // asks git what is tracked. Exits non-zero on any failure so a reviewer can
 // re-run it against the PR head.
@@ -44,6 +59,8 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { findAnywhere, findRunInvocations } from './ci-workflow.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const workflow = path.join('.github', 'workflows', 'ci.yml');
@@ -337,19 +354,55 @@ for (const e of ciScripts) {
 // job still exists, and verify-cli-parity is itself an array entry that
 // section 3 above requires. Neither can be dropped without the other going
 // red.
+//
+// LIVE, not merely present. Round 1 asserted this with a regex over the raw
+// file, which passed on a commented-out invocation (citing the comment's line
+// as evidence) and on `if: false`. Neither is sabotage-shaped — commenting a
+// job out to iterate and forgetting to restore it is an ordinary Tuesday — so
+// the question is now asked structurally, via scripts/ci-workflow.mjs: is
+// this the `run` value of a step that will actually execute?
+//
+// What this still does not claim: that the job is a REQUIRED context in
+// branch protection. That lives in repository settings, which no check in the
+// tree can read. A live step proves this audit runs and can go red, not that
+// a red one blocks a merge.
 // ---------------------------------------------------------------------------
 
 console.log('\n=== 4. This check runs in CI, from outside the list it audits ===\n');
 
-const invocation = new RegExp(`node\\s+scripts/${SELF}\\.mjs`, 'g');
-const wiredAt = [...yaml.matchAll(invocation)]
-  .map((m) => yaml.slice(0, m.index).split('\n').length)
-  .filter((line) => !arrayRegion || line < arrayRegion.start || line > arrayRegion.end);
+const invocation = new RegExp(`node\\s+scripts/${SELF}\\.mjs`);
+const outsideArray = (line) => !arrayRegion || line < arrayRegion.start || line > arrayRegion.end;
+const invocations = findRunInvocations(yaml, invocation).filter((f) => outsideArray(f.line));
+const live = invocations.filter((f) => f.disabled.length === 0);
+const disabled = invocations.filter((f) => f.disabled.length > 0);
+
+// Diagnostic for the exact confusion round 1 shipped: the text is there, the
+// step is not. Saying "not found" over a file that visibly contains the string
+// sends a reader looking in the wrong place.
+const textAt = findAnywhere(yaml, invocation).filter(outsideArray);
 
 check(
-  wiredAt.length > 0,
-  `${workflow} runs \`node scripts/${SELF}.mjs\` from a step of its own`,
-  wiredAt.length ? `ci.yml:${wiredAt.join(', ci.yml:')}` : 'nothing in CI runs this audit — it proves nothing where it matters'
+  live.length > 0,
+  `${workflow} runs \`node scripts/${SELF}.mjs\` from a live step of its own`,
+  live.length
+    ? live.map((f) => `ci.yml:${f.line} in job '${f.job}'`).join(', ')
+    : disabled.length
+      ? `the step is at ci.yml:${disabled.map((f) => f.line).join(', ci.yml:')} but will not run — ` +
+        `${disabled.flatMap((f) => f.disabled).join('; ')}. Nothing in CI executes this audit.`
+      : textAt.length
+        ? `the text appears at ci.yml:${textAt.join(', ci.yml:')} but not as a step at all — ` +
+          'commented out, or not a `run:` value. Nothing in CI executes this audit.'
+        : 'nothing in CI runs this audit — it proves nothing where it matters'
+);
+
+// A disabled invocation is a distinct failure from an absent one, and a worse
+// one: the file still reads like the audit is wired.
+check(
+  disabled.length === 0,
+  'and no invocation of it is switched off while left in place',
+  disabled.length
+    ? disabled.map((f) => `ci.yml:${f.line} — ${f.disabled.join('; ')}`).join(' | ')
+    : ''
 );
 
 // And it must NOT be an array entry: that would make the audit droppable by
