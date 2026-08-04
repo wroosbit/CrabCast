@@ -627,26 +627,239 @@ type CarriesEcho<T extends Record<keyof T, ConfigEcho[]>> = T;
 type FleetCategoriesCarryTheEcho = CarriesEcho<FleetCategories>;
 
 /**
- * How many agents each of `list_agents`' categories will carry. The registry
- * compacts at 500 records, so these are bounded already — the cap is about
- * clients that poll continuously, not about the log. Anything beyond it is
- * *counted* rather than dropped silently.
+ * How many rows a paged `list_agents` category carries when the caller does
+ * not ask for a size. The default is what a fleet UI polling continuously
+ * gets, and it stays cheap on purpose.
+ *
+ * WHAT THIS NUMBER USED TO BE, AND WHY IT MOVED (KAN-163). It was a hard clip
+ * with no way past it, and the sentence beside it said the cap "is about
+ * clients that poll continuously, not about the log". That was true and it was
+ * false in composition with `docs/event-contract.md` §2, which makes an
+ * authoritative `list` poll a CORRECTNESS requirement for every consumer of
+ * our events. A reconciler is a client that polls continuously AND needs
+ * completeness — the old comment named the exact case it got wrong.
+ *
+ * The consequence was not latency. Rows are ordered newest-first, so the row
+ * that fell off had been waiting longest: an agent switched off long enough
+ * became permanently invisible to the thing responsible for restoring it,
+ * while every poll looked healthy. Butchr measured it on their real fleet —
+ * 89 standby agents, 25 returned, 72% invisible, and no way to ask for the
+ * rest.
+ *
+ * So the number is now a PAGE SIZE rather than a ceiling: see
+ * {@link pageFleetCategory}, and §2 of the event contract, which states this
+ * limit and the remedy in the same section as the obligation it qualifies.
  */
 const FLEET_CATEGORY_LIMIT = 25;
 
 /**
- * Newest first, then clipped, with the unclipped count returned alongside.
+ * The largest page a caller may ask for.
  *
- * The order matters as much as the cap: clipping an unordered list hides an
- * arbitrary subset, while clipping a newest-first one hides the oldest — which
- * for all of these categories is the least urgent thing in it.
+ * A ceiling on the PAGE is not a ceiling on the ENUMERATION, which is the
+ * whole difference between this and what it replaced: a caller who wants
+ * everything follows `nextCursor` until it is null, and no page size makes any
+ * row unreachable. Raising this number would only save round trips — it is
+ * deliberately not the mechanism completeness rests on, because "raise the
+ * limit" moves a cliff rather than removing one.
  */
-function clipFleetCategory<T>(
+const FLEET_CATEGORY_MAX_LIMIT = 200;
+
+/**
+ * The `list_agents` categories that are paged, by their name on the wire.
+ *
+ * `agents` and `unbackedPanes` are NOT here and are never clipped: both are
+ * built from the herdr census, which is bounded by what is actually running on
+ * the machine. They are complete in every response.
+ */
+const PAGED_FLEET_CATEGORIES = [
+  'missingAgents',
+  'preemptedAgents',
+  'standbyAgents',
+  'unstartedAgents',
+  'foreignPanes'
+] as const;
+
+type PagedFleetCategory = (typeof PAGED_FLEET_CATEGORIES)[number];
+
+/** What a caller asks for, per category, on a `list_agents` request. */
+interface FleetPageRequest {
+  /** An opaque `nextCursor` from a previous response, or null/absent for the first page. */
+  after?: string | null;
+  /** Rows to carry, 1..{@link FLEET_CATEGORY_MAX_LIMIT}. Defaults to {@link FLEET_CATEGORY_LIMIT}. */
+  limit?: number;
+}
+
+/** What a caller is told about one paged category, on the response. */
+interface FleetPageDto {
+  /** Rows in THIS page. */
+  returned: number;
+  /** Rows in the whole category, cursor or no cursor. */
+  total: number;
+  /** The page size this response used, whether asked for or defaulted. */
+  limit: number;
+  /** Rows after this page. Zero exactly when {@link nextCursor} is null. */
+  remaining: number;
+  /**
+   * Pass as `after` to get the next page, or null when this page is the last.
+   *
+   * NULL IS THE ONLY "you have everything" SIGNAL, and it is deliberately not
+   * inferable from arithmetic: comparing `returned` against `total` is wrong
+   * the moment the fleet changes between pages, and a consumer that stops on
+   * `returned < limit` stops early on a page that happened to land short.
+   */
+  nextCursor: string | null;
+}
+
+/**
+ * The position of one row in a category's total order, encoded for the wire.
+ *
+ * Opaque to the consumer BY CONTRACT — it is a position, not a row id, and its
+ * encoding may change. It carries the sort key rather than an index so that a
+ * row disappearing between pages (an agent switched back on, say) shifts
+ * nothing: the next page resumes from the KEY, which still orders correctly
+ * whether or not the row it names is still there.
+ */
+interface FleetCursor {
+  /** The row's `when` value — its timestamp. */
+  w: string;
+  /** The row's tiebreaker — its unique key within the category. */
+  k: string;
+}
+
+function encodeFleetCursor(cursor: FleetCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+function decodeFleetCursor(raw: string): FleetCursor | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (typeof parsed.w !== 'string' || typeof parsed.k !== 'string') return null;
+    return { w: parsed.w, k: parsed.k };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Newest first, then the row's key, so the order is TOTAL rather than merely
+ * sorted.
+ *
+ * The tiebreaker is not decoration. Forty agents stood down in one loop share
+ * a millisecond, and a paged read over an order with ties can hand a caller
+ * the same row twice and never hand them another one at all — which is the
+ * defect this whole mechanism exists to remove, reintroduced one level down.
+ */
+function compareFleetRows(a: FleetCursor, b: FleetCursor): number {
+  const byTime = b.w.localeCompare(a.w);
+  return byTime !== 0 ? byTime : a.k.localeCompare(b.k);
+}
+
+/**
+ * One page of a fleet category, plus the handle for the next one.
+ *
+ * REPLACES A SILENT CLIP (KAN-163). What was `sorted.slice(0, 25)` with a
+ * count alongside is now a cursor walk: the default response is the same 25
+ * rows it always was, and a consumer that needs the category — a
+ * level-triggered reconciler, which §2 of the event contract REQUIRES to poll
+ * — follows `nextCursor` to the end and can reach every row, including the
+ * oldest, which is precisely the one the old clip dropped.
+ *
+ * `total` made the truncation honest and not usable: it says how many rows are
+ * missing, never which.
+ */
+function pageFleetCategory<T>(
   rows: T[],
-  when: (row: T) => string
-): { rows: T[]; total: number } {
-  const sorted = [...rows].sort((a, b) => when(b).localeCompare(when(a)));
-  return { rows: sorted.slice(0, FLEET_CATEGORY_LIMIT), total: sorted.length };
+  when: (row: T) => string,
+  key: (row: T) => string,
+  request: FleetPageRequest | undefined,
+  category: string
+): { rows: T[]; page: FleetPageDto } | { error: string } {
+  const limit = request?.limit ?? FLEET_CATEGORY_LIMIT;
+  if (
+    typeof limit !== 'number' ||
+    !Number.isInteger(limit) ||
+    limit < 1 ||
+    limit > FLEET_CATEGORY_MAX_LIMIT
+  ) {
+    return {
+      error:
+        `Invalid pages.${category}.limit: expected an integer between 1 and ` +
+        `${FLEET_CATEGORY_MAX_LIMIT}, got ${JSON.stringify(request?.limit)}. A larger page is ` +
+        `not how you get the whole category — follow \`pages.${category}.nextCursor\` until it ` +
+        `is null.`
+    };
+  }
+
+  const after = request?.after;
+  let from: FleetCursor | null = null;
+  if (after !== undefined && after !== null) {
+    if (typeof after !== 'string' || (from = decodeFleetCursor(after)) === null) {
+      return {
+        error:
+          `Invalid pages.${category}.after: ${JSON.stringify(after)} is not a cursor this daemon ` +
+          `issued. Pass a \`nextCursor\` from a previous list_agents response, or omit it for the ` +
+          `first page. This is refused rather than answered from the beginning, because a cursor ` +
+          `that silently resets turns an enumeration into a loop over its first page.`
+      };
+    }
+  }
+
+  const ordered = [...rows]
+    .map((row) => ({ row, at: { w: when(row), k: key(row) } }))
+    .sort((a, b) => compareFleetRows(a.at, b.at));
+
+  const start = from === null ? 0 : ordered.findIndex((r) => compareFleetRows(r.at, from!) > 0);
+  // No row sorts after the cursor: the caller has already seen everything.
+  const page = start < 0 ? [] : ordered.slice(start, start + limit);
+  const consumed = (start < 0 ? ordered.length : start) + page.length;
+  const remaining = ordered.length - consumed;
+
+  return {
+    rows: page.map((r) => r.row),
+    page: {
+      returned: page.length,
+      total: ordered.length,
+      limit,
+      remaining,
+      nextCursor: remaining > 0 && page.length > 0 ? encodeFleetCursor(page[page.length - 1].at) : null
+    }
+  };
+}
+
+/**
+ * The `pages` block of a request, validated, or the refusal naming what is
+ * wrong with it.
+ *
+ * A misspelled category is REFUSED rather than ignored. Ignoring it answers a
+ * caller's enumeration request with the default page and no indication that
+ * their paging did nothing — the same shape of silence this ticket is about.
+ */
+function readFleetPageRequests(
+  raw: unknown
+): { pages: Partial<Record<PagedFleetCategory, FleetPageRequest>> } | { error: string } {
+  if (raw === undefined || raw === null) return { pages: {} };
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { error: 'Invalid pages: expected an object keyed by category name' };
+  }
+  const known = new Set<string>(PAGED_FLEET_CATEGORIES);
+  const pages: Partial<Record<PagedFleetCategory, FleetPageRequest>> = {};
+  for (const [category, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!known.has(category)) {
+      return {
+        error:
+          `Invalid pages.${category}: not a paged category. The paged categories are ` +
+          `${PAGED_FLEET_CATEGORIES.join(', ')}. \`agents\` and \`unbackedPanes\` are never ` +
+          `clipped and take no page.`
+      };
+    }
+    if (value === undefined || value === null) continue;
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      return { error: `Invalid pages.${category}: expected an object with \`after\` and/or \`limit\`` };
+    }
+    pages[category as PagedFleetCategory] = value as FleetPageRequest;
+  }
+  return { pages };
 }
 
 /**
@@ -3869,7 +4082,16 @@ export class MessageRouter {
    * reported as a foreign pane occupying that path, which is exactly what a
    * reader needs to see.
    */
-  private handleListAgents(_data: any, respond: Respond) {
+  private handleListAgents(data: any, respond: Respond) {
+    // What the caller asked to page, before anything expensive happens. A
+    // misspelled category or an impossible limit is answered as a refusal
+    // rather than as a default page — see readFleetPageRequests.
+    const requested = readFleetPageRequests(data?.pages);
+    if ('error' in requested) {
+      respond({ action: 'list_agents_response', success: false, error: requested.error });
+      return;
+    }
+
     // One read of the registry for the whole response. Several of the fields
     // below are derived from it, and asking it repeatedly was both several
     // whole-file parses per poll and several chances for an append landing
@@ -3879,28 +4101,47 @@ export class MessageRouter {
     const { agents, unbackedPanes, foreignPanes, staleSessions, census } =
       this.surveyAgents(intents);
 
-    // Agents that should be here and are not. Computed from the same census the
-    // list is built from, so the two can never disagree about what is running.
-    const missing = clipFleetCategory(
-      this.missingAgents(agents, staleSessions, intents),
-      (row) => row.since
-    );
+    // THE FIVE PAGED CATEGORIES, each with the field it is ordered by and the
+    // field that makes that order total. Every one of these used to be a
+    // silent `slice(0, 25)`; the cursor is what a consumer follows to reach
+    // the rest, and `path` (or `paneName`, for a pane that is not ours and has
+    // no path of ours) is what keeps two rows sharing a millisecond from
+    // hiding each other across a page boundary.
+    const paged: Record<PagedFleetCategory, { rows: any[]; page: FleetPageDto }> = {} as any;
+    for (const [category, rows, when, key] of [
+      // Agents that should be here and are not. Computed from the same census
+      // the list is built from, so the two can never disagree about what is
+      // running.
+      ['missingAgents', this.missingAgents(agents, staleSessions, intents),
+        (r: any) => r.since, (r: any) => r.path],
+      // Work taken off the machine to make room, still owed a decision.
+      ['preemptedAgents', this.preemptedAgents(agents, intents),
+        (r: any) => r.at, (r: any) => r.path],
+      // Agents a person switched off. From the same census for the same
+      // reason: an agent that is running must never be offered an On button.
+      ['standbyAgents', this.standbyAgents(agents, intents),
+        (r: any) => r.since, (r: any) => r.path],
+      // Agents that exist and have never run. Same census, same reason: an
+      // agent that is running must never be offered as one that has yet to
+      // start.
+      ['unstartedAgents', this.unstartedAgents(agents, intents),
+        (r: any) => r.since, (r: any) => r.path],
+      ['foreignPanes', foreignPanes,
+        (r: any) => r.paneName, (r: any) => r.paneName]
+    ] as Array<[PagedFleetCategory, any[], (r: any) => string, (r: any) => string]>) {
+      const result = pageFleetCategory(rows, when, key, requested.pages[category], category);
+      if ('error' in result) {
+        respond({ action: 'list_agents_response', success: false, error: result.error });
+        return;
+      }
+      paged[category] = result;
+    }
 
-    // Work taken off the machine to make room, still owed a decision.
-    const preempted = clipFleetCategory(
-      this.preemptedAgents(agents, intents),
-      (row) => row.at
-    );
-
-    // Agents a person switched off. From the same census for the same reason:
-    // an agent that is running must never be offered an On button.
-    const { standby, total: standbyTotal } = this.standbyAgents(agents, intents);
-
-    // Agents that exist and have never run. Same census, same reason: an agent
-    // that is running must never be offered as one that has yet to start.
-    const { unstarted, total: unstartedTotal } = this.unstartedAgents(agents, intents);
-
-    const foreign = clipFleetCategory(foreignPanes, (row) => row.paneName);
+    const missing = paged.missingAgents;
+    const preempted = paged.preemptedAgents;
+    const standby = paged.standbyAgents.rows;
+    const unstarted = paged.unstartedAgents.rows;
+    const foreign = paged.foreignPanes;
 
     // Descriptor headroom, reported where someone looking at agents will see
     // it. Expressed in panes because that is the unit the reader can act on.
@@ -3933,29 +4174,45 @@ export class MessageRouter {
       // are the ones that will refuse an activation, so a reader can see the
       // refusal coming rather than meeting it.
       foreignPanes: foreign.rows,
-      foreignPanesTotal: foreign.total,
+      foreignPanesTotal: foreign.page.total,
       // `missingAgents` is in `categories` above. Always present, even when
       // empty: a caller that has to distinguish "no agents are missing" from
       // "this daemon does not track that" cannot do it from an absent field.
       // Empty array means the fleet is whole.
-      missingTotal: missing.total,
+      missingTotal: missing.page.total,
       // Work that was taken off the machine to make room for something more
       // important, and has not been put back. It is a queue of decisions still
       // owed rather than a log of events: the moment one of these is
       // re-activated it leaves the list. Nothing here restarts them,
       // deliberately — a preemption queue that restarts its own entries is a
       // scheduler, and preemption must never be automatic.
-      preemptedTotal: preempted.total,
+      preemptedTotal: preempted.page.total,
       // `standbyAgents` is in `categories` above — where a fleet client's On
       // button gets its candidates.
-      standbyTotal,
+      standbyTotal: paged.standbyAgents.page.total,
       // Agents that exist and have NEVER run — the fifth answer to "not
       // running", and the one that used to belong to no list at all. Kept
       // separate from standby because the difference is behavioural: switching
       // a standby agent on resumes the conversation it was stopped in, and
       // these have no conversation to resume. Always present, even when empty,
       // for the same reason `missingAgents` is.
-      unstartedTotal,
+      unstartedTotal: paged.unstartedAgents.page.total,
+      // THE HANDLE PAST THE CLIP, one entry per paged category (KAN-163).
+      //
+      // Every `*Total` above says how many rows a category has; none of them
+      // ever said how to reach the ones this response did not carry, and
+      // `docs/event-contract.md` §2 tells a consumer that polling `list` is
+      // what makes them CORRECT. `nextCursor` is what closes that: pass it
+      // back as `pages.<category>.after` and keep going until it is null.
+      //
+      // It sits on every response rather than only on a truncated one, so a
+      // consumer that checks it is doing the ordinary thing rather than
+      // handling an exception — the categories that fit in one page answer
+      // null, which is the same "you have everything" they would answer at
+      // the end of a walk.
+      pages: Object.fromEntries(
+        PAGED_FLEET_CATEGORIES.map((category) => [category, paged[category].page])
+      ),
       // THE RESYNC HANDLE, on the authoritative read rather than only on the
       // events. This is what closes the event contract's resync path: a
       // subscriber that reconnects has no event to compare `bootId` against —
@@ -4159,7 +4416,7 @@ export class MessageRouter {
   private standbyAgents(
     agents: ListedAgent[],
     sharedIntents?: Map<string, AgentIntent>
-  ): { standby: StandbyAgent[]; total: number } {
+  ): StandbyAgent[] {
     const alive = new Set(agents.map((a) => a.path));
     const standby: StandbyAgent[] = [];
 
@@ -4196,8 +4453,11 @@ export class MessageRouter {
       });
     }
 
-    const clipped = clipFleetCategory(standby, (row) => row.since);
-    return { standby: clipped.rows, total: clipped.total };
+    // Unpaged and unsorted: ordering and paging are one decision, made once,
+    // in handleListAgents. A category that clipped itself here was a second
+    // place the cap lived, and the reason the response could not say how to
+    // reach past it.
+    return standby;
   }
 
   /**
@@ -4224,7 +4484,7 @@ export class MessageRouter {
   private unstartedAgents(
     agents: ListedAgent[],
     sharedIntents?: Map<string, AgentIntent>
-  ): { unstarted: UnstartedAgent[]; total: number } {
+  ): UnstartedAgent[] {
     const alive = new Set(agents.map((a) => a.path));
     const unstarted: UnstartedAgent[] = [];
 
@@ -4252,8 +4512,8 @@ export class MessageRouter {
       });
     }
 
-    const clipped = clipFleetCategory(unstarted, (row) => row.since);
-    return { unstarted: clipped.rows, total: clipped.total };
+    // Unpaged, for the reason standbyAgents gives.
+    return unstarted;
   }
 
   /**

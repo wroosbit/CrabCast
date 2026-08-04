@@ -332,6 +332,40 @@ jobs:
       #                                      not wait would be proving
       #                                      something else.
       #
+      # And one for the authoritative read itself, whose failure mode was not
+      # an error but an omission a consumer could not see:
+      #
+      #   verify-fleet-enumeration           a consumer can enumerate a fleet
+      #                                      category COMPLETELY. §2 of the
+      #                                      event contract makes polling
+      #                                      `list` a correctness requirement,
+      #                                      and `list` returned 25 rows of a
+      #                                      category newest-first with no way
+      #                                      past the cap — so the row that
+      #                                      fell off was the one that had been
+      #                                      waiting longest, and every poll
+      #                                      looked healthy (KAN-163; Butchr
+      #                                      measured 89 standby agents, 25
+      #                                      returned). It PRODUCES 40 standby
+      #                                      agents through configure →
+      #                                      activate → deactivate rather than
+      #                                      writing registry rows, shows the
+      #                                      oldest missing from a default
+      #                                      read, walks the cursor to all 40
+      #                                      including that one, and mutates
+      #                                      the compiled daemon FOUR ways —
+      #                                      including restoring the shipped
+      #                                      defect exactly — to prove those
+      #                                      assertions can go red. Its last
+      #                                      section drives a real daemon, the
+      #                                      real CLI (running the next-page
+      #                                      command the CLI printed itself)
+      #                                      and the real MCP server, because a
+      #                                      mechanism that exists in the
+      #                                      router and not on the surfaces a
+      #                                      consumer holds is a mechanism
+      #                                      nobody can use.
+      #
       # verify-daemon-provenance starts daemons but needs no herdr either: it
       # drives `daemon_status`, which touches neither panes nor the herdr
       # binary. It builds its OWN fixture trees under the system temp dir — one
@@ -385,6 +419,7 @@ jobs:
             verify-event-contract
             verify-send-confirms-delivery
             verify-proof-cleans-up-when-interrupted
+            verify-fleet-enumeration
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

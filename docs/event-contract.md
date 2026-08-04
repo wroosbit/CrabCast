@@ -167,6 +167,77 @@ contract in full and still diverge.
 So: **an authoritative `list` sweep on a timer is a correctness requirement for
 any consumer of these events, not a nicety.**
 
+### The poll we just made a correctness requirement is PAGED. Read this beside the clause above — they were shipped apart, and that was the bug
+
+`list_agents` does not return whole categories by default. Five of them are
+**newest-first and carry 25 rows a page**:
+
+| paged | not paged |
+| --- | --- |
+| `missingAgents`, `preemptedAgents`, `standbyAgents`, `unstartedAgents`, `foreignPanes` | `agents`, `unbackedPanes` — built from the herdr census, bounded by what is running, complete in every response |
+
+**Newest-first means the row that falls off has been waiting longest.** For a
+level-triggered reconciler — which is what the clause above instructs you to
+build — that is not slower convergence, it is **starvation of precisely the
+wrong rows**: an agent switched off long enough becomes permanently invisible
+to the thing responsible for restoring it, while every poll looks healthy.
+Butchr measured it on their real fleet: **89 standby agents, 25 returned, 72%
+invisible.**
+
+**The remedy, in the same breath as the requirement.** Every response carries a
+`pages` block, one entry per paged category:
+
+```json
+"pages": {
+  "standbyAgents": { "returned": 25, "total": 89, "limit": 25, "remaining": 64,
+                     "nextCursor": "eyJ3IjoiMjAyNi0…" }
+}
+```
+
+Pass that cursor back to get the next page, and keep going **until
+`nextCursor` is null**:
+
+```json
+{ "action": "list_agents", "pages": { "standbyAgents": { "after": "eyJ3IjoiMjAyNi0…" } } }
+```
+
+* On the CLI: `crabcast list --category standbyAgents --after <cursor>`. A
+  truncated category prints its own next command under its heading.
+* On MCP: `crabcast_list_agents` takes `category`, `after` and `limit`.
+* `limit` is 1–200 and defaults to 25. **It is not the mechanism.** A bigger
+  page moves the cliff; the cursor is what removes it, at any page size.
+
+Four things that are contract rather than advice, because each is a way to
+believe you have a whole category when you do not:
+
+1. **`nextCursor === null` is the only "you have everything" signal.**
+   `returned < limit` is not — a page can land short. Neither is
+   `returned === total`: `total` is the size of the category, and a cursored
+   page is a window into it rather than a prefix of it.
+2. **`*Total` was never a remedy.** `standbyTotal` says how many rows are
+   missing and never which, and it is still there for the same reason it always
+   was: so a reader can see the size of what one page left out.
+3. **The cursor is opaque and is a POSITION, not a row id.** Pass it back
+   unchanged. A row vanishing between pages — an agent switched back on —
+   shifts nothing, because the next page resumes from the sort key rather than
+   from an index. An invented or corrupted cursor is **refused**, not answered
+   from the beginning: a cursor that silently reset would turn an enumeration
+   into a loop over its first page, which is this defect wearing a new coat.
+4. **A page walk is not a transaction.** Each page is answered from its own
+   read of the registry and its own census. A row created while you page can
+   arrive ahead of your cursor and be missed by *this* walk, and a row whose
+   timestamp moves can repeat. That is what the timer is for: the next sweep
+   sees it. Reconcile on the union of what you observe, not on the assumption
+   that one walk is a snapshot.
+
+**For the record, since it is the whole reason this section exists:** the clip
+shipped, and this document described the poll as a correctness requirement
+without mentioning it. Each sentence was true; the composition was false — we
+told a consumer that polling `list` is what makes them correct, and `list` did
+not return the fleet. `scripts/verify-fleet-enumeration.mjs` is where the fix
+is proven, and it asserts this section names the limit, so the number above and
+`FLEET_CATEGORY_LIMIT` in `src/router.ts` cannot drift apart quietly.
+
 ### Across a daemon restart
 
 Subscriptions die with the socket and nothing is replayed. The signal is
