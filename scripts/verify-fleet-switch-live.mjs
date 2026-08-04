@@ -15,7 +15,7 @@
 //                  STAYS down and is reported in standbyAgents, not restored
 //   5. way back  — the standby row is what switches it back on
 //   6. lost      — close the pane behind the daemon's back: one
-//                  agent_lost_event per loss, not one per sweep, and
+//                  agent.lost per loss, not one per sweep, and
 //                  missingAgents names it until someone decides
 //   7. teardown  — the machine as it was found
 //
@@ -184,7 +184,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { cleanup()
 let socket = null;
 let buffer = '';
 const pending = new Map();
-/** Unsolicited broadcasts (agent_lost_event and friends), in arrival order. */
+/** Unsolicited broadcasts (agent.lost and friends), in arrival order. */
 const events = [];
 let nextId = 0;
 
@@ -463,13 +463,13 @@ closeProbePane();
 await waitForProbe(false);
 
 // The sweep runs every 30s. Wait up to 45s for the first announcement…
-const eventsBefore = events.filter((e) => e.action === 'agent_lost_event').length;
+const eventsBefore = events.filter((e) => e.action === 'agent.lost').length;
 let lostEvent = null;
 for (let i = 0; i < 90 && !lostEvent; i++) {
   await sleep(500);
-  lostEvent = events.find((e) => e.action === 'agent_lost_event' && e.path === PROBE_DIR);
+  lostEvent = events.find((e) => e.action === 'agent.lost' && e.path === PROBE_DIR);
 }
-console.log(`agent_lost_event received: ${JSON.stringify(lostEvent && {
+console.log(`agent.lost received: ${JSON.stringify(lostEvent && {
   action: lostEvent.action, path: lostEvent.path, paneName: lostEvent.paneName,
   key: lostEvent.key, since: lostEvent.since, reason: lostEvent.reason
 }, null, 2)}`);
@@ -481,9 +481,9 @@ console.log(`\nmissingAgents on the next poll: ${JSON.stringify(missingRow && { 
 // …then sit through one more full sweep and count the announcements.
 console.log('\nwaiting out one more 30s sweep to prove the event does not repeat…');
 await sleep(35000);
-const lostEvents = events.filter((e) => e.action === 'agent_lost_event' && e.path === PROBE_DIR);
+const lostEvents = events.filter((e) => e.action === 'agent.lost' && e.path === PROBE_DIR);
 const stillListed = (await call('list_agents')).missingAgents.some((m) => m.path === PROBE_DIR);
-console.log(`agent_lost_event count after a second sweep: ${lostEvents.length - eventsBefore >= 1 ? lostEvents.length : 0} (still exactly ${lostEvents.length})`);
+console.log(`agent.lost count after a second sweep: ${lostEvents.length - eventsBefore >= 1 ? lostEvents.length : 0} (still exactly ${lostEvents.length})`);
 console.log(`missingAgents still reports it on every poll: ${stillListed}`);
 
 verdict(

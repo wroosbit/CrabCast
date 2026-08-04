@@ -13,9 +13,15 @@
 //                   terminal, tail_agent returns pane text, agent_status
 //                   reports it, deactivate stands it down and the list no
 //                   longer shows it
-//   4. events     — the activation's agent_activated_event arrives as an MCP
+//   4. events     — the activation's agent.activated arrives as an MCP
 //                   notification on a SECOND connected client, proving the
-//                   daemon's broadcasts are forwarded, not just responses
+//                   daemon's broadcasts are forwarded, not just responses —
+//                   and as a STRUCTURED PAYLOAD rather than a rendered
+//                   sentence, which is what makes it something a subscriber
+//                   can act on (KAN-128). The event contract itself is proven
+//                   in full by verify-event-contract.mjs; what this section
+//                   keeps is the property it has always had, restated against
+//                   the payload
 //   5. reset      — reset_agent stands a second agent down AND deletes its
 //                   workspace directory; a reset of nothing is isError (the
 //                   mapping this port deliberately adds over the extraction
@@ -556,7 +562,7 @@ rule('4. broadcasts — the activation event arrived on the second client');
 await waitFor(
   () => clientB.notifications.some((n) =>
     n.method === 'notifications/message' &&
-    String(n.params?.data ?? '').includes('agent_activated_event')),
+    n.params?.data?.action === 'agent.activated'),
   5000,
   'the activation event on client B'
 ).catch(() => {});
@@ -565,11 +571,25 @@ const eventNotes = clientB.notifications.filter((n) => n.method === 'notificatio
 show('client B notifications:', eventNotes.map((n) => n.params?.data));
 
 const activationNote = eventNotes.find((n) =>
-  String(n.params?.data ?? '').includes(`agent_activated_event - ${AGENT_PATH}`));
+  n.params?.data?.action === 'agent.activated' && n.params?.data?.path === AGENT_PATH);
 verdict(
-  activationNote !== undefined,
-  'client B — which made no request — received the agent_activated_event notification',
-  'no activation event reached the second client'
+  activationNote !== undefined &&
+    // A payload that is a rendered string is a failure — this line is the
+    // assertion, not a formatting preference. The forwarder used to send
+    // `[CrabCast Event] <action> - <subject>`, and a subscriber cannot act on
+    // prose.
+    typeof activationNote.params.data === 'object' &&
+    typeof activationNote.params.data.seq === 'number' &&
+    typeof activationNote.params.data.bootId === 'string' &&
+    // PRESENT, not necessarily non-null. `paneId` is observed from herdr's
+    // census and this shim's `agent list` does not report one; null is the
+    // honest answer and the contract's requirement is that the field is
+    // carried, not that it is always populated.
+    'paneId' in activationNote.params.data &&
+    activationNote.params.data.configVersion === 1,
+  'client B — which made no request — received agent.activated as a STRUCTURED payload\n' +
+  '    carrying its envelope (seq, bootId, at) and its declared fields',
+  'no structured activation event reached the second client'
 );
 
 // ---------------------------------------------------------------- 5. forget --

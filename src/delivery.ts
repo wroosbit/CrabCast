@@ -53,9 +53,20 @@
  * before. It is not that the agent received this message *alone*. Two sends in
  * quick succession can be submitted as ONE concatenated line — the second's
  * text is typed into a composer the first is still sitting in — and both sends
- * correctly report `delivered` while the agent acts only on the first. Observed
- * in KAN-114's review. The mitigation is the caller's: leave the recipient time
- * to swallow one message before sending the next, rather than pipelining.
+ * correctly report `delivered` while the agent acts only on the first.
+ *
+ * THIS BIT OUR OWN FIXTURE, about an hour after it was written down here, and
+ * that is the fact worth carrying rather than the rule. The live proof's
+ * contended section sent a setup instruction and then the message it was
+ * setting up for; both arrived as `…nothing elselive 1b-ii: reply with…`, the
+ * setup never took effect, and the section asserted against a state that had
+ * never been established. Both sends reported `delivered`, correctly, under
+ * the definition above. So this is not a theoretical caveat that a careful
+ * caller avoids — it caught the person who had just documented it, in the same
+ * pull request. The mitigation is the caller's and it is real work: leave the
+ * recipient time to swallow one message before sending the next, and if
+ * something downstream depends on the first having landed, WAIT FOR EVIDENCE OF
+ * THAT rather than for this function's `delivered`.
  *
  * **2. A delivered message can arrive with somebody else's text in front of
  * it.** The interrupt makes Claude Code restore its own in-flight prompt into

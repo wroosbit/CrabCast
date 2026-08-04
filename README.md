@@ -515,6 +515,14 @@ Validation still refuses rather than repairs, on the two things that remain. A c
 
 Exactly one daemon owns the socket: a second daemon that finds a live socket exits 0; a stale socket file left by a crash is unlinked and reclaimed. `node scripts/daemon-status.mjs` round-trips a `daemon_status` request over the socket, and `node scripts/verify-config-and-socket.mjs` is the live proof of all of the above.
 
+### Events
+
+The daemon announces fleet changes to every connected client — nine of them, `agent.configured` through `registry.degraded` — on the socket and as structured MCP notifications. **[`docs/event-contract.md`](docs/event-contract.md) is the contract**: the events, their payloads, what an unrecognised action does, and the delivery guarantees.
+
+Read the delivery section before you build on them. Events are **at-most-once** and are a latency optimisation over an authoritative `list` poll, never a replacement for one: **a subscriber that does not independently poll `list` on a timer is not entitled to convergence.** For a subscriber that polls, a missed event costs slower convergence; for one with no timer it costs correctness. `bootId` on every event — and on `list_agents` and `daemon_status`, so a reconnecting subscriber need not wait for an event — is how you find out the daemon restarted and your sequence watermark is meaningless.
+
+`node scripts/verify-event-contract.mjs` is the live proof.
+
 ### Which build is running
 
 `crabcast daemon-status` answers what the **running process** was built from — not what is in the directory it was started from. CrabCast is consumed as a linked local checkout (`file:../crabcast`), so there is no published artifact and no version string to ask for; without this, a fleet that misbehaves has nothing that can name the build that did it.

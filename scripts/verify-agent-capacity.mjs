@@ -449,14 +449,14 @@ const overridden = await activate(running, { name: 'task-kan-99', priority: 1, g
 console.log('the gate now allows it, and records that it did:\n');
 console.log(JSON.stringify(overridden.events, null, 2));
 console.log(
-  '\n  → broadcast as capacity_override_event, logged to the daemon log with the\n' +
+  '\n  → broadcast as capacity.overridden, logged to the daemon log with the\n' +
   '    full derivation, and echoed to the caller as capacityOverride on the\n' +
   '    activate response. The spawn itself then proceeds — this stub throws on\n' +
   `    spawnSession, which is how we know the gate was passed: ${
     flag(overridden.reachedSpawn) ? 'it was' : 'IT WAS NOT — CHECK THIS'
   }.`
 );
-flag(overridden.events.some((e) => e.action === 'capacity_override_event'));
+flag(overridden.events.some((e) => e.action === 'capacity.overridden'));
 
 // ----------------------------------------------------- 10. provenance --
 rule('10. PROVENANCE — the same hardware, seed vs measured divisor');
@@ -685,7 +685,7 @@ const chargedUnrefusable = await activate([], {
 });
 
 const overrideEvents = [...epicAtZero.events, ...storyAtZero.events]
-  .filter((e) => e.action === 'capacity_override_event');
+  .filter((e) => e.action === 'capacity.overridden');
 
 console.log(
   `  epic-kan-40   (not refusable, no override) → refused: ${epicAtZero.response?.success === false}, ` +
@@ -696,7 +696,7 @@ console.log(
   `reached spawn: ${chargedUnrefusable.reachedSpawn}\n` +
   `  task-kan-99   (refusable,     no override) → refused: ${taskAtZero.response?.success === false}` +
   (taskAtZero.response?.reason ? ` (${taskAtZero.response.reason})` : '') + '\n' +
-  `  capacity_override_event broadcast for the unrefusable agents: ${overrideEvents.length}\n`
+  `  capacity.overridden broadcast for the unrefusable agents: ${overrideEvents.length}\n`
 );
 
 const exemptPassed =

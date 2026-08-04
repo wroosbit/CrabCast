@@ -110,7 +110,8 @@ export interface PreemptionCandidate {
  * slot necessary.
  *
  * Built by the capacity gate's preempt path, carried on the
- * `agent_preempted_event` broadcast and the deactivate payload, and persisted
+ * `agent.deactivated` broadcast's `preemption` block and the deactivate payload,
+ * and persisted
  * by `AgentRegistry.recordDeactivated(record, preemption)`.
  */
 export interface PreemptionRecord {

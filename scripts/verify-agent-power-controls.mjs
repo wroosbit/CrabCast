@@ -337,7 +337,7 @@ rule('0. CONFIGURE — the verb that makes an agent exist, and what it refuses')
   });
   console.log(`  gateExempt: true alone → ${JSON.stringify(shorthand.config)}`);
 
-  const configured = events.find((e) => e.action === 'agent_configured_event');
+  const configured = events.find((e) => e.action === 'agent.configured');
   const record = agentRegistry.intents().get(dir);
   console.log(`\n  broadcast: ${configured?.action} for ${configured?.path}`);
   console.log(`  registry:  ${record.event}, and NOT expected to be running: ` +
@@ -440,7 +440,7 @@ rule('1. OFF — what a client sends, and the agent gone from the census');
   const after = list(router, sent).agents.map((a) => a.path);
   console.log(`census after:\n  ${after.join('\n  ')}`);
 
-  const broadcast = events.find((e) => e.action === 'agent_deactivated_event');
+  const broadcast = events.find((e) => e.action === 'agent.deactivated');
   console.log(`\nbroadcast to every connected client: ${broadcast.action} ${broadcast.path}`);
 
   verdict(
@@ -799,7 +799,7 @@ rule('7. FORGET — the verb that replaced `reset`, and what it will not do');
   console.log(`\n  forget on a path that never held an agent → ${JSON.stringify({ success: noRecord.success, existed: noRecord.existed })}`);
   console.log(`    ${noRecord.note}`);
 
-  const broadcast = events.find((e) => e.action === 'agent_forgotten_event');
+  const broadcast = events.find((e) => e.action === 'agent.forgotten');
 
   verdict(
     whileRunning.success === false && whileRunning.refused === 'running' &&
@@ -961,7 +961,7 @@ rule('8. DURABILITY IS REPORTED — a registry that cannot be written says so');
   fs.chmodSync(sealedDir, 0o755); // so cleanup can remove the scratch
   fs.chmodSync(sealedLog, 0o600);
 
-  const degraded = events.find((e) => e.action === 'registry_degraded_event');
+  const degraded = events.find((e) => e.action === 'registry.degraded');
   console.log('the agent exists and is verified — but the disk does not know it, and that');
   console.log('gap must be somebody\'s to act on rather than a line in a log nobody reads:\n');
   console.log(`  activate_agent → ${JSON.stringify({ success: res.success, verified: res.verified, durable: res.durable, durabilityError: Boolean(res.durabilityError) })}`);
