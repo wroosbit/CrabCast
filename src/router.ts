@@ -1322,6 +1322,26 @@ export class MessageRouter {
     const running = Boolean(session) || (occupancy.reachable && occupancy.ours !== null);
     const ourPaneId = occupancy.reachable ? (occupancy.ours?.paneId ?? null) : null;
 
+    // A LIVE PANE OF OURS IS NOT THE SAME FACT AS A LIVE AGENT OF OURS, and
+    // treating them as one fact is what KAN-153 was.
+    //
+    // `running` answers "is something live at this path bearing our name". It
+    // does NOT answer whether this daemon knows what is live there — that is
+    // the record, and the record can be absent while the pane is not:
+    //
+    //   * a registry lost while herdr's panes survived — the state
+    //     `verify-restart-survival` exists for, from the other side;
+    //   * a `forget` that landed over a still-running agent, which `forget`
+    //     refuses when it can see the pane and cannot refuse when it cannot.
+    //
+    // Every claim below about "the agent this call is changing" needs BOTH
+    // halves, so the two are named apart here rather than being spelled
+    // `running` at one call site and `running && existing` at another — which
+    // is precisely the drift that put a non-null assertion on a branch
+    // reachable without one.
+    const liveAgentOfOurs = running && existing !== undefined;
+    const unrecordedPane = running && existing === undefined;
+
     // ------------------------------------------- what this call asks to move
     //
     // ON A FIRST `configure`, EVERY KNOB MOVED. There was no record, so every
@@ -1348,7 +1368,14 @@ export class MessageRouter {
             ? RECONFIGURATION_COST[name] === 'restart-required'
               ? 'refused-restart-required'
               : 'withheld'
-            : running
+            // `liveAgentOfOurs`, NOT `running`. "In place" is a claim that the
+            // value took effect on an agent this daemon is maintaining, and
+            // over an UNRECORDED pane there is no such agent to make it about:
+            // nothing here knows what that process was started with, so what
+            // this call wrote is what the next `activate` will use. Saying
+            // `applied-in-place` there would be the echo describing a process
+            // no record accounts for.
+            : liveAgentOfOurs
               ? 'applied-in-place'
               : 'applied';
       }
@@ -1384,7 +1411,33 @@ export class MessageRouter {
         }
       : {};
 
-    if (restartRequired.length) {
+    // BOTH REFUSALS BELOW ARE ABOUT A *RE*CONFIGURATION, and the `existing` in
+    // this condition is the whole of it (KAN-153).
+    //
+    // WHY IT IS NOT JUST A NULL GUARD. On a FIRST `configure` there is no
+    // record, so `changed` is every attribute and `restartRequired` is
+    // non-empty by construction — which used to walk a first configure over a
+    // live pane straight into a refusal written for a reconfiguration, where
+    // it read `existing!.configVersion` and threw. Guarding only the read
+    // would have stopped the throw and left the refusal: a first `configure`
+    // refused because a pane happens to be live, with no way out, since
+    // `activate` requires `configure` first.
+    //
+    // So the refusal is scoped to what it was written to protect. Its whole
+    // purpose is that a caller does not silently spend a running agent's
+    // conversation on a knob change; a first configure has no prior
+    // configuration to preserve and no conversation being spent, so there is
+    // nothing here for it to protect. Occupancy is `activate`'s question and
+    // `activate` already asks it — CrabCast maintains agents, it does not own
+    // the directory or the pane, and a `configure` that refused because a pane
+    // exists would be answering a question it was not asked.
+    //
+    // AND THE COMPILER NOW KNOWS. Narrowing here is what lets the message
+    // below read `existing.configVersion` with no `!`: the claim "this branch
+    // is only reachable with a record" is enforced rather than asserted, which
+    // is the difference the assertion papered over. A `!` is a claim about the
+    // world with no proof attached.
+    if (existing && restartRequired.length) {
       // THE CENSUS COULD NOT ANSWER, AND THE RECORD SAYS THIS AGENT IS UP.
       //
       // Checked BEFORE the running test rather than after, because the running
@@ -1466,7 +1519,7 @@ export class MessageRouter {
               : `.`) +
             ` The agent is untouched and still running` +
             (ourPaneId ? ` in pane ${ourPaneId}` : '') +
-            `, and its configuration is still version ${existing!.configVersion}.\n` +
+            `, and its configuration is still version ${existing.configVersion}.\n` +
             `Remedy: deactivate(${agentPath}); configure(${agentPath}, …); activate(${agentPath}). ` +
             `There is no force flag, deliberately — one would be this destroy-and-recreate ` +
             `with a label on it, and the decision to spend a conversation is the caller's.`,
@@ -1620,7 +1673,12 @@ export class MessageRouter {
        * world rather than about the call, so it is stated rather than left to
        * be inferred from a status read.
        */
-      appliedInPlace: running && changed.length > 0,
+      appliedInPlace: liveAgentOfOurs && changed.length > 0,
+      // `running` is still reported as the fact it is — something of ours is
+      // live at this path — even where `appliedInPlace` is false because
+      // nothing here knows what it is. The two fields answer different
+      // questions and a caller needs both; see `unrecordedPane` below, which
+      // is what makes the combination legible instead of contradictory.
       ...(running ? { running: true, ...(ourPaneId ? { paneId: ourPaneId } : {}) } : {}),
       ...(running && existing && changed.length
         ? {
@@ -1630,6 +1688,39 @@ export class MessageRouter {
               `the decision that needs ${changed.length === 1 ? 'it' : 'them'} is made, so ` +
               `nothing was respawned and the conversation is untouched. The pane is the ` +
               `same one${ourPaneId ? ` (${ourPaneId})` : ''}.`
+          }
+        : {}),
+      // A LIVE PANE OF OURS, AND NO RECORD UNTIL THIS CALL WROTE ONE.
+      //
+      // IT IS NOT REFUSED — see the block on the refusal above for why the
+      // refusal is a reconfiguration's and not this call's. BUT IT IS NOT
+      // ADOPTED SILENTLY EITHER, and that is what this field is: recording the
+      // knobs and saying nothing about the pane would be a quieter version of
+      // the same failure, leaving the caller to discover the state at
+      // `activate` and to misread `alreadyRunning: true` as "it is running
+      // what I configured".
+      //
+      // A SEPARATE KEY RATHER THAN A `note`, deliberately: the notes on this
+      // response are mutually exclusive spreads that overwrite each other, and
+      // this one has to survive alongside whichever of them also applies.
+      ...(unrecordedPane
+        ? {
+            unrecordedPane: {
+              paneName: paneNameFor(agentPath),
+              ...(ourPaneId ? { paneId: ourPaneId } : {}),
+              meaning:
+                `A pane named ${paneNameFor(agentPath)} is already live in ${agentPath}. It is ` +
+                `OURS by name, but nothing was configured at this path until this call, so ` +
+                `this daemon has no record of what that agent was started with — a registry ` +
+                `lost while herdr's panes survived, or a \`forget\` over an agent that kept ` +
+                `running. NOTHING WAS APPLIED TO IT: the configuration above was written and ` +
+                `is what the NEXT activation will use, and it does not describe the process ` +
+                `running there now. \`activate\` on this path ADOPTS that pane rather than ` +
+                `starting one, so it would answer \`alreadyRunning: true\` over a ` +
+                `configuration no process has ever read. Stand the pane down first if you ` +
+                `want an agent that is really running what you just configured.`,
+              remedy: `deactivate(${agentPath}); activate(${agentPath})`
+            }
           }
         : {}),
       willWrite: willWrite.length

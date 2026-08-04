@@ -284,6 +284,28 @@ I-SURVIVED-THE-REFUSED-RECONFIGURATION
 brooswit@kchb-ThinkPad-X1-Carbon-5th:/tmp/kan126-live/owned/alpha$
 ```
 
+**The refusal is a *re*configuration's, and a *first* `configure` is answered even when a pane is live.** The refusal exists so a caller does not silently spend a running agent's conversation on a knob change; a first `configure` has no prior configuration to preserve and no conversation being spent, so there is nothing there for it to protect — and refusing would strand the path, because `activate` requires `configure` first. That case is reachable: a `forget` over an agent that kept running, or a registry lost while herdr's panes survived. Below, the record was deleted out from under a live agent and the directory configured again:
+
+```
+$ crabcast configure /tmp/kan153-live/owned/adopted --priority 5 --launcher shell --label "the adopted agent"
+configured /tmp/kan153-live/owned/adopted
+  pane name:     crabcast-adopted-5e306b396cd82470
+  changed:       every knob — this call created the record
+  pane:          w65702dcc803d94-12
+  version:       1, frozen 2026-08-04T16:57:09.251Z
+  …
+per knob:
+  priority     applied — takes effect at the next activate
+  …
+
+A LIVE PANE OF OURS IS ALREADY THERE, and nothing had been configured for it:
+  pane name:     crabcast-adopted-5e306b396cd82470  (w65702dcc803d94-12)
+  A pane named crabcast-adopted-5e306b396cd82470 is already live in /tmp/kan153-live/owned/adopted. It is OURS by name, but nothing was configured at this path until this call, so this daemon has no record of what that agent was started with — a registry lost while herdr's panes survived, or a `forget` over an agent that kept running. NOTHING WAS APPLIED TO IT: the configuration above was written and is what the NEXT activation will use, and it does not describe the process running there now. `activate` on this path ADOPTS that pane rather than starting one, so it would answer `alreadyRunning: true` over a configuration no process has ever read. Stand the pane down first if you want an agent that is really running what you just configured.
+  remedy:        deactivate(/tmp/kan153-live/owned/adopted); activate(/tmp/kan153-live/owned/adopted)
+```
+
+**It is answered, but it is not adopted quietly**, and the difference is the block above. Recording the knobs and saying nothing about the pane would leave the caller to discover the state at `activate` — which reports `already running — nothing was started` and then echoes the configuration it *just* read from the record, over a process that was started before that record existed. The knobs read `applied`, never `applied-in-place`: a live pane of ours is not the same fact as a live *agent* of ours, and nothing here knows what that process was started with. Standing it down and activating again is what makes the two agree.
+
 **A silent defer is not the middle ground it looks like.** Accepting the change and applying it "at next start" leaves the configuration and the world disagreeing behind a `success: true` — the same failure in a quieter costume, and it would make the config echo describe what was last *requested* rather than what the agent is *running with*. The refusal is what makes the echo honest.
 
 **And `configure` is atomic, so the response reports per knob.** A call mixing an in-place change with a respawn-requiring one is refused whole, and says which knobs were refused and which were *withheld* — in-place-capable, and not applied anyway:
