@@ -291,8 +291,11 @@ console.log('\n  1a. an agent configured with no provisioning at all');
     JSON.stringify(before) === JSON.stringify(after),
     `added: ${JSON.stringify(after.filter((f) => !before.includes(f)))}`
   );
-  check('no .mcp.json appeared — it is written only under an explicit opt-in',
-    !fs.existsSync(path.join(dir, '.mcp.json')));
+  check(
+    'no .mcp.json appeared — it is written only when the caller supplies the servers that go ' +
+      'in it, which is the act that consents to it',
+    !fs.existsSync(path.join(dir, '.mcp.json'))
+  );
   check(
     "their own .claude/settings.local.json is byte-identical — CrabCast never writes a " +
       'permission policy into somebody\'s repository',
