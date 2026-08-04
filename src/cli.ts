@@ -135,11 +135,14 @@ export interface CommandSpec {
   /**
    * The `action` the daemon puts on its reply, or null when it sets none.
    *
-   * Recorded rather than used: this client correlates by `id` and nothing
-   * else (see {@link DaemonClient}), because `daemon_status` answers with no
-   * `action` field at all (router.ts) and a client keyed on action names
-   * would hang on it. The field is here for the parity check, which needs to
-   * know what a command's reply looks like.
+   * Recorded rather than used: this client correlates by `id` and nothing else
+   * (see {@link DaemonClient}). Every reply carries a label as of KAN-122 —
+   * `daemon_status` was the last one that did not — and correlating on those
+   * labels would still be wrong, because the same socket also carries
+   * unsolicited broadcasts (`agent_lost_event`, `agent_detached_event`) and
+   * nothing about an action name distinguishes somebody's answer from
+   * somebody else's event. The field is here for the parity check, which
+   * verifies each recorded label against the router that sends it.
    */
   responseAction: string | null;
   summary: string;
@@ -1076,12 +1079,157 @@ function renderCapacity(reader: ResponseReader): string {
   );
 }
 
+// ------------------------------------------------------- build provenance
+
+/**
+ * Every field of the `build` object (provenance.ts), so the block below can be
+ * checked against the object it is handed. Same rule as CAPACITY_FIELDS and
+ * for the same reason: a nested object is out of the top-level reader's reach,
+ * so anything this renderer has not been taught would vanish rather than land
+ * in the residue.
+ */
+const BUILD_FIELDS = [
+  'commit', 'clean', 'builtAt', 'gitRoot', 'distDir', 'stampPath', 'stampPresent',
+  'stampUsable', 'readAt', 'unknown'
+] as const;
+
+const FRESHNESS_FIELDS = [
+  'state', 'summary', 'processIsCurrentBuild', 'sourcesNewerThanBuild', 'basis',
+  'runningBuiltAt', 'runningCommit', 'onDiskBuiltAt', 'onDiskCommit', 'distNewestAt',
+  'sourceDir', 'sourceNewestAt', 'sourceNewestFile', 'unknown'
+] as const;
+
+/** Whatever a nested block was not taught to print. */
+function unknownKeysOf(obj: any, known: readonly string[]): string[] {
+  return Object.keys(obj ?? {})
+    .filter((key) => !known.includes(key))
+    .map((key) => `${INDENT}${key}: ${compact(obj[key])}`);
+}
+
+/**
+ * A field that may be unknown, and must say so out loud.
+ *
+ * `field()` prints nothing for null, which is right for a field that is merely
+ * absent and catastrophic for these: a `commit` line silently missing from a
+ * status reads as an unremarkable status, and the whole point of KAN-122 is
+ * that "I don't know what I am running" must be impossible to mistake for
+ * "everything is fine". So null prints the word, in capitals, and the reason
+ * follows in the block underneath.
+ */
+function knownOrUnknown(label: string, value: unknown, width: number): string {
+  if (value === undefined || value === null || value === '') {
+    return `${INDENT}${(label + ':').padEnd(width)} UNKNOWN`;
+  }
+  return `${INDENT}${(label + ':').padEnd(width)} ${String(value)}`;
+}
+
+/**
+ * The reasons behind every UNKNOWN above, under a heading that refuses to be
+ * read as an all-clear.
+ */
+function unknownReasons(unknown: any, what: string): string | null {
+  const entries = Object.entries(unknown ?? {});
+  if (!entries.length) return null;
+  return lines(
+    `\n! ${what} COULD NOT BE ESTABLISHED — this is absent data, NOT a clean result:`,
+    ...entries.map(([f, reason]) => `${INDENT}${f} — ${reason}`)
+  );
+}
+
+const PROVENANCE_WIDTH = 16;
+
+/**
+ * What the running process was built from (KAN-122).
+ *
+ * Read at the daemon's boot, not now: a daemon whose `dist/` was rebuilt
+ * underneath it is still executing what it loaded, and this block is the only
+ * place that fact is visible. The freshness block below is what compares it to
+ * the tree as it stands.
+ */
+function buildBlock(build: any): string | null {
+  // A daemon that answers nothing here is itself the finding, and the loudest
+  // one this command can report: build provenance has been on every reply
+  // since KAN-122, so a daemon without it was started from a `dist/` that
+  // predates this CLI — which is the exact "the running process is not what
+  // you think it is" that the field exists to expose.
+  if (build === undefined || build === null) {
+    return lines(
+      `\n! THIS DAEMON REPORTS NO BUILD PROVENANCE.`,
+      `${INDENT}Every daemon that carries it answers a \`build\` object here (KAN-122). This one`,
+      `${INDENT}did not, so it was started from a dist/ older than this CLI — you are talking to a`,
+      `${INDENT}CrabCast that is not the one in this checkout. Restart the daemon.`
+    );
+  }
+  if (typeof build !== 'object') return null;
+  return lines(
+    `\nbuild — what THIS process was loaded from, read when it started:`,
+    knownOrUnknown('commit', build.commit, PROVENANCE_WIDTH),
+    // Spelled out rather than printed as a bare boolean, because `false` and
+    // "could not tell" are a sentence apart and one character apart.
+    knownOrUnknown(
+      'checkout',
+      build.clean === true
+        ? 'clean when this build was made'
+        : build.clean === false
+          ? 'DIRTY when this build was made — it contains uncommitted edits'
+          : null,
+      PROVENANCE_WIDTH
+    ),
+    knownOrUnknown('built', build.builtAt, PROVENANCE_WIDTH),
+    field('git root', build.gitRoot, PROVENANCE_WIDTH),
+    field('loaded from', build.distDir, PROVENANCE_WIDTH),
+    // Three situations, not two: no stamp, a stamp that answered, and a stamp
+    // sitting right there that was NOT believed. The last one matters most to
+    // whoever is looking at that directory — they can see a file naming a
+    // commit, and need to know this daemon read it and put it aside.
+    field(
+      'stamp',
+      build.stampPresent
+        ? build.stampUsable
+          ? build.stampPath
+          : `${build.stampPath} — PRESENT BUT NOT BELIEVED (see below)`
+        : `absent (${build.stampPath})`,
+      PROVENANCE_WIDTH
+    ),
+    field('read at', build.readAt, PROVENANCE_WIDTH),
+    unknownReasons(build.unknown, 'THE BUILD THIS DAEMON IS RUNNING'),
+    ...unknownKeysOf(build, BUILD_FIELDS)
+  );
+}
+
+/** Whether that build is still the one on disk, and whether it is up to date. */
+function freshnessBlock(freshness: any): string | null {
+  // Silent when the build block above has already said the daemon predates
+  // this field; saying it twice is noise, and saying nothing at all is what
+  // this block must never do.
+  if (freshness === undefined || freshness === null) return null;
+  if (typeof freshness !== 'object') return null;
+  const yesNo = (v: unknown) => (v === true ? 'yes' : v === false ? 'no' : 'UNKNOWN');
+  return lines(
+    `\nfreshness: ${String(freshness.state ?? 'unknown').toUpperCase()}`,
+    freshness.summary ? indent(String(freshness.summary)) : null,
+    knownOrUnknown('running the build on disk', yesNo(freshness.processIsCurrentBuild), 26),
+    knownOrUnknown('sources newer than build', yesNo(freshness.sourcesNewerThanBuild), 26),
+    field('compared by', freshness.basis, 26),
+    field('build on disk', freshness.onDiskBuiltAt, 26),
+    field('newest in dist/', freshness.distNewestAt, 26),
+    field('sources', freshness.sourceDir, 26),
+    field(
+      'newest source',
+      freshness.sourceNewestAt
+        ? `${freshness.sourceNewestAt}${freshness.sourceNewestFile ? ` (${freshness.sourceNewestFile})` : ''}`
+        : null,
+      26
+    ),
+    unknownReasons(freshness.unknown, 'FRESHNESS'),
+    // Read off the build block above; repeating them here would be two copies
+    // of one fact on one screen.
+    ...unknownKeysOf(freshness, FRESHNESS_FIELDS)
+  );
+}
+
 /**
  * The daemon itself, rather than any agent it is running.
- *
- * The one response in the whole API with no `action` field (router.ts), which
- * costs this renderer nothing — ResponseReader already treats `action` as
- * framing — but is why the client correlates by `id` alone.
  *
  * It used to print the config's workspace-type table, because that answered
  * the question people actually arrive with: not "is a daemon up" but "is the
@@ -1090,6 +1238,13 @@ function renderCapacity(reader: ResponseReader): string {
  * question is now about the durable registry, which is the only place an
  * agent's configuration exists. `crabcast list` is what shows the agents
  * themselves; this shows where they are kept.
+ *
+ * It now also answers WHICH CRABCAST IS RUNNING (KAN-122). CrabCast is
+ * consumed as a linked local checkout with no published artifact and no pinned
+ * commit, so a consumer whose fleet misbehaves had no way to name the build
+ * that did it — and the case that matters most is invisible from the
+ * filesystem, because a daemon that predates a rebuild goes on serving the old
+ * `dist/` while the tree on disk looks entirely current.
  */
 function renderDaemonStatus(reader: ResponseReader): string {
   if (!reader.success) return lines(failure(reader, 'daemon status'), residue(reader));
@@ -1102,6 +1257,8 @@ function renderDaemonStatus(reader: ResponseReader): string {
     field('registry', reader.take('registryPath')),
     field('agents', `${reader.take('configuredAgents')} configured, ` +
       `${reader.take('expectedAgents')} expected to be running`),
+    buildBlock(reader.take('build')),
+    freshnessBlock(reader.take('freshness')),
     residue(reader)
   );
 }
@@ -1431,12 +1588,14 @@ export const COMMANDS: CommandSpec[] = [
     // exists, and `pid` below is what `kill` needs.
     name: 'daemon-status',
     action: 'daemon_status',
-    // The only handler in the API that answers with no `action` field
-    // (router.ts). Null rather than omitted: "answers without one" and "we
-    // did not record what it answers with" are different facts, and the
-    // parity check reads this one.
-    responseAction: null,
-    summary: 'the daemon itself: pid, uptime, the config it loaded, where the registry lives',
+    // It used to be the one handler in the API that answered with no `action`
+    // at all, and this said `null`. KAN-122 gave it one, so the value here is
+    // a label like every other command's — and the parity check now verifies
+    // that label against `router.ts` rather than verifying an absence.
+    responseAction: 'daemon_status_response',
+    summary:
+      'the daemon itself: pid, uptime, the config it loaded, where the registry lives, ' +
+      'and WHICH BUILD it is running',
     positionals: [],
     flags: [],
     // Never. This is the command whose entire question is "is a daemon
@@ -1749,11 +1908,13 @@ function operandsFor(spec: CommandSpec, given: string[]): string[] {
 /**
  * One connection, one request, correlated by `id`.
  *
- * Correlation is by `id` and never by action name. `daemon_status` is the one
- * handler that replies with no `action` field at all (router.ts) — a client
- * that matched on action names would hang on it — and KAN-94 adds exactly
- * that command, so the rule is built in here before it is needed rather than
- * discovered by it.
+ * Correlation is by `id` and never by action name. It was built that way
+ * because `daemon_status` used to reply with no `action` field at all, and a
+ * client matching on names would have hung on it; KAN-122 gave it one, and the
+ * rule is unchanged for the reason that outlives that case — the same socket
+ * carries unsolicited broadcasts (`agent_lost_event`, `agent_detached_event`),
+ * so an action name tells a client what a frame is ABOUT and never whose
+ * request it answers. The `id === undefined` line below is that rule.
  */
 class DaemonClient {
   private nextId = 0;
