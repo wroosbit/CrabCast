@@ -30,6 +30,60 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+  # The proof list in the `verify` job below is hand-maintained, and it is the
+  # one line every concurrent slice edits — it conflicted SIX times in one
+  # evening, four of them on the same PR (#15 after T5, T9, KAN-136 and T2;
+  # #17 after T5, where this file was the ONLY conflict in an otherwise clean
+  # PR; #16 after T9). Resolving such a hunk by taking one side rather than the
+  # union silently retires whichever proof lost: no error, no red check, and
+  # the script sits in scripts/ looking exactly like coverage.
+  #
+  # This job is what notices. It reconciles every tracked scripts/verify-*.mjs
+  # against two lists — the `scripts=(...)` array below, and the exclusion
+  # register inside the script — and fails by name on anything in neither, or
+  # on an array entry whose file is gone (KAN-141).
+  #
+  # It is a JOB rather than a step in `verify`, and deliberately NOT an entry
+  # in that array, because a guard inside the thing it guards is not a guard:
+  # the same merge resolution that drops a proof could drop the audit, and the
+  # tree would go green with nothing watching. A separate job is a separate
+  # region of this file, which the array's conflict hunk does not reach — and
+  # deleting a whole named job is an edit a reviewer sees, not a hunk they
+  # resolve. Removing it also turns verify-cli-parity §6 red, which is itself
+  # an array entry the audit requires; neither can go quietly without the
+  # other complaining.
+  #
+  # That guard is about EXECUTION, not text. Each of these fails both checks
+  # by name: deleting this step; commenting it out; hiding it behind a
+  # trailing `#`; switching it off with `if:` or `continue-on-error: true`;
+  # swallowing its exit code (`|| true`, `set +e`, `; true`, a bare pipe, a
+  # trailing `exit 0`, backgrounding); and MENTIONING it rather than running
+  # it — quoted (`echo "node scripts/…"`), handed to another command
+  # (`bash -c '…'`), or behind a wrapper such as `timeout`. The invocation
+  # has to BEGIN A COMMAND ON ITS OWN LINE.
+  #
+  # What that does NOT cover: anything gating the line from ELSEWHERE in a
+  # `run:` block. A multi-line `if … then / node scripts/… / fi`, a heredoc
+  # body, an uncalled function, or `echo $(node scripts/…)` are all green
+  # with the audit never running. The checks reason per line, not per block —
+  # KAN-148 tracks the fix. Do not read the list above as "everything is
+  # caught".
+  #
+  # Do not disable it to iterate — the red check is the point, and `|| true`
+  # is exactly the edit nobody takes back off.
+  #
+  # It needs no build and no npm install: it reads this file and asks git what
+  # is tracked, so it stays green (or usefully red) even when the build is not.
+  proof-registry:
+    name: proof-registry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node scripts/verify-proof-registry.mjs
+
   # Additive to the two required checks above (KAN-88 item 10). Until this
   # existed, every behavioural invariant in this daemon — verified activation,
   # the capacity gate's arithmetic, preemption's consent rules, restart
@@ -150,24 +204,24 @@ jobs:
       # "reports unknown rather than something plausible" cannot be
       # demonstrated in a tree that has a commit in it (KAN-122).
       #
-      # DELIBERATELY EXCLUDED — these need a real herdr server and real
+      # DELIBERATELY EXCLUDED — seven scripts need a real herdr server and real
       # terminal panes, which no GitHub runner has (herdr's public
-      # availability is itself an open question on this project). Running
-      # them here would produce a red check about the runner rather than
-      # about the code:
-      #
-      #   verify-no-attach-steal.mjs              attaches to a live agent
-      #   verify-tab-per-agent.mjs                needs real tabs and panes
-      #   verify-fleet-switch-live.mjs            live restart/stand-down
-      #                                           sequences against a real
-      #                                           daemon and `herdr agent list`
-      #   verify-activate-verified-existence.mjs  real herdr 0.6.x, real panes
-      #   verify-pretrust-survives-concurrency    private herdr server + panes
-      #   verify-pty-init-rejects-unknown-session private herdr server + PTYs
-      #   verify-spawn-failure-legibility.mjs     private herdr server
-      #
-      # They are the live half of this suite and are run by hand on a machine
+      # availability is itself an open question on this project). Running them
+      # here would produce a red check about the runner rather than about the
+      # code. They are the live half of this suite, run by hand on a machine
       # with herdr; their output goes on the PR.
+      #
+      # That list used to be prose right here, which is a form no check can
+      # read — so it drifted, and nothing compared it to scripts/. It now
+      # lives as data in the EXCLUSIONS register of
+      # scripts/verify-proof-registry.mjs, where the proof-registry job reads
+      # it and holds every entry to a reason and a citation (KAN-141). Do not
+      # re-add the names here: two lists is two places to forget.
+      #
+      # THE ARRAY BELOW IS A UNION, NOT A CHOICE. It is the line concurrent
+      # slices conflict on. If you are resolving that conflict, keep BOTH
+      # sides' entries — taking one side retires the other's proof. The
+      # proof-registry job fails by name if you get it wrong.
       # ---------------------------------------------------------------------
       - name: verify (isolatable scripts, serialized)
         run: |
