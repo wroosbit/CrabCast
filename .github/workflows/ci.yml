@@ -77,22 +77,36 @@ jobs:
       #                                      and an over-large one is refused
       #                                      legibly rather than truncated.
       #
-      # And one more, for the same class of reason — a state read that omits
-      # a field fails silently, since the caller gets a well-formed response
-      # with less in it than it should have:
+      # And two more, both for the same class of reason — a reconciler calls
+      # these paths constantly, and every way they can break is silent:
       #
+      #   verify-idempotent-lifecycle        `activate` three times leaves ONE
+      #                                      pane, `deactivate` twice does not
+      #                                      error, the two ways of not running
+      #                                      stay distinct — and a FOREIGN pane
+      #                                      still refuses, which is the
+      #                                      assertion that keeps a no-op from
+      #                                      swallowing T1's guard. Its stub is
+      #                                      stateful: `agent start` really adds
+      #                                      a pane and `pane close` really
+      #                                      removes one, so the pane count is a
+      #                                      measurement rather than a fixture.
       #   verify-state-read-echoes-config    every fleet category echoes the
       #                                      agent's frozen configuration, and
       #                                      `unstartedAgents` is distinct from
-      #                                      standby. It PRODUCES every category
-      #                                      before asserting on it (a
-      #                                      completeness check over an empty
-      #                                      list passes vacuously) and then
-      #                                      MUTATES the compiled daemon to
-      #                                      prove its own assertions can go
-      #                                      red. It also spawns a real daemon
-      #                                      and drives the real CLI and MCP
-      #                                      server against the herdr shim.
+      #                                      standby. A state read that omits a
+      #                                      field fails silently — the caller
+      #                                      gets a well-formed response with
+      #                                      less in it than it should have. It
+      #                                      PRODUCES every category before
+      #                                      asserting on it (a completeness
+      #                                      check over an empty list passes
+      #                                      vacuously) and then MUTATES the
+      #                                      compiled daemon to prove its own
+      #                                      assertions can go red. It also
+      #                                      spawns a real daemon and drives the
+      #                                      real CLI and MCP server against the
+      #                                      herdr shim.
       #
       # DELIBERATELY EXCLUDED — these need a real herdr server and real
       # terminal panes, which no GitHub runner has (herdr's public
@@ -129,6 +143,7 @@ jobs:
             verify-cli-parity
             verify-herdr-version-notice
             verify-refuses-occupied-directory
+            verify-idempotent-lifecycle
             verify-prompt-is-not-a-template
             verify-state-read-echoes-config
           )

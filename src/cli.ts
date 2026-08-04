@@ -586,14 +586,35 @@ function renderActivate(reader: ResponseReader, request: Record<string, unknown>
     // Not an error and not a second pane: the agent this call asked for is
     // running, which is what the caller wanted. Said in words because
     // "activated" would claim something happened.
+    reader.take('started');
     return lines(
       `${what} is already running — nothing was started`,
       field('pane', `${reader.take('paneName')} (${reader.take('paneId')})`),
       field('verified', reader.take('verified')),
+      // What this call did NOT change, read back from the record: the
+      // idempotent activation is the read a reconciler makes most often, so
+      // it prints the same block the spawning branch does rather than being
+      // the one answer that says less.
       configBlockSeen(reader, INDENT),
+      // The one thing this call DID change. Printed, because a repair the
+      // user cannot see is indistinguishable from no repair at all.
+      reader.take('recordReconciled') === true
+        ? `${INDENT}record:        reconciled — the durable record did not say this agent was ` +
+          `running and now does, so a restart will restore it`
+        : null,
+      durability(reader),
+      // A stranger sharing the directory does not make this a refusal, but it
+      // is never swallowed: two agents in one directory is what the whole
+      // occupancy guard exists to make visible.
+      occupiedBlock(reader.take('occupiedBy')),
+      (() => {
+        const note = reader.take<string>('note');
+        return note ? `\n${note}` : null;
+      })(),
       residue(reader)
     );
   }
+  reader.take('started');
   const echo = configBlockSeen(reader, INDENT);
   return lines(
     `activated ${what}`,
@@ -964,6 +985,11 @@ function renderStatus(reader: ResponseReader, request: Record<string, unknown>):
       field('configured', reader.take('configured')),
       field('pane name', reader.take('paneName')),
       echo,
+      // Rendered here too, not only on the success branch. It was landing in
+      // the residue instead, which dumped twenty lines of raw JSON under
+      // "other fields in the daemon's response" — the guard doing its job, and
+      // the job it was pointing at was mine.
+      provenanceBlock(reader.take('provenance')),
       residue(reader)
     );
   }

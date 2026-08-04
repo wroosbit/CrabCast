@@ -624,6 +624,67 @@ const s5 = ownedDir('s5', 'versioned');
     `configVersion ${afterDown.configVersion}, priority ${afterDown.config.priority}`
   );
 
+  // -- THE MERGE CASE, and it is new code that nobody had proven ------------
+  //
+  // T5 (KAN-127) made the idempotent `activate` CONVERGE a record that had
+  // fallen behind: when the census shows our pane live and the record does not
+  // say `activated`, that call writes the activation and reports
+  // `recordReconciled`. It is the repair a supervisor makes after a durable
+  // write failed.
+  //
+  // A converging write that loses a field is not a repair. The branch rebuilt
+  // the record as `{path, config}` — the two fields it happened to have named
+  // — which drops `configVersion` and `configuredAt`, and `intents()`
+  // normalizes an absent version to 1. So the call whose whole job is fixing
+  // the record would have silently reset the compare-and-set token to 1 on an
+  // agent configured three times, and a reconciler diffing on it would see the
+  // version go BACKWARDS. Neither slice has this defect alone; the merge of
+  // the two is where it lives, which is why the case is here.
+  {
+    const behind = ownedDir('s5', 'record-behind');
+    const b = harness('s5-behind');
+    setCensus([]);
+    await b.invoke({ action: 'configure_agent', path: behind, ...KNOBS });
+    await b.invoke({ action: 'configure_agent', path: behind, ...KNOBS, priority: 2 });
+    const third = await b.invoke({ action: 'configure_agent', path: behind, ...KNOBS, priority: 3 });
+    check(third.configVersion === 3, 'a record configured three times is at version 3');
+
+    // The record says `configured` while our pane is live: exactly the state a
+    // failed durable write leaves behind.
+    setCensus([ourPane(behind, '%55')]);
+    const repaired = await b.invoke({ action: 'activate_agent', path: behind });
+    show('the converging activate:', {
+      alreadyRunning: repaired.alreadyRunning,
+      started: repaired.started,
+      recordReconciled: repaired.recordReconciled,
+      configVersion: repaired.configVersion,
+      everActivated: repaired.everActivated
+    });
+    check(
+      repaired.recordReconciled === true && repaired.alreadyRunning === true,
+      "T5's converge path fired: the record was behind and this call settled it"
+    );
+    check(
+      repaired.configVersion === 3,
+      'and the version it reports is still 3 — the repair did not reset the token it repaired',
+      `configVersion: ${repaired.configVersion}`
+    );
+    const written = b.agentRegistry.intents().get(behind);
+    check(
+      written.event === 'activated' && written.configVersion === 3 &&
+        written.record.configuredAt === third.configuredAt,
+      'the ROW it wrote carries the version and the configure time, not a rebuilt pair of ' +
+        'fields — read back off the log rather than off the response',
+      `${written.event}, v${written.configVersion}, configuredAt ${written.record.configuredAt}`
+    );
+    const after = await b.invoke({ action: 'agent_status', path: behind });
+    check(
+      after.configVersion === 3 && after.config.priority === 3 && after.everActivated === true,
+      'and the state read agrees with all three of them afterwards',
+      `v${after.configVersion}, priority ${after.config.priority}, everActivated ${after.everActivated}`
+    );
+  }
+
   // It also has to survive the log being rewritten, because compaction emits
   // one row per agent and a preserve set that dropped the field would reset
   // every version on a busy fleet.
@@ -847,6 +908,38 @@ function mutantDist(name, file, from, to) {
     problems.length >= 3,
     'backing the config echo out of the compiled daemon makes section 2 FAIL on every ' +
       'category — so section 2 is testing the daemon rather than its own expectations'
+  );
+}
+
+{
+  // MUTATION 1b: the merge case. T5's converging `activate` rebuilds the
+  // record from the two fields that branch happens to name, which is what it
+  // did before this merge — and is a repair that loses the token it repairs.
+  const dir = mutantDist(
+    'converge-rebuilds-record', 'router.js',
+    // Anchored on the `respond` that follows it, because the SPAWN path makes
+    // the same call one screen down. Two occurrences would make this mutation
+    // ambiguous, and `mutantDist` refuses rather than picking one.
+    'const durable = this.rememberActivated(intent.record);\n            respond({',
+    'const durable = this.rememberActivated({ path: agentPath, config });\n            respond({'
+  );
+  const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
+  const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
+  const behind = ownedDir('s8', 'record-behind');
+  const b = harness('s8-behind', Broken, BrokenReg);
+  setCensus([]);
+  await b.invoke({ action: 'configure_agent', path: behind, ...KNOBS });
+  await b.invoke({ action: 'configure_agent', path: behind, ...KNOBS, priority: 3 });
+  setCensus([ourPane(behind, '%56')]);
+  await b.invoke({ action: 'activate_agent', path: behind });
+  const written = b.agentRegistry.intents().get(behind);
+  console.log(`   the mutant's repaired record reads: v${written.configVersion} ` +
+    `(configuredAt ${written.record.configuredAt ?? 'DROPPED'})`);
+  check(
+    written.configVersion === 1 && written.record.configuredAt === undefined,
+    'rebuilding the record in the converge path resets configVersion from 2 to 1 and drops ' +
+      'the configure time — a compare-and-set token going BACKWARDS, which section 5 catches',
+    `v${written.configVersion}, configuredAt ${written.record.configuredAt}`
   );
 }
 
