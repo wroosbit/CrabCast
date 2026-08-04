@@ -903,6 +903,149 @@ function parseAgentConfig(data: any): ConfigParse {
   };
 }
 
+// -------------------------------------------- per-attribute reconfiguration
+
+/**
+ * What changing ONE knob costs on a RUNNING agent.
+ *
+ *  - `in-place` — the daemon reads it at decision time, out of the record, on
+ *    every call that needs it. Changing it changes the next decision. Nothing
+ *    inside the pane has a copy.
+ *  - `restart-required` — it was consumed at spawn. The pane is already running
+ *    the process it named, or the agent has already read the file it produced.
+ *    Rewriting the record now would change the configuration without changing
+ *    the agent, and the only thing that could close that gap is a respawn.
+ */
+export type ReconfigurationCost = 'in-place' | 'restart-required';
+
+/**
+ * EVERY knob, classified. This table is the specification for customer
+ * requirement 2, and it is a TOTAL MAP OVER {@link AgentConfig} on purpose.
+ *
+ * `keyof Required<AgentConfig>` means a field added to the configuration
+ * without a line here does not compile. That matters more than it looks: the
+ * failure this task exists to prevent is a knob whose reconfiguration
+ * behaviour nobody decided, and the shape of that failure is silence — a new
+ * spawn-time attribute would fall through to whatever the default branch did,
+ * and the default branch is the one that quietly writes it under a live agent.
+ * A missing line is a red typecheck instead.
+ */
+export const RECONFIGURATION_COST: { [K in keyof Required<AgentConfig>]: ReconfigurationCost } = {
+  // Read out of the record when the capacity gate runs (see capacityGate and
+  // preemptionCandidates), never handed to the pane.
+  priority: 'in-place',
+  refusable: 'in-place',
+  chargeable: 'in-place',
+  preemptable: 'in-place',
+  // Nothing parses it; it is display text on a row.
+  label: 'in-place',
+  // IT IS THE COMMAND THE PANE RUNS, resolved once when the agent was spawned.
+  launcher: 'restart-required',
+  // Written into the agent's sidecar and passed at spawn. The agent running
+  // there has already read it.
+  prompt: 'restart-required',
+  // Written into `.mcp.json`, which the runtime reads once, at boot.
+  mcpServers: 'restart-required'
+};
+
+/** Every knob's name, in a stable order, derived from the table above. */
+const CONFIG_ATTRIBUTES = Object.keys(RECONFIGURATION_COST) as (keyof AgentConfig)[];
+
+/**
+ * Why one restart-required knob is one, in the caller's own words.
+ *
+ * The refusal has to NAME THE ATTRIBUTE AND THE REASON — a bare "cannot change
+ * that" leaves the caller to guess whether they hit a policy, a bug, or a
+ * transient. These sentences are what makes the refusal actionable, and they
+ * are per attribute because the three are restart-required for three different
+ * mechanical reasons.
+ */
+const RESTART_REASON: Record<string, string> = {
+  launcher:
+    'the launcher IS the process running in the pane, resolved once when the agent was ' +
+    'spawned. Changing it means a different program, which is a different agent',
+  prompt:
+    "the prompt is written into the agent's sidecar and handed to it at spawn. The agent " +
+    'running there has already read it, so rewriting it now would change the record ' +
+    'without changing the agent',
+  mcpServers:
+    'the servers are written into .mcp.json, which the runtime reads once when it boots. ' +
+    'Rewriting it under a live agent changes a file it will not read again'
+};
+
+/**
+ * One knob's value, canonicalized for comparison.
+ *
+ * SORTED KEYS, ORDERED ARRAYS. An `args` array's order is the command line and
+ * absolutely matters; a JSON object's key order is not observable to anything
+ * that reads it back, so treating a reordered `mcpServers` map as a change
+ * would refuse a call that asks for nothing — and a spurious refusal is a false
+ * claim about the world in the same way a spurious success is.
+ */
+function canonicalKnob(value: unknown): string {
+  if (value === undefined) return '\u0000absent';
+  const walk = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(walk);
+    if (node && typeof node === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(node as object).sort()) {
+        out[key] = walk((node as Record<string, unknown>)[key]);
+      }
+      return out;
+    }
+    return node;
+  };
+  return JSON.stringify(walk(value)) ?? '\u0000absent';
+}
+
+/**
+ * One knob's value as the diff should see it.
+ *
+ * ABSENT AND EMPTY `mcpServers` ARE THE SAME THING, and normalizing them here
+ * is what keeps a reconciler from deadlocking. Neither writes anything into the
+ * caller's directory, so there is no change for a respawn to make take effect —
+ * but a reconciler that always sends `mcpServers: {}` against a record written
+ * without the field would otherwise be told "restart required" forever, on a
+ * difference with no consequence, and no number of deactivate/activate cycles
+ * would clear it.
+ */
+function knobValue(config: AgentConfig, name: keyof AgentConfig): unknown {
+  const value = config[name];
+  if (name === 'mcpServers' && value && Object.keys(value as object).length === 0) {
+    return undefined;
+  }
+  return value;
+}
+
+/** Which knobs the incoming document asks to move. */
+function changedAttributes(before: AgentConfig, after: AgentConfig): (keyof AgentConfig)[] {
+  return CONFIG_ATTRIBUTES.filter(
+    (name) => canonicalKnob(knobValue(before, name)) !== canonicalKnob(knobValue(after, name))
+  );
+}
+
+/**
+ * What happened to one knob. Reported for every knob on every reconfiguration
+ * of an existing record, because the epic's first invariant is that `success`
+ * is a claim about the world and a bare one cannot carry this.
+ */
+export type AttributeOutcome =
+  /** The value sent is the value already on the record. Nothing to do. */
+  | 'unchanged'
+  /** Changed, and the running agent's next decision reads the new value. */
+  | 'applied-in-place'
+  /** Changed on a stopped agent, and takes effect at the next `activate`. */
+  | 'applied'
+  /** Changed, needs a respawn, and was NOT applied. This is the refusal. */
+  | 'refused-restart-required'
+  /**
+   * Changed, could have applied in place, and was NOT applied — because
+   * something else in the same call was refused and `configure` is atomic.
+   * The distinct name is the point: a caller must be able to tell a knob that
+   * landed from one that would have.
+   */
+  | 'withheld';
+
 /**
  * The durable half of a state read, from the intent that holds it.
  *
@@ -1202,6 +1345,30 @@ export class MessageRouter {
    * IT MAY NOT `mkdir`. Every path now comes from the caller, so the
    * filesystem is the only thing left that can tell a directory you meant from
    * one you mistyped — see identity.ts.
+   *
+   * ON AN EXISTING RECORD IT RECONFIGURES PER ATTRIBUTE, and never by killing
+   * the agent. {@link RECONFIGURATION_COST} is the table; the customer's
+   * sentence is the reason: *"a reconciler that quietly discards conversation
+   * history to satisfy a config diff is the worst bug this design could have. I
+   * would rather have an honest 'cannot change X in place' than a convenient one
+   * that costs me an agent's memory."* So where a respawn would be required this
+   * REFUSES, names the attribute and why, leaves the running agent untouched,
+   * and puts the remedy in the message. There is no force flag — see `forget`
+   * for the same decision and the same reason.
+   *
+   * A SILENT DEFER IS NOT THE MIDDLE GROUND IT LOOKS LIKE. Accepting the change
+   * and applying it "at next start" leaves the configuration and the world
+   * disagreeing behind a `success: true`, which is the same failure in a
+   * quieter costume — and it would break requirement 1's echo, whose whole
+   * claim is that what a read reports is what the agent is RUNNING with.
+   *
+   * AND IT IS ATOMIC. A refused call applies NOTHING, including the knobs that
+   * could have moved in place. `configure` takes ONE desired-state document;
+   * applying half of it leaves the agent in a state nobody asked for — half
+   * new, half old — which a retrying reconciler would never converge out of and
+   * which would make the echo match neither the caller's intent nor any prior
+   * state. The response says per knob which is which, so "half applied" is
+   * never something a caller has to infer.
    */
   private handleConfigure(data: any, respond: Respond): void {
     const fail = (error: string, extra: Record<string, unknown> = {}) =>
@@ -1230,39 +1397,181 @@ export class MessageRouter {
     );
     const session = this.deps.herdrBridge.getSessionByPath(agentPath);
     const running = Boolean(session) || (occupancy.reachable && occupancy.ours !== null);
+    const ourPaneId = occupancy.reachable ? (occupancy.ours?.paneId ?? null) : null;
 
-    // RECONFIGURING A RUNNING AGENT IS REFUSED WHOLE, HERE.
+    // ------------------------------------------- what this call asks to move
     //
-    // The per-attribute answer — priority, the gate flags and label change in
-    // place while launcher, prompt and mcpServers refuse — is the next-but-two
-    // slice's, and it is strictly more permissive than this. Shipping the
-    // permissive half first would mean this PR could rewrite the launcher or
-    // the prompt under a live agent, which is a different process and a file
-    // it has already read: a destroy-and-recreate wearing a config diff's
-    // clothes. So the conservative superset ships with the verb, and the
-    // relaxation ships with the per-attribute rules that make it safe.
-    if (running && existing) {
-      fail(
-        `Refusing to reconfigure ${agentPath} while an agent is running in it. Some of these ` +
-          `values are read once, at spawn: the launcher IS the process, and the prompt has ` +
-          `already been read. Applying them under a live agent would either do nothing or ` +
-          `mean a different agent, and neither is what a configuration change asks for. ` +
-          `Stand it down first: deactivate(path), configure(path, …), activate(path).`,
-        {
-          path: agentPath,
-          refused: 'running',
-          applied: [],
-          // UNCHANGED, and said so: a refusal applies nothing, so the token a
-          // caller holds is still current. Reporting it here is what lets a
-          // reconciler tell "my write was rejected" from "my view is stale".
+    // ON A FIRST `configure`, EVERY KNOB MOVED. There was no record, so every
+    // one of them went from "nothing is written here" to the value this
+    // document gives it — and that is true of the OPTIONAL knobs a caller left
+    // out as well: `configure` takes one desired-state document, the document
+    // says "no prompt", and the record now carries that. Reporting the whole
+    // set is the reading that makes `applied` mean the same thing on both
+    // paths — what this call wrote — rather than a field whose meaning depends
+    // on which branch produced it.
+    const changed = existing
+      ? changedAttributes(existing.record.config, parsed.config)
+      : [...CONFIG_ATTRIBUTES];
+    const restartRequired = changed.filter((n) => RECONFIGURATION_COST[n] === 'restart-required');
+    const inPlace = changed.filter((n) => RECONFIGURATION_COST[n] === 'in-place');
+
+    /** Every knob, with what this call did to it. See {@link AttributeOutcome}. */
+    const outcomesWith = (applied: boolean): Record<string, AttributeOutcome> => {
+      const out: Record<string, AttributeOutcome> = {};
+      for (const name of CONFIG_ATTRIBUTES) {
+        out[name] = !changed.includes(name)
+          ? 'unchanged'
+          : !applied
+            ? RECONFIGURATION_COST[name] === 'restart-required'
+              ? 'refused-restart-required'
+              : 'withheld'
+            : running
+              ? 'applied-in-place'
+              : 'applied';
+      }
+      return out;
+    };
+
+    /**
+     * The compare-and-set token and the configuration STILL IN FORCE, on every
+     * refusal path.
+     *
+     * ONE OBJECT, SHARED BY BOTH REFUSALS, and that is not tidiness. A refusal
+     * applies nothing, so the token the caller already holds is still current —
+     * and a refusal that moved it would tell a compare-and-set caller its write
+     * landed when nothing was applied, so the caller stops retrying and the
+     * agent keeps running the configuration nobody wanted. Building it once
+     * means the property cannot hold on one refusal branch and quietly not on
+     * the other, and it means the mutation that proves the property is asserted
+     * (verify-state-read-echoes-config, mutation 1c) has a single target that
+     * breaks every path at once.
+     */
+    const tokenUnchanged = existing
+      ? {
           configVersion: existing.configVersion,
           config: existing.record.config,
-          ...(occupancy.reachable && occupancy.ours
-            ? { paneId: occupancy.ours.paneId }
-            : {})
+          // CARRIED BECAUSE THE BLOCK IS READ AS A UNIT. `configuredAt` is what
+          // a renderer pairs with `configVersion` to say when the configuration
+          // still in force was frozen; without it the CLI printed a refusal
+          // reading "configured before versions were recorded" over a record
+          // that has carried the field since it was written. Found by running
+          // the live proof rather than by reading this file, which is the point
+          // of running it.
+          configuredAt: existing.configuredAt
         }
-      );
-      return;
+      : {};
+
+    if (restartRequired.length) {
+      // THE CENSUS COULD NOT ANSWER, AND THE RECORD SAYS THIS AGENT IS UP.
+      //
+      // Checked BEFORE the running test rather than after, because the running
+      // test's negative is exactly what an unreachable herdr produces:
+      // `listHerdrAgentsChecked` returns an EMPTY census when herdr does not
+      // answer, so `ours` is null and `running` reads false — a check
+      // rendering its own failure as an all-clear, and rendering it as
+      // permission to rewrite the prompt of an agent that is very much alive.
+      // That is the same mistake `activate` refuses as unverifiable and
+      // `forget` refuses one verb over, and silence is not evidence here
+      // either.
+      //
+      // It gates ONLY the restart-required knobs, which is the whole reason
+      // this is not simply `forget`'s rule copied: `priority` and the gate
+      // flags are daemon-side metadata whose new value is correct whether the
+      // agent is up or down, so refusing them for want of a census would cost
+      // a caller a capacity decision to buy nothing.
+      //
+      // RESIDUAL, stated rather than hidden: an agent whose record has fallen
+      // behind (last event `configured`) over a live pane, with herdr
+      // unreachable AND no session in this daemon, is not caught. `forget`
+      // accepts the same window for the same reason — there is no third source
+      // of evidence to consult — and a daemon restart re-attaches the fleet,
+      // so the session map is empty only briefly.
+      if (!running && !occupancy.reachable && existing?.event === 'activated') {
+        fail(
+          `Refusing to reconfigure ${restartRequired.join(', ')} on ${agentPath}: herdr did ` +
+            `not answer, so whether an agent is running there could not be checked — and the ` +
+            `registry records this agent as active. ` +
+            `${restartRequired.length === 1 ? 'That knob is' : 'Those knobs are'} read once, ` +
+            `at spawn, so writing ${restartRequired.length === 1 ? 'it' : 'them'} under a live ` +
+            `agent would change the record without changing the agent. An unreachable herdr ` +
+            `is silence, not evidence that nothing is there. NOTHING WAS APPLIED. Bring herdr ` +
+            `up and try again; the in-place knobs (` +
+            `${CONFIG_ATTRIBUTES.filter((n) => RECONFIGURATION_COST[n] === 'in-place').join(', ')}` +
+            `) can be changed without it.`,
+          {
+            path: agentPath,
+            refused: 'unverifiable',
+            attributes: restartRequired,
+            applied: [],
+            withheld: inPlace,
+            changed,
+            outcomes: outcomesWith(false),
+            ...tokenUnchanged,
+            remedy:
+              `Bring herdr up, then configure(${agentPath}, …) again — or ` +
+              `deactivate(${agentPath}); configure(${agentPath}, …); activate(${agentPath}).`
+          }
+        );
+        return;
+      }
+
+      // THE REFUSAL THIS TASK EXISTS FOR.
+      //
+      // The agent stays exactly as it is: no pane is closed, no conversation is
+      // touched, no half of the document is written. What the caller gets
+      // instead is the name of each attribute that forced this, the mechanical
+      // reason for each one, and the three calls that would actually do what
+      // they asked. The caller decides whether an agent's memory is worth the
+      // change; this daemon does not decide it for them by default.
+      if (running) {
+        fail(
+          `Refusing to reconfigure ${agentPath}: ` +
+            `${restartRequired.length === 1 ? 'one attribute' : `${restartRequired.length} attributes`} ` +
+            `cannot change under a running agent, and standing it down to make ` +
+            `${restartRequired.length === 1 ? 'it' : 'them'} take effect would cost this agent ` +
+            `its conversation.\n` +
+            restartRequired
+              .map((name) => `  ${name} — ${RESTART_REASON[name] ?? 'consumed at spawn'}.`)
+              .join('\n') +
+            `\nNOTHING WAS APPLIED` +
+            (inPlace.length
+              ? `, including ${inPlace.join(', ')}, which would have changed in place. ` +
+                `\`configure\` takes one desired-state document: applying half of it would ` +
+                `leave this agent half new and half old, which is a state nobody asked for ` +
+                `and no retry converges out of. Send the in-place knobs on their own if you ` +
+                `want them now.`
+              : `.`) +
+            ` The agent is untouched and still running` +
+            (ourPaneId ? ` in pane ${ourPaneId}` : '') +
+            `, and its configuration is still version ${existing!.configVersion}.\n` +
+            `Remedy: deactivate(${agentPath}); configure(${agentPath}, …); activate(${agentPath}). ` +
+            `There is no force flag, deliberately — one would be this destroy-and-recreate ` +
+            `with a label on it, and the decision to spend a conversation is the caller's.`,
+          {
+            path: agentPath,
+            refused: 'restart-required',
+            /** Exactly which ones forced it. */
+            attributes: restartRequired,
+            /** ALWAYS EMPTY — `configure` is atomic. */
+            applied: [],
+            /** In-place-capable, and not applied anyway. See the outcomes map. */
+            withheld: inPlace,
+            changed,
+            outcomes: outcomesWith(false),
+            reasons: Object.fromEntries(
+              restartRequired.map((name) => [name, RESTART_REASON[name] ?? 'consumed at spawn'])
+            ),
+            // UNCHANGED, and said so: a refusal applies nothing, so the token a
+            // caller holds is still current. Reporting it here is what lets a
+            // reconciler tell "my write was rejected" from "my view is stale".
+            ...tokenUnchanged,
+            remedy:
+              `deactivate(${agentPath}); configure(${agentPath}, …); activate(${agentPath})`,
+            ...(ourPaneId ? { paneId: ourPaneId } : {})
+          }
+        );
+        return;
+      }
     }
 
     // MONOTONIC PER PATH, minted here because this is the only verb that
@@ -1284,19 +1593,54 @@ export class MessageRouter {
       configuredAt
     };
 
+    // A RECONFIGURATION DOES NOT CHANGE WHICH LIFECYCLE EVENT IS LAST, and
+    // getting that wrong loses a fleet quietly.
+    //
+    // `expected()` — the set a daemon restart restores — filters on `event ===
+    // 'activated'`. Writing a `configured` row over a RUNNING agent would take
+    // it out of that set: the agent keeps working, the next daemon boot does
+    // not know it should be there, and `reconcile` prints a healthy-looking
+    // fleet with one agent missing from it. Nothing about a knob moving says
+    // the agent stopped being activated, so the row that carries the new
+    // configuration carries the event the record already had, with the
+    // ORIGINAL activation's timestamp (see recordActivated).
+    //
+    // The stopped cases are unchanged and stay `configured`: that is what T3's
+    // standby membership test was built against, and it is why that test asks
+    // `everActivated` rather than reading the event.
     const durable = this.surfaceRegistryOutcome(
-      this.deps.agentRegistry.recordConfigured(record),
+      existing?.event === 'activated'
+        ? this.deps.agentRegistry.recordActivated(record, existing.at)
+        : this.deps.agentRegistry.recordConfigured(record),
       `configured ${agentPath}`
     );
 
-    const occupiedBy = occupancy.reachable ? occupancy.occupants : [];
+    // OUR OWN PANE IS NOT AN OCCUPANT OF OUR OWN DIRECTORY.
+    //
+    // `occupancyOf` answers "what is live here", which includes this agent when
+    // it is running — the right answer to its own question, and the wrong one
+    // to put behind a field whose note says `activate` will refuse until that
+    // pane is gone. Now that a running agent can reach this response at all,
+    // reporting it to itself would tell a caller that reconfiguring their own
+    // agent's priority has blocked its activation.
+    const occupiedBy = occupancy.reachable
+      ? occupancy.occupants.filter((o) => o.name !== occupancy.ours?.name)
+      : [];
 
     this.deps.broadcast({
       action: 'agent.configured',
       path: agentPath,
       config: parsed.config,
       configVersion: record.configVersion,
-      configuredAt
+      configuredAt,
+      // WHICH KNOBS MOVED, on the event as well as the response — a subscriber
+      // diffing per path should not have to re-read to find out whether an
+      // event it just saw touched anything it cares about. (The event's NAME
+      // and the structured MCP payload are the event-contract slice's; this is
+      // the field that slice's table already specifies for this event, carried
+      // by the call that computes it.)
+      changed,
+      outcomes: outcomesWith(true)
     });
 
     // WHAT ACTIVATION WILL WRITE INTO THE CALLER'S DIRECTORY, said now.
@@ -1323,8 +1667,47 @@ export class MessageRouter {
       configuredAt,
       reconfigured: Boolean(existing),
       // Carried on the reconfigure path so a caller can see the token move,
-      // and so a refusal (the next slice's) has a value to report unchanged.
+      // and so a refusal has a value to report unchanged.
       ...(existing ? { previousConfigVersion: existing.configVersion } : {}),
+      // PER KNOB, ON EVERY SUCCESS — INCLUDING THE FIRST `configure`.
+      //
+      // These three are UNCONDITIONAL, and that is the same call this daemon
+      // already made one verb over: `activate` puts `alreadyRunning` and
+      // `started` on every successful response, true or false, "so 'did this
+      // call start it' is read rather than inferred from a missing field".
+      // Gating them on `existing` would make a first configure and a
+      // reconfigure that changed nothing look identical from outside — both
+      // silent — and our consumer has no second source to fall back on.
+      // Absence is exactly the thing this slice is trying to stop them
+      // inferring from, so nothing here is signalled by it.
+      //
+      // On a first configure that means `applied` is every knob and `withheld`
+      // is empty: there was no record, so this call wrote all of it. See the
+      // note on `changed` above for why the knobs a caller left out are in that
+      // set — the record now carries "no prompt", and this call is what put it
+      // there.
+      changed,
+      applied: changed,
+      withheld: [],
+      outcomes: outcomesWith(true),
+      /**
+       * Whether the values that moved took effect on a LIVE agent (as opposed
+       * to being what the next `activate` will use). It is a fact about the
+       * world rather than about the call, so it is stated rather than left to
+       * be inferred from a status read.
+       */
+      appliedInPlace: running && changed.length > 0,
+      ...(running ? { running: true, ...(ourPaneId ? { paneId: ourPaneId } : {}) } : {}),
+      ...(running && existing && changed.length
+        ? {
+            note:
+              `${changed.join(', ')} changed IN PLACE on the running agent: ` +
+              `${changed.length === 1 ? 'it is' : 'they are'} read out of the record when ` +
+              `the decision that needs ${changed.length === 1 ? 'it' : 'them'} is made, so ` +
+              `nothing was respawned and the conversation is untouched. The pane is the ` +
+              `same one${ourPaneId ? ` (${ourPaneId})` : ''}.`
+          }
+        : {}),
       willWrite: willWrite.length
         ? [
             {

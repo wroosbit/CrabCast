@@ -156,6 +156,29 @@ jobs:
       #                                      a pane and `pane close` really
       #                                      removes one, so the pane count is a
       #                                      measurement rather than a fixture.
+      #   verify-reconfiguration-refuses     changing a knob on a RUNNING agent
+      #                                      is answered per attribute, and a
+      #                                      change that would need a respawn is
+      #                                      REFUSED rather than performed. It
+      #                                      belongs here for the same reason
+      #                                      the two above do — a refusal is the
+      #                                      easiest thing in this daemon to
+      #                                      regress silently, because widening
+      #                                      it by one attribute leaves every
+      #                                      other assertion green. So its
+      #                                      refusals are asserted against
+      #                                      evidence taken from OUTSIDE the
+      #                                      response: the pane id, the stub's
+      #                                      argv log, a hash of the
+      #                                      conversation on disk, and the
+      #                                      durable record read off the log.
+      #                                      It iterates the classification
+      #                                      table itself, so a knob added
+      #                                      without a decision fails it; and it
+      #                                      MUTATES the compiled daemon four
+      #                                      ways — including the exact bug the
+      #                                      task exists to prevent — to prove
+      #                                      the assertions can go red.
       #   verify-state-read-echoes-config    every fleet category echoes the
       #                                      agent's frozen configuration, and
       #                                      `unstartedAgents` is distinct from
@@ -276,6 +299,7 @@ jobs:
             verify-callers-directory
             verify-daemon-provenance
             verify-state-read-echoes-config
+            verify-reconfiguration-refuses
             verify-event-contract
           )
           # One at a time, and one scratch $HOME each. Both halves are

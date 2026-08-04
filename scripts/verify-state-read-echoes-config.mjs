@@ -751,6 +751,14 @@ const s5 = ownedDir('s5', 'versioned');
   // caller its change landed when it did not — so the caller stops retrying,
   // and the agent keeps running the configuration nobody wanted. The refusal
   // says `applied: []`; the version has to say the same thing.
+  //
+  // WHAT MOVED WITH KAN-126, since this block was written against the blanket
+  // refusal that shipped with the verb: reconfiguring a running agent is now
+  // answered PER ATTRIBUTE, so `priority: 9` on a live agent no longer refuses
+  // — it applies in place, which is the point of that task. The refusal this
+  // block needs is now produced by a RESTART-REQUIRED knob, so it asks to move
+  // the prompt. The property under test is untouched: a refusal must not move
+  // the token.
   {
     const refused = ownedDir('s5', 'refused-while-running');
     const r = harness('s5-refused');
@@ -761,13 +769,17 @@ const s5 = ownedDir('s5', 'versioned');
 
     // Live in the census, so `configure` refuses the whole call.
     setCensus([ourPane(refused, '%60')]);
-    const no = await r.invoke({ action: 'configure_agent', path: refused, ...KNOBS, priority: 9 });
+    const no = await r.invoke({
+      action: 'configure_agent', path: refused, ...KNOBS,
+      priority: 9, prompt: 'a different prompt entirely'
+    });
     show('the refused reconfigure:', {
       success: no.success, refused: no.refused, applied: no.applied,
+      attributes: no.attributes, withheld: no.withheld,
       configVersion: no.configVersion, priority: no.config?.priority
     });
-    check(no.success === false && no.refused === 'running' && no.applied?.length === 0,
-      'reconfiguring a RUNNING agent is refused whole, applying nothing');
+    check(no.success === false && no.refused === 'restart-required' && no.applied?.length === 0,
+      'a reconfigure a RUNNING agent cannot take is refused whole, applying nothing');
     check(
       no.configVersion === before.configVersion,
       'and the version it reports is UNCHANGED — a refusal that moved the token would tell ' +
@@ -1175,7 +1187,13 @@ function mutantDist(name, file, from, to) {
   await b.invoke({ action: 'configure_agent', path: refused, ...KNOBS });
   const accepted = await b.invoke({ action: 'configure_agent', path: refused, ...KNOBS, priority: 4 });
   setCensus([ourPane(refused, '%61')]);
-  const no = await b.invoke({ action: 'configure_agent', path: refused, ...KNOBS, priority: 9 });
+  // A RESTART-REQUIRED knob, because that is what refuses now (KAN-126). The
+  // mutation target is a single shared object, so breaking it breaks BOTH
+  // refusal paths — this one and the unverifiable-census one — at once.
+  const no = await b.invoke({
+    action: 'configure_agent', path: refused, ...KNOBS,
+    priority: 9, prompt: 'a different prompt entirely'
+  });
   console.log(`   the mutant's refusal reports v${no.configVersion} where the record still holds ` +
     `v${accepted.configVersion}`);
   check(
