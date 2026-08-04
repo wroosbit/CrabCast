@@ -894,18 +894,35 @@ function parseAgentConfig(data: any): ConfigParse {
  * `undefined` in, "there is no record" out, as explicit nulls: see
  * {@link ConfigEcho.config}.
  */
-function configEcho(intent: AgentIntent | undefined, live = false): ConfigEcho {
-  // AN AGENT THAT IS RUNNING HAS RUN, whatever the log says, and `live` is
-  // what keeps those two from contradicting each other on one row. The log can
-  // legitimately lack an `activated` event for a live agent — a durable write
-  // that failed, or a record restated by `configure` — and a row reading
-  // `state: 'running'` beside `everActivated: false` would be telling a reader
-  // that activating this agent starts a fresh conversation while it is in the
-  // middle of one. The field answers "will the next activate resume?", and for
-  // something already running the answer is yes.
-  const everActivated = Boolean(intent?.everActivated) || live;
+function configEcho(intent: AgentIntent | undefined): ConfigEcho {
+  // EVERY FIELD HERE COMES FROM THE RECORD AND NOTHING ELSE. That is what the
+  // provenance legend promises about this block, and it has to be true field by
+  // field rather than mostly.
+  //
+  // THIS USED TO BE `Boolean(intent?.everActivated) || live`, and that was a
+  // real defect rather than a shortcut. The argument for it was that a row
+  // reading `state: 'running'` beside `everActivated: false` looks
+  // contradictory — but the two are answers to different questions, and mixing
+  // them broke the one this block exists to keep clean. A `configured`-last
+  // record over a live pane (reachable: a durable write that failed after an
+  // activation leaves exactly that, and this daemon says so at
+  // `handleDeactivateAgent`) then read back `everActivated: true` from a record
+  // that says otherwise — a field the legend calls DURABLE, changing with
+  // liveness, and reverting the moment the pane went away. A supervisor would
+  // see the agent move into `unstartedAgents`, whose CLI line says it has never
+  // run, while it holds a conversation.
+  //
+  // The honest reading is the record's: `everActivated` means CRABCAST'S OWN
+  // LOG SHOWS AN ACTIVATION AT THIS PATH. `false` beside `state: 'running'` is
+  // not a contradiction, it is the record being behind — which is a real state
+  // with a real name (`recordReconciled`, T5) and a real repair, and hiding it
+  // behind an `||` removed the only signal that it had happened.
+  //
+  // The case the `||` was reaching for is answered properly instead: the
+  // activate paths build this block AFTER the record is written, so what they
+  // echo is a record that genuinely carries the activation. See handleActivate.
   if (!intent) {
-    return { config: null, configVersion: null, configuredAt: null, everActivated };
+    return { config: null, configVersion: null, configuredAt: null, everActivated: false };
   }
   return {
     // The frozen object itself, not a rebuild of it. A field-by-field copy here
@@ -915,7 +932,7 @@ function configEcho(intent: AgentIntent | undefined, live = false): ConfigEcho {
     config: intent.record.config,
     configVersion: intent.configVersion,
     configuredAt: intent.configuredAt,
-    everActivated
+    everActivated: intent.everActivated
   };
 }
 
@@ -2075,14 +2092,14 @@ export class MessageRouter {
         // same echo the spawning branch does rather than being the one answer
         // that says less.
         //
-        // `live: true` — as of AFTER this call, which is what a response
-        // describes. The echo is built from the intent read before the handler
-        // ran, and this agent is running now, so `everActivated: false` here
-        // would say "it has never run" on the response that confirms it is
-        // running. That is the same reason `recordReconciled` and `reattached`
-        // exist below: all three are this branch answering about the world it
-        // leaves behind rather than about the one it found.
-        ...configEcho(intent, true),
+        // FROM A RECORD RE-READ AFTER THE CONVERGING WRITE ABOVE, not from the
+        // intent this handler opened with. A response describes the world it
+        // leaves behind, and `rememberActivated` has just run — so re-reading
+        // is how `everActivated` can be `true` here while remaining a purely
+        // durable fact. Inferring it from liveness instead was the defect this
+        // replaces: it made a field the legend calls durable change with the
+        // census and revert on restart.
+        ...configEcho(this.deps.agentRegistry.intents().get(agentPath)),
         // Present only when THIS call took the terminal back — the agent was
         // running and unreachable, and now is not. Silent on the steady-state
         // no-op, where the session was already ours.
@@ -2273,9 +2290,13 @@ export class MessageRouter {
       // The whole record, on the response that started it. A caller that
       // activates and then reads back should find the same values, and saying
       // them here is what lets it check that without a second call.
-      // `live`: see the `alreadyRunning` branch. The echo is built from the
-      // intent as it was BEFORE this activation, and this agent has now run.
-      ...configEcho(intent, true),
+      //
+      // RE-READ AFTER `rememberActivated`, for the reason spelled out on the
+      // already-running branch: this is a durable field, so it is answered from
+      // the durable record as it stands once this call's write has landed. If
+      // that write failed, this correctly still reads `false` — and `durable:
+      // false` below says why, which is better than a `true` nothing backs.
+      ...configEcho(this.deps.agentRegistry.intents().get(agentPath)),
       // Not decoration: it is the difference between this response and the
       // KAN-23 false success. `true` means the agent was found in herdr's
       // census before this was sent, and success is never reported without it.
@@ -2689,7 +2710,10 @@ export class MessageRouter {
     const state = this.stateOf(intent, ours !== null, census.reachable);
 
     const session = this.deps.herdrBridge.getSessionByPath(agentPath);
-    const echo = configEcho(intent, ours !== null);
+    // The record, and only the record. `ours` decides `state` — an observed
+    // field — and must not reach the echo: that mixing is what made a durable
+    // field change with the census.
+    const echo = configEcho(intent);
 
     if (session) {
       // From the census this handler already took, rather than a second read.
@@ -3260,7 +3284,12 @@ export class MessageRouter {
       // read uses, so the two can never disagree.
       state: this.stateOf(intent, true),
       configured: Boolean(intent),
-      ...configEcho(intent, true),
+      // `state: 'running'` beside `everActivated: false` is NOT a contradiction
+      // here: the first is observed, the second is what our log records, and a
+      // row showing both is a record that has fallen behind a live agent. T5's
+      // converging `activate` is the repair, and hiding the disagreement behind
+      // a liveness fallback removed the only signal that it existed.
+      ...configEcho(intent),
       path: agentPath,
       paneName,
       paneId: census?.paneId ?? null,
@@ -3424,10 +3453,7 @@ export class MessageRouter {
                     ourPaneIn(census, occupies!, occupied.record.config.launcher) !== null,
                     census.reachable
                   ),
-                  ...configEcho(
-                    occupied,
-                    ourPaneIn(census, occupies!, occupied.record.config.launcher) !== null
-                  )
+                  ...configEcho(occupied)
                 }
               : null
           });

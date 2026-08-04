@@ -274,20 +274,6 @@ function clampTailLines(lines: unknown): number {
 }
 
 /**
- * What herdr alone can tell us about an agent, with no session to consult.
- * Unknown fields are explicitly null rather than absent: this is serialized
- * to a client as JSON, where an undefined field would simply vanish and read
- * as "the daemon didn't answer that" instead of "there is nothing to report".
- */
-export interface HerdrAgentDescription {
-  paneName: string;
-  paneId: string | null;
-  /** The pane's own cwd, as herdr reports it — canonicalized when it resolves. */
-  workDir: string | null;
-  herdrStatus: HerdrAgentStatus;
-}
-
-/**
  * One entry of `herdr agent list` — herdr's own record of a pane, independent
  * of anything this daemon remembers.
  *
@@ -1575,35 +1561,19 @@ export class HerdrBridge {
   }
 
   /**
-   * Ask herdr directly about the agent in a directory. This is the answer for
-   * a path whose session died with a previous daemon: the pane outlives us, so
-   * its status and cwd are still there to be read. Throws when herdr has no
-   * such agent.
+   * `describeAgent` USED TO BE HERE, and is deleted rather than kept for a
+   * caller that might want it (KAN-125).
    *
-   * NO RESOLUTION STEP, and that is the whole of the re-key. The pane name is
-   * a pure function of the path, so there is nothing to search, nothing to
-   * match by suffix, and no ambiguity for a caller to disambiguate — two
-   * agents that would once have collided on a shared key are two different
-   * directories and therefore two different names. (The refusal that used to
-   * report that ambiguity is described rather than quoted, here and
-   * everywhere: `verify-agent-power-controls.mjs` greps `src/` for it, and a
-   * check somebody has to eyeball to see the hits are only comments is a check
-   * that has stopped working.)
+   * It asked herdr about ONE agent with `agent get`, and its only caller was
+   * `agent_status`'s sessionless branch. That handler now answers from the same
+   * census `list_agents` uses, because two herdr reads in one handler can
+   * disagree and a status and a list taken together should describe one moment.
+   * The census carries everything `agent get` returned — pane id, cwd, status —
+   * so the second call bought nothing and cost a subprocess per status.
+   *
+   * Left as a note rather than as code: a public method with no callers is a
+   * second way to ask a question this daemon has deliberately narrowed to one.
    */
-  public describeAgent(agentPath: string): HerdrAgentDescription {
-    const paneName = paneNameFor(agentPath);
-    const agent = this.runHerdr(['agent', 'get', paneName])?.result?.agent;
-    if (!agent) {
-      throw new Error(`No agent found for path '${agentPath}'`);
-    }
-
-    return {
-      paneName,
-      paneId: typeof agent.pane_id === 'string' && agent.pane_id ? agent.pane_id : null,
-      workDir: typeof agent.cwd === 'string' ? agent.cwd : null,
-      herdrStatus: toAgentStatus(agent.agent_status)
-    };
-  }
 
   /**
    * The tail of an agent's terminal, as plain text. `recent-unwrapped` is the

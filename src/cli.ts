@@ -525,14 +525,20 @@ function configBlock(row: any, pad = INDENT + INDENT): string | null {
       ? `${pad}mcp servers: ${mcpServerNames(config.mcpServers)}`
       : null,
     config.label !== undefined ? `${pad}label: ${config.label}` : null,
-    // The fact that decides what the next activation does, said in the words
-    // of the thing a reader is deciding about. Only where the daemon answered
-    // it: absent is not `false`, and printing "has never run" for a field
-    // nobody sent would be inventing the answer.
+    // The fact that decides what the next activation does. Only where the
+    // daemon answered it: absent is not `false`, and printing anything for a
+    // field nobody sent would be inventing the answer.
+    //
+    // PHRASED AS A STATEMENT ABOUT THE RECORD, not about the world. It used to
+    // read "this agent has never run", which is a claim the record cannot
+    // support: `everActivated` is whether CRABCAST'S LOG carries an activation
+    // at this path, and a live agent whose durable write failed has run without
+    // the log knowing. The old wording put that agent's row under a sentence
+    // that was simply false about it.
     typeof row.everActivated === 'boolean'
       ? `${pad}next activate: ${row.everActivated
-          ? 'RESUMES the conversation it was stopped in'
-          : 'starts FRESH — this agent has never run'}`
+          ? 'RESUMES the conversation it was stopped in (this path has a recorded activation)'
+          : 'starts FRESH — no activation recorded at this path'}`
       : null,
     ...unknown.map((key) => `${pad}${key}: ${compact(config[key])}`)
   );

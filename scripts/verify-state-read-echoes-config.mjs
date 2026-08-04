@@ -65,8 +65,15 @@ const { connectToDaemon, onJsonLines, writeJsonLine, socketPathFor } =
 // --------------------------------------------------------------- the harness
 
 const rule = (title) => console.log(`\n${'='.repeat(78)}\n${title}\n${'='.repeat(78)}`);
-const show = (label, value) =>
-  console.log(`   ${label}\n${JSON.stringify(value, null, 2).replace(/^/gm, '     ')}`);
+const show = (label, value) => {
+  // `JSON.stringify(undefined)` is `undefined`, and `.replace` on that threw —
+  // which took the whole run down mid-section under a mutation, so sections
+  // after it never reported at all. The exit code stayed 1 so CI was never
+  // wrong, but a script that dies silently past its halfway point is one whose
+  // later assertions nobody can claim ran.
+  const body = value === undefined ? '(undefined)' : JSON.stringify(value, null, 2);
+  console.log(`   ${label}\n${String(body).replace(/^/gm, '     ')}`);
+};
 
 const failures = [];
 const check = (ok, claim, detail) => {
@@ -732,6 +739,55 @@ const s5 = ownedDir('s5', 'versioned');
     'and it survives COMPACTION, along with the fact that this agent has run',
     `configVersion ${afterCompact.configVersion}, everActivated ${afterCompact.everActivated}`
   );
+
+  // -- A REFUSED CONFIGURE MUST NOT MOVE THE TOKEN --------------------------
+  //
+  // The property with the most weight on it and, until now, the least evidence:
+  // it was true, and nothing anywhere asserted it. Mutating the refusal branch
+  // to bump the version passed every script in the suite.
+  //
+  // It matters because the version is a COMPARE-AND-SET token and the next
+  // slice builds a reconciler on it. A token that changes on a refusal tells a
+  // caller its change landed when it did not — so the caller stops retrying,
+  // and the agent keeps running the configuration nobody wanted. The refusal
+  // says `applied: []`; the version has to say the same thing.
+  {
+    const refused = ownedDir('s5', 'refused-while-running');
+    const r = harness('s5-refused');
+    setCensus([]);
+    await r.invoke({ action: 'configure_agent', path: refused, ...KNOBS });
+    const before = await r.invoke({ action: 'configure_agent', path: refused, ...KNOBS, priority: 4 });
+    check(before.configVersion === 2, 'a stopped agent reconfigures to version 2');
+
+    // Live in the census, so `configure` refuses the whole call.
+    setCensus([ourPane(refused, '%60')]);
+    const no = await r.invoke({ action: 'configure_agent', path: refused, ...KNOBS, priority: 9 });
+    show('the refused reconfigure:', {
+      success: no.success, refused: no.refused, applied: no.applied,
+      configVersion: no.configVersion, priority: no.config?.priority
+    });
+    check(no.success === false && no.refused === 'running' && no.applied?.length === 0,
+      'reconfiguring a RUNNING agent is refused whole, applying nothing');
+    check(
+      no.configVersion === before.configVersion,
+      'and the version it reports is UNCHANGED — a refusal that moved the token would tell ' +
+        'a compare-and-set caller its write landed when nothing was applied',
+      `${before.configVersion} → ${no.configVersion}`
+    );
+    check(
+      no.config?.priority === 4,
+      'and the config it reports is the one still in force, not the one that was refused',
+      `priority ${no.config?.priority} (refused call asked for 9)`
+    );
+    const onDisk = r.agentRegistry.intents().get(refused);
+    check(
+      onDisk.configVersion === before.configVersion && onDisk.record.config.priority === 4,
+      'and the RECORD is untouched — read off the log rather than off the response, because ' +
+        'a response can say "unchanged" over a row that changed',
+      `v${onDisk.configVersion}, priority ${onDisk.record.config.priority}`
+    );
+    setCensus([]);
+  }
 }
 
 // ===========================================================================
@@ -846,6 +902,115 @@ rule('7. `provenance` classifies every key on every row');
     `every key on all ${rows.length} rows of every category is classified by the legend`,
     unclassified.size ? `unclassified: ${[...unclassified].join(', ')}` : undefined
   );
+
+  // ---- THE CLASSIFICATION ITSELF, not merely its completeness --------------
+  //
+  // WHY THIS SECTION EXISTS IN THIS SHAPE. Everything above asserts that each
+  // key is in SOME bucket. That is a check about the legend's coverage and says
+  // nothing about whether the bucket is RIGHT — and a legend that confidently
+  // mislabels a field is worse than none, because a consumer will store what it
+  // is told is durable.
+  //
+  // It shipped mislabelled: `everActivated` was computed as
+  // `record || live`, sat in `durable`, and therefore changed with the census
+  // and reverted on restart. The completeness check passed throughout. So each
+  // bucket is now made to demonstrate the property it claims:
+  //
+  //   durable   — must NOT change when only the census changes, and must
+  //               survive a rebuilt daemon over the same log
+  //   observed  — must change when the census does, or it is not an observation
+  //   derived   — `paneName` must equal the pure function of the path
+  //
+  // The durable half is the one that catches the defect, and the observed half
+  // is what stops the whole legend being satisfied by calling everything
+  // durable and never looking.
+  const probe = ownedDir('s7', 'classified');
+  {
+    const c = harness('s7');
+    await c.invoke({ action: 'configure_agent', path: probe, ...KNOBS });
+    c.agentRegistry.recordActivated(c.agentRegistry.intents().get(probe).record);
+
+    setCensus([ourPane(probe, '%77')]);
+    const withPane = await c.invoke({ action: 'agent_status', path: probe });
+    setCensus([]);
+    const withoutPane = await c.invoke({ action: 'agent_status', path: probe });
+    // A second daemon over the SAME log, with the pane back: durable fields
+    // must be indifferent to the process as well as to the census.
+    setCensus([ourPane(probe, '%78')]);
+    const afterRebuild = await harness('s7').invoke({ action: 'agent_status', path: probe });
+
+    const legend = withPane.provenance;
+    const bucketOf = (key) =>
+      legend.durable.includes(key) ? 'durable'
+        : legend.observed.includes(key) ? 'observed'
+          : legend.derived.includes(key) ? 'derived' : null;
+
+    const drifted = [];
+    for (const key of Object.keys(withPane)) {
+      if (bucketOf(key) !== 'durable') continue;
+      const a = JSON.stringify(withPane[key]);
+      if (JSON.stringify(withoutPane[key]) !== a) {
+        drifted.push(`${key}: ${a} with a pane, ${JSON.stringify(withoutPane[key])} without`);
+      } else if (JSON.stringify(afterRebuild[key]) !== a) {
+        drifted.push(`${key}: ${a} before a restart, ${JSON.stringify(afterRebuild[key])} after`);
+      }
+    }
+    console.log(`\n   durable fields checked against a census change and a restart: ` +
+      `${Object.keys(withPane).filter((k) => bucketOf(k) === 'durable').join(', ')}`);
+    check(
+      drifted.length === 0,
+      'every field the legend calls DURABLE is identical with the pane, without the pane, ' +
+        'and through a rebuilt daemon over the same log — it is a fact about the record ' +
+        'rather than about the moment it was read',
+      drifted.join('; ')
+    );
+    check(
+      withPane.everActivated === true && withoutPane.everActivated === true &&
+        afterRebuild.everActivated === true,
+      '`everActivated` in particular, since it is the one that shipped mislabelled: the ' +
+        'record carries an activation, so it reads true whether or not a pane is there',
+      `${withPane.everActivated} / ${withoutPane.everActivated} / ${afterRebuild.everActivated}`
+    );
+
+    const observedThatMoved = Object.keys(withPane).filter(
+      (k) => bucketOf(k) === 'observed' &&
+        JSON.stringify(withPane[k]) !== JSON.stringify(withoutPane[k])
+    );
+    console.log(`   observed fields that moved with the census: ${observedThatMoved.join(', ') || '(none)'}`);
+    check(
+      observedThatMoved.includes('paneId'),
+      'and a field the legend calls OBSERVED does move with the census — `paneId` is ' +
+        `%77 with the pane and ${JSON.stringify(withoutPane.paneId)} without, which is what ` +
+        'makes "observed" a claim rather than a label',
+      `moved: ${observedThatMoved.join(', ')}`
+    );
+    check(
+      withPane.paneName === paneNameFor(probe) && withoutPane.paneName === withPane.paneName,
+      'and a DERIVED field is the pure function it says it is: paneName === paneNameFor(path), ' +
+        'census or no census'
+    );
+
+    // The state read and the record must also agree about what a `configured`-
+    // last row over a LIVE pane means — the exact probe that found the defect.
+    const behind = ownedDir('s7', 'record-behind-live');
+    const d = harness('s7-behind');
+    await d.invoke({ action: 'configure_agent', path: behind, ...KNOBS });
+    setCensus([ourPane(behind, '%79')]);
+    const liveButUnrecorded = await d.invoke({ action: 'agent_status', path: behind });
+    show('a live pane whose record never recorded an activation:', {
+      state: liveButUnrecorded.state,
+      everActivated: liveButUnrecorded.everActivated,
+      configVersion: liveButUnrecorded.configVersion
+    });
+    check(
+      liveButUnrecorded.state === 'running' && liveButUnrecorded.everActivated === false,
+      'a live pane whose record carries no activation reads `running` AND ' +
+        '`everActivated: false` — the two are answers to different questions, and the ' +
+        'disagreement is the signal that the record is behind rather than something to hide',
+      `state ${liveButUnrecorded.state}, everActivated ${liveButUnrecorded.everActivated}`
+    );
+    setCensus([]);
+  }
 
   // And the unreachable case, because an empty census is silence rather than
   // evidence and the legend must say so rather than implying a clean read.
@@ -988,6 +1153,75 @@ function mutantDist(name, file, from, to) {
       'the configure time — a compare-and-set token going BACKWARDS, which section 5 catches',
     `v${written.configVersion}, configuredAt ${written.record.configuredAt}`
   );
+}
+
+{
+  // MUTATION 1c: the refusal bumps the token it is supposed to leave alone.
+  //
+  // This is the mutation that found the gap: it was applied to the shipping
+  // daemon during review and NOTHING in this suite went red, because the
+  // property was true and unasserted. Kept as the standing proof that the new
+  // section 5 assertion is wired to the code rather than to its own hopes.
+  const dir = mutantDist(
+    'refusal-bumps-version', 'router.js',
+    'configVersion: existing.configVersion,',
+    'configVersion: existing.configVersion + 1,'
+  );
+  const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
+  const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
+  const refused = ownedDir('s8', 'refusal-bumps');
+  const b = harness('s8-refusal', Broken, BrokenReg);
+  setCensus([]);
+  await b.invoke({ action: 'configure_agent', path: refused, ...KNOBS });
+  const accepted = await b.invoke({ action: 'configure_agent', path: refused, ...KNOBS, priority: 4 });
+  setCensus([ourPane(refused, '%61')]);
+  const no = await b.invoke({ action: 'configure_agent', path: refused, ...KNOBS, priority: 9 });
+  console.log(`   the mutant's refusal reports v${no.configVersion} where the record still holds ` +
+    `v${accepted.configVersion}`);
+  check(
+    no.configVersion === accepted.configVersion + 1,
+    'a refusal that bumps the version is exactly what section 5 now catches — and until this ' +
+      'assertion existed, this mutation passed the entire suite',
+    `refusal said v${no.configVersion}, record holds v${accepted.configVersion}`
+  );
+  setCensus([]);
+}
+
+{
+  // MUTATION 1d: a durable field inferred from liveness — the round-1 blocker,
+  // restored so the new classification check is provably the thing that finds
+  // it. `everActivated` reverts to `record || live`, which the completeness
+  // half of section 7 passed for its entire life.
+  const dir = mutantDist(
+    'everactivated-follows-liveness', 'router.js',
+    'everActivated: intent.everActivated\n    };',
+    'everActivated: intent.everActivated || globalThis.__kan125_live === true\n    };'
+  );
+  const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
+  const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
+  const behind = ownedDir('s8', 'liveness-leak');
+  const b = harness('s8-liveness', Broken, BrokenReg);
+  setCensus([]);
+  await b.invoke({ action: 'configure_agent', path: behind, ...KNOBS });
+
+  // The mutant's echo consults a live flag the real one does not have. With it
+  // set, a record that carries NO activation reports `everActivated: true` —
+  // and reverts the moment it is cleared, which is a restart.
+  setCensus([ourPane(behind, '%62')]);
+  globalThis.__kan125_live = true;
+  const whileLive = await b.invoke({ action: 'agent_status', path: behind });
+  globalThis.__kan125_live = false;
+  const afterRestart = await b.invoke({ action: 'agent_status', path: behind });
+  console.log(`   the mutant reports everActivated=${whileLive.everActivated} while live and ` +
+    `${afterRestart.everActivated} after — from one unchanged record`);
+  check(
+    whileLive.everActivated === true && afterRestart.everActivated === false,
+    'a field the legend calls DURABLE changing with liveness is what section 7 now catches: ' +
+      'one record, two answers, and the completeness check would have passed both',
+    `${whileLive.everActivated} → ${afterRestart.everActivated}`
+  );
+  delete globalThis.__kan125_live;
+  setCensus([]);
 }
 
 {
@@ -1183,16 +1417,21 @@ const CONFIGURE_ARGV = [
   console.log(`\n   $ crabcast status ${livePath}`);
   console.log(cliStatus.stdout.replace(/^/gm, '     '));
   const cliText = cliStatus.stdout;
+  // ANCHORED TO WHOLE LINES (`^…$` with /m), not floated over the whole
+  // stdout. A bare /priority 7/ would match inside any other agent's block, so
+  // on a fleet-shaped output it could pass while saying nothing about THIS
+  // agent — a check that cannot distinguish its own subject is not measuring
+  // one. The knobs are asserted as the single line that carries them together,
+  // which also proves they are rendered as one block rather than scattered.
   const cliShows = [
-    ['priority 7', /priority 7/],
-    ['launcher shell', /launcher shell/],
-    ['refusable false', /refusable false/],
-    ['preemptable false', /preemptable false/],
-    ['the prompt size', /prompt: \d+ characters/],
-    ['the mcp servers, with the builtin marked', /mcp servers: crabcast \(builtin\), kan125-example/],
-    ['the label', /label: the state read/],
-    ['the version', /config v1/],
-    ['the state', /state:\s+running/]
+    ['the whole knob line, with the version',
+      /^ +config v1 frozen \S+: priority 7, launcher shell, refusable false, chargeable true, preemptable false$/m],
+    ['the prompt size', /^ +prompt: \d+ characters$/m],
+    ['the mcp servers, with the builtin marked',
+      /^ +mcp servers: crabcast \(builtin\), kan125-example$/m],
+    ['the label', /^ +label: the state read$/m],
+    ['what the next activate would do', /^ +next activate: RESUMES .+recorded activation\)$/m],
+    ['the state', /^ +state: +running$/m]
   ].filter(([, re]) => !re.test(cliText));
   check(cliShows.length === 0,
     'SURFACE 3/4 — `crabcast status` prints every knob, the version and the state',
@@ -1202,8 +1441,9 @@ const CONFIGURE_ARGV = [
   console.log(`\n   $ crabcast list`);
   console.log(cliList.stdout.replace(/^/gm, '     '));
   check(
-    /config v1 frozen/.test(cliList.stdout) && /priority 7, launcher shell/.test(cliList.stdout),
-    'and `crabcast list` prints the same block on the fleet row'
+    /^ +config v1 frozen \S+: priority 7, launcher shell, refusable false, chargeable true, preemptable false$/m
+      .test(cliList.stdout),
+    'and `crabcast list` prints the same block on the fleet row, line for line'
   );
   check(
     /unstarted agents \(\d+\)/.test(cliList.stdout) &&
