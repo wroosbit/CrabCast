@@ -3019,12 +3019,32 @@ export class MessageRouter {
    * what the old `success: true` asked of them.
    */
   private handleSendToAgent(data: any, respond: Respond) {
+    /**
+     * The request never became a send, so NO PANE WAS READ — and this must not
+     * borrow the vocabulary of a verdict that was.
+     *
+     * `not-delivered` is defined as evidence: the pane was read and the message
+     * is not in it. An unresolvable path and a blank message are neither that
+     * nor `unverifiable` — nothing was attempted, so there is nothing to have
+     * been uncertain about. Answering `not-delivered` here was true in outcome
+     * and false in its stated basis, which is this epic's recurring defect in
+     * miniature: a claim whose wording covers more than its mechanism.
+     *
+     * So it says `refused`, in the vocabulary `activate` already uses for a
+     * call rejected before anything happened (`refused: 'not-configured'`,
+     * `refused: 'unverifiable'`). `delivered: false` and `verdict` are still on
+     * the response, both outcomes, because a caller must never have to infer
+     * the outcome from a missing field — and the ABSENCE of an `evidence`
+     * block is deliberately not the signal, since inference-from-absence is the
+     * thing being refused. `refused` is the field to read.
+     */
     const fail = (error: string) =>
       respond({
         action: 'send_to_agent_response',
         success: false,
         delivered: false,
-        verdict: 'not-delivered',
+        verdict: 'refused',
+        refused: 'invalid-request',
         error
       });
 

@@ -617,6 +617,56 @@ const WIRE_PATH = fs.realpathSync(WIRE_DIR);
   check(unkRes.verdict === 'unverifiable' && unkRes.delivered === false,
     'and an unobservable send as `unverifiable`, distinct from both');
 
+  // --- the request that never became a send --------------------------------
+  //
+  // ROUND 2, ITEM 3. These used to answer `not-delivered`, whose whole content
+  // is "the pane was read and the message is not in it" — and no pane was read.
+  // True in outcome, false in its stated basis, which is this epic's recurring
+  // defect in miniature. They get their own word now, and the assertion that
+  // makes it mean something is that NOTHING WAS TYPED AT ANYBODY.
+  const keysBeforeRefusals = invocations().length;
+  const blankRes = await raw('send_to_agent', { path: WIRE_PATH, message: '   ' });
+  const noSuchRes = await raw('send_to_agent', { path: '/tmp/kan114-no-such-directory-anywhere', message: 'hello' });
+  console.log('   send_to_agent_response (refused — blank message):');
+  console.log(JSON.stringify(blankRes, null, 2).replace(/^/gm, '     '));
+  console.log('   send_to_agent_response (refused — path does not resolve):');
+  console.log(JSON.stringify(noSuchRes, null, 2).replace(/^/gm, '     '));
+
+  check([blankRes, noSuchRes].every((r) => r.verdict === 'refused' && r.refused === 'invalid-request'),
+    'a request that never became a send answers `refused`, NOT `not-delivered` — no pane was read, ' +
+    'so it may not borrow the word whose content is "the pane was read"',
+    JSON.stringify([blankRes, noSuchRes].map((r) => r.verdict)));
+  check([blankRes, noSuchRes].every((r) => r.delivered === false && typeof r.verdict === 'string'),
+    'and `delivered` and `verdict` are still on it, both outcomes — the outcome is never inferred ' +
+    'from a missing field');
+  // READABILITY ASSERTED AT THE POINT ABSENCE IS ASSERTED, which is this
+  // ticket's own subject one level up (KAN-138's shape): "zero keystrokes"
+  // would be satisfied just as well by an argv log nobody could read. So the
+  // log is shown to be readable and non-empty FIRST, and only then is the
+  // window counted.
+  const typedIn = (from, to) => invocations()
+    .slice(from, to)
+    .filter((v) => v[0] === 'pane' && (v[1] === 'send-keys' || v[1] === 'send-text'));
+
+  const afterRefusals = invocations().length;
+  check(invocations().length > 0,
+    'the argv log is readable and non-empty — a zero below is read off a log that exists',
+    `${invocations().length} herdr call(s) recorded so far`);
+  check(typedIn(keysBeforeRefusals, afterRefusals).length === 0,
+    'NOTHING WAS TYPED AT ANY AGENT across both refusals — no send-keys, no send-text',
+    JSON.stringify(typedIn(keysBeforeRefusals, afterRefusals)));
+
+  // THE CANARY. Both refusals produce zero herdr calls of ANY kind, so the
+  // assertion above would read the same on a counter that had silently stopped
+  // working. A real send immediately afterwards has to move it — otherwise the
+  // zero was a constant rather than a measurement.
+  dropEnters(0);
+  await raw('send_to_agent', { path: WIRE_PATH, message: 'canary: the keystroke counter is live' });
+  check(typedIn(afterRefusals, invocations().length).length > 0,
+    'and the counter is LIVE: a real send in the same window does move it, so the zero above ' +
+    'is a measurement rather than a constant',
+    JSON.stringify(typedIn(afterRefusals, invocations().length)));
+
   // EVERY response carries both fields, in all three outcomes. A field that
   // appears only when true asks a caller to read meaning into an absence,
   // which is the shape this daemon refuses everywhere else (mcp.ts:297).

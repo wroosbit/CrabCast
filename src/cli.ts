@@ -1235,6 +1235,16 @@ function renderSend(reader: ResponseReader, request: Record<string, unknown>): s
       : null
   );
 
+  // A request that never became a send says so, rather than being printed as a
+  // delivery that did not happen. The daemon's own error already names what was
+  // wrong with the call, so this is the ordinary failure line.
+  if (verdict === 'refused') {
+    return lines(
+      failure(reader, `send to ${key} — REFUSED, nothing was typed at any agent`),
+      field('refused by', reader.take('refused')),
+      residue(reader)
+    );
+  }
   if (verdict === 'unverifiable') {
     return lines(
       `UNVERIFIABLE: send to ${key} — the message was typed, and whether it landed is UNKNOWN.`,

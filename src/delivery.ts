@@ -42,6 +42,33 @@
  *      somebody's working agent. KAN-114 forbids that outright, and the fix the
  *      human performed by hand in the witnessed incident is the right one: the
  *      text is already in the composer, so what it needs is a submit.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT CONFIRMING BY PANE ECHO DOES NOT ESTABLISH. Three limits, written down
+ * because a known gap named here is a boundary and an unnamed one is a defect.
+ * ---------------------------------------------------------------------------
+ *
+ * **1. `delivered` means SUBMITTED, not ARRIVED INTACT.** The claim is that
+ * this message's fingerprint appeared above the composer more times than
+ * before. It is not that the agent received this message *alone*. Two sends in
+ * quick succession can be submitted as ONE concatenated line — the second's
+ * text is typed into a composer the first is still sitting in — and both sends
+ * correctly report `delivered` while the agent acts only on the first. Observed
+ * in KAN-114's review. The mitigation is the caller's: leave the recipient time
+ * to swallow one message before sending the next, rather than pipelining.
+ *
+ * **2. A delivered message can arrive with somebody else's text in front of
+ * it.** The interrupt makes Claude Code restore its own in-flight prompt into
+ * the composer, and this send's text is appended after it, so what gets
+ * submitted is `<their interrupted prompt><our message>`. The confirmation is
+ * unaffected — the fingerprint is looked for anywhere in the submitted region,
+ * not at a line start — but the recipient reads both. Observed live in
+ * KAN-114's own proof.
+ *
+ * **3. Nothing here is evidence the agent UNDERSTOOD or ACTED on it.** The
+ * strongest claim available from a pane is that the recipient's TUI cleared its
+ * input buffer and committed the line. That is materially stronger than "bytes
+ * were typed", and it is materially weaker than "the work is under way".
  */
 
 /**
@@ -175,8 +202,26 @@ export function messageInComposer(tail: string, message: string): boolean {
  *    is a different fact from evidence of absence in exactly the way
  *    {@link AgentPresence}'s `absent`/`unverifiable` split already says for
  *    liveness and `activate`'s refuse-unverifiable already says for occupancy.
+ *
+ * EVERY ONE OF THE THREE IS A STATEMENT ABOUT A PANE THAT WAS LOOKED AT, and
+ * that is why a request which never became a send may not answer with any of
+ * them — see {@link SendResponseVerdict}. A bad path read no pane; calling that
+ * `not-delivered` would be true in outcome and false in its basis.
  */
 export type SendVerdict = 'delivered' | 'not-delivered' | 'unverifiable';
+
+/**
+ * What the wire can answer, which is the three DELIVERY verdicts plus one word
+ * for a request that never became a send at all.
+ *
+ * `refused` is not a fourth thing a send can do — it is the answer when there
+ * was no send: an unresolvable path, a blank message. Those read no pane, so
+ * they may not borrow `not-delivered`, whose whole content is "the pane was
+ * read and it is not in it". Giving them their own word keeps each of the three
+ * above meaning exactly what it says, and it uses the vocabulary `activate`
+ * already has for a call rejected before anything happened.
+ */
+export type SendResponseVerdict = SendVerdict | 'refused';
 
 /** How much of the tail is carried back to the caller as the verdict's evidence. */
 export const EVIDENCE_TAIL_CHARS = 4000;

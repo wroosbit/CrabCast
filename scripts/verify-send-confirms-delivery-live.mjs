@@ -290,6 +290,69 @@ let deliveredResult;
 }
 
 // ===========================================================================
+rule('1b. A BUSY RECIPIENT — the condition this ticket is actually about');
+// ===========================================================================
+//
+// ROUND 2, ITEM 2. Every other send in both proofs goes to an agent sitting at
+// an empty composer — an agent that would have been idle anyway. But the whole
+// point of `send_to_agent` is giving NEW INSTRUCTIONS TO A STILL-RUNNING
+// AGENT, so a proof that only ever addresses an idle one has not exercised the
+// case the feature exists for.
+//
+// It also measures the cost, which is the other half of round 2: the send's
+// first keystroke is a Ctrl+C, and this section is where that stops being an
+// abstract caveat and becomes a line of pane text.
+
+let busyResult;
+{
+  dropEnters(0);
+  setUnreadable(false);
+
+  // Put the agent to work on something that will still be running when we
+  // interrupt it. A Bash tool call is the state the review found: `sleep`
+  // running, and the interrupt terminating it.
+  await send('live 1b setup: run `sleep 90` with your Bash tool right now, nothing else');
+  let busy = false;
+  for (let i = 0; i < 30 && !busy; i++) {
+    await sleep(2000);
+    const t = bridge.tailAgent(AGENT_PATH, 60);
+    // Claude Code only offers "esc to interrupt" while it is actually working.
+    busy = t.success && typeof t.text === 'string' && /esc to interrupt/i.test(t.text);
+  }
+  check(busy, 'PRECONDITION: the agent is genuinely BUSY — its pane offers "esc to interrupt"',
+    bridge.tailAgent(AGENT_PATH, 20).text);
+
+  const mark = invocations().length;
+  const message = 'live 1b: reply with the single word BUSYACK and nothing else';
+  const r = await send(message);
+  busyResult = r;
+  showVerdict('sent to a BUSY agent:', r);
+  showPane('the REAL pane the verdict was read from:', r.evidence.tail);
+
+  check(r.verdict === 'delivered',
+    'a send to a BUSY agent is confirmed DELIVERED — the case the feature exists for',
+    JSON.stringify({ ...r.evidence, tail: undefined }));
+  check(r.evidence.landedAfter > r.evidence.landedBefore,
+    'and by the same measurement: the submitted count went up on a pane that was read');
+  check(keysSince(mark).filter((l) => l.endsWith(' C-c')).length === 1,
+    'exactly one Ctrl+C, at an agent that was mid-tool-call', JSON.stringify(keysSince(mark)));
+
+  // THE COST, MEASURED RATHER THAN CAVEATED. The first Ctrl+C terminates the
+  // recipient's in-flight work. The MCP description used to call this call
+  // "safe for the recipient's in-flight work"; it is not, and round 2 corrected
+  // the sentence. This is the evidence the corrected sentence rests on.
+  await sleep(3000);
+  const after = bridge.tailAgent(AGENT_PATH, 80);
+  const interrupted = after.success && typeof after.text === 'string' &&
+    /Interrupted|What should Claude do instead/i.test(after.text);
+  showPane('the pane after the send — what the interrupt did to the in-flight work:', after.text);
+  check(interrupted,
+    'AND THE IN-FLIGHT TOOL CALL WAS TERMINATED by the interrupt — so "safe for the recipient\'s ' +
+    'in-flight work" would have been false, which is why the MCP description no longer says it',
+    after.text?.slice(-400));
+}
+
+// ===========================================================================
 rule('2. THE ENTER DID NOT TAKE — reported NOT DELIVERED, on a real composer');
 // ===========================================================================
 
