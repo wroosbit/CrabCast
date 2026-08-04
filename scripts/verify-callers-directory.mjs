@@ -390,13 +390,32 @@ section('2. An existing .mcp.json is MERGED, not replaced (AC 2)');
   await invoke(deps, { action: 'deactivate_agent', path: dir });
   const forgotten = await invoke(deps, { action: 'forget_agent', path: dir });
   check('forget succeeded', forgotten.success === true, forgotten.error);
-  const afterForget = JSON.parse(fs.readFileSync(path.join(dir, '.mcp.json'), 'utf8'));
+
+  // SURVIVAL IS ASSERTED BEFORE THE FILE IS READ, and the order is the point.
+  // Reading first meant a deleted file crashed this section with an ENOENT
+  // before the assertion written for exactly that case ever ran: the suite went
+  // red, which is the right colour, but for the wrong reason and from the wrong
+  // line. "Never remove a file we did not create" would have been caught by a
+  // stack trace rather than by the check that names it — and a refactor moving
+  // the crash would have left the property unguarded with nothing looking
+  // different.
+  const mcpPath = path.join(dir, '.mcp.json');
+  const survives = fs.existsSync(mcpPath);
+  check(
+    'the file itself survives, because CrabCast did not create it',
+    survives && forgotten.success === true,
+    survives ? undefined : `${mcpPath} was deleted — a file CrabCast merged into is not ours to remove`
+  );
+
+  // Guarded for the same reason: a missing file must not turn the two
+  // assertions below into a crash that pre-empts them.
+  const afterForget = survives ? JSON.parse(fs.readFileSync(mcpPath, 'utf8')) : {};
+  const afterServers = afterForget.mcpServers ?? {};
   check('after forget, THEIR server and THEIR key are still there',
-    JSON.stringify(afterForget.mcpServers['their-linter']) === JSON.stringify(theirs.mcpServers['their-linter']) &&
-      JSON.stringify(afterForget.somethingElseEntirely) === JSON.stringify(theirs.somethingElseEntirely));
-  check('and ours is gone', afterForget.mcpServers.crabcast === undefined);
-  check('the file itself survives, because CrabCast did not create it',
-    fs.existsSync(path.join(dir, '.mcp.json')) && forgotten.success === true);
+    JSON.stringify(afterServers['their-linter']) === JSON.stringify(theirs.mcpServers['their-linter']) &&
+      JSON.stringify(afterForget.somethingElseEntirely) === JSON.stringify(theirs.somethingElseEntirely),
+    JSON.stringify(afterForget));
+  check('and ours is gone', afterServers.crabcast === undefined, JSON.stringify(afterServers));
 }
 
 // ===========================================================================
@@ -511,8 +530,15 @@ section('4. forget removes exactly what we wrote, and nothing else (AC 4)');
   check('THE DIRECTORY ITSELF IS UNTOUCHED — CrabCast never created one, so it never deletes one',
     fs.existsSync(dir) && fs.statSync(dir).isDirectory());
   check('their git repository is intact', fs.existsSync(path.join(dir, '.git', 'HEAD')));
+  // Existence asserted before the read, for the same reason as §2: a cleanup
+  // that deleted the caller's whole exclude file rather than one line from it
+  // must fail THIS check, not crash before reaching it.
+  const excludeSurvives = fs.existsSync(excludeFile);
+  check('their exclude file itself survives — we added a line to it, not created it',
+    excludeSurvives, excludeFile);
   check('and our exclude line is gone from it',
-    !fs.readFileSync(excludeFile, 'utf8').split('\n').some((l) => l.trim() === '.mcp.json'));
+    excludeSurvives &&
+      !fs.readFileSync(excludeFile, 'utf8').split('\n').some((l) => l.trim() === '.mcp.json'));
   check('CrabCast\'s own sidecar is gone too — it is ours, inside our own data dir',
     !fs.existsSync(sidecar), sidecar);
   check('forget REPORTED what it removed rather than doing it silently',
@@ -923,6 +949,36 @@ section('8. The opt-in and the definitions are ONE decision');
   await attempt('into-their-broken-file', { atlassian: { command: 'npx', args: [] } },
     { '.mcp.json': 'not json' });
 
+  // PROTOTYPE-SHAPED NAMES. This enumeration read as exhaustive and was not:
+  // a server named `__proto__` assigned into an ordinary object literal hits
+  // Object.prototype's setter, stores nothing, throws nothing, and the request
+  // simply loses the key. The whole chain then behaved impeccably about a
+  // definition it could no longer see — `configure` succeeded with an empty
+  // `willWrite`, the record stored `{}`, `activate` succeeded, and `agent
+  // start` was issued for an agent with no tools.
+  //
+  // An enumeration that misses a case is worse than an illustration, because
+  // it reads as exhaustive. So the case is in the enumeration now, and the two
+  // NON-dropping prototype names are here beside it — `constructor` and
+  // `hasOwnProperty` round-trip through a plain literal correctly, so the fix
+  // has to be structural rather than a special case for the one name a reader
+  // happened to think of.
+  //
+  // Built through JSON.parse rather than as a literal, and that is not a
+  // detail: `{ __proto__: … }` written in THIS file would lose the key before
+  // the request was even sent, and the case would silently become a different,
+  // weaker one. JSON.parse creates it as an own property, which is also
+  // exactly what the real socket path does.
+  const parsed = (text) => JSON.parse(text);
+  await attempt('proto-shaped-alone',
+    parsed('{"__proto__": {"command": "npx", "args": []}}'));
+  await attempt('proto-shaped-mixed',
+    parsed('{"__proto__": {"command": "npx"}, "atlassian": {"command": "npx"}}'));
+  await attempt('constructor-named',
+    parsed('{"constructor": {"command": "npx", "args": []}}'));
+  await attempt('hasownproperty-named',
+    parsed('{"hasOwnProperty": {"command": "npx", "args": []}}'));
+
   console.log('    every way of supplying definitions, and what happened:');
   for (const o of outcomes) console.log(`      ${o.label.padEnd(22)} ${o.outcome}`);
 
@@ -962,37 +1018,78 @@ section('9. The checks above can actually fail (mutation)');
 }
 
 {
-  // 2's predicate: "their server survived". Fed a file that was REPLACED rather
-  // than merged — the old unparseable-file branch's outcome — it must go red.
-  const replaced = { mcpServers: { crabcast: { command: 'node' } } };
-  check(
-    'the merge check goes RED against a file that was replaced rather than merged',
-    replaced.mcpServers['their-linter'] === undefined
-  );
-}
+  // 2's, 4's and 7's predicates, exercised against artifacts REAL CODE
+  // produced — not against literals written two lines up.
+  //
+  // WHY THIS BLOCK WAS REWRITTEN, since it is the more interesting half. The
+  // first version of these three "mutations" compared two script-local literals
+  // to each other and imported nothing from `dist`. They were green, they
+  // looked like mutation tests, and they proved nothing: §9 exists to show that
+  // §2/§4/§7 are not tautologies, and for these three the proof was itself one.
+  // The properties did hold — mutating the production code really did turn
+  // those sections red — but a proof that a proof means something has to run
+  // the thing it is talking about.
+  //
+  // So each predicate below is applied to output from the REAL
+  // `provisionMcpConfig` and the REAL `listing()`, under conditions where it
+  // must come back false.
+  const { provisionMcpConfig } = await import(path.join(dist, 'provisioning.js'));
 
-{
-  // 4's predicate: "the directory came back exactly as it was". Fed a listing
-  // with residue left in it, it must go red.
-  const before = ['README.md'];
-  const afterWithResidue = ['.mcp.json', 'README.md'];
+  // 2's predicate: "their server survived the merge". Provision into a
+  // directory that never had their server; the same predicate must say so.
+  const noTheirs = ownedDir('mutation-merge', {});
+  provisionMcpConfig({
+    agentPath: noTheirs,
+    sidecarDir: path.join(tmp, 'mutation-merge-sidecar'),
+    definitions: { crabcast: { command: 'node' } }
+  });
+  const merged = JSON.parse(fs.readFileSync(path.join(noTheirs, '.mcp.json'), 'utf8'));
   check(
-    'the residue check goes RED when a file is left behind',
-    JSON.stringify(before) !== JSON.stringify(afterWithResidue)
+    'the merge check goes RED on a real written file that does not carry their server — the ' +
+      'predicate discriminates rather than always agreeing',
+    merged.mcpServers['their-linter'] === undefined && merged.mcpServers.crabcast !== undefined,
+    JSON.stringify(merged.mcpServers)
   );
-}
 
-{
-  // 7's predicate: "the written definition equals the supplied one". Fed what a
-  // daemon that normalised the value would have produced — dropping the field
-  // it did not recognise — it must go red.
-  const supplied = { command: 'x', args: [], somethingCrabcastHasNeverHeardOf: { a: 1 } };
+  // 4's predicate: "the directory came back exactly as it was", over the same
+  // `listing()` §4 uses. A real provisioning write must make it false.
+  const residueDir = ownedDir('mutation-residue', { 'README.md': '# theirs\n' });
+  const beforeReal = listing(residueDir);
+  provisionMcpConfig({
+    agentPath: residueDir,
+    sidecarDir: path.join(tmp, 'mutation-residue-sidecar'),
+    definitions: { crabcast: { command: 'node' } }
+  });
+  const afterReal = listing(residueDir);
+  check(
+    'the residue check goes RED against a directory a real write left a file in',
+    JSON.stringify(beforeReal) !== JSON.stringify(afterReal),
+    `${JSON.stringify(beforeReal)} vs ${JSON.stringify(afterReal)}`
+  );
+
+  // 7's predicate: "the written definition equals the supplied one". Provision
+  // one definition, then compare the REAL written bytes against both it and a
+  // normalised version — the predicate must agree with one and not the other.
+  const verbatimDir = ownedDir('mutation-verbatim', {});
+  const suppliedDef = { command: 'x', args: [], somethingCrabcastHasNeverHeardOf: { a: 1 } };
+  provisionMcpConfig({
+    agentPath: verbatimDir,
+    sidecarDir: path.join(tmp, 'mutation-verbatim-sidecar'),
+    definitions: { theirs: suppliedDef }
+  });
+  const onDisk = JSON.parse(fs.readFileSync(path.join(verbatimDir, '.mcp.json'), 'utf8'))
+    .mcpServers.theirs;
   const normalised = { command: 'x', args: [] };
   check(
-    'the verbatim check goes RED against a definition that was normalised on the way through',
-    JSON.stringify(normalised) !== JSON.stringify(supplied)
+    'the verbatim check AGREES with the real written file and DISAGREES with a normalised ' +
+      'version of it — both directions, so it measures the file rather than always passing',
+    JSON.stringify(onDisk) === JSON.stringify(suppliedDef) &&
+      JSON.stringify(onDisk) !== JSON.stringify(normalised),
+    JSON.stringify(onDisk)
   );
+}
 
+{
   // 6c's predicate: "no `agent start` was issued". The argv log is what makes
   // that evidence rather than inference, so the detector itself is exercised
   // here — against an activation deliberately allowed to succeed. Without this,

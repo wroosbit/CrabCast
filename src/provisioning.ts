@@ -289,10 +289,20 @@ export function provisionMcpConfig(options: {
     }
   }
 
-  const servers =
+  // NULL-PROTOTYPE, because every key in here is caller-controlled and one of
+  // them has a setter on Object.prototype. `servers['__proto__'] = definition`
+  // on an ordinary literal throws nothing and stores nothing — see the note in
+  // router.ts's `parseAgentConfig` for the end-to-end failure that produces.
+  //
+  // `Object.assign` onto a null-prototype target is safe for the same reason
+  // the plain literal is not: with no prototype there is no setter to hit, so
+  // every key becomes an own property.
+  const servers: Record<string, unknown> = Object.assign(
+    Object.create(null),
     config.mcpServers && typeof config.mcpServers === 'object' && !Array.isArray(config.mcpServers)
-      ? { ...config.mcpServers }
-      : {};
+      ? config.mcpServers
+      : {}
+  );
 
   const foreign = Object.keys(definitions).filter(
     (key) => Object.prototype.hasOwnProperty.call(servers, key) && priorKeys[key] === undefined
@@ -307,7 +317,11 @@ export function provisionMcpConfig(options: {
     );
   }
 
-  const written: Record<string, string> = { ...priorKeys };
+  // Null-prototype for the same reason: `written` is keyed by server name too,
+  // and it is what `forget` later reads back to decide what it may remove. A
+  // key that vanished here would be a key CrabCast wrote and could never take
+  // back out.
+  const written: Record<string, string> = Object.assign(Object.create(null), priorKeys);
   for (const [key, definition] of Object.entries(definitions)) {
     servers[key] = definition;
     written[key] = JSON.stringify(definition);

@@ -547,7 +547,29 @@ function parseAgentConfig(data: any): ConfigParse {
       );
     }
 
-    const specs: Record<string, McpServerSpec> = {};
+    // `Object.create(null)`, NOT `{}`, AND THIS IS LOAD-BEARING.
+    //
+    // A server named `__proto__` assigned into an ordinary object literal hits
+    // Object.prototype's setter instead of creating an own property. The
+    // assignment succeeds, throws nothing, and the key is simply NOT THERE
+    // afterwards. Reproduced end to end: `configure` answered `success: true`
+    // with `willWrite: []`, the record stored `mcpServers: {}`, `activate`
+    // answered `success: true`, no `.mcp.json` was written, and `agent start`
+    // WAS issued — a caller supplied a definition, the agent came up with no
+    // tools, and nothing anywhere said why.
+    //
+    // That is precisely the defect this slice exists to close, living inside
+    // the slice that closes it. And the count guard downstream (herdr.ts)
+    // cannot catch it: the key is lost HERE, one frame upstream, so by the time
+    // the bridge compares counts the record honestly reads "nothing was asked
+    // for". The guard is not wrong; it is being lied to. Which is the argument
+    // for fixing it at every point the map is built rather than adding a
+    // special case for one name.
+    //
+    // `constructor`, `toString` and `hasOwnProperty` all round-trip through a
+    // plain literal correctly — only `__proto__` has the setter — so this is
+    // not a class of key that a reader would spot by trying the obvious ones.
+    const specs: Record<string, McpServerSpec> = Object.create(null);
     const unknownBuiltins: string[] = [];
     for (const [name, spec] of Object.entries(data.mcpServers as Record<string, unknown>)) {
       if (!name.trim()) {

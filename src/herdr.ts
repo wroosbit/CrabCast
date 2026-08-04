@@ -804,7 +804,11 @@ export class HerdrBridge {
     const requested = config.mcpServers ?? {};
     const requestedNames = Object.keys(requested);
     if (requestedNames.length > 0) {
-      const definitions: Record<string, unknown> = {};
+      // `Object.create(null)` — see the note in router.ts's `parseAgentConfig`.
+      // A server named `__proto__` assigned into a plain literal vanishes
+      // silently, and the count comparison below is what would otherwise be
+      // asked to notice a key that never arrived.
+      const definitions: Record<string, unknown> = Object.create(null);
       const unsupplied: string[] = [];
       // Insertion order preserved: the caller's map is iterated in the order it
       // arrived and each value is carried across untouched, so "nothing is
