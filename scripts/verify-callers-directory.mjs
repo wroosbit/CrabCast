@@ -712,6 +712,41 @@ console.log('\n  6b. a server key that is already theirs');
   check('and the refusal names the colliding server', /'crabcast'/.test(activated.error ?? ''),
     activated.error);
   check('no agent was started', agentStartIssued() === false);
+
+  // THE SIBLING OF THE `__proto__` BUG, and the one that destroys THEIR data
+  // rather than losing ours. Found by probing for relatives of the round-1
+  // blocker rather than by anything failing.
+  //
+  // The guard above asked "have we written this key before?" as
+  // `priorKeys[key] === undefined`. For a server named `toString` — or
+  // `constructor`, `valueOf`, `hasOwnProperty` — that lookup inherits a
+  // function from Object.prototype, so it is never `undefined`, so the key
+  // answered as OURS and was silently overwritten. Exactly backwards: the
+  // caller's own server, taken over by the guard written to prevent that.
+  const theirsNamedToString = { mcpServers: { toString: { command: '/their/own/thing' } } };
+  const protoDir = ownedDir('ac6-collision-prototype', {
+    '.mcp.json': JSON.stringify(theirsNamedToString, null, 2)
+  });
+  const protoDeps = newCase();
+  resetShim();
+  const protoRes = await bringUp(protoDeps, protoDir, {
+    ...CLAUDE,
+    // Built through JSON.parse for the same reason §8's cases are: a literal
+    // here would not faithfully carry a prototype-shaped key.
+    mcpServers: JSON.parse('{"toString": {"command": "/ours"}}')
+  });
+  check(
+    "a server named `toString` that is ALREADY THEIRS is refused, not taken over — the " +
+      'prototype family blinds a membership test written as `map[key] === undefined`',
+    protoRes.activated.success === false,
+    JSON.stringify(protoRes.activated).slice(0, 240)
+  );
+  check(
+    'and THEIR definition is untouched on disk',
+    JSON.parse(fs.readFileSync(path.join(protoDir, '.mcp.json'), 'utf8'))
+      .mcpServers.toString.command === '/their/own/thing'
+  );
+  check('nothing was started for it', agentStartIssued() === false);
 }
 
 console.log('\n  6c. a server CrabCast cannot supply — FEWER SERVERS THAN REQUESTED (KAN-121)');

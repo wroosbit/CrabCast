@@ -160,6 +160,24 @@ export class ProvisioningError extends Error {
 
 // --------------------------------------------------------------- provenance
 
+/**
+ * Whether `object` has `key` as its OWN property.
+ *
+ * ONE FUNCTION RATHER THAN THE IDIOM SPELLED OUT AT EACH SITE, because every
+ * key in this file is a server name a caller chose, and JavaScript objects
+ * answer questions about names they never held. `map[key] === undefined` is
+ * false for `toString`; `key in map` is true for `constructor`; and assigning
+ * `__proto__` into a plain literal stores nothing at all. Each of those three
+ * has already been a defect here — two found in review, one found looking for
+ * its siblings — and they are the same defect wearing different names.
+ *
+ * So: build every caller-keyed map with a null prototype, and ask about
+ * membership through this.
+ */
+function ownKey(object: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
 function provenanceFileIn(sidecarDir: string): string {
   return path.join(sidecarDir, PROVENANCE_FILENAME);
 }
@@ -252,7 +270,14 @@ export function provisionMcpConfig(options: {
   const { agentPath, sidecarDir, definitions } = options;
   const file = path.join(agentPath, MCP_CONFIG_FILENAME);
   const provenance = readProvenance(sidecarDir) ?? emptyProvenance(agentPath);
-  const priorKeys = provenance.mcpConfig?.keys ?? {};
+  // Null-prototype, and read below with `hasOwnProperty` rather than by
+  // comparing against `undefined`. See {@link ownKey} — the plain-literal
+  // version of this made the foreign-key refusal blind to a whole family of
+  // server names.
+  const priorKeys: Record<string, string> = Object.assign(
+    Object.create(null),
+    provenance.mcpConfig?.keys ?? {}
+  );
 
   const existed = fs.existsSync(file);
   let config: any = {};
@@ -304,8 +329,31 @@ export function provisionMcpConfig(options: {
       : {}
   );
 
+  // THE SECOND BUG OF THE PROTOTYPE FAMILY — found by probing for siblings of
+  // the `__proto__` one rather than by anything failing.
+  //
+  // A server named `toString` (or `constructor`, `valueOf`, `hasOwnProperty`)
+  // that the caller already has in their file, and that CrabCast has never
+  // written, used to answer this test as OURS: `priorKeys['toString']` inherits
+  // a function from Object.prototype, so it is not `undefined`, so the key was
+  // filtered out of `foreign` and quietly overwritten. That is the precise
+  // opposite of the property this guard exists for — do not take over a key
+  // that is the caller's — and it failed silently, in the direction of
+  // clobbering their file.
+  //
+  // Worse than the `__proto__` case in one way: that one dropped OUR key and
+  // the agent noticed by having no tools. This one destroys THEIRS.
+  //
+  // TWO INDEPENDENT FIXES, and both are kept deliberately — measured, not
+  // assumed. Building `priorKeys` with a null prototype closes it on its own
+  // (there is no inherited `toString` to find), and asking through `ownKey`
+  // closes it on its own (it ignores the prototype chain whatever the map's
+  // shape). Reverting either one alone leaves the proof green; reverting both
+  // turns it red, which is how the two were told apart. Keeping both means a
+  // future refactor that reconstructs this map from a plain object, or copies
+  // the membership idiom to a new site, does not silently reopen it.
   const foreign = Object.keys(definitions).filter(
-    (key) => Object.prototype.hasOwnProperty.call(servers, key) && priorKeys[key] === undefined
+    (key) => ownKey(servers, key) && !ownKey(priorKeys, key)
   );
   if (foreign.length) {
     throw new ProvisioningError(
@@ -672,7 +720,7 @@ function removeOurMcpKeys(
 
   const taken: string[] = [];
   for (const [key, written] of Object.entries(keys)) {
-    if (!Object.prototype.hasOwnProperty.call(servers, key)) continue;
+    if (!ownKey(servers, key)) continue;
     if (JSON.stringify(servers[key]) !== written) {
       left.push(
         `${file}: the server \`${key}\` has been edited since CrabCast wrote it, so it was left ` +
