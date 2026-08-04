@@ -15,6 +15,7 @@
 // exists) imports the built command table. Exits non-zero on any failure so a
 // reviewer can re-run it against the PR head.
 
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -380,6 +381,75 @@ for (const c of COMMANDS ?? []) {
       `'crabcast ${c.name}' records reply label '${c.responseAction}', which router.ts sends`
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// 5. The source tree holds nothing the compiler cannot see.
+//
+// This section exists because a stale copy of `src/router.ts` shipped in a
+// commit under the name `src/.ts` — a file whose entire name is the extension
+// — and all three required checks went green over it.
+//
+// Nothing here was careless twice: `tsconfig.json` has `"include": ["src"]`,
+// and TypeScript's wildcard expansion SKIPS dot-prefixed files. So the file
+// was never compiled, never imported, and never rendered by `ls`. What it did
+// do is answer every future grep, code search and reader with a 2,586-line
+// near-copy of this daemon's largest file, 23 lines out of date on the
+// ownership test — which is how it was found.
+//
+// The lesson is the one this suite keeps relearning: a check that cannot fail
+// is not a check. The compiler's blindness here is deliberate and correct for
+// its own job, so the audit belongs somewhere that looks at the tree rather
+// than at the build — and this script is already the one that reads `src/`
+// mechanically and starts nothing.
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 5. Nothing in src/ is invisible to the compiler ===\n');
+
+const gitFiles = execFileSync('git', ['ls-files', 'src', 'scripts'], {
+  cwd: repoRoot,
+  encoding: 'utf8'
+}).split('\n').filter(Boolean);
+
+const invisible = gitFiles.filter((f) => path.basename(f).startsWith('.'));
+const wrongExt = gitFiles.filter((f) => {
+  const b = path.basename(f);
+  if (b.startsWith('.')) return false;              // reported above
+  if (f.startsWith('src/')) return !b.endsWith('.ts');
+  return !b.endsWith('.mjs');
+});
+
+console.log(`  tracked under src/ and scripts/: ${gitFiles.length} file(s)`);
+check(
+  invisible.length === 0,
+  'no tracked file under src/ or scripts/ has a dot-prefixed name',
+  invisible.length
+    ? `INVISIBLE TO tsc AND TO \`ls\`: ${invisible.join(', ')} — a wildcard include skips ` +
+      `these, so nothing compiles or lints them`
+    : ''
+);
+check(
+  wrongExt.length === 0,
+  'every tracked file has the extension its directory expects (src/*.ts, scripts/*.mjs)',
+  wrongExt.length ? wrongExt.join(', ') : ''
+);
+
+// And the compiler really does see every source file, rather than this being
+// an argument about wildcards: compare what git tracks against what tsc emits.
+const distDir = path.join(repoRoot, 'dist');
+if (fs.existsSync(distDir)) {
+  const emitted = new Set(
+    fs.readdirSync(distDir).filter((f) => f.endsWith('.js')).map((f) => f.slice(0, -3))
+  );
+  const unemitted = gitFiles
+    .filter((f) => f.startsWith('src/') && f.endsWith('.ts'))
+    .map((f) => path.basename(f, '.ts'))
+    .filter((name) => !emitted.has(name));
+  check(
+    unemitted.length === 0,
+    'and every tracked src/*.ts was actually emitted to dist/ — measured, not assumed',
+    unemitted.length ? `never compiled: ${unemitted.join(', ')}` : `${emitted.size} module(s)`
+  );
 }
 
 // ---------------------------------------------------------------------------
