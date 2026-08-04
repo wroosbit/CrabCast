@@ -560,23 +560,36 @@ async function raw(action, payload = {}) {
   });
 }
 
+// A DIRECTORY OF ITS OWN, configured BEFORE anything runs in it — the ordinary
+// caller ordering (configure, then activate), rather than sections 1-5's
+// fixture where the pane was started first and CrabCast never knew about it.
+//
+// That ordering is not incidental. Configuring a path that ALREADY has a live
+// CrabCast-named pane and no durable record CRASHES on current `main`
+// (`Cannot read properties of undefined (reading 'configVersion')`, router.ts
+// :1469 — `existing!` on a branch reachable with no `existing`). Filed as a
+// follow-up and linked `Relates` to this ticket; it is T4's refusal path
+// rather than this slice's, so it is reported rather than patched here.
+const WIRE_DIR = fs.mkdtempSync(path.join(scratchRoot, 'wire-'));
+const WIRE_PATH = fs.realpathSync(WIRE_DIR);
+
 {
   // The daemon is spawned by the CLI's own first connect, exactly as any
-  // caller would get one. `configure` then `activate` puts a record behind the
-  // pane the shim already has, so the router's address resolution has
-  // something real to resolve.
+  // caller would get one. `activate` then spawns the pane through the shim, so
+  // every read below resolves a pane the real code path created.
   dropEnters(0);
   setUnreadable(false);
-  const configured = crabcast(['configure', AGENT_PATH, '--priority', '5', '--launcher', 'claude']);
+  const configured = crabcast(['configure', WIRE_PATH, '--priority', '5', '--launcher', 'claude']);
   check(configured.status === 0, 'the CLI configured an agent against a real daemon',
-    `${configured.status}: ${configured.stderr?.slice(0, 300)}`);
+    `exit ${configured.status}\n${configured.stdout}\n${configured.stderr}`);
   const st = await raw('daemon_status');
   daemonPids.add(st.pid);
-  const activated = crabcast(['activate', AGENT_PATH, '--override']);
-  check(activated.status === 0, 'and activated it', `${activated.status}: ${activated.stderr?.slice(0, 400)}`);
+  const activated = crabcast(['activate', WIRE_PATH, '--override']);
+  check(activated.status === 0, 'and activated it',
+    `exit ${activated.status}\n${activated.stdout}\n${activated.stderr}`);
 
   // --- the socket: a delivered send ---------------------------------------
-  const okRes = await raw('send_to_agent', { path: AGENT_PATH, message: 'wire: a delivered message' });
+  const okRes = await raw('send_to_agent', { path: WIRE_PATH, message: 'wire: a delivered message' });
   console.log('   send_to_agent_response (delivered):');
   console.log(JSON.stringify({ ...okRes, evidence: { ...okRes.evidence, tail: '…' } }, null, 2)
     .replace(/^/gm, '     '));
@@ -585,7 +598,7 @@ async function raw(action, payload = {}) {
 
   // --- the socket: a send whose Enter did not take -------------------------
   dropEnters(99);
-  const badRes = await raw('send_to_agent', { path: AGENT_PATH, message: 'wire: the enter did not take' });
+  const badRes = await raw('send_to_agent', { path: WIRE_PATH, message: 'wire: the enter did not take' });
   console.log('   send_to_agent_response (not delivered):');
   console.log(JSON.stringify({ ...badRes, evidence: { ...badRes.evidence, tail: '…' } }, null, 2)
     .replace(/^/gm, '     '));
@@ -597,7 +610,7 @@ async function raw(action, payload = {}) {
   // --- the socket: unverifiable -------------------------------------------
   dropEnters(0);
   setUnreadable(true);
-  const unkRes = await raw('send_to_agent', { path: AGENT_PATH, message: 'wire: cannot be observed' });
+  const unkRes = await raw('send_to_agent', { path: WIRE_PATH, message: 'wire: cannot be observed' });
   setUnreadable(false);
   console.log('   send_to_agent_response (unverifiable):');
   console.log(JSON.stringify(unkRes, null, 2).replace(/^/gm, '     '));
@@ -616,16 +629,16 @@ async function raw(action, payload = {}) {
 
   // --- the CLI -------------------------------------------------------------
   dropEnters(0);
-  const cliOk = crabcast(['send', AGENT_PATH, 'cli: a delivered message']);
-  console.log(`   $ crabcast send ${AGENT_PATH} 'cli: a delivered message'`);
+  const cliOk = crabcast(['send', WIRE_PATH, 'cli: a delivered message']);
+  console.log(`   $ crabcast send ${WIRE_PATH} 'cli: a delivered message'`);
   console.log(cliOk.stdout.replace(/^/gm, '     '));
   check(cliOk.status === 0 && /delivered to /.test(cliOk.stdout) &&
         /submitted output/.test(cliOk.stdout),
     'the CLI says DELIVERED and says what that was read from', cliOk.stdout.slice(0, 300));
 
   dropEnters(99);
-  const cliBad = crabcast(['send', AGENT_PATH, 'cli: the enter did not take']);
-  console.log(`   $ crabcast send ${AGENT_PATH} 'cli: the enter did not take'`);
+  const cliBad = crabcast(['send', WIRE_PATH, 'cli: the enter did not take']);
+  console.log(`   $ crabcast send ${WIRE_PATH} 'cli: the enter did not take'`);
   console.log(cliBad.stdout.replace(/^/gm, '     '));
   check(cliBad.status !== 0 && /NOT DELIVERED/.test(cliBad.stdout),
     'the CLI says NOT DELIVERED and exits non-zero — it no longer says "Enter pressed"',
@@ -635,9 +648,9 @@ async function raw(action, payload = {}) {
 
   dropEnters(0);
   setUnreadable(true);
-  const cliUnk = crabcast(['send', AGENT_PATH, 'cli: cannot be observed']);
+  const cliUnk = crabcast(['send', WIRE_PATH, 'cli: cannot be observed']);
   setUnreadable(false);
-  console.log(`   $ crabcast send ${AGENT_PATH} 'cli: cannot be observed'`);
+  console.log(`   $ crabcast send ${WIRE_PATH} 'cli: cannot be observed'`);
   console.log(cliUnk.stdout.replace(/^/gm, '     '));
   check(/UNVERIFIABLE/.test(cliUnk.stdout) && !/FAILED/.test(cliUnk.stdout),
     'and UNVERIFIABLE gets its own line rather than being printed as a failure — ' +

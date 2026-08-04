@@ -775,16 +775,59 @@ function missingKnobs(missing: unknown): string | null {
   return `${INDENT}missing:       ${missing.join(', ')}`;
 }
 
+/**
+ * What this call did to each knob, one line each.
+ *
+ * PRINTED IN FULL, INCLUDING THE UNCHANGED ONES, and that is the point rather
+ * than verbosity. `configure` takes one desired-state document, so a reader
+ * asking "did my change land" is really asking about every field they sent —
+ * and the answer that matters most is the one this task exists to make
+ * impossible to fake: a knob that was REFUSED beside one that was WITHHELD
+ * beside one that was applied. Printing only the interesting ones would let a
+ * half-applied call look like a clean one at a glance, which is the defect.
+ */
+const OUTCOME_GLOSS: Record<string, string> = {
+  'unchanged': 'unchanged — the value sent is the value it already had',
+  'applied-in-place': 'APPLIED IN PLACE — live now, nothing was respawned',
+  'applied': 'applied — takes effect at the next activate',
+  'refused-restart-required': 'REFUSED — cannot change under a running agent',
+  'withheld': 'withheld — would have applied in place; nothing was, this call is atomic'
+};
+
+function outcomesBlock(outcomes: unknown): string | null {
+  if (!outcomes || typeof outcomes !== 'object' || Array.isArray(outcomes)) return null;
+  const rows = Object.entries(outcomes as Record<string, string>);
+  if (!rows.length) return null;
+  const width = Math.max(...rows.map(([name]) => name.length));
+  return lines(
+    '\nper knob:',
+    ...rows.map(
+      ([name, outcome]) =>
+        `${INDENT}${name.padEnd(width)}  ${OUTCOME_GLOSS[outcome] ?? outcome}`
+    )
+  );
+}
+
 function renderConfigure(reader: ResponseReader, request: Record<string, unknown>): string {
   const what = addressed(reader, request);
   if (!reader.success) {
+    const attributes = reader.take<string[]>('attributes');
+    const withheld = reader.take<string[]>('withheld');
+    // Read rather than rendered a second time: the daemon's error already
+    // names each attribute and its reason, in a sentence a caller can act on.
+    reader.seen('reasons', 'changed');
     return lines(
       failure(reader, `configure ${what}`),
       field('refused', reader.take('refused')),
       missingKnobs(reader.take('missing')),
+      field('attributes', Array.isArray(attributes) ? attributes.join(', ') : null),
       reader.take('applied') !== undefined
         ? `${INDENT}applied:       nothing — configure is all-or-nothing`
         : null,
+      // NAMED SEPARATELY FROM THE REFUSED ONES. These could have moved and did
+      // not, and a caller who cannot tell the two apart cannot tell whether
+      // re-sending the in-place knobs alone would work.
+      field('withheld', Array.isArray(withheld) && withheld.length ? withheld.join(', ') : null),
       // UNCHANGED, and said so: nothing was applied, so the version the caller
       // already holds is still current.
       field(
@@ -795,6 +838,12 @@ function renderConfigure(reader: ResponseReader, request: Record<string, unknown
       ),
       configBlockSeen(reader, INDENT),
       field('pane', reader.take('paneId')),
+      outcomesBlock(reader.take('outcomes')),
+      // The three calls that would do what the caller asked, verbatim from the
+      // daemon. The CLI does not compose this sentence: which verbs undo a
+      // restart-required change is the daemon's rule, and a copy here is the
+      // copy that is wrong after it changes.
+      reader.take('remedy') ? `\nremedy: ${reader.res.remedy}` : null,
       durability(reader),
       residue(reader)
     );
@@ -804,9 +853,34 @@ function renderConfigure(reader: ResponseReader, request: Record<string, unknown
   const note = reader.take('note');
   const version = reader.take('configVersion');
   const previous = reader.take('previousConfigVersion');
+  const changed = reader.take<string[]>('changed');
+  const appliedInPlace = reader.take('appliedInPlace');
+  // `applied` duplicates `changed` on this path and `withheld` is empty by
+  // construction; the per-knob block below says both, per knob.
+  reader.seen('applied', 'withheld', 'running');
+  const reconfigured = reader.take('reconfigured');
   return lines(
-    `${reader.take('reconfigured') ? 'reconfigured' : 'configured'} ${what}`,
+    `${reconfigured ? 'reconfigured' : 'configured'} ${what}`,
     field('pane name', reader.take('paneName')),
+    // WHAT MOVED, on a success. An empty list is the useful answer rather than
+    // a boring one: it says the document sent was already the configuration.
+    //
+    // On a FIRST configure the daemon reports every knob — there was no record,
+    // so all of it was written — and naming all eight there would be noise
+    // rather than information, so this says what that list means instead. The
+    // per-knob block below still prints each one, and `--json` carries the
+    // array either way: the summary is shortened, never the response.
+    Array.isArray(changed)
+      ? field(
+          'changed',
+          !reconfigured
+            ? 'every knob — this call created the record'
+            : changed.length
+              ? `${changed.join(', ')}${appliedInPlace ? ' — IN PLACE, on the running agent' : ''}`
+              : 'nothing — this document was already the configuration'
+        )
+      : null,
+    field('pane', reader.take('paneId')),
     // The compare-and-set token, on the call that minted it. A caller
     // reconciling against this daemon needs it without a second read.
     field(
@@ -842,6 +916,7 @@ function renderConfigure(reader: ResponseReader, request: Record<string, unknown
       ? `${INDENT}occupancy:     UNKNOWN — herdr did not answer, so nothing was checked`
       : null,
     occupiedBlock(occupied),
+    outcomesBlock(reader.take('outcomes')),
     note ? `\n${note}` : null,
     durability(reader),
     residue(reader)
@@ -1429,18 +1504,25 @@ function agentPathOf(positionals: string[]): string {
  * daemon already owns, and the copy is the one that is wrong after the daemon
  * changes. Omitting them produces the daemon's refusal, which names them and
  * says why — a better answer than anything this file could print.
+ *
+ * THE `(in place)` / `(RESTART)` MARKS ARE A CONVENIENCE, NOT THE RULE. The
+ * table that decides it is `RECONFIGURATION_COST` in router.ts, which is a
+ * total map over the configuration and therefore cannot omit a knob. These
+ * marks exist so `--help` answers the question a caller is about to ask, and
+ * the daemon's refusal — which names the attribute and the mechanical reason —
+ * is what they get if they ask anyway.
  */
 const CONFIGURE_FLAGS: FlagSpec[] = [
-  { name: 'priority', kind: 'number', value: '<n>', help: 'what this agent outranks when the machine is full (required)' },
-  { name: 'launcher', kind: 'string', value: '<name>', help: 'the runtime to run in the pane, e.g. claude (required)' },
-  { name: 'prompt', kind: 'string', value: '<text>', help: "the agent's bootstrap prompt, as literal text" },
-  { name: 'prompt-file', kind: 'string', value: '<file>', help: 'read the prompt from this file; its BYTES cross the wire, not the path' },
-  { name: 'mcp', kind: 'string', value: '<a,b>', help: 'comma-separated MCP servers CrabCast builds itself (crabcast)' },
-  { name: 'mcp-config', kind: 'string', value: '<file>', help: 'JSON file of your own server DEFINITIONS, {"name":{"command":…}}; its bytes cross the wire and are written verbatim' },
-  { name: 'label', kind: 'string', value: '<text>', help: 'display text; never parsed, never an address, duplicates fine' },
-  { name: 'refusable', kind: 'boolean', help: 'may the capacity gate refuse it (default true; --refusable=false to exempt)' },
-  { name: 'chargeable', kind: 'boolean', help: 'does it occupy a charged slot (default true)' },
-  { name: 'preemptable', kind: 'boolean', help: 'may it be stood down to make room (default true)' },
+  { name: 'priority', kind: 'number', value: '<n>', help: 'what this agent outranks when the machine is full (required; changes in place)' },
+  { name: 'launcher', kind: 'string', value: '<name>', help: 'the runtime to run in the pane, e.g. claude (required; RESTART: it IS the process)' },
+  { name: 'prompt', kind: 'string', value: '<text>', help: "the agent's bootstrap prompt, as literal text (RESTART: read once, at spawn)" },
+  { name: 'prompt-file', kind: 'string', value: '<file>', help: 'read the prompt from this file; its BYTES cross the wire, not the path (RESTART)' },
+  { name: 'mcp', kind: 'string', value: '<a,b>', help: 'comma-separated MCP servers CrabCast builds itself (crabcast) (RESTART: .mcp.json is read at boot)' },
+  { name: 'mcp-config', kind: 'string', value: '<file>', help: 'JSON file of your own server DEFINITIONS, {"name":{"command":…}}; its bytes cross the wire and are written verbatim (RESTART)' },
+  { name: 'label', kind: 'string', value: '<text>', help: 'display text; never parsed, never an address, duplicates fine (changes in place)' },
+  { name: 'refusable', kind: 'boolean', help: 'may the capacity gate refuse it (default true; --refusable=false to exempt; changes in place)' },
+  { name: 'chargeable', kind: 'boolean', help: 'does it occupy a charged slot (default true; changes in place)' },
+  { name: 'preemptable', kind: 'boolean', help: 'may it be stood down to make room (default true; changes in place)' },
   { name: 'gate-exempt', kind: 'boolean', help: 'shorthand for all three of the above false; refused alongside any of them' }
 ];
 
@@ -1617,7 +1699,9 @@ export const COMMANDS: CommandSpec[] = [
     name: 'configure',
     action: 'configure_agent',
     responseAction: 'configure_response',
-    summary: 'make an agent exist: freeze a directory plus its knobs into the durable registry',
+    summary:
+      'make an agent exist, or change its knobs — priority and the gate flags change under a ' +
+      'running agent, launcher/prompt/mcp are REFUSED rather than costing it a respawn',
     positionals: [PATH_ARG],
     flags: CONFIGURE_FLAGS,
     spawnsDaemon: true,
