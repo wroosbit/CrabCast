@@ -828,7 +828,9 @@ show(
 // daemonCwd then every check below would pass for the wrong reason — a
 // relative path would resolve somewhere neither directory is, and "it did not
 // reach the daemon-cwd victim" would be true by accident.
-const dstatus = await raw(rel, 'daemon_status', {});
+// `trackDaemon`, not a bare `raw`: this fixture spawns a daemon like every
+// other one, and a detached daemon nobody remembers outlives the script.
+const dstatus = await trackDaemon(rel);
 const procCwd = `/proc/${dstatus.pid}/cwd`;
 if (fs.existsSync(procCwd)) {
   check(
