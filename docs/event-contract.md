@@ -34,7 +34,7 @@ payload below.
 | `agent.deactivated` | `agent_deactivated_event` **(breaking)**, with `agent_preempted_event` **merged in** | a stand-down confirmed | `path`, `reason` (`requested` \| `preempted`); `paneName`, `sessionId`, `preemption` when they exist |
 | `agent.forgotten` | `agent_forgotten_event` **(breaking)** | `forget` accepted | `path`, `removed[]` |
 | `agent.status_changed` | — **(new)** | the fleet sweep observed a different herdr status than it last observed | `path`, `paneName`, `paneId`, `from`, `to` |
-| `agent.lost` | `agent_lost_event` **(breaking)** | an agent the registry records as active has no live agent in its directory | `path`, `paneName`, `label`, `config`, `configVersion`, `configuredAt`, `everActivated`, `since`, `reason` |
+| `agent.lost` | `agent_lost_event` **(breaking)** | an agent the registry records as active has no live agent in its directory | `path`, `paneName`, `label`, `config`, `configVersion`, `configuredAt`, `everActivated`, `activatedBy`, `since`, `reason` |
 | `agent.detached` | `agent_detached_event` **(breaking)** | a PTY this daemon held died | `path`, `paneName`, `sessionId`, `reason`, `exitCode` |
 | `capacity.overridden` | `capacity_override_event` **(breaking)** | an activation started past the capacity gate on an explicit override | `what`, `capacity` — **no `path`** |
 | `registry.degraded` | `registry_degraded_event` **(breaking)** | a durable registry write failed | `what`, `error`, `consequence` — **no `path`** |

@@ -101,6 +101,87 @@ entry bakes in `CRABCAST_CONFIG` so a server spawned inside a workspace addresse
 the daemon that provisioned it. You could not write it correctly, so CrabCast
 does. Asking for a builtin it does not have is **refused**, naming what it has.
 
+That entry also carries **`CRABCAST_AGENT_PATH`: the agent's own canonical
+path**, and it is worth knowing what that is for. It is how an agent identifies
+itself when it calls CrabCast, which is the whole input to `activatedBy` — the
+supervisor of record. When an agent configures or activates another agent, the
+daemon records *which* agent did it, so a fleet has an org chart rather than a
+flat list.
+
+It is here rather than in the pane's environment on purpose. This file is the
+one artifact that is both **specific to one agent** and **outside that agent's
+power to write**, so an identity placed in it is one CrabCast *issued*, not one a
+caller *asserted* — and there is no `activatedBy` parameter on any verb, so
+parentage cannot be claimed, only observed. A pane environment variable would be
+inherited by every process the agent ever spawns, which is a different and much
+looser thing.
+
+Two consequences, stated because neither is obvious:
+
+- An agent configured **without** the `crabcast` builtin is never identified —
+  but it also has no way to reach the daemon, so it cannot activate anything.
+- The **CLI is never identified**. A human at a shell has no supervisor of
+  record, and `activatedBy: null` says so explicitly rather than by omission.
+
+## Who becomes the supervisor of record, exactly
+
+> **Only two calls may establish parentage: the `configure` that brings an agent
+> into existence, and the `activate` that actually STARTS one.** Every other
+> call carries the existing value forward.
+
+`activatedBy` means *who stood this agent up*. So the calls that do not stand
+anything up do not get to answer the question:
+
+| call | mints? | why |
+| --- | --- | --- |
+| `configure` on a path with no record | **yes** | the agent comes into existence here |
+| `activate` that starts a stopped agent | **yes** | this call is what put it there |
+| `activate` on an agent already running | no | it re-attaches a terminal and repairs a record |
+| `configure` on an existing agent | no | changing a knob is not standing it up |
+| `deactivate` | no | stopping an agent is not activating it |
+| boot-time restoration | no | the machine came back; nobody decided anything |
+
+**This is not a refinement, it is a defect class.** Identity taken from whoever
+is *converging on* or *attached to* an agent answers "who is looking at this",
+which coincides with "who started it" often enough to pass a casual test and
+diverges the moment anyone touches a pane they did not create. A reconciler that
+polls `activate` to hold desired state would otherwise become the supervisor of
+record for every agent in the fleet, and the org chart would redraw itself to
+say so.
+
+An agent may not be its own supervisor. Under the rule above a self-claim is
+structurally unreachable — an agent must be running to call anything, and
+neither minting call can come from an agent already up at the path it names — so
+the guard that refuses it is defence in depth against a future third mint site.
+
+**The residual, named rather than left to be discovered.** A stand-down followed
+by a start **does** re-parent, because the start is a genuine start:
+
+```
+A activates X          → X.activatedBy = A
+B activates X (up)     → X.activatedBy = A     ← converge; no re-parenting
+B deactivates X
+B activates X (down)   → X.activatedBy = B     ← B stood it up this time
+```
+
+So **whichever caller most recently started an agent is its supervisor of
+record, and a caller that stops and restarts agents becomes the supervisor of
+every agent it restarts.** That follows from the rule rather than qualifying it,
+and it is written here because it is the kind of property that changes silently
+when somebody refactors the thing that calls `activate`.
+
+**This document does not say which callers that makes safe.** It states what the
+daemon does; whether a given consumer's design collides with it depends on
+decisions on their side of the boundary — how they converge, and whether one
+component is the sole writer — which are not facts this repository holds. A
+sentence here declaring some caller unaffected would be exactly the kind of
+claim this project keeps filing against itself: a property asserted about a
+category on the strength of knowing one path through it.
+
+Proved by `scripts/verify-activated-by.mjs` §5, including the control that a
+genuine restart by another supervisor *does* re-parent — without which
+"parentage never changes" would satisfy the whole section.
+
 ```bash
 crabcast configure /home/you/code/thing \
   --priority 5 --launcher claude \
@@ -287,3 +368,11 @@ from a response.
 
 It also proves it can **fail**: the last section mutates the things it guards and
 asserts the checks go red, because a check that cannot fail is not a check.
+
+`scripts/verify-activated-by.mjs` covers the `CRABCAST_AGENT_PATH` half, and it
+is deliberately arranged so that it cannot pass without the identity genuinely
+arriving: it reads the `.mcp.json` the daemon wrote, spawns the real MCP server
+with the environment **out of that file**, and lets two agents build a
+three-level chain. Nothing in that section types an identity in — because a
+proof that supplies its own input has not tested that the input arrives, which
+is precisely how this feature shipped broken elsewhere.

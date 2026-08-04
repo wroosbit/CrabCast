@@ -66,16 +66,50 @@ export const BUILTIN_MCP_SERVERS = ['crabcast'] as const;
  * data dir and could address a different daemon than the one that provisioned
  * it. That is why this is the one definition CrabCast owns: the caller has no
  * way to know which daemon they are being provisioned by.
+ *
+ * IT ALSO BAKES IN WHO THE AGENT IS, as CRABCAST_AGENT_PATH, and that is what
+ * makes a supervisor of record possible at all.
+ *
+ * The reasoning is the same one sentence further on. This definition is written
+ * per-agent, by the daemon, into that one agent's `.mcp.json` — it is the only
+ * artifact in this system that is BOTH specific to one agent and outside that
+ * agent's power to write. So an identity placed here is one the daemon issued,
+ * not one a caller asserted, and every request from the server it spawns can
+ * carry it (`mcp.ts`). The daemon then knows which agent is calling, which is
+ * the whole input to `activatedBy`.
+ *
+ * THE ALTERNATIVES, AND WHY NOT THEM. The pane's environment would identify a
+ * CLI run inside an agent too, and was rejected: it is inherited by every
+ * process the agent ever spawns, including ones that are not it, so it would
+ * turn a fact this daemon issued into ambient authority lying around in a shell.
+ * A caller-supplied field on `configure`/`activate` was rejected outright —
+ * parentage a caller can name is parentage a caller can invent, and the field's
+ * entire value to a consumer is that nobody chose it.
+ *
+ * WHAT THAT LEAVES UNIDENTIFIED, said plainly because it is a real hole and not
+ * a small one: an agent configured WITHOUT the `crabcast` builtin has no channel
+ * and therefore no identity — but it also has no way to reach this daemon, so it
+ * cannot activate anything and has nothing to be the parent of. And the CLI is
+ * never identified, deliberately: a human at a shell has no supervisor of
+ * record, and that is the case `activatedBy: null` exists to state.
+ *
+ * The paths are absolute and rewritten on every activation, like the two above,
+ * so a directory that moves does not leave an agent claiming its old identity.
  */
 export function builtinMcpServer(
   name: string,
-  daemonConfigPath?: string
+  daemonConfigPath?: string,
+  agentPath?: string
 ): Record<string, unknown> | null {
   if (name !== 'crabcast') return null;
+  const env: Record<string, string> = {
+    ...(daemonConfigPath ? { CRABCAST_CONFIG: daemonConfigPath } : {}),
+    ...(agentPath ? { CRABCAST_AGENT_PATH: agentPath } : {})
+  };
   return {
     command: process.execPath,
     args: [path.join(__dirname, 'mcp.js')],
-    ...(daemonConfigPath ? { env: { CRABCAST_CONFIG: daemonConfigPath } } : {})
+    ...(Object.keys(env).length ? { env } : {})
   };
 }
 

@@ -98,10 +98,19 @@ const dirFor = (name) => {
   return fs.realpathSync(dir);
 };
 
-// A durable record is a path plus its configuration. Under the type model most
-// of it could be looked up again from config; it cannot now, so the row IS the
-// agent — which is why section 1 checks the whole thing round-trips.
-const record = (name, over = {}) => ({ path: dirFor(name), config: knobs(over) });
+// A durable record is a path, its configuration, and who activated it. Under
+// the type model most of it could be looked up again from config; it cannot
+// now, so the row IS the agent — which is why section 1 checks the whole thing
+// round-trips.
+//
+// `activatedBy: null` is written rather than left off (KAN-113): the registry
+// normalizes every row on both edges, so a record built without the field comes
+// back WITH it, and the round-trip assertion below is a deep equality. Saying
+// it here keeps that assertion honest in the strong direction — it now checks
+// that parentage round-trips too, rather than being relaxed to ignore it.
+const record = (name, over = {}, activatedBy = null) => ({
+  path: dirFor(name), config: knobs(over), activatedBy
+});
 
 // ---------------------------------------------------------------------------
 section('1. The registry records intent, not history');
