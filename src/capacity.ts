@@ -37,16 +37,20 @@ import * as os from 'os';
  * fixed reservation for one of them had become arithmetic about an agent that
  * may not exist.
  *
- * The rule that replaced it (KAN-41), generalized here for config-declared
- * types: only *charged* agents — types without `gateExempt` in
- * crabcast.config.json — are accounted for at all. `cap` is cores and memory
- * minus the human reserve and herdr's overhead, and nothing else. Gate-exempt
- * types are neither counted in `running` nor reserved for — they are declared
- * exempt because they supervise rather than do the work, typically
- * low-resource and idle, not competing for the machine the way a worker
- * compiling a repo does. They are still reported in `Capacity.exemptAgents`,
- * so a reader of a capacity report can see they exist; they are simply never
- * charged.
+ * The rule that replaced it (KAN-41), now expressed per agent rather than per
+ * workspace type: only *chargeable* agents are accounted for at all. `cap` is
+ * cores and memory minus the human reserve and herdr's overhead, and nothing
+ * else. An agent a caller configured with `chargeable: false` is neither
+ * counted in `running` nor reserved for — that flag is asked for because the
+ * agent supervises rather than does the work, typically low-resource and idle,
+ * not competing for the machine the way a worker compiling a repo does. Such
+ * agents are still reported in `Capacity.exemptAgents`, so a reader of a
+ * capacity report can see they exist; they are simply never charged.
+ *
+ * `chargeable` used to be one third of a `gateExempt` boolean declared on a
+ * workspace type. Splitting it out is what lets a caller have an agent that
+ * costs a slot but can never be taken, or one that is free but still refusable
+ * — combinations the single flag could not express.
  *
  * KAN-44/KAN-56 closed the loop this header opened. `readCapacity()` always
  * read cores, memory and load live; the one static input left was the
@@ -219,13 +223,12 @@ export interface Capacity {
   /** Set when CRABCAST_MAX_AGENTS overrode the derivation. */
   configuredCap: number | null;
 
-  /** Charged agents alive right now. Gate-exempt agents are not among them. */
+  /** Chargeable agents alive right now. Unchargeable ones are not among them. */
   running: number;
   /**
-   * Agents of `gateExempt` types alive right now. Reported, never charged:
-   * their types are declared exempt in config because they supervise rather
-   * than do the work, and spend most of their lives idle. See the header for
-   * the argument.
+   * Agents configured `chargeable: false`, alive right now. Reported, never
+   * charged: a caller asks for that flag because the agent supervises rather
+   * than does the work, and spends most of its life idle. See the header.
    */
   exemptAgents: number;
 
@@ -291,7 +294,7 @@ export function computeCapacity(
 
   // Static cap: what the hardware supports with nothing else assumed. herdr's
   // share comes off here because the load average cannot be consulted for a
-  // machine that is not this one. Nothing is held back for gate-exempt types
+  // machine that is not this one. Nothing is held back for uncharged agents
   // — see the header: only charged agents are charged.
   const cpuBudget = machine.cores - reservedCores - HERDR_OVERHEAD_CORES;
   const capByCpu = Math.floor(Math.max(0, cpuBudget) / cost.cores);
@@ -326,7 +329,7 @@ export function computeCapacity(
   // The load average already includes every agent, charged or exempt, herdr,
   // and whatever the human is running, so this is the one term that
   // distinguishes three idle agents from three that are compiling. It is also
-  // where running gate-exempt agents are felt at all: never charged in the
+  // where running uncharged agents are felt at all: never charged in the
   // model, their real (usually small) usage is in the measured load, and in
   // availableBytes below — a running exempt agent's memory is memory the
   // kernel has already stopped offering.
@@ -472,7 +475,7 @@ export function getMeasuredAgentCost(): MeasuredAgentCost | null {
 /**
  * Capacity of this machine, with `running` charged agents already on it.
  *
- * `exempt` is how many gate-exempt agents were found running. It is passed so
+ * `exempt` is how many uncharged agents were found running. It is passed so
  * the report can say so, not so the arithmetic can charge for them — they are
  * never charged at all.
  */
@@ -551,7 +554,7 @@ export function describeCapacity(c: Capacity): string {
   lines.push(
     `running: ${c.running} charged agent(s)` +
     (c.exemptAgents > 0
-      ? `, plus ${c.exemptAgents} gate-exempt agent(s) (not counted against the cap)`
+      ? `, plus ${c.exemptAgents} uncharged agent(s) (not counted against the cap)`
       : '')
   );
   lines.push(

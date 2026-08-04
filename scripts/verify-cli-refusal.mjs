@@ -174,7 +174,7 @@ fs.chmodSync(path.join(shimDir, 'herdr'), 0o755);
  * daemon's whole life by whichever invocation happened to start it. One env
  * per fixture, used for every call against it, is what keeps that honest.
  */
-function fixture(name, types, env = {}) {
+function fixture(name, _unusedTypes, env = {}) {
   const dir = path.join(scratch, name);
   const dataDir = path.join(dir, 'data');
   // Its own shim state as well as its own dataDir: the shim records started
@@ -182,27 +182,21 @@ function fixture(name, types, env = {}) {
   // counting every other fixture's agents against its cap.
   const state = path.join(dir, 'shim-state');
   fs.mkdirSync(state, { recursive: true });
-  fs.mkdirSync(path.join(dir, 'prompts'), { recursive: true });
-  for (const type of types) {
-    fs.writeFileSync(path.join(dir, 'prompts', `${type.name}.md`), `KAN-93 proof workspace {{KEY}}.\n`);
-  }
   const configPath = path.join(dir, 'crabcast.config.json');
-  fs.writeFileSync(configPath, JSON.stringify({
-    dataDir,
-    workspaceTypes: types.map((t) => ({
-      name: t.name,
-      priority: t.priority,
-      promptFile: `prompts/${t.name}.md`,
-      defaultLauncher: 'shell',
-      mcpServers: [],
-      gateExempt: false
-    }))
-  }, null, 2));
+  // A dataDir and nothing else: there is no type table left to declare, and
+  // every knob this script used to put in it is now a `configure` flag.
+  fs.writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
   return {
     name,
     configPath,
     dataDir,
     state,
+    /** A directory this fixture's agents run in. The address, and all of it. */
+    dirFor(agent) {
+      const d = path.join(dir, 'owned', agent);
+      fs.mkdirSync(d, { recursive: true });
+      return fs.realpathSync(d);
+    },
     env: {
       ...process.env,
       HOME: fakeHome,
@@ -286,7 +280,22 @@ console.log(`scratch:        ${scratch}`);
 
 rule('1. REFUSAL — at CRABCAST_MAX_AGENTS=0, activate exits non-zero and prints the derivation');
 
-const capped = fixture('capped', [{ name: 'shell', priority: 1 }], CAP_ZERO);
+const capped = fixture('capped', null, CAP_ZERO);
+
+/**
+ * `crabcast configure <dir> …` — mandatory before anything can be activated,
+ * and the only place a priority and a launcher exist now.
+ */
+function configure(fx, agent, extra = []) {
+  const dir = fx.dirFor(agent);
+  const run = crabcast(fx, ['configure', dir, '--priority', '1', '--launcher', 'shell', ...extra]);
+  if (run.code !== EXIT.OK) {
+    console.log(`  configure ${dir} FAILED: ${run.stdout}${run.stderr}`);
+  }
+  return dir;
+}
+
+const demoDir = configure(capped, 'demo');
 
 // Two invocations, because one process prints one of the two modes. Their
 // figures come from two readings of a live machine a second apart, so load
@@ -296,8 +305,8 @@ const capped = fixture('capped', [{ name: 'shell', priority: 1 }], CAP_ZERO);
 let human = null;
 let asJson = null;
 for (let attempt = 1; attempt <= 5; attempt++) {
-  human = crabcast(capped, ['activate', 'shell', 'demo']);
-  const jsonRun = crabcast(capped, ['activate', 'shell', 'demo', '--json']);
+  human = crabcast(capped, ['activate', demoDir]);
+  const jsonRun = crabcast(capped, ['activate', demoDir, '--json']);
   try {
     asJson = { ...jsonRun, parsed: JSON.parse(jsonRun.stdout) };
   } catch {
@@ -311,7 +320,7 @@ for (let attempt = 1; attempt <= 5; attempt++) {
 }
 await trackDaemon(capped);
 
-show('the session, unedited:', `$ CRABCAST_MAX_AGENTS=0 crabcast activate shell demo\n${human.stdout}$ echo $?\n${human.code}`);
+show('the session, unedited:', `$ CRABCAST_MAX_AGENTS=0 crabcast activate ${demoDir}\n${human.stdout}$ echo $?\n${human.code}`);
 
 check(human.code !== 0, `it exits non-zero (${human.code})`);
 check(human.code === EXIT.REFUSED, `the code is ${EXIT.REFUSED} — "the daemon said no", not "no daemon" (${EXIT.TRANSPORT})`);
@@ -368,7 +377,7 @@ const rendered = activateSpec.render(new ResponseReader({
   reason: 'the load average is 3.00',
   derivation: SYNTHETIC_DERIVATION,
   id: 'cli-1-1'
-}), { type: 'task', key: 'KAN-93' });
+}), { path: '/home/someone/work' });
 show('rendered:', rendered);
 check(rendered.includes(SYNTHETIC_DERIVATION), 'the rendered text contains the derivation as one contiguous verbatim block');
 check(
@@ -382,13 +391,12 @@ check(
 const withUnknown = activateSpec.render(new ResponseReader({
   action: 'activate_response',
   success: true,
-  type: 'shell',
-  key: 'demo',
+  path: '/home/someone/work',
   sessionId: 's1',
   status: 'active',
   verified: true,
   somethingTheCliHasNeverHeardOf: 'must still be visible'
-}), { type: 'shell', key: 'demo' });
+}), { path: '/home/someone/work' });
 check(
   withUnknown.includes('somethingTheCliHasNeverHeardOf') && withUnknown.includes('must still be visible'),
   'an unrecognised response field is printed, not silently dropped'
@@ -398,7 +406,7 @@ check(
 
 rule('3. --json — the daemon\'s response, field for field, unmodified');
 
-const wire = await raw(capped, 'activate_by_key', { type: 'shell', key: 'demo' });
+const wire = await raw(capped, 'activate_agent', { path: demoDir });
 const viaCli = asJson.parsed;
 
 show('what the CLI printed (--json):', JSON.stringify(viaCli, null, 2));
@@ -436,18 +444,22 @@ const codes = [];
 
 codes.push(['0 success', crabcast(capped, ['capacity']), EXIT.OK]);
 codes.push(['1 refused', human, EXIT.REFUSED]);
-codes.push(['2 usage (missing operand)', crabcast(capped, ['activate', 'shell']), EXIT.USAGE]);
+codes.push(['2 usage (missing operand)', crabcast(capped, ['activate']), EXIT.USAGE]);
 codes.push(['2 usage (unknown command)', crabcast(capped, ['frobnicate']), EXIT.USAGE]);
 codes.push(['2 usage (unknown flag)', crabcast(capped, ['list', '--colour']), EXIT.USAGE]);
 
 // Nothing has ever run in this data dir, and `list` does not start a daemon.
-const cold = fixture('cold', [{ name: 'shell', priority: 1 }]);
+const cold = fixture('cold', null);
 const transport = crabcast(cold, ['list']);
 codes.push(['3 transport (no daemon, and list does not start one)', transport, EXIT.TRANSPORT]);
 
 // A config that was NAMED and will not load: a refusal, never a fallback onto
 // whatever daemon happens to be running somewhere else.
 const brokenConfig = path.join(scratch, 'broken.config.json');
+// A config that still declares the retired key. It is refused rather than
+// ignored — a config written against the type model set an agent's priority,
+// prompt, launcher and gate exemption, and silently dropping it would start a
+// daemon that agrees with the file about nothing.
 fs.writeFileSync(brokenConfig, '{ "workspaceTypes": [ { "name": "shell" } ] }');
 const configRefusal = spawnSync(process.execPath, [cliJs, 'list', '--config', brokenConfig], {
   env: capped.env,
@@ -469,8 +481,10 @@ check(
 );
 show('the config refusal:', codes[codes.length - 1][1].stderr.trim());
 check(
-  /priority/.test(codes[codes.length - 1][1].stderr),
-  'the config refusal repeats the loader\'s own complaint rather than inventing one'
+  /workspaceTypes/.test(codes[codes.length - 1][1].stderr) &&
+    /no longer a config key/.test(codes[codes.length - 1][1].stderr),
+  'the config refusal repeats the loader\'s own complaint rather than inventing one — and\n' +
+  '        names the retired key rather than silently ignoring it'
 );
 
 // ------------------------------------------------------------------ 5. flags
@@ -481,24 +495,27 @@ rule('5. --override AND --preempt — real booleans, proven in both directions')
 //     starts here is the flag arriving as a boolean true. The router refuses a
 //     non-boolean before it looks anything up (invalidFlag), so a CLI that
 //     forwarded the string "true" would be refused instead.
-const overrides = fixture('override', [{ name: 'shell', priority: 1 }], CAP_ZERO);
-const overrode = crabcast(overrides, ['activate', 'shell', 'kept', '--override']);
+const overrides = fixture('override', null, CAP_ZERO);
+const keptDir = configure(overrides, 'kept');
+const notkeptDir = configure(overrides, 'notkept');
+const junkDir = configure(overrides, 'junk');
+const overrode = crabcast(overrides, ['activate', keptDir, '--override']);
 await trackDaemon(overrides);
-show('$ crabcast activate shell kept --override', overrode.stdout + overrode.stderr);
+show(`$ crabcast activate ${keptDir} --override`, overrode.stdout + overrode.stderr);
 check(overrode.code === EXIT.OK, `--override starts an agent past a cap of 0 (exit ${overrode.code})`);
 check(/started past the cap on purpose/.test(overrode.stdout), 'the override is reported, with the figures it bypassed');
 
-const overrideFalse = crabcast(overrides, ['activate', 'shell', 'notkept', '--override=false']);
-show('$ crabcast activate shell notkept --override=false', overrideFalse.stdout + overrideFalse.stderr);
+const overrideFalse = crabcast(overrides, ['activate', notkeptDir, '--override=false']);
+show(`$ crabcast activate ${notkeptDir} --override=false`, overrideFalse.stdout + overrideFalse.stderr);
 check(overrideFalse.code === EXIT.REFUSED, '--override=false is a real false: the activation is refused');
 check(
   !/Invalid override/.test(overrideFalse.stdout),
   'and it is refused BY CAPACITY, not as an invalid flag — the wire carried a boolean, not the string "false"'
 );
 
-const overrideJunk = crabcast(overrides, ['activate', 'shell', 'junk', '--override=yes']);
+const overrideJunk = crabcast(overrides, ['activate', junkDir, '--override=yes']);
 check(overrideJunk.code === EXIT.USAGE, '--override=yes is a usage error (exit 2) that never reaches the daemon');
-show('$ crabcast activate shell junk --override=yes', overrideJunk.stderr.trim());
+show(`$ crabcast activate ${junkDir} --override=yes`, overrideJunk.stderr.trim());
 
 // (b) --preempt, end to end: one agent running, a higher-priority activation
 //     refused with a preemption offer, then the same call with the flag.
@@ -506,34 +523,40 @@ show('$ crabcast activate shell junk --override=yes', overrideJunk.stderr.trim()
 //     what binds, which is the constraint the preemption is about.
 const fleet = fixture(
   'preempt',
-  [{ name: 'shell', priority: 1 }, { name: 'boss', priority: 5 }],
+  null,
   { CRABCAST_MAX_AGENTS: '1', CRABCAST_AGENT_CORES: '0.01', CRABCAST_AGENT_MEMORY_MB: '1' }
 );
-const first = crabcast(fleet, ['activate', 'shell', 'humble']);
-await trackDaemon(fleet);
-check(first.code === EXIT.OK, `the one slot is taken by shell/humble (exit ${first.code})`);
+// Priority is a `configure` flag now rather than a property of a type, so the
+// two agents differ by what their own records say they are worth.
+const humbleDir = configure(fleet, 'humble');
+const chiefDir = fleet.dirFor('chief');
+crabcast(fleet, ['configure', chiefDir, '--priority', '5', '--launcher', 'shell']);
 
-const refusedForRoom = crabcast(fleet, ['activate', 'boss', 'chief']);
-show('$ crabcast activate boss chief', refusedForRoom.stdout);
+const first = crabcast(fleet, ['activate', humbleDir]);
+await trackDaemon(fleet);
+check(first.code === EXIT.OK, `the one slot is taken by the priority-1 agent (exit ${first.code})`);
+
+const refusedForRoom = crabcast(fleet, ['activate', chiefDir]);
+show(`$ crabcast activate ${chiefDir}`, refusedForRoom.stdout);
 check(refusedForRoom.code === EXIT.REFUSED, 'a second activation is refused: the cap is 1');
 check(
-  /preemption available/.test(refusedForRoom.stdout) && /shell\/humble/.test(refusedForRoom.stdout),
-  'the refusal names the agent that could be stood down, by address'
+  /preemption available/.test(refusedForRoom.stdout) && refusedForRoom.stdout.includes(humbleDir),
+  'the refusal names the agent that could be stood down, by path'
 );
 
-const preemptFalse = crabcast(fleet, ['activate', 'boss', 'chief', '--preempt=false']);
+const preemptFalse = crabcast(fleet, ['activate', chiefDir, '--preempt=false']);
 check(preemptFalse.code === EXIT.REFUSED, '--preempt=false is a real false: still refused');
 check(
   !/Invalid preempt/.test(preemptFalse.stdout),
   'and refused by capacity rather than by the router\'s flag validation'
 );
 
-const preempted = crabcast(fleet, ['activate', 'boss', 'chief', '--preempt']);
-show('$ crabcast activate boss chief --preempt', preempted.stdout);
+const preempted = crabcast(fleet, ['activate', chiefDir, '--preempt']);
+show(`$ crabcast activate ${chiefDir} --preempt`, preempted.stdout);
 check(preempted.code === EXIT.OK, `--preempt makes room and the activation succeeds (exit ${preempted.code})`);
 check(
-  /preempted to make room/.test(preempted.stdout) && /shell\/humble/.test(preempted.stdout),
-  'the CLI says whose work was interrupted, by address'
+  /preempted to make room/.test(preempted.stdout) && preempted.stdout.includes(humbleDir),
+  'the CLI says whose work was interrupted, by path'
 );
 
 const afterwards = crabcast(fleet, ['list']);
@@ -601,7 +624,7 @@ const shimSent = () => {
 // shell/kept is the agent section 5 started with --override, and it is still
 // running against the same daemon.
 const before = shimSent().length;
-const sentHelp = crabcast(overrides, ['send', 'kept', '--help']);
+const sentHelp = crabcast(overrides, ['send', keptDir, '--help']);
 const afterHelp = shimSent();
 show('$ crabcast send kept --help', sentHelp.stdout + sentHelp.stderr);
 show('what herdr was asked to type:', JSON.stringify(afterHelp[afterHelp.length - 1]));
@@ -616,34 +639,36 @@ check(
 );
 check(sentHelp.code === EXIT.OK, `it exits on the daemon's verdict (${sentHelp.code}), not on a phantom success`);
 
-const sentDash = crabcast(overrides, ['send', 'kept', '-x']);
+const sentDash = crabcast(overrides, ['send', keptDir, '-x']);
 check(
   shimSent().pop() === '-x' && sentDash.code === EXIT.OK,
   'a single-dash message is text too: "-x" was delivered'
 );
 
-const sentAfter = crabcast(overrides, ['send', 'kept', 'hi', '--type', 'shell']);
+// A flag written after the message is message text. `send` has no flags of
+// its own now — the `--type` disambiguator went with the types, because a path
+// cannot be ambiguous — so the note about a mistakable word can only fire for
+// a GLOBAL flag, which is what the next case covers.
+const sentAfter = crabcast(overrides, ['send', keptDir, 'hi', 'there']);
 check(
-  shimSent().pop() === 'hi --type shell',
-  'a flag written AFTER the message is message text — the documented trade, not a silent reinterpretation'
+  shimSent().pop() === 'hi there',
+  'the whole message is joined and delivered, not clipped at the first word'
 );
-check(
-  /is part of the message, not a flag/.test(sentAfter.stderr),
-  'and the CLI says so on stderr rather than leaving the caller to wonder'
-);
-show('the note:', sentAfter.stderr.trim());
 
-const sentTimeout = crabcast(overrides, ['send', 'kept', '--timeout', '5000']);
+const sentTimeout = crabcast(overrides, ['send', keptDir, '--timeout', '5000']);
 check(
   shimSent().pop() === '--timeout 5000',
   'a global flag inside a message no longer retunes the client: "--timeout 5000" was delivered as text'
 );
+show('what the daemon was asked to type:', JSON.stringify(shimSent().pop()));
 
-// `--` still does its job for the commands that have no rest positional.
-const dashedKey = crabcast(capped, ['status', '--', '-odd-key']);
+// `--` still does its job for the commands that have no rest positional. The
+// path does not exist, so the daemon refuses — which is the point: the operand
+// reached it intact rather than being read as a flag.
+const dashedKey = crabcast(capped, ['status', '--', '-odd-path']);
 check(
-  dashedKey.code === EXIT.REFUSED && /-odd-key/.test(dashedKey.stdout),
-  '`--` still ends flag parsing where there is no rest positional: `status -- -odd-key` asked about "-odd-key"'
+  dashedKey.code === EXIT.REFUSED && /-odd-path/.test(dashedKey.stdout),
+  '`--` still ends flag parsing where there is no rest positional: `status -- -odd-path` asked about "-odd-path"'
 );
 
 // And the command's own help is still reachable, because the rest positional
@@ -658,7 +683,7 @@ check(
   "and that help states the rule, so the behaviour is documented where it is met"
 );
 
-const hexLines = crabcast(capped, ['tail', 'x', '--lines', '0x10']);
+const hexLines = crabcast(capped, ['tail', demoDir, '--lines', '0x10']);
 check(
   hexLines.code === EXIT.USAGE && /plain decimal/.test(hexLines.stderr),
   '--lines 0x10 is a usage error rather than a silent 16'
@@ -674,15 +699,9 @@ rule('8. A dataDir WHOSE SOCKET CANNOT FIT IS REFUSED AT LOAD, by both consumers
 // file in a directory that is empty. The config loader refuses rather than
 // repairs, so it refuses this too.
 const longDir = path.join(scratch, 'x'.repeat(120));
-fs.mkdirSync(path.join(longDir, 'prompts'), { recursive: true });
-fs.writeFileSync(path.join(longDir, 'prompts', 'shell.md'), 'KAN-93 {{KEY}}\n');
+fs.mkdirSync(longDir, { recursive: true });
 const longConfig = path.join(longDir, 'crabcast.config.json');
-fs.writeFileSync(longConfig, JSON.stringify({
-  dataDir: path.join(longDir, 'data'),
-  workspaceTypes: [
-    { name: 'shell', priority: 1, promptFile: 'prompts/shell.md', defaultLauncher: 'shell' }
-  ]
-}));
+fs.writeFileSync(longConfig, JSON.stringify({ dataDir: path.join(longDir, 'data') }));
 
 const cliLong = spawnSync(process.execPath, [cliJs, 'list', '--config', longConfig], {
   env: capped.env, encoding: 'utf8'

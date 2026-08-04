@@ -65,18 +65,15 @@ const herdrState = path.join(scratch, 'herdr-state');
 mkdirSync(fakeHome, { recursive: true });
 mkdirSync(herdrState, { recursive: true });
 
-// The daemon under test loads a real config: one `task` type running the
-// `shell` launcher, dataDir inside the scratch.
+// The daemon under test loads a real config: a dataDir inside the scratch and
+// nothing else, because there is no type table left to declare.
 const dataDir = path.join(fakeHome, '.local', 'share', 'crabcast');
 const configPath = path.join(fakeHome, 'crabcast.config.json');
-mkdirSync(path.join(fakeHome, 'prompts'), { recursive: true });
-writeFileSync(path.join(fakeHome, 'prompts', 'task.md'), 'KAN-25 proof workspace {{KEY}}.\n');
-writeFileSync(configPath, JSON.stringify({
-  dataDir,
-  workspaceTypes: [
-    { name: 'task', priority: 1, promptFile: 'prompts/task.md', defaultLauncher: 'shell' }
-  ]
-}, null, 2));
+writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
+
+/** The directory this proof's one agent is. CrabCast creates none of its own. */
+const AGENT_DIR = path.join(fakeHome, 'owned', 'kan-25-verify');
+mkdirSync(AGENT_DIR, { recursive: true });
 
 const isolatedEnv = {
   HOME: fakeHome,
@@ -311,13 +308,9 @@ if (!herdrAvailable) {
   // with it: the capacity gate measures the real machine, and whether this
   // box is busy is not what is being proved. The override is recorded with
   // the figures at the time, as it is for anyone.
-  const activated = await call('activate_by_key', {
-    type: 'task',
-    key: 'KAN-25-VERIFY',
-    defaultAgent: 'shell',
-    override: true
-  });
-  console.log('activate_by_key →', JSON.stringify({ ...activated, id: undefined }, null, 2));
+  await call('configure_agent', { path: AGENT_DIR, priority: 1, launcher: 'shell' });
+  const activated = await call('activate_agent', { path: AGENT_DIR, override: true });
+  console.log('activate_agent →', JSON.stringify({ ...activated, id: undefined }, null, 2));
 
   if (!activated.success) {
     record('a real session could be started', false, activated.error);
@@ -384,7 +377,7 @@ if (!herdrAvailable) {
     // session's data listener on every call — ~60 registrations to answer a
     // question that changes nothing.
     const paneText = async () => {
-      const tailed = await call('tail_agent', { key: 'KAN-25-VERIFY', type: 'task', lines: 200 });
+      const tailed = await call('tail_agent', { path: AGENT_DIR, lines: 200 });
       return typeof tailed.text === 'string' ? tailed.text : '';
     };
 

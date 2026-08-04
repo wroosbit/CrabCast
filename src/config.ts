@@ -1,17 +1,26 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { WorkspaceTypeConfig } from './types.js';
 // For the socket-path length check below. One-way: ipc.ts imports nothing
 // from here, so naming the socket in one place costs no cycle.
 import { socketPathFor } from './ipc.js';
 
-// The config file is the whole definition of what this daemon can run: an
-// optional data directory and a list of workspace types. Validation refuses
-// rather than repairs — a config the loader would have to guess about is a
-// config whose author has not decided, and the failure modes of guessing
-// (a silently-floored priority, a dashed name that breaks agent addressing)
-// only surface after work has been destroyed.
+// The config file used to be the whole definition of what this daemon could
+// run: a data directory plus a list of workspace types, each declaring a
+// priority, a prompt, a launcher and a gate flag. Types are gone — an agent is
+// a directory plus the knobs a caller froze onto it with `configure` — so what
+// is left here is the data directory and nothing else.
+//
+// WHAT THAT DELETION TOOK WITH IT, so nobody restores half of it: the
+// dash-in-a-type-name refusal existed only to protect a name parse that no
+// longer happens; the duplicate-type check protected a lookup table that no
+// longer exists; and the required-`priority` refusal moved rather than
+// vanished — `configure` now refuses an agent with no priority, for the same
+// reason and in the same words.
+//
+// The rule that stayed is the one that was never about types: this loader
+// refuses rather than repairs. A config it would have to guess about is a
+// config whose author has not decided.
 
 export const DEFAULT_CONFIG_FILENAME = 'crabcast.config.json';
 export const DEFAULT_DATA_DIR = path.join(os.homedir(), '.local', 'share', 'crabcast');
@@ -49,9 +58,8 @@ export interface CrabcastConfig {
   configPath: string;
   /** Directory of the config file; `promptFile` paths resolve from here. */
   baseDir: string;
-  /** Absolute, `~`-expanded. Socket, logs, and workspaces live under it. */
+  /** Absolute, `~`-expanded. Socket, logs, registry and sidecars live under it. */
   dataDir: string;
-  workspaceTypes: WorkspaceTypeConfig[];
 }
 
 /**
@@ -119,69 +127,24 @@ function expandHome(p: string): string {
   return p;
 }
 
-function parseWorkspaceType(entry: unknown, index: number): WorkspaceTypeConfig {
-  if (!isPlainObject(entry)) {
-    refuse(`workspaceTypes[${index}]: must be an object`);
-  }
-
-  const name = entry.name;
-  if (typeof name !== 'string' || name.length === 0) {
-    refuse(`workspaceTypes[${index}]: "name" is required and must be a non-empty string`);
-  }
-  const label = `workspace type "${name}"`;
-  if (name.includes('-')) {
-    // Agent names are `<prefix>-<type>-<key>` and are parsed by splitting at
-    // the first dash after the prefix (keys routinely contain dashes; types
-    // must not). A dashed type would not fail here — it would break agent
-    // addressing silently, later, for someone else.
-    refuse(
-      `${label}: "name" must not contain a dash — agent names are ` +
-        `<prefix>-<type>-<key> and the type is recovered by splitting at the ` +
-        `first dash, so a dashed type breaks addressing silently`
-    );
-  }
-
-  if (!('priority' in entry)) {
-    refuse(
-      `${label}: "priority" is required — a silently-defaulted priority would ` +
-        `sit at the floor and be preemptable by everything, and nobody would ` +
-        `find out until its work was destroyed`
-    );
-  }
-  const priority = entry.priority;
-  if (typeof priority !== 'number' || !Number.isFinite(priority)) {
-    refuse(`${label}: "priority" must be a finite number`);
-  }
-
-  const promptFile = entry.promptFile;
-  if (typeof promptFile !== 'string' || promptFile.length === 0) {
-    refuse(`${label}: "promptFile" is required and must be a non-empty string`);
-  }
-
-  const defaultLauncher = entry.defaultLauncher;
-  if (typeof defaultLauncher !== 'string' || defaultLauncher.length === 0) {
-    refuse(`${label}: "defaultLauncher" is required and must be a non-empty string`);
-  }
-
-  let mcpServers: string[] = [];
-  if ('mcpServers' in entry && entry.mcpServers !== undefined) {
-    const value = entry.mcpServers;
-    if (!Array.isArray(value) || value.some((s) => typeof s !== 'string')) {
-      refuse(`${label}: "mcpServers" must be an array of strings`);
-    }
-    mcpServers = value as string[];
-  }
-
-  let gateExempt = false;
-  if ('gateExempt' in entry && entry.gateExempt !== undefined) {
-    if (typeof entry.gateExempt !== 'boolean') {
-      refuse(`${label}: "gateExempt" must be a boolean`);
-    }
-    gateExempt = entry.gateExempt;
-  }
-
-  return { name, priority, promptFile, defaultLauncher, mcpServers, gateExempt };
-}
+/**
+ * A key this loader used to understand and no longer does, with what to do
+ * about it.
+ *
+ * Refused rather than ignored. A config still declaring `workspaceTypes` was
+ * written against a model where those declarations decided an agent's
+ * priority, prompt, launcher and gate exemption — silently dropping them would
+ * start a daemon that agrees with the file about nothing, and the first
+ * evidence would be an activation refused for a knob nobody knew had moved.
+ */
+const RETIRED_KEYS: Record<string, string> = {
+  workspaceTypes:
+    'workspace types are gone: an agent is a directory plus the knobs a caller freezes ' +
+    'onto it with `configure`. priority, prompt, launcher, mcpServers and the gate flags ' +
+    'are now per-agent `configure` parameters rather than per-type config, so this ' +
+    'declaration has no consumer. Remove the key; there is nothing to move it to in ' +
+    'this file.'
+};
 
 /** Parse and validate config text. Throws ConfigError on any refusal. */
 export function parseConfig(raw: string, configPath: string): CrabcastConfig {
@@ -223,23 +186,11 @@ export function parseConfig(raw: string, configPath: string): CrabcastConfig {
     );
   }
 
-  if (!('workspaceTypes' in data) || !Array.isArray(data.workspaceTypes)) {
-    refuse(`${configPath}: "workspaceTypes" is required and must be an array`);
-  }
-  const workspaceTypes = data.workspaceTypes.map(parseWorkspaceType);
-
-  const seen = new Set<string>();
-  for (const type of workspaceTypes) {
-    if (seen.has(type.name)) {
-      refuse(
-        `workspace type "${type.name}": declared more than once — which ` +
-          `declaration wins would be a silent choice`
-      );
-    }
-    seen.add(type.name);
+  for (const [key, why] of Object.entries(RETIRED_KEYS)) {
+    if (key in data) refuse(`${configPath}: "${key}" is no longer a config key — ${why}`);
   }
 
-  return { configPath, baseDir, dataDir, workspaceTypes };
+  return { configPath, baseDir, dataDir };
 }
 
 /** Load and validate the config file at `configPath`. */

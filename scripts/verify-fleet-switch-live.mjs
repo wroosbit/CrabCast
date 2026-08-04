@@ -43,18 +43,26 @@
 // Run it on a machine with herdr running.
 
 import { execFileSync, spawn } from 'child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import net from 'net';
 import { tmpdir } from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+// The one thing this live proof needs from the code under test: the pane name
+// a directory derives, so the herdr census can be searched for our probe
+// without parsing anything back out of the name.
+const { paneNameFor } = await import(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'identity.js')
+);
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(scriptDir, '..');
 
-const PROBE_TYPE = 'task';
-const PROBE_KEY = 'KAN72-PROBE';
-const PROBE_AGENT = `crabcast-${PROBE_TYPE}-${PROBE_KEY.toLowerCase()}`;
+// The probe is a DIRECTORY now — that is the whole address — and its pane
+// name is a one-way function of it. Both are filled in once the scratch exists.
+let PROBE_DIR;
+let PROBE_AGENT;
 
 if (!existsSync(path.join(rootDir, 'dist', 'daemon.js'))) {
   console.error('dist/daemon.js is missing — run `npm run build` first.');
@@ -126,14 +134,14 @@ async function waitForProbe(present, timeoutMs = 20000) {
 const scratch = mkdtempSync(path.join(tmpdir(), 'kan72-live-'));
 const dataDir = path.join(scratch, 'data');
 const configPath = path.join(scratch, 'crabcast.config.json');
-mkdirSync(path.join(scratch, 'prompts'), { recursive: true });
-writeFileSync(path.join(scratch, 'prompts', 'task.md'), 'KAN-72 live probe workspace {{KEY}}.\n');
-writeFileSync(configPath, JSON.stringify({
-  dataDir,
-  workspaceTypes: [
-    { name: PROBE_TYPE, priority: 1, promptFile: 'prompts/task.md', defaultLauncher: 'shell' }
-  ]
-}, null, 2));
+// A dataDir and nothing else: no type table left to declare.
+writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
+
+// The probe's directory. THIS SCRIPT creates it, because CrabCast creates none
+// — and removes it at the end, because CrabCast may not.
+mkdirSync(path.join(scratch, 'owned', 'probe'), { recursive: true });
+PROBE_DIR = realpathSync(path.join(scratch, 'owned', 'probe'));
+PROBE_AGENT = paneNameFor(PROBE_DIR);
 
 const socketPath = path.join(dataDir, 'crabcast.sock');
 const registryPath = path.join(dataDir, 'agents.jsonl');
@@ -289,22 +297,21 @@ rule('2. ON — a pane that was not there, and then is');
 // that is the point of a live proof — and a refusal is not a failure of this
 // script: the refusal's own [Start anyway] (override: true, recorded) is the
 // path a supervisor takes next, and the rest of the proof needs a probe.
-let started = await call('activate_by_key', {
-  type: PROBE_TYPE,
-  key: PROBE_KEY,
-  defaultAgent: 'shell'
+// `configure` first: it is mandatory, and `activate` takes no attributes, so
+// the launcher and priority this probe runs with arrive here or nowhere.
+const configured = await call('configure_agent', {
+  path: PROBE_DIR, priority: 1, launcher: 'shell'
 });
+console.log(`configure_agent → success: ${configured.success}, ` +
+  `occupiedBy: ${JSON.stringify(configured.occupiedBy)}`);
+
+let started = await call('activate_agent', { path: PROBE_DIR });
 if (started.success === false && started.refusedBy === 'capacity') {
   console.log(`the real gate refused first: ${started.reason}`);
-  started = await call('activate_by_key', {
-    type: PROBE_TYPE,
-    key: PROBE_KEY,
-    defaultAgent: 'shell',
-    override: true
-  });
-  console.log(`[Start anyway] → activate_by_key with override: true`);
+  started = await call('activate_agent', { path: PROBE_DIR, override: true });
+  console.log(`[Start anyway] → activate_agent with override: true`);
 }
-console.log(`activate_by_key → success: ${started.success}, verified: ${started.verified}, sessionId: ${started.sessionId}`);
+console.log(`activate_agent → success: ${started.success}, verified: ${started.verified}, sessionId: ${started.sessionId}`);
 if (!started.success) {
   console.error(`could not start the probe: ${started.error}`);
   process.exit(1);
@@ -316,9 +323,9 @@ console.log(`\nherdr agent list → ${withProbe.length} agents`);
 console.log(`  ${PROBE_AGENT}   ← the one that was not there in section 1`);
 
 const listedOn = await call('list_agents');
-const rowOn = listedOn.agents.find((a) => a.agentName === PROBE_AGENT);
+const rowOn = listedOn.agents.find((a) => a.path === PROBE_DIR);
 console.log(`\nand on the daemon's own poll:`);
-console.log(`  ${JSON.stringify({ agentName: rowOn?.agentName, type: rowOn?.type, key: rowOn?.key, sessionless: rowOn?.sessionless, gateExempt: rowOn?.gateExempt, herdrStatus: rowOn?.herdrStatus })}`);
+console.log(`  ${JSON.stringify({ path: rowOn?.path, paneName: rowOn?.paneName, sessionless: rowOn?.sessionless, chargeable: rowOn?.chargeable, herdrStatus: rowOn?.herdrStatus })}`);
 console.log(`\nthe registry line behind it, fsynced before the response went out:`);
 console.log(`  ${readFileSync(registryPath, 'utf8').trim().split('\n').pop()}`);
 
@@ -342,7 +349,7 @@ let restoredRow = null;
 for (let i = 0; i < 60 && !restoredRow; i++) {
   await sleep(1000);
   const listed = await call('list_agents');
-  const row = listed.agents.find((a) => a.agentName === PROBE_AGENT);
+  const row = listed.agents.find((a) => a.path === PROBE_DIR);
   if (row && row.sessionless === false) restoredRow = row;
 }
 const censusAfterRestart = herdrAgents() ?? [];
@@ -353,7 +360,7 @@ console.log('daemon #2 reconcile log:');
 for (const line of grepReconcile()) console.log(`  ${line}`);
 console.log(`\nherdr agent list → probe pane count: ${paneCount} (a double-spawn would need a second name or an error)`);
 console.log(`daemon #2 list_agents row:`);
-console.log(`  ${JSON.stringify({ agentName: restoredRow?.agentName, sessionless: restoredRow?.sessionless, sessionId: restoredRow?.sessionId, status: restoredRow?.status })}`);
+console.log(`  ${JSON.stringify({ path: restoredRow?.path, sessionless: restoredRow?.sessionless, sessionId: restoredRow?.sessionId, status: restoredRow?.status })}`);
 console.log(`  (session id ${restoredRow?.sessionId} ≠ daemon #1's ${sessionBefore} — a fresh attach, re-verified through`);
 console.log(`   the activation path's confirmAgentPresent, not a persisted name taken on faith)`);
 console.log(`missingAgents after reconcile: ${JSON.stringify(listedAfter.missingAgents)}`);
@@ -371,8 +378,8 @@ verdict(
 // -------------------------------------------------------- 4. off + restart --
 rule('4. OFF, THEN RESTART — a deliberate stand-down stays down');
 
-const off = await call('deactivate_by_key', { type: PROBE_TYPE, key: PROBE_KEY });
-console.log(`deactivate_by_key → ${JSON.stringify({ success: off.success, type: off.type, key: off.key })}`);
+const off = await call('deactivate_agent', { path: PROBE_DIR });
+console.log(`deactivate_agent → ${JSON.stringify({ success: off.success, path: off.path, wasRunning: off.wasRunning, state: off.state })}`);
 const vanished = await waitForProbe(false);
 console.log(`probe gone from herdr: ${vanished}`);
 console.log(`registry line recorded for the stand-down:`);
@@ -384,18 +391,18 @@ await startDaemon('daemon #3');
 // that it does NOT use it.
 await sleep(5000);
 const afterStandDownRestart = await call('list_agents');
-const standbyRow = afterStandDownRestart.standbyAgents.find((a) => a.agentName === PROBE_AGENT);
+const standbyRow = afterStandDownRestart.standbyAgents.find((a) => a.path === PROBE_DIR);
 console.log('\ndaemon #3 reconcile log:');
 for (const line of grepReconcile()) console.log(`  ${line}`);
 console.log(`\nprobe running after the restart: ${probeRunning()}`);
-console.log(`standbyAgents: ${JSON.stringify(afterStandDownRestart.standbyAgents.map((a) => ({ agentName: a.agentName, defaultAgent: a.defaultAgent, since: a.since })))}`);
+console.log(`standbyAgents: ${JSON.stringify(afterStandDownRestart.standbyAgents.map((a) => ({ path: a.path, launcher: a.launcher, since: a.since })))}`);
 console.log(`standbyTotal: ${afterStandDownRestart.standbyTotal}, missingAgents: ${JSON.stringify(afterStandDownRestart.missingAgents)}`);
 
 verdict(
   off.success === true && vanished && !probeRunning() &&
     Boolean(standbyRow) &&
     afterStandDownRestart.missingAgents.length === 0 &&
-    !afterStandDownRestart.agents.some((a) => a.agentName === PROBE_AGENT),
+    !afterStandDownRestart.agents.some((a) => a.path === PROBE_DIR),
   'the reboot did not overturn the human\'s decision: the agent stayed down, and the\n' +
   '    way back is reported in standbyAgents rather than taken automatically.',
   `the stand-down did not stay down: running=${probeRunning()} standby=${Boolean(standbyRow)}`
@@ -404,33 +411,33 @@ verdict(
 // ------------------------------------------------------------- 5. way back --
 rule('5. THE WAY BACK — off is reversible from the list that reported it');
 
-console.log('a client sends, from that standby row:\n');
-console.log(`  { action: 'activate_by_key', type: '${standbyRow?.type}', key: '${standbyRow?.key}',`);
-console.log(`    defaultAgent: '${standbyRow?.defaultAgent}' }\n`);
+console.log('a client sends, from that standby row — and nothing else, because');
+console.log('`activate` takes no attributes: the launcher it comes back as is the one on');
+console.log('its own record, not one the caller has to remember to repeat:\n');
+console.log(`  { action: 'activate_agent', path: '${standbyRow?.path}' }`);
+console.log(`  (the row also reports launcher '${standbyRow?.launcher}', for the human reading it)\n`);
 
-const backOn = await call('activate_by_key', {
-  type: standbyRow?.type ?? PROBE_TYPE,
-  key: standbyRow?.key ?? PROBE_KEY,
-  defaultAgent: standbyRow?.defaultAgent ?? 'shell',
+const backOn = await call('activate_agent', {
+  path: standbyRow?.path ?? PROBE_DIR,
   // Past the gate for the same reason section 2 ends up there: this machine
   // is busy, and the point being proved here is the round trip, not the gate.
   override: true
 });
 const returned = await waitForProbe(true);
 const listedBack = await call('list_agents');
-console.log(`activate_by_key → success: ${backOn.success}`);
+console.log(`activate_agent → success: ${backOn.success}`);
 console.log(`herdr agent list → ${PROBE_AGENT} present: ${(herdrAgents() ?? []).includes(PROBE_AGENT)}`);
-console.log(`list_agents → running: ${listedBack.agents.some((a) => a.agentName === PROBE_AGENT)}, still on the stood-down list: ${listedBack.standbyAgents.some((a) => a.agentName === PROBE_AGENT)}`);
+console.log(`list_agents → running: ${listedBack.agents.some((a) => a.path === PROBE_DIR)}, still on the stood-down list: ${listedBack.standbyAgents.some((a) => a.path === PROBE_DIR)}`);
 
 verdict(
   Boolean(standbyRow) &&
-    standbyRow.defaultAgent === 'shell' &&
+    standbyRow.launcher === 'shell' &&
     backOn.success === true &&
     returned &&
-    !listedBack.standbyAgents.some((a) => a.agentName === PROBE_AGENT),
+    !listedBack.standbyAgents.some((a) => a.path === PROBE_DIR),
   'the agent that was switched off is the agent that came back, with the launcher it\n' +
   '    was started with, and it left the candidate list the moment it did.',
-  `the round trip did not close: standby=${Boolean(standbyRow)} launcher=${standbyRow?.defaultAgent} back=${returned}`
+  `the round trip did not close: standby=${Boolean(standbyRow)} launcher=${standbyRow?.launcher} back=${returned}`
 );
 
 // ----------------------------------------------------------------- 6. lost --
@@ -446,22 +453,22 @@ const eventsBefore = events.filter((e) => e.action === 'agent_lost_event').lengt
 let lostEvent = null;
 for (let i = 0; i < 90 && !lostEvent; i++) {
   await sleep(500);
-  lostEvent = events.find((e) => e.action === 'agent_lost_event' && e.agentName === PROBE_AGENT);
+  lostEvent = events.find((e) => e.action === 'agent_lost_event' && e.path === PROBE_DIR);
 }
 console.log(`agent_lost_event received: ${JSON.stringify(lostEvent && {
-  action: lostEvent.action, agentName: lostEvent.agentName, type: lostEvent.type,
+  action: lostEvent.action, path: lostEvent.path, paneName: lostEvent.paneName,
   key: lostEvent.key, since: lostEvent.since, reason: lostEvent.reason
 }, null, 2)}`);
 
 const listedLost = await call('list_agents');
-const missingRow = listedLost.missingAgents.find((m) => m.agentName === PROBE_AGENT);
-console.log(`\nmissingAgents on the next poll: ${JSON.stringify(missingRow && { agentName: missingRow.agentName, since: missingRow.since })}`);
+const missingRow = listedLost.missingAgents.find((m) => m.path === PROBE_DIR);
+console.log(`\nmissingAgents on the next poll: ${JSON.stringify(missingRow && { path: missingRow.path, since: missingRow.since })}`);
 
 // …then sit through one more full sweep and count the announcements.
 console.log('\nwaiting out one more 30s sweep to prove the event does not repeat…');
 await sleep(35000);
-const lostEvents = events.filter((e) => e.action === 'agent_lost_event' && e.agentName === PROBE_AGENT);
-const stillListed = (await call('list_agents')).missingAgents.some((m) => m.agentName === PROBE_AGENT);
+const lostEvents = events.filter((e) => e.action === 'agent_lost_event' && e.path === PROBE_DIR);
+const stillListed = (await call('list_agents')).missingAgents.some((m) => m.path === PROBE_DIR);
 console.log(`agent_lost_event count after a second sweep: ${lostEvents.length - eventsBefore >= 1 ? lostEvents.length : 0} (still exactly ${lostEvents.length})`);
 console.log(`missingAgents still reports it on every poll: ${stillListed}`);
 
@@ -478,20 +485,20 @@ rule('7. TEARDOWN — the machine as it was found');
 
 // The loss is still on the books; standing the dead agent down is the decision
 // that clears it (and proves the already-gone path against the real herdr).
-const standDown = await call('deactivate_by_key', { type: PROBE_TYPE, key: PROBE_KEY });
-console.log(`deactivate_by_key for the lost agent → ${JSON.stringify({ success: standDown.success, alreadyGone: standDown.alreadyGone })}`);
+const standDown = await call('deactivate_agent', { path: PROBE_DIR });
+console.log(`deactivate_agent for the lost agent → ${JSON.stringify({ success: standDown.success, alreadyGone: standDown.alreadyGone })}`);
 const finalList = await call('list_agents');
 const final = herdrAgents() ?? [];
 console.log(`\nherdr agent list → ${final.length} agents`);
 console.log(`  probe present:                            ${final.includes(PROBE_AGENT)}`);
 console.log(`  every agent from section 1 still running: ${baseline.every((n) => final.includes(n))}`);
-console.log(`  missingAgents cleared by the stand-down:  ${!finalList.missingAgents.some((m) => m.agentName === PROBE_AGENT)}`);
+console.log(`  missingAgents cleared by the stand-down:  ${!finalList.missingAgents.some((m) => m.path === PROBE_DIR)}`);
 
 verdict(
   !final.includes(PROBE_AGENT) &&
     baseline.every((n) => final.includes(n)) &&
     standDown.success === true &&
-    !finalList.missingAgents.some((m) => m.agentName === PROBE_AGENT),
+    !finalList.missingAgents.some((m) => m.path === PROBE_DIR),
   'no orphan pane, the loss was resolved by a recorded decision, and every agent that\n' +
   '    was working when this started still is.',
   'this script did not leave the machine as it found it.'

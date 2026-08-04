@@ -17,21 +17,33 @@
 //                     first two. This is the assertion that fails on the old
 //                     code, and it is the whole point of the change.
 //
-// Usage: node scripts/verify-tab-per-agent.mjs [key-prefix]
+// Usage: node scripts/verify-tab-per-agent.mjs [scratch-root]
 //
 // Run it after `npm run build`, against the live herdr. It creates and
 // removes its own scratch agents and touches nothing else; agents that were
 // already running are left alone, which the run also reports on.
 
 import { execFileSync } from 'child_process';
-import { rmSync } from 'fs';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
-import { HerdrBridge, agentNameFor, workspaceDirFor, AGENT_NAME_PREFIX } from '../dist/herdr.js';
+import { HerdrBridge } from '../dist/herdr.js';
+import { paneNameFor, PANE_NAME_PREFIX } from '../dist/identity.js';
 import { DEFAULT_DATA_DIR } from '../dist/config.js';
 
-const PREFIX = process.argv[2] ?? 'kan32-verify';
-const TYPE = 'shell';
-const KEYS = [`${PREFIX}-a`, `${PREFIX}-b`, `${PREFIX}-c`];
+// Three directories this script owns outright. An agent IS its directory now,
+// so the scratch agents are scratch DIRECTORIES — and the script creates them
+// itself, because `configure` refuses a path that is not there and CrabCast
+// creates none of its own.
+const SCRATCH = process.argv[2] ?? fs.mkdtempSync(path.join(os.tmpdir(), 'kan32-verify-'));
+const DIRS = ['a', 'b', 'c'].map((suffix) => {
+  const dir = path.join(SCRATCH, suffix);
+  fs.mkdirSync(dir, { recursive: true });
+  return fs.realpathSync(dir);
+});
+const CONFIG = {
+  priority: 1, refusable: true, chargeable: true, preemptable: true, launcher: 'shell'
+};
 const dataDir = process.env.CRABCAST_DATA_DIR
   ? path.resolve(process.env.CRABCAST_DATA_DIR)
   : DEFAULT_DATA_DIR;
@@ -44,8 +56,8 @@ function herdr(args) {
 }
 
 /** herdr's view of one agent: which tab it is in, and how full that tab is. */
-function placementOf(key) {
-  const name = agentNameFor(TYPE, key);
+function placementOf(dir) {
+  const name = paneNameFor(dir);
   const agent = herdr(['agent', 'get', name])?.result?.agent;
   if (!agent) return undefined;
   const tabs = herdr(['tab', 'list', '--workspace', agent.workspace_id])?.result?.tabs ?? [];
@@ -61,8 +73,8 @@ function placementOf(key) {
 // The width of a pane is what the bug was about, so measure it rather than
 // eyeball the tail: a shell that prints its own $COLUMNS reports the grid it
 // was actually given.
-function widthOf(key) {
-  const tail = bridge.tailAgent(key, TYPE, 40);
+function widthOf(dir) {
+  const tail = bridge.tailAgent(dir, 40);
   if (!tail.success) return { error: tail.error };
   const cols = [...(tail.text ?? '').matchAll(/COLS=(\d+)/g)].map((m) => Number(m[1]));
   return { cols: cols.length ? cols[cols.length - 1] : undefined, text: tail.text ?? '' };
@@ -74,7 +86,7 @@ const bridge = new HerdrBridge(dataDir);
 // them. Recorded by terminal id: pane and tab ids renumber as panes come and
 // go, and comparing those would produce false alarms.
 const before = (herdr(['agent', 'list'])?.result?.agents ?? [])
-  .filter((a) => a.name.startsWith(AGENT_NAME_PREFIX))
+  .filter((a) => a.name.startsWith(PANE_NAME_PREFIX))
   .map((a) => ({ name: a.name, terminalId: a.terminal_id }));
 console.log(`pre-existing crabcast agents: ${before.length}`);
 for (const a of before) console.log(`  ${a.name} (${a.terminalId})`);
@@ -85,16 +97,16 @@ const REPORT_WIDTH = 'while true; do echo "COLS=$COLUMNS"; sleep 1; done';
 
 try {
   console.log('\n== spawn two agents ==');
-  for (const key of KEYS.slice(0, 2)) {
-    bridge.spawnSession(TYPE, key, undefined, '', 'shell');
+  for (const dir of DIRS.slice(0, 2)) {
+    bridge.spawnSession(dir, CONFIG);
     await sleep(2500);
   }
-  for (const key of KEYS.slice(0, 2)) {
-    await bridge.sendToAgent(key, REPORT_WIDTH, TYPE);
+  for (const dir of DIRS.slice(0, 2)) {
+    await bridge.sendToAgent(dir, REPORT_WIDTH);
   }
   await sleep(3000);
 
-  const placed = KEYS.slice(0, 2).map(placementOf);
+  const placed = DIRS.slice(0, 2).map(placementOf);
   for (const p of placed) console.log(`  ${p?.name}: tab=${p?.tabId} panes-in-tab=${p?.panesInTab}`);
 
   const distinctTabs = new Set(placed.map((p) => p?.tabId)).size === 2;
@@ -104,29 +116,29 @@ try {
 
   console.log('\n== tails (this is what tail_agent returns) ==');
   const widthsBefore = {};
-  for (const key of KEYS.slice(0, 2)) {
-    const w = widthOf(key);
-    widthsBefore[key] = w.cols;
-    console.log(`  ${agentNameFor(TYPE, key)}: COLUMNS=${w.cols}`);
+  for (const dir of DIRS.slice(0, 2)) {
+    const w = widthOf(dir);
+    widthsBefore[dir] = w.cols;
+    console.log(`  ${paneNameFor(dir)}: COLUMNS=${w.cols}`);
     console.log(
       (w.text ?? '').trimEnd().split('\n').slice(-3).map((l) => `    | ${l}`).join('\n')
     );
   }
 
   console.log('\n== spawn a third; the first two must not narrow ==');
-  bridge.spawnSession(TYPE, KEYS[2], undefined, '', 'shell');
+  bridge.spawnSession(DIRS[2], CONFIG);
   await sleep(2500);
-  await bridge.sendToAgent(KEYS[2], REPORT_WIDTH, TYPE);
+  await bridge.sendToAgent(DIRS[2], REPORT_WIDTH);
   await sleep(3000);
 
   let unchanged = true;
-  for (const key of KEYS.slice(0, 2)) {
-    const after = widthOf(key).cols;
-    const same = after === widthsBefore[key];
+  for (const dir of DIRS.slice(0, 2)) {
+    const after = widthOf(dir).cols;
+    const same = after === widthsBefore[dir];
     unchanged &&= same;
-    console.log(`  ${agentNameFor(TYPE, key)}: ${widthsBefore[key]} -> ${after} ${same ? '(unchanged)' : '(CHANGED)'}`);
+    console.log(`  ${paneNameFor(dir)}: ${widthsBefore[dir]} -> ${after} ${same ? '(unchanged)' : '(CHANGED)'}`);
   }
-  console.log(`  ${placementOf(KEYS[2])?.name}: tab=${placementOf(KEYS[2])?.tabId}`);
+  console.log(`  ${placementOf(DIRS[2])?.name}: tab=${placementOf(DIRS[2])?.tabId}`);
 
   console.log('\n== pre-existing agents ==');
   const after = herdr(['agent', 'list'])?.result?.agents ?? [];
@@ -150,13 +162,16 @@ try {
   process.exitCode = ok ? 0 : 1;
 } finally {
   console.log('\n== cleanup ==');
-  for (const key of KEYS) {
-    const r = bridge.closeAgentByKey(key);
+  for (const dir of DIRS) {
+    const r = bridge.closeAgentByPath(dir);
     // Closing the agent's last pane is also what closes its tab, so there is
     // no tab to tidy up separately.
-    rmSync(workspaceDirFor(dataDir, TYPE, key), { recursive: true, force: true });
-    console.log(`  ${key}: ${r.success ? 'closed' : r.error}`);
+    console.log(`  ${dir}: ${r.success ? 'closed' : r.error}`);
   }
+  // The scratch directories are THIS SCRIPT's, not CrabCast's — it created
+  // them and so it removes them. CrabCast neither made nor may delete them,
+  // which is the point of `configure` refusing a path that does not exist.
+  fs.rmSync(SCRATCH, { recursive: true, force: true });
   // The bridge still holds attach PTYs, which would keep the loop alive.
   await sleep(500);
   process.exit(process.exitCode ?? 0);

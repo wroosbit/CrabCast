@@ -34,7 +34,7 @@
 // Run it after `npm run build`.
 
 import { execFileSync, spawn } from 'child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -42,7 +42,10 @@ import { fileURLToPath } from 'url';
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = process.argv[2] ?? path.join(scriptDir, '..', 'dist');
 
-const TYPE = 'k23proof';
+// This script's panes are recognised by the directories it owns rather than by
+// a name prefix: the pane name is a one-way function of the path, so cleanup
+// asks "is this pane in one of MY directories" instead of parsing a name.
+const PANE_PREFIX = 'crabcast-';
 
 // sockaddr_un.sun_path is ~108 bytes, so the socket cannot live under a long
 // TMPDIR. /tmp directly is the only reliably short option.
@@ -100,7 +103,8 @@ function cleanup() {
     delete process.env.CRABCAST_K23_MODE;
     const listed = JSON.parse(execFileSync(realHerdr, ['agent', 'list'], { encoding: 'utf8' }));
     for (const agent of listed?.result?.agents ?? []) {
-      if (agent?.name?.startsWith(`crabcast-${TYPE}-`) && agent.pane_id) {
+      const inScratch = typeof agent?.cwd === 'string' && agent.cwd.startsWith(stateDir);
+      if (agent?.name?.startsWith(PANE_PREFIX) && inScratch && agent.pane_id) {
         try { execFileSync(realHerdr, ['pane', 'close', String(agent.pane_id)]); } catch {}
       }
     }
@@ -128,63 +132,72 @@ process.env.PATH = `${shimDir}:${process.env.PATH}`;
 
 // ---------------------------------------------------------- the harness --
 
-const { HerdrBridge, agentNameFor, AGENT_CONFIRM_TIMEOUT_MS, HERDR_CLI_TIMEOUT_MS } =
+const { HerdrBridge, AGENT_CONFIRM_TIMEOUT_MS, HERDR_CLI_TIMEOUT_MS } =
   await import(path.join(distDir, 'herdr.js'));
 const { MessageRouter } = await import(path.join(distDir, 'router.js'));
 const { AgentRegistry } = await import(path.join(distDir, 'agent-registry.js'));
-const { WorkspaceRegistry } = await import(path.join(distDir, 'registry.js'));
-const { PromptLoader } = await import(path.join(distDir, 'prompt.js'));
 const { loadConfig } = await import(path.join(distDir, 'config.js'));
+const { paneNameFor } = await import(path.join(distDir, 'identity.js'));
 
-// A real config for the proof type. Agents here run `bash` — the type's
-// declared `shell` launcher — so nothing in this script starts a real coding
-// agent, and the census question for them is name registration (initPty sets
+// A real config: a dataDir and nothing else, because there is no type table
+// left to declare. Agents here run `bash` — the `shell` launcher each one is
+// configured with — so nothing in this script starts a real coding agent, and
+// the census question for them is name registration (initPty sets
 // expectsRuntime false for `shell`).
 const dataDir = path.join(stateDir, 'data');
 const configPath = path.join(stateDir, 'crabcast.config.json');
-mkdirSync(path.join(stateDir, 'prompts'), { recursive: true });
-writeFileSync(path.join(stateDir, 'prompts', `${TYPE}.md`), 'KAN-23 proof workspace.\n');
-writeFileSync(configPath, JSON.stringify({
-  dataDir,
-  workspaceTypes: [
-    { name: TYPE, priority: 1, promptFile: `prompts/${TYPE}.md`, defaultLauncher: 'shell' }
-  ]
-}, null, 2));
+writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
 const config = loadConfig(configPath);
 
 const bridge = new HerdrBridge(config.dataDir);
+const agentRegistry = new AgentRegistry(path.join(stateDir, 'agents.jsonl'));
 let sent;
 const router = new MessageRouter({
-  registry: new WorkspaceRegistry(config.workspaceTypes),
   config,
-  promptLoader: new PromptLoader(config.baseDir),
   herdrBridge: bridge,
   daemonStartedAt: new Date(),
-  // The durable registry landed with the T4 slice; a scratch log keeps this
-  // script's activations out of any real fleet record.
-  agentRegistry: new AgentRegistry(path.join(stateDir, 'agents.jsonl')),
+  agentRegistry,
   send: (msg) => { sent = msg; },
   broadcast: () => {}
 });
 
-// These agents really are shells — the type's `shell` defaultLauncher, so
-// nothing here starts a coding agent, and the explicit field documents that
-// the fixture path is deliberate.
-const AS_SHELL = { defaultAgent: 'shell' };
+/**
+ * The directory one of this script's agents is. It has to be created here:
+ * an agent IS a directory, and `configure` refuses one that does not exist
+ * because CrabCast creates none of its own.
+ */
+function agentDir(name) {
+  const dir = path.join(stateDir, 'owned', name);
+  mkdirSync(dir, { recursive: true });
+  return realpathSync(dir);
+}
+
+// These agents really are shells, and the explicit launcher documents that
+// the fixture path is deliberate: nothing here starts a coding agent.
+const AS_SHELL = {
+  priority: 1, refusable: true, chargeable: true, preemptable: true, launcher: 'shell'
+};
 
 // The capacity gate reads the real machine, and whether this box is busy is
 // not what is being proved here. The override path is real, recorded, and
 // what [Start anyway] sends; verify-agent-capacity.mjs proves the gate.
 const OVERRIDE = { override: true };
 
-/** Drive the real handler and return exactly what the caller would receive. */
-async function activate(key, extra = {}) {
+/**
+ * Drive the real handler and return exactly what the caller would receive.
+ *
+ * `configure` first, every time: it is mandatory, `activate` takes no
+ * attributes, and re-configuring an agent that is not running is a no-op that
+ * writes the same record again.
+ */
+async function activate(name, extra = {}) {
+  const dir = agentDir(name);
+  if (!agentRegistry.intents().has(dir)) {
+    agentRegistry.recordConfigured({ path: dir, config: AS_SHELL });
+  }
   sent = undefined;
   const startedAt = Date.now();
-  await router.handleActivateByKey(
-    { action: 'activate_by_key', type: TYPE, key, ...AS_SHELL, ...OVERRIDE, ...extra },
-    (msg) => { sent = msg; }
-  );
+  await router.handleActivate({ path: dir, ...OVERRIDE, ...extra }, (msg) => { sent = msg; });
   return { response: sent, elapsedMs: Date.now() - startedAt };
 }
 
@@ -216,11 +229,11 @@ const verdict = (ok, yes, no) => {
 rule('1. happy path — a normal activation, verified before it is claimed');
 
 const happy = await activate('HAPPY');
-show('activate_by_key response:', happy.response);
+show('activate response:', happy.response);
 
 sent = undefined;
 router.handle({ action: 'list_agents' });
-const listed = (sent?.agents ?? []).filter((a) => a.type === TYPE || a.agentName.startsWith(`crabcast-${TYPE}-`));
+const listed = (sent?.agents ?? []).filter((a) => typeof a.path === 'string' && a.path.startsWith(stateDir));
 show('list_agents, immediately afterwards:', listed);
 console.log(`\n   herdr agent list: ${JSON.stringify(herdrAgentNames())}`);
 console.log(`   verification cost: ${happy.elapsedMs}ms for the whole activation`);
@@ -228,7 +241,7 @@ console.log(`   verification cost: ${happy.elapsedMs}ms for the whole activation
 verdict(
   happy.response?.success === true &&
     happy.response?.verified === true &&
-    listed.some((a) => a.agentName === agentNameFor(TYPE, 'HAPPY')),
+    listed.some((a) => a.path === agentDir('HAPPY')),
   'success: true, and the agent is genuinely in list_agents',
   'a normal activation no longer succeeds or is not listed'
 );
@@ -244,15 +257,15 @@ process.env.CRABCAST_K23_MODE = 'swallow-start';
 const ghost = await activate('GHOST');
 delete process.env.CRABCAST_K23_MODE;
 
-show('activate_by_key response:', ghost.response);
+show('activate response:', ghost.response);
 console.log(`\n   herdr agent list: ${JSON.stringify(herdrAgentNames())}`);
 
 verdict(
   ghost.response?.success === false &&
     ghost.response?.verified === false &&
     typeof ghost.response?.error === 'string' &&
-    ghost.response.error.includes(agentNameFor(TYPE, 'GHOST')) &&
-    !herdrAgentNames().includes(agentNameFor(TYPE, 'GHOST')),
+    ghost.response.error.includes(paneNameFor(agentDir('GHOST'))) &&
+    !herdrAgentNames().includes(paneNameFor(agentDir('GHOST'))),
   'success: false, naming the agent that is not there',
   'the false success is still reachable'
 );
@@ -274,7 +287,7 @@ console.log('   whole confirmation window for an agent that never appeared.\n');
 const PROBE_BUDGET_MS = 1000;
 const t0 = Date.now();
 const shortBound = await bridge.confirmAgentPresent(
-  agentNameFor(TYPE, 'never-exists'),
+  paneNameFor(agentDir('never-exists')),
   false,
   PROBE_BUDGET_MS
 );
@@ -308,12 +321,12 @@ console.log('   fails, so the census cannot answer either way about an agent tha
 console.log('   demonstrably fine. The activation must be reported as unverified — and the');
 console.log('   working agent must survive it, because silence is not evidence.\n');
 
-const beforeBlind = bridge.getSessionByKey('HAPPY');
+const beforeBlind = bridge.getSessionByPath(agentDir('HAPPY'));
 process.env.CRABCAST_K23_MODE = 'blind-list';
 const blind = await activate('HAPPY');
 delete process.env.CRABCAST_K23_MODE;
 
-show('activate_by_key response:', blind.response);
+show('activate response:', blind.response);
 
 const afterBlind = bridge.getSession(beforeBlind?.sessionId);
 console.log(`\n   session ${beforeBlind?.sessionId}: ${afterBlind?.status ?? 'gone'}` +
@@ -325,7 +338,7 @@ verdict(
     /did not answer/.test(blind.response?.error ?? '') &&
     afterBlind?.status === 'active' &&
     !afterBlind?.spawnError &&
-    herdrAgentNames().includes(agentNameFor(TYPE, 'HAPPY')),
+    herdrAgentNames().includes(paneNameFor(agentDir('HAPPY'))),
   'reported as unverified rather than as a dead agent, and the live agent was left alone',
   'an unreachable herdr was mistaken for evidence the agent is gone'
 );
@@ -335,16 +348,16 @@ verdict(
 rule('5. a refused activation is reported, not latched');
 
 console.log('   The same key from section 2, activated again against the real herdr. A session');
-console.log('   left active for an agent known not to exist would be the one getSessionByKey');
+console.log('   left active for an agent known not to exist would be the one getSessionByPath');
 console.log('   hands back, and no later activation could ever spawn past it.\n');
 
 const retry = await activate('GHOST');
-show('activate_by_key response:', retry.response);
+show('activate response:', retry.response);
 console.log(`\n   herdr agent list: ${JSON.stringify(herdrAgentNames())}`);
 
 verdict(
   retry.response?.success === true &&
-    herdrAgentNames().includes(agentNameFor(TYPE, 'GHOST')),
+    herdrAgentNames().includes(paneNameFor(agentDir('GHOST'))),
   'the retry produced a real agent — the earlier failure locked nothing out',
   'the failed activation poisoned the session map'
 );
@@ -360,30 +373,30 @@ console.log('   issued; what comes back must not be success.\n');
 // a teardown must not swallow on its way to returning true.
 process.env.CRABCAST_K23_MODE = 'refuse-close';
 sent = undefined;
-router.handle({ action: 'deactivate_by_key', key: 'GHOST', type: TYPE });
+router.handle({ action: 'deactivate_agent', path: agentDir('GHOST') });
 const refusedOff = sent;
 delete process.env.CRABCAST_K23_MODE;
 
-show('deactivate_by_key response:', refusedOff);
+show('deactivate_agent response:', refusedOff);
 console.log(`\n   herdr agent list: ${JSON.stringify(herdrAgentNames())}`);
 
 verdict(
   refusedOff?.success === false &&
     /may still be running/.test(refusedOff?.error ?? '') &&
-    herdrAgentNames().includes(agentNameFor(TYPE, 'GHOST')),
+    herdrAgentNames().includes(paneNameFor(agentDir('GHOST'))),
   'a refused stand-down is reported as one — and the agent is indeed still there',
   'deactivate still reports success for a teardown that did not happen'
 );
 
 console.log('\n   The same stand-down with herdr answering, for the contrast:\n');
 sent = undefined;
-router.handle({ action: 'deactivate_by_key', key: 'GHOST', type: TYPE });
+router.handle({ action: 'deactivate_agent', path: agentDir('GHOST') });
 const realOff = sent;
-show('deactivate_by_key response:', realOff);
+show('deactivate_agent response:', realOff);
 console.log(`\n   herdr agent list: ${JSON.stringify(herdrAgentNames())}`);
 
 verdict(
-  realOff?.success === true && !herdrAgentNames().includes(agentNameFor(TYPE, 'GHOST')),
+  realOff?.success === true && !herdrAgentNames().includes(paneNameFor(agentDir('GHOST'))),
   'success: true only when the agent actually went away',
   'the honest failure came at the cost of the working path'
 );
@@ -392,7 +405,7 @@ console.log('\n   send, to an agent that does not exist. It resolves the pane th
 console.log('   before it types anything, so there is nothing to confirm afterwards:\n');
 
 sent = undefined;
-router.handle({ action: 'send_to_agent', key: 'NOSUCH', type: TYPE, message: 'hello' });
+router.handle({ action: 'send_to_agent', path: agentDir('NOSUCH'), message: 'hello' });
 await sleep(1500);
 show('send_to_agent response:', sent);
 
@@ -406,12 +419,18 @@ console.log('\n   reset, on a workspace that is not there. success describes the
 console.log('   which is what reset is, and the agent outcome rides alongside it:\n');
 
 sent = undefined;
-router.handle({ action: 'reset_by_key', type: TYPE, key: 'NOSUCH' });
-show('reset_by_key response:', sent);
+// `reset` is REMOVED rather than redefined, so a caller still invoking it is
+// told by name. `forget` is the verb that replaced its record half; it deletes
+// no directory, because CrabCast created none.
+router.handle({ action: 'reset_by_key', type: 'shell', key: 'NOSUCH' });
+show('reset_by_key response (the removed verb):', sent);
 
 verdict(
-  sent?.success === false,
-  'reset already reports the real outcome of the delete — no change was needed',
+  sent?.success === false && /Unknown action: reset_by_key/.test(sent?.error ?? '') &&
+    /deactivate_agent/.test(sent?.error ?? '') && /forget_agent/.test(sent?.error ?? ''),
+  'the removed `reset` answers Unknown action BY NAME and points at the two verbs that\n' +
+  '    replaced it — a redefined `reset` would have let every caller keep calling it and\n' +
+  '    quietly mean something else',
   'reset claimed to have deleted a workspace that was not there'
 );
 

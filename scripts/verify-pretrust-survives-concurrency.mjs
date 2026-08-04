@@ -25,7 +25,7 @@
 
 import { execFileSync, spawn } from 'child_process';
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
   rmSync, symlinkSync, writeFileSync
 } from 'fs';
 import net from 'net';
@@ -75,18 +75,25 @@ chmodSync(stubClaude, 0o755);
 symlinkSync(realHerdr, path.join(stubBin, 'herdr'));
 
 // The daemon under test loads a real config: a `task` type whose
-// defaultLauncher is `claude` — the launcher whose setup writes the trust
+// A dataDir and nothing else — there is no type table left to declare. Each
+// agent is configured with `claude`, the launcher whose setup writes the trust
 // entry under proof.
 const dataDir = path.join(fakeHome, '.local', 'share', 'crabcast');
 const configPath = path.join(fakeHome, 'crabcast.config.json');
-mkdirSync(path.join(fakeHome, 'prompts'), { recursive: true });
-writeFileSync(path.join(fakeHome, 'prompts', 'task.md'), 'KAN-54 proof workspace {{KEY}}.\n');
-writeFileSync(configPath, JSON.stringify({
-  dataDir,
-  workspaceTypes: [
-    { name: 'task', priority: 1, promptFile: 'prompts/task.md', defaultLauncher: 'claude' }
-  ]
-}, null, 2));
+writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
+
+/**
+ * The directory one of this proof's agents is.
+ *
+ * Created here rather than by CrabCast, which is the change this proof rides
+ * on rather than tests: the trust entry is written for a directory the CALLER
+ * owns now, which is exactly the case that makes it matter.
+ */
+function agentDir(name) {
+  const dir = path.join(fakeHome, 'owned', name);
+  mkdirSync(dir, { recursive: true });
+  return realpathSync(dir);
+}
 
 // SHELL=/bin/bash + HOME=fakeHome make the daemon's loginShellPath() resolve
 // to bare system dirs (no real claude), so PATH lookups land on the stub.
@@ -112,7 +119,10 @@ process.on('exit', () => {
 
 const claudeConfigPath = path.join(fakeHome, '.claude.json');
 const socketPath = path.join(dataDir, 'crabcast.sock');
-const workDirFor = (key) => path.join(dataDir, 'workspaces', 'task', key.toLowerCase());
+// The trust key IS the agent's directory — Claude Code keys `projects` by the
+// normalized absolute path, and that path is now the caller's directory rather
+// than one CrabCast allocated under its own dataDir.
+const workDirFor = (name) => agentDir(name);
 
 const readConfig = () => JSON.parse(readFileSync(claudeConfigPath, 'utf8'));
 const entryPresent = (key) => {
@@ -236,8 +246,13 @@ const call = (action, data = {}) =>
 // `override: true`: the capacity gate measures the real machine, and whether
 // this box is busy is not what is being proved. The override is recorded
 // with the figures at the time, as it is for anyone.
-const activate = (key) =>
-  call('activate_by_key', { type: 'task', key, defaultAgent: 'claude', override: true });
+const activate = async (name) => {
+  const dir = agentDir(name);
+  // `configure` is mandatory and `activate` takes no attributes, so the
+  // launcher this proof is about arrives here.
+  await call('configure_agent', { path: dir, priority: 1, launcher: 'claude' });
+  return call('activate_agent', { path: dir, override: true });
+};
 
 const banner = (title) => {
   console.log('\n' + '='.repeat(78));
@@ -262,7 +277,7 @@ console.log(readFileSync(claudeConfigPath, 'utf8'));
 // --- 2. the solo path ------------------------------------------------------------
 banner('2. solo activation — one agent, nobody competing (the regression check)');
 const solo = await activate('KAN54-SOLO');
-console.log('activate_by_key →', summarize(solo));
+console.log('activate_agent →', summarize(solo));
 record('a solo activation succeeds', solo.success === true, solo.error);
 record(
   'its trust entry is in ~/.claude.json',
@@ -291,7 +306,7 @@ banner('4. clobber injection, transient — one competing write-back erases the 
 const transient = startClobberer('KAN54-TRANSIENT', { once: true });
 const transientResp = await activate('KAN54-TRANSIENT');
 transient.stop();
-console.log('activate_by_key →', summarize(transientResp));
+console.log('activate_agent →', summarize(transientResp));
 console.log(`the injector clobbered the entry ${transient.count()} time(s)`);
 record(
   'the clobber actually happened',
@@ -314,7 +329,7 @@ banner('5. clobber injection, persistent — a writer that never stops rewriting
 const hostile = startClobberer('KAN54-HOSTILE', { once: false });
 const hostileResp = await activate('KAN54-HOSTILE');
 hostile.stop();
-console.log('activate_by_key →', summarize(hostileResp));
+console.log('activate_agent →', summarize(hostileResp));
 console.log(`the injector clobbered the entry ${hostile.count()} time(s)`);
 record(
   'the activation fails honestly: success is false, not a wedged agent behind success: true',

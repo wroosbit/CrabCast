@@ -1,12 +1,16 @@
-// Ported from the extraction source's KAN-38 proof: a fleet client can switch
-// an agent off and back on, and every way that could go wrong has an answer
-// rather than a discovery.
+// Ported from the extraction source's KAN-38 proof, and re-keyed onto the path
+// by KAN-124: a fleet client can make an agent exist, switch it off and back
+// on, and make it stop existing — and every way that could go wrong has an
+// answer rather than a discovery.
 //
-// Eight sections, one per thing that had to be decided:
+// Sections:
 //
+//   0. configure    — the verb that makes an agent exist, and what it refuses:
+//                     a missing priority or launcher, a directory that is not
+//                     there, and an incoherent gate triple
 //   1. off          — the message a client sends, and the agent gone from the census
 //   2. on           — where the On candidates come from, and the agent back
-//   3. launcher     — why a stand-down has to carry the activation record with it
+//   3. the record   — why a stand-down has to carry the whole configuration
 //   4. preempted    — a preemption is a debt: reported until re-activation,
 //                     disjoint from standby, and re-activation is a resume;
 //                     4b: a failed teardown writes nothing; 4c: the debt list
@@ -14,42 +18,44 @@
 //   5. already gone — standing down an agent that already died records the
 //                     intent and reports success, not failure
 //   6. poll churn   — a census position is not an identity across polls
-//   7. reset        — a deleted workspace is not offered a way back;
-//                     7b: reset resolves the full address, never a key-twin
+//   7. forget       — the verb that replaced `reset`: it removes the RECORD and
+//                     no directory, refuses while the agent runs, and succeeds
+//                     on a path that never held one; 7b: a deleted directory is
+//                     not offered a way back
 //   8. durability   — a registry that cannot be written answers durable: false
 //                     and broadcasts the degradation, instead of hiding it
 //                     behind verified: true
-//
-// KAN-88 added four more, for the deferred findings from PR #6's review:
-//
-//   9. compaction   — compaction carries the standby rows whose workspace still
-//                     exists, so a stood-down agent keeps its way back past the
-//                     500-record mark (B5)
-//  10. mcpServers   — a changed server list is re-recorded, so a restart does
-//                     not replay the list the agent first started with (B6)
+//   9. compaction   — carries the standby rows whose directory still exists,
+//                     AND the `configured` rows that are the agents themselves
+//                     (KAN-124 AC 6); 9b: carried records keep their own `at`;
+//                     9c: an ex-preempted row does not claim somebody chose it
+//  10. restatement  — an activation that changes nothing writes nothing, and one
+//                     that re-binds a pane does
 //  11. short writes — a write that stops part way is finished, and one that
-//                     cannot progress is reported instead of fsynced (B7)
-//  12. one read     — one whole-log read per list_agents poll instead of four,
-//                     and all three registry-derived categories capped with
-//                     totals rather than only standby (B9); 12b: the daemon's
-//                     missing-sweep reads the UNCAPPED list, so a loss past
-//                     position 25 is still announced rather than silently
-//                     never reported
+//                     cannot progress is reported instead of fsynced
+//  12. one read     — one whole-log read per list_agents poll, all categories
+//                     capped with totals; 12b: the daemon's missing-sweep reads
+//                     the UNCAPPED list
+//  13. collision    — two agents that would have collided on a shared key
+//                     coexist, and the ambiguity that used to decide between
+//                     them is GONE rather than merely unreached (AC 3)
 //
-// Every section drives the real MessageRouter, the real WorkspaceRegistry, a
-// real config through the real loader and a real on-disk AgentRegistry, so
-// what it prints is what a caller actually receives and what is actually
-// written to the log. herdr is stubbed — nothing here reaches it except a
-// census and a pane close, and the live half of this proof (a real daemon, a
-// real herdr, `herdr agent list` as ground truth) is
-// verify-fleet-switch-live.mjs.
+// Every section drives the real MessageRouter, a real config through the real
+// loader, and a real on-disk AgentRegistry, so what it prints is what a caller
+// actually receives and what is actually written to the log. Only herdr is
+// stubbed — and the stub is a REAL HerdrBridge with its herdr-touching methods
+// replaced, so `occupancyOf` and the three-fact binding under test here are the
+// shipping implementations rather than a re-statement of them.
 //
-// What did NOT travel from the extraction source: the work-state confirmation
-// (its git probe stays in Butchr per the story's NOT-ported list), the
-// hardcoded supervisor set (CrabCast marks rows with the type's `gateExempt`
-// from config instead), and the capacity refusal (the measured gate landed
-// with KAN-71 and has its own proof in verify-agent-capacity.mjs; activations
-// here pass it with the recorded override — see PAST_THE_GATE).
+// WHAT CHANGED FROM THE TYPE MODEL, so a reviewer can see nothing was weakened:
+//   * every address is a directory, so the fixtures make real directories
+//   * `gateExempt` on a row became the three flags it was always conflating
+//   * section 7 tested `reset`; `reset` is removed, so it tests `forget`, which
+//     is a strictly stronger claim — `reset` deleted a directory and `forget`
+//     refuses to
+//   * section 10 tested that a changed mcpServers list was re-recorded. That
+//     drift is now impossible by construction (see the section) so it tests the
+//     invariant that replaced it.
 //
 // Usage:
 //   npm run build
@@ -72,116 +78,137 @@ let failures = 0;
 
 /**
  * Every activation in this script passes this, and it is not a shortcut. The
- * capacity gate (KAN-71's slice) reads the real machine — cores, memory, and
- * a one-minute load average that moves while this script runs — and this
- * script is about the registry's power controls, not the gate: a proof that
- * passes on a quiet machine and fails on a busy one proves nothing either
- * way. The override path is itself real and recorded; the gate has its own
- * proof in verify-agent-capacity.mjs.
+ * capacity gate reads the real machine — cores, memory, and a one-minute load
+ * average that moves while this script runs — and this script is about the
+ * registry's power controls, not the gate: a proof that passes on a quiet
+ * machine and fails on a busy one proves nothing either way. The override path
+ * is itself real and recorded; the gate has its own proof in
+ * verify-agent-capacity.mjs.
  */
 const PAST_THE_GATE = { override: true };
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'kan38-'));
-const WORKSPACES = path.join(TMP, 'workspaces');
+const OWNED = path.join(TMP, 'owned');
 let registryFile = 0;
 
-// A real config through the real loader: an exempt supervisor-ish type and an
-// ordinary one, so the rows a client renders carry the flag from config.
+// A real config through the real loader. It declares a dataDir and nothing
+// else: there is no type table left to declare, which is the whole of KAN-124's
+// deletion seen from a config file.
 const dataDir = path.join(TMP, 'data');
 const configPath = path.join(TMP, 'crabcast.config.json');
-fs.mkdirSync(path.join(TMP, 'prompts'), { recursive: true });
-fs.writeFileSync(path.join(TMP, 'prompts', 'any.md'), 'KAN-38 proof {{KEY}}.\n');
-fs.writeFileSync(configPath, JSON.stringify({
-  dataDir,
-  workspaceTypes: [
-    { name: 'epic', priority: 10, promptFile: 'prompts/any.md', defaultLauncher: 'claude', gateExempt: true },
-    { name: 'task', priority: 1, promptFile: 'prompts/any.md', defaultLauncher: 'claude' }
-  ]
-}, null, 2));
+fs.writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
 
-const { WorkspaceRegistry } = await import(path.join(distDir, 'registry.js'));
+const { HerdrBridge } = await import(path.join(distDir, 'herdr.js'));
 const { MessageRouter } = await import(path.join(distDir, 'router.js'));
 const { AgentRegistry } = await import(path.join(distDir, 'agent-registry.js'));
-const { PromptLoader } = await import(path.join(distDir, 'prompt.js'));
 const { loadConfig } = await import(path.join(distDir, 'config.js'));
+const { paneNameFor, canonicalizeOrNull } = await import(path.join(distDir, 'identity.js'));
 
 const config = loadConfig(configPath);
-const registry = new WorkspaceRegistry(config.workspaceTypes);
-const prompts = new PromptLoader(config.baseDir);
+
+/** A directory the caller already owns. Every address in this file is one. */
+function owned(...parts) {
+  const dir = path.join(OWNED, ...parts);
+  fs.mkdirSync(dir, { recursive: true });
+  return fs.realpathSync(dir);
+}
+
+/** The knobs a caller freezes onto an agent. `configure` requires the first two. */
+const knobs = (over = {}) => ({
+  priority: 1,
+  refusable: true,
+  chargeable: true,
+  preemptable: true,
+  launcher: 'claude',
+  ...over
+});
 
 // ------------------------------------------------------------- the harness --
 
 /**
  * A herdr that reports exactly the agents it is told to and forgets one when
  * its pane is closed, so a census taken after a stand-down is the fleet as it
- * then is rather than a reconstruction. This is the stand-in for
- * `herdr agent list`, and the live script proves the same sequence against the
- * real one.
+ * then is rather than a reconstruction.
+ *
+ * It is a REAL HerdrBridge with the methods that shell out to herdr replaced.
+ * That matters: `occupancyOf` — the three-fact binding and the occupancy test
+ * `activate` refuses on — stays the shipping implementation, reading the census
+ * this stub hands it. A hand-written stand-in for that logic would be a second
+ * copy of the rule, and the copy is the one that is wrong.
  */
-function stubHerdr(running, { statuses = {}, workDirs = {}, closeFails = false } = {}) {
-  const alive = [...running];
-  const bridge = {
-    alive,
-    spawns: [],
-    listHerdrAgentsChecked: () => ({
-      reachable: true,
-      agents: alive.map((name) => ({
-        name,
-        agentRuntime: 'claude',
-        workDir: workDirs[name] ?? path.join(WORKSPACES, name),
-        herdrStatus: statuses[name] ?? 'working'
-      }))
-    }),
-    listHerdrAgents: () => bridge.listHerdrAgentsChecked().agents,
-    // The post-spawn existence check, answered from the same list the census
-    // is built from — which is the rule the real one follows.
-    confirmAgentPresent: async (agentName) =>
-      alive.includes(agentName)
-        ? { present: true, waitedMs: 0, checks: 1 }
-        : { present: false, reason: 'absent', waitedMs: 0, checks: 1,
-            error: `stub herdr has no agent '${agentName}'` },
-    abandonSession: () => {},
-    listHerdrStatuses: () => new Map(bridge.listHerdrAgents().map((a) => [a.name, a.herdrStatus])),
-    listActiveSessions: () => [],
-    getSessionByKey: () => undefined,
-    getSessionByAddress: () => undefined,
-    terminateSession: () => ({ success: true }),
-    // Type-aware, like the real one: a caller that gives the full address must
-    // only ever close that address's pane — that precision is what section 7's
-    // cross-type reset check leans on.
-    closeAgentByKey: (key, type) => {
-      if (closeFails) return { success: false, error: `No agent found for key '${key}'` };
-      const i = type
-        ? alive.findIndex((n) => n === `crabcast-${type}-${key.toLowerCase()}`)
-        : alive.findIndex((n) => n.endsWith(`-${key.toLowerCase()}`));
-      if (i === -1) return { success: false, error: `No agent found for key '${key}'` };
-      const [agentName] = alive.splice(i, 1);
-      return { success: true, agentName };
-    },
-    tailAgent: () => ({ success: true, text: 'bypass permissions on\n❯ ' }),
-    sendToAgent: async () => ({ success: true }),
-    resetWorkspace: () => ({ success: true }),
-    spawnSession: (type, key, url, prompt, defaultAgent, mcpServers, resume) => {
-      const workDir = path.join(WORKSPACES, type, key.toLowerCase());
-      fs.mkdirSync(workDir, { recursive: true });
-      bridge.spawns.push({ type, key, url, defaultAgent, resume });
-      alive.push(`crabcast-${type}-${key.toLowerCase()}`);
-      return {
-        sessionId: `${type}-${key.toLowerCase()}-stub`,
-        type,
-        key,
-        url,
-        createdAt: new Date(),
-        status: 'active',
-        workDir,
-        ptyBuffer: '',
-        onDataListeners: [],
-        // What the real spawnSession sets on a resume; resumedConversation
-        // stays false so the fire-and-forget nudge has nothing to do here.
-        ...(resume ? { resume, resumedConversation: false } : {})
-      };
-    }
+function stubHerdr(running, { statuses = {}, closeFails = false } = {}) {
+  // `running` is a list of directories. The pane name and pane id are derived
+  // the way the real ones are, so nothing here can drift from identity.ts.
+  const alive = running.map((dir) => ({ path: dir, paneId: `%${paneNameFor(dir).slice(-4)}` }));
+  const bridge = new HerdrBridge(config.dataDir, config.configPath);
+
+  bridge.alive = alive;
+  bridge.spawns = [];
+  bridge.closed = [];
+
+  bridge.listHerdrAgentsChecked = () => ({
+    reachable: true,
+    agents: alive.map((a) => ({
+      name: paneNameFor(a.path),
+      paneId: a.paneId,
+      agentRuntime: 'claude',
+      workDir: a.path,
+      canonicalWorkDir: canonicalizeOrNull(a.path),
+      herdrStatus: statuses[a.path] ?? 'working'
+    }))
+  });
+  bridge.listHerdrAgents = () => bridge.listHerdrAgentsChecked().agents;
+  bridge.listHerdrStatuses = () =>
+    new Map(bridge.listHerdrAgents().map((a) => [a.name, a.herdrStatus]));
+
+  // The post-spawn existence check, answered from the same list the census is
+  // built from — which is the rule the real one follows.
+  bridge.confirmAgentPresent = async (paneName) => {
+    const found = alive.find((a) => paneNameFor(a.path) === paneName);
+    return found
+      ? { present: true, paneId: found.paneId, waitedMs: 0, checks: 1 }
+      : {
+          present: false, reason: 'absent', waitedMs: 0, checks: 1,
+          error: `stub herdr has no agent '${paneName}'`
+        };
   };
+
+  bridge.abandonSession = () => {};
+  bridge.listActiveSessions = () => [];
+  bridge.getSessionByPath = () => undefined;
+  bridge.terminateSession = () => ({ success: true });
+
+  bridge.closeAgentByPath = (agentPath) => {
+    const paneName = paneNameFor(agentPath);
+    if (closeFails) return { success: false, paneName, error: `No agent at '${agentPath}'` };
+    const i = alive.findIndex((a) => a.path === agentPath);
+    if (i === -1) return { success: false, paneName, error: `No agent at '${agentPath}'` };
+    alive.splice(i, 1);
+    bridge.closed.push(agentPath);
+    return { success: true, paneName };
+  };
+
+  bridge.tailAgent = () => ({ success: true, text: 'bypass permissions on\n❯ ' });
+  bridge.sendToAgent = async () => ({ success: true });
+
+  bridge.spawnSession = (agentPath, agentConfig, prompt, resume) => {
+    bridge.spawns.push({ path: agentPath, config: agentConfig, prompt, resume });
+    const paneId = `%${paneNameFor(agentPath).slice(-4)}`;
+    alive.push({ path: agentPath, paneId });
+    return {
+      sessionId: `${paneNameFor(agentPath)}-stub`,
+      path: agentPath,
+      paneName: paneNameFor(agentPath),
+      createdAt: new Date(),
+      status: 'active',
+      ptyBuffer: '',
+      onDataListeners: [],
+      // What the real spawnSession sets on a resume; resumedConversation stays
+      // false so the fire-and-forget nudge has nothing to do here.
+      ...(resume ? { resume, resumedConversation: false } : {})
+    };
+  };
+
   return bridge;
 }
 
@@ -191,9 +218,7 @@ function newRouter(bridge, seed = []) {
   const agentRegistry = new AgentRegistry(path.join(TMP, `agents-${++registryFile}.jsonl`));
   for (const record of seed) agentRegistry.recordActivated(record);
   const router = new MessageRouter({
-    registry,
     config,
-    promptLoader: prompts,
     herdrBridge: bridge,
     daemonStartedAt: new Date(),
     agentRegistry,
@@ -222,63 +247,209 @@ async function quiet(fn) {
   }
 }
 
-const seedOf = (names, workDirs = {}) =>
-  names.map((agentName) => {
-    const [, type, ...rest] = agentName.split('-');
-    const key = rest.join('-');
-    return {
-      agentName,
-      type,
-      key: key.toUpperCase(),
-      workDir: workDirs[agentName] ?? path.join(WORKSPACES, type, key),
-      defaultAgent: 'claude'
-    };
+/**
+ * An `activated` seed row: the durable record of an agent that is running,
+ * bound to the pane the stub census will report for it.
+ */
+const seedOf = (dirs, over = {}) =>
+  dirs.map((dir) => ({
+    path: dir,
+    config: knobs(over),
+    paneId: `%${paneNameFor(dir).slice(-4)}`
+  }));
+
+// ------------------------------------------------------------ 0. configure --
+rule('0. CONFIGURE — the verb that makes an agent exist, and what it refuses');
+
+{
+  console.log(
+    'There is no workspace type to inherit from any more, so every required knob\n' +
+    'arrives in this call or nowhere. The refusals below are the ones the deleted\n' +
+    'config loader used to make at daemon boot — they did not vanish with it, they\n' +
+    'moved to the caller who made the mistake.\n'
+  );
+
+  const dir = owned('configure', 'ok');
+  const bridge = stubHerdr([]);
+  const { router, agentRegistry, events, sent } = newRouter(bridge);
+
+  const missing = await quiet(async () => {
+    router.handle({ action: 'configure_agent', path: dir });
+    return sent();
   });
+  console.log(`  configure with no knobs at all → ${JSON.stringify({ success: missing.success, missing: missing.missing })}`);
+  console.log(`    ${missing.error}\n`);
+
+  const badPriority = await quiet(async () => {
+    router.handle({ action: 'configure_agent', path: dir, priority: 'high', launcher: 'claude' });
+    return sent();
+  });
+  console.log(`  priority: 'high' → ${JSON.stringify({ success: badPriority.success })}`);
+  console.log(`    ${badPriority.error}\n`);
+
+  const badLauncher = await quiet(async () => {
+    router.handle({ action: 'configure_agent', path: dir, priority: 1, launcher: 'clade' });
+    return sent();
+  });
+  console.log(`  launcher: 'clade' → ${JSON.stringify({ success: badLauncher.success })}`);
+  console.log(`    ${badLauncher.error}\n`);
+
+  const noDir = await quiet(async () => {
+    router.handle({ action: 'configure_agent', path: path.join(OWNED, 'thign'), ...knobs() });
+    return sent();
+  });
+  console.log(`  a directory that is not there → ${JSON.stringify({ success: noDir.success })}`);
+  console.log(`    ${noDir.error}\n`);
+
+  // The cross-field rule, which used to fail a daemon BOOT — in front of
+  // whoever restarted it, long after whoever wrote the mistake had gone.
+  const incoherent = await quiet(async () => {
+    router.handle({
+      action: 'configure_agent', path: dir, priority: 1, launcher: 'claude',
+      chargeable: false, preemptable: true
+    });
+    return sent();
+  });
+  console.log(`  chargeable: false with preemptable: true → ${JSON.stringify({ success: incoherent.success })}`);
+  console.log(`    ${incoherent.error}\n`);
+
+  // The shorthand, and the refusal that keeps it from being ambiguous.
+  const bothForms = await quiet(async () => {
+    router.handle({
+      action: 'configure_agent', path: dir, priority: 1, launcher: 'claude',
+      gateExempt: true, refusable: true
+    });
+    return sent();
+  });
+  console.log(`  gateExempt AND an explicit flag → ${JSON.stringify({ success: bothForms.success })}`);
+  console.log(`    ${bothForms.error}\n`);
+
+  const ok = await quiet(async () => {
+    router.handle({ action: 'configure_agent', path: dir, ...knobs({ label: 'a display label' }) });
+    return sent();
+  });
+  console.log(`  a complete configure → ${JSON.stringify({ success: ok.success, path: ok.path, paneName: ok.paneName })}`);
+
+  const shorthand = await quiet(async () => {
+    const other = owned('configure', 'exempt');
+    router.handle({ action: 'configure_agent', path: other, priority: 9, launcher: 'claude', gateExempt: true });
+    return sent();
+  });
+  console.log(`  gateExempt: true alone → ${JSON.stringify(shorthand.config)}`);
+
+  const configured = events.find((e) => e.action === 'agent_configured_event');
+  const record = agentRegistry.intents().get(dir);
+  console.log(`\n  broadcast: ${configured?.action} for ${configured?.path}`);
+  console.log(`  registry:  ${record.event}, and NOT expected to be running: ` +
+    `${JSON.stringify(agentRegistry.expected().map((r) => r.path))}`);
+
+  verdict(
+    missing.success === false &&
+      JSON.stringify(missing.missing) === JSON.stringify(['priority', 'launcher']) &&
+      badPriority.success === false && badLauncher.success === false &&
+      /clade/.test(badLauncher.error) && /claude/.test(badLauncher.error),
+    'a configure without priority or launcher is refused NAMING them, and a bad value\n' +
+    '    for either is refused naming the value — the loader\'s refusals moved to the\n' +
+    '    caller rather than disappearing with it.',
+    `a required knob was defaulted: ${JSON.stringify({ missing: missing.missing, prio: badPriority.success, launcher: badLauncher.success })}`
+  );
+  verdict(
+    noDir.success === false && /does not exist/.test(noDir.error) && /never creates a directory/.test(noDir.error),
+    'configure may not mkdir, so the filesystem is the typo-checker: a mistyped path is\n' +
+    '    refused rather than scattered through the caller\'s tree.',
+    `configure accepted a path that does not exist: ${JSON.stringify(noDir)}`
+  );
+  verdict(
+    incoherent.success === false && /frees nothing/.test(incoherent.error) &&
+      bothForms.success === false && /silent decision/.test(bothForms.error),
+    'the incoherent gate combination is refused SYNCHRONOUSLY to the caller who wrote it\n' +
+    '    (it used to fail a daemon boot), and the shorthand cannot be silently combined\n' +
+    '    with the flags it stands for.',
+    `the gate triple accepted an incoherent or ambiguous combination`
+  );
+  verdict(
+    ok.success === true &&
+      record?.event === 'configured' &&
+      agentRegistry.expected().length === 0 &&
+      Boolean(configured) &&
+      shorthand.config.refusable === false && shorthand.config.chargeable === false &&
+      shorthand.config.preemptable === false,
+    'a configured agent EXISTS and is not running — it is absent from expected(), so a\n' +
+    '    reboot correctly does not start it; and gateExempt expands to all three flags false.',
+    `configure did not record the agent correctly: ${JSON.stringify({ event: record?.event, expected: agentRegistry.expected().length })}`
+  );
+
+  // And activate refuses a path nobody configured, naming what is missing.
+  const unconfigured = owned('configure', 'never');
+  const refused = await quiet(async () => {
+    let out;
+    await router.handleActivate({ path: unconfigured, ...PAST_THE_GATE }, (m) => { out = m; });
+    return out;
+  });
+  console.log(`\n  activate on a never-configured path → ${JSON.stringify({ success: refused.success, refused: refused.refused, missing: refused.missing })}`);
+  console.log(`    ${refused.error}`);
+  verdict(
+    refused.success === false && refused.refused === 'not-configured' &&
+      /takes no attributes/.test(refused.error),
+    'and `activate` on a path nobody configured refuses NAMING what is missing, rather\n' +
+    '    than inventing a priority and a launcher for it.',
+    `activate started an unconfigured agent: ${JSON.stringify(refused)}`
+  );
+}
 
 // ------------------------------------------------------------------ 1. off --
 rule('1. OFF — what a client sends, and the agent gone from the census');
 
 {
-  const FLEET = ['crabcast-epic-kan-39', 'crabcast-task-kan-38', 'crabcast-task-kan-25'];
-  const workDirs = Object.fromEntries(
-    FLEET.map((n) => [n, path.join(WORKSPACES, ...n.replace('crabcast-', '').split(/-(.*)/s).slice(0, 2))])
-  );
-  for (const dir of Object.values(workDirs)) fs.mkdirSync(dir, { recursive: true });
+  const epic = owned('fleet', 'epic-kan-39');
+  const taskA = owned('fleet', 'task-kan-38');
+  const taskB = owned('fleet', 'task-kan-25');
+  const FLEET = [epic, taskA, taskB];
 
-  const bridge = stubHerdr(FLEET, { workDirs });
-  const { router, events, sent } = newRouter(bridge, seedOf(FLEET, workDirs));
+  const bridge = stubHerdr(FLEET);
+  const { router, events, sent } = newRouter(bridge, [
+    ...seedOf([epic], { chargeable: false, refusable: false, preemptable: false, priority: 10 }),
+    ...seedOf([taskA, taskB])
+  ]);
 
   const listed = list(router, sent);
-  const before = listed.agents.map((a) => a.agentName);
-  console.log(`census before: ${before.join(', ')}\n`);
+  const before = listed.agents.map((a) => a.path);
+  console.log(`census before:\n  ${before.join('\n  ')}\n`);
 
-  const exempt = listed.agents.find((a) => a.type === 'epic')?.gateExempt;
-  const charged = listed.agents.find((a) => a.type === 'task')?.gateExempt;
-  console.log(`rows carry the config's gateExempt flag: epic=${exempt}, task=${charged}`);
-  console.log('(the flag comes from crabcast.config.json, not from a client-side type list)\n');
+  const exemptRow = listed.agents.find((a) => a.path === epic);
+  const chargedRow = listed.agents.find((a) => a.path === taskA);
+  console.log(`rows carry the gate triple from the agent's own record:`);
+  console.log(`  ${epic}\n    refusable=${exemptRow.refusable} chargeable=${exemptRow.chargeable} preemptable=${exemptRow.preemptable}`);
+  console.log(`  ${taskA}\n    refusable=${chargedRow.refusable} chargeable=${chargedRow.chargeable} preemptable=${chargedRow.preemptable}`);
+  console.log(
+    '\n(one `gateExempt` boolean used to carry all three, which is only ever right by\n' +
+    'coincidence — never-refused, uncharged and unpreemptable are different decisions)\n'
+  );
 
-  console.log('a client sends exactly one message — by KEY, not by session id, because an');
-  console.log('agent that outlived the daemon holding its terminal has no session id and is');
-  console.log('exactly as stoppable:\n');
-  console.log(`  { action: 'deactivate_by_key', type: 'task', key: 'KAN-38' }\n`);
+  console.log('a client sends exactly one message — by PATH, because an agent that outlived');
+  console.log('the daemon holding its terminal has no session id and is exactly as stoppable,');
+  console.log('and because a path cannot be ambiguous the way a key could:\n');
+  console.log(`  { action: 'deactivate_agent', path: '${taskA}' }\n`);
 
   const res = await quiet(async () => {
-    router.handle({ action: 'deactivate_by_key', type: 'task', key: 'KAN-38' });
+    router.handle({ action: 'deactivate_agent', path: taskA });
     return sent();
   });
-  console.log(`response: ${JSON.stringify({ success: res.success, type: res.type, key: res.key })}`);
+  console.log(`response: ${JSON.stringify({ success: res.success, path: res.path, wasRunning: res.wasRunning, state: res.state })}`);
 
-  const after = list(router, sent).agents.map((a) => a.agentName);
-  console.log(`census after:  ${after.join(', ')}`);
+  const after = list(router, sent).agents.map((a) => a.path);
+  console.log(`census after:\n  ${after.join('\n  ')}`);
 
   const broadcast = events.find((e) => e.action === 'agent_deactivated_event');
-  console.log(`\nbroadcast to every connected client: ${broadcast.action} ${broadcast.type}/${broadcast.key}`);
+  console.log(`\nbroadcast to every connected client: ${broadcast.action} ${broadcast.path}`);
 
   verdict(
-    res.success === true && !after.includes('crabcast-task-kan-38') && after.length === before.length - 1 &&
-      exempt === true && charged === false,
+    res.success === true && res.wasRunning === true && res.state === 'standby' &&
+      !after.includes(taskA) && after.length === before.length - 1 &&
+      exemptRow.chargeable === false && chargedRow.chargeable === true,
     'the agent is gone from the census a client renders, nothing else moved, and the\n' +
-    '    response carries the address a fleet list needs to attribute it to a row.',
+    '    response says WHAT it did — never a bare success: `wasRunning` and `state`\n' +
+    '    distinguish an agent this call stopped from one that was already down.',
     `off did not take: success=${res.success} after=${after.join(',')}`
   );
 }
@@ -287,52 +458,47 @@ rule('1. OFF — what a client sends, and the agent gone from the census');
 rule('2. ON — where the candidates come from, and the agent back');
 
 {
-  const FLEET = ['crabcast-epic-kan-39', 'crabcast-task-kan-38'];
-  const workDirs = Object.fromEntries(FLEET.map((n) => [n, path.join(WORKSPACES, 'live', n)]));
-  for (const dir of Object.values(workDirs)) fs.mkdirSync(dir, { recursive: true });
-
-  const bridge = stubHerdr(FLEET, { workDirs });
-  const { router, sent } = newRouter(bridge, seedOf(FLEET, workDirs));
+  const epic = owned('on', 'epic');
+  const task = owned('on', 'task');
+  const bridge = stubHerdr([epic, task]);
+  const { router, sent } = newRouter(bridge, seedOf([epic, task]));
 
   console.log(
     'A fleet client lists what is running, and something that is off is not in that\n' +
     'list. So the candidates cannot come from the client. They come from the durable\n' +
-    'registry — the only record of activation INTENT this system has — in three\n' +
-    'disjoint ways; one agent never gets two switches:\n'
+    'registry — the only record of activation INTENT this system has — in disjoint\n' +
+    'ways; one agent never gets two switches:\n'
   );
   console.log('  missingAgents    last word `activated`, not running    a loss    → restore');
   console.log('  preemptedAgents  stood down for capacity              a debt    → put back');
   console.log('  standbyAgents    stood down because a person said so  a choice  → turn on');
-  console.log('\nNo parallel registry is written. All three are reductions of the same');
+  console.log('\nNo parallel registry is written. All of them are reductions of the same');
   console.log('append-only log that boot-time restoration already reads.\n');
 
-  await quiet(async () => router.handle({ action: 'deactivate_by_key', type: 'task', key: 'KAN-38' }));
+  await quiet(async () => router.handle({ action: 'deactivate_agent', path: task }));
   const off = list(router, sent);
-  console.log(`after switching task/KAN-38 off, list_agents carries:\n`);
+  console.log(`after switching it off, list_agents carries:\n`);
   console.log(JSON.stringify({ standbyAgents: off.standbyAgents, standbyTotal: off.standbyTotal }, null, 2));
 
   const candidate = off.standbyAgents[0];
-  console.log(`\na client sends, from that row:\n`);
-  console.log(`  { action: 'activate_by_key', type: '${candidate.type}', key: '${candidate.key}',`);
-  console.log(`    defaultAgent: '${candidate.defaultAgent}' }`);
+  console.log(`\na client sends, from that row — and nothing else, because `);
+  console.log(`\`activate\` takes no attributes at all:\n`);
+  console.log(`  { action: 'activate_agent', path: '${candidate.path}' }`);
 
   const res = await quiet(async () => {
     let out;
-    await router.handleActivateByKey(
-      { type: candidate.type, key: candidate.key, defaultAgent: candidate.defaultAgent, ...PAST_THE_GATE },
-      (msg) => { out = msg; }
-    );
+    await router.handleActivate({ path: candidate.path, ...PAST_THE_GATE }, (msg) => { out = msg; });
     return out;
   });
 
   const back = list(router, sent);
-  console.log(`\nactivate_by_key → success: ${res.success}`);
-  console.log(`census:     ${back.agents.map((a) => a.agentName).join(', ')}`);
-  console.log(`stood down: ${back.standbyAgents.length === 0 ? '(empty — it left the list the moment it came back)' : back.standbyAgents.map((a) => a.key).join(', ')}`);
+  console.log(`\nactivate_agent → success: ${res.success}`);
+  console.log(`census:     ${back.agents.map((a) => a.path).join(', ')}`);
+  console.log(`stood down: ${back.standbyAgents.length === 0 ? '(empty — it left the list the moment it came back)' : back.standbyAgents.map((a) => a.path).join(', ')}`);
 
   verdict(
     res.success === true &&
-      back.agents.some((a) => a.agentName === 'crabcast-task-kan-38') &&
+      back.agents.some((a) => a.path === task) &&
       back.standbyAgents.length === 0,
     'off and on are a round trip from one client, and the candidate list empties itself\n' +
     '    — an agent that is running is never offered an On button.',
@@ -340,60 +506,53 @@ rule('2. ON — where the candidates come from, and the agent back');
   );
 }
 
-// ------------------------------------------------------------- 3. launcher --
-rule('3. LAUNCHER — why a stand-down has to carry the activation record with it');
+// --------------------------------------------------------------- 3. record --
+rule('3. THE RECORD — why a stand-down has to carry the whole configuration');
 
 {
-  const FLEET = ['crabcast-task-kan-38'];
-  const workDir = path.join(WORKSPACES, 'launcher', 'kan-38');
-  fs.mkdirSync(workDir, { recursive: true });
-  const bridge = stubHerdr(FLEET, { workDirs: { 'crabcast-task-kan-38': workDir } });
+  const dir = owned('record', 'agent');
+  const bridge = stubHerdr([dir]);
   const { router, agentRegistry } = newRouter(bridge, [
     {
-      agentName: 'crabcast-task-kan-38',
-      type: 'task',
-      key: 'KAN-38',
-      workDir,
-      url: 'https://example.invalid/browse/KAN-38',
-      defaultAgent: 'claude',
-      mcpServers: ['crabcast']
+      path: dir,
+      config: knobs({ launcher: 'claude', mcpServers: ['crabcast'], label: 'KAN-38', prompt: 'do the thing' }),
+      paneId: '%rec'
     }
   ]);
 
-  await quiet(async () => router.handle({ action: 'deactivate_by_key', type: 'task', key: 'KAN-38' }));
-  const intent = agentRegistry.intents().get('crabcast-task-kan-38');
+  await quiet(async () => router.handle({ action: 'deactivate_agent', path: dir }));
+  const intent = agentRegistry.intents().get(dir);
 
   console.log('the stand-down record the registry now holds:\n');
-  console.log(`  event:        ${intent.event}`);
-  console.log(`  workDir:      ${intent.record.workDir}`);
-  console.log(`  url:          ${intent.record.url}`);
-  console.log(`  defaultAgent: ${intent.record.defaultAgent}`);
-  console.log(`  mcpServers:   ${JSON.stringify(intent.record.mcpServers)}`);
+  console.log(`  event:      ${intent.event}`);
+  console.log(`  path:       ${intent.record.path}`);
+  console.log(`  config:     ${JSON.stringify(intent.record.config)}`);
+  console.log(`  paneId:     ${intent.record.paneId}`);
 
   console.log(
-    '\n  `AgentRecord` is the argument list of an activation, and `defaultAgent` is one\n' +
-    '  of its arguments: an agent recorded without it and then switched back on falls\n' +
-    '  to the type\'s defaultLauncher, which may not be the launcher it actually ran —\n' +
-    '  it would come back as something other than what it was. The url and workDir\n' +
-    '  travel for the same reason. The extraction source learned this when stood-down\n' +
-    '  agents with no recorded launcher came back as bare shells wearing agent names.'
+    '\n  Under the type model this record was the argument list of an activation and\n' +
+    '  most of it could be looked up again from config if it were lost. It cannot now:\n' +
+    '  types are deleted, so this row is the ONLY place this agent\'s priority, launcher,\n' +
+    '  gate flags and prompt exist. A stand-down that dropped them would not produce a\n' +
+    '  degraded activation — it would produce an agent that cannot be activated at all.'
   );
 
-  await quiet(() =>
-    router.handleActivateByKey(
-      { type: 'task', key: 'KAN-38', defaultAgent: intent.record.defaultAgent, url: intent.record.url, ...PAST_THE_GATE },
-      () => {}
-    )
-  );
+  await quiet(() => router.handleActivate({ path: dir, ...PAST_THE_GATE }, () => {}));
   const spawned = bridge.spawns[bridge.spawns.length - 1];
-  console.log(`\n  switched back on with:  defaultAgent=${spawned.defaultAgent}  url=${spawned.url}`);
+  console.log(`\n  switched back on with: launcher=${spawned.config.launcher} ` +
+    `mcpServers=${JSON.stringify(spawned.config.mcpServers)} prompt=${JSON.stringify(spawned.prompt)}`);
 
   verdict(
-    intent.record.defaultAgent === 'claude' &&
-      intent.record.url === 'https://example.invalid/browse/KAN-38' &&
-      spawned.defaultAgent === 'claude',
-    'it comes back as what it was, not as something else.',
-    `the activation record did not survive the stand-down: ${JSON.stringify(intent.record)}`
+    intent.record.config.launcher === 'claude' &&
+      JSON.stringify(intent.record.config.mcpServers) === JSON.stringify(['crabcast']) &&
+      intent.record.config.prompt === 'do the thing' &&
+      intent.record.paneId === '%rec' &&
+      spawned.config.launcher === 'claude' &&
+      spawned.prompt === 'do the thing',
+    'it comes back as what it was, not as something else — and the pane binding travels\n' +
+    '    too, so a pane bearing it is still recognisable as OUR dead one rather than a\n' +
+    '    stranger\'s live one.',
+    `the configuration did not survive the stand-down: ${JSON.stringify(intent.record)}`
   );
 }
 
@@ -401,18 +560,16 @@ rule('3. LAUNCHER — why a stand-down has to carry the activation record with i
 rule('4. PREEMPTED — a debt, reported until re-activation, and re-activation is a resume');
 
 {
-  const FLEET = ['crabcast-task-kan-40'];
-  const workDir = path.join(WORKSPACES, 'task', 'kan-40');
-  fs.mkdirSync(workDir, { recursive: true });
-  const bridge = stubHerdr(FLEET, { workDirs: { 'crabcast-task-kan-40': workDir } });
-  const { router, sent } = newRouter(bridge, seedOf(FLEET, { 'crabcast-task-kan-40': workDir }));
+  const victimDir = owned('preempt', 'victim');
+  const bridge = stubHerdr([victimDir]);
+  const { router, sent } = newRouter(bridge, seedOf([victimDir]));
 
-  // The record a preempting caller (the capacity slice, T3) attaches: why this
-  // stand-down was not the agent's own idea.
+  // The record the capacity gate's preempt path attaches: why this stand-down
+  // was not the agent's own idea.
+  const bossDir = owned('preempt', 'boss');
   const preemption = {
-    byAgentName: 'crabcast-epic-kan-59',
-    byType: 'epic',
-    byKey: 'KAN-59',
+    byPath: bossDir,
+    byPaneName: paneNameFor(bossDir),
     byPriority: 10,
     priority: 1,
     herdrStatus: 'working',
@@ -420,18 +577,18 @@ rule('4. PREEMPTED — a debt, reported until re-activation, and re-activation i
   };
 
   await quiet(async () =>
-    router.handle({ action: 'deactivate_by_key', type: 'task', key: 'KAN-40', preemption })
+    router.handle({ action: 'deactivate_agent', path: victimDir, preemption })
   );
 
   const listed = list(router, sent);
-  const owed = listed.preemptedAgents.find((a) => a.agentName === 'crabcast-task-kan-40');
+  const owed = listed.preemptedAgents.find((a) => a.path === victimDir);
   console.log('list_agents now carries the debt:\n');
   console.log(JSON.stringify(listed.preemptedAgents, null, 2));
-  console.log(`\ndisjoint from standby (one agent, one switch): standbyAgents = ${JSON.stringify(listed.standbyAgents.map((a) => a.agentName))}`);
+  console.log(`\ndisjoint from standby (one agent, one switch): standbyAgents = ${JSON.stringify(listed.standbyAgents.map((a) => a.path))}`);
 
   const res = await quiet(async () => {
     let out;
-    await router.handleActivateByKey({ type: 'task', key: 'KAN-40', defaultAgent: 'claude', ...PAST_THE_GATE }, (m) => { out = m; });
+    await router.handleActivate({ path: victimDir, ...PAST_THE_GATE }, (m) => { out = m; });
     return out;
   });
   const spawned = bridge.spawns[bridge.spawns.length - 1];
@@ -441,7 +598,7 @@ rule('4. PREEMPTED — a debt, reported until re-activation, and re-activation i
 
   verdict(
     Boolean(owed) &&
-      owed.by.agentName === 'crabcast-epic-kan-59' &&
+      owed.by.path === bossDir &&
       owed.derivation === preemption.derivation &&
       /interrupted, not finished/.test(owed.reason) &&
       listed.standbyAgents.length === 0 &&
@@ -461,25 +618,25 @@ rule('4. PREEMPTED — a debt, reported until re-activation, and re-activation i
   console.log('  is alive and working: owed a resume it is not owed, absent from expected()');
   console.log('  so a reboot forgets it, and framed as interrupted on its next activation.\n');
 
-  const survivorDir = path.join(WORKSPACES, 'task', 'kan-42');
-  fs.mkdirSync(survivorDir, { recursive: true });
-  const failBridge = stubHerdr(['crabcast-task-kan-42'], { workDirs: { 'crabcast-task-kan-42': survivorDir } });
+  const survivor = owned('preempt', 'survivor');
+  const failBridge = stubHerdr([survivor]);
   // A live session whose teardown fails — the pane stays, the agent works on.
-  failBridge.getSessionByAddress = () => ({
-    sessionId: 'task-kan-42-stub', type: 'task', key: 'KAN-42',
-    createdAt: new Date(), status: 'active', workDir: survivorDir,
-    ptyBuffer: '', onDataListeners: []
+  failBridge.getSessionByPath = () => ({
+    sessionId: 'survivor-stub',
+    path: survivor,
+    paneName: paneNameFor(survivor),
+    createdAt: new Date(), status: 'active', ptyBuffer: '', onDataListeners: []
   });
   failBridge.terminateSession = () => ({ success: false, error: 'stub: the pane would not close' });
-  const failHarness = newRouter(failBridge, seedOf(['crabcast-task-kan-42'], { 'crabcast-task-kan-42': survivorDir }));
+  const failHarness = newRouter(failBridge, seedOf([survivor]));
 
   const failed = await quiet(async () => {
-    failHarness.router.handle({ action: 'deactivate_by_key', type: 'task', key: 'KAN-42', preemption });
+    failHarness.router.handle({ action: 'deactivate_agent', path: survivor, preemption });
     return failHarness.sent();
   });
-  const survivorIntent = failHarness.agentRegistry.intents().get('crabcast-task-kan-42');
+  const survivorIntent = failHarness.agentRegistry.intents().get(survivor);
   const failedList = list(failHarness.router, failHarness.sent);
-  console.log(`  deactivate_by_key (teardown fails) → ${JSON.stringify({ success: failed.success, error: failed.error })}`);
+  console.log(`  deactivate_agent (teardown fails) → ${JSON.stringify({ success: failed.success, error: failed.error })}`);
   console.log(`  registry intent after: ${survivorIntent.event}`);
   console.log(`  preemptedAgents after: ${JSON.stringify(failedList.preemptedAgents)}`);
 
@@ -487,7 +644,7 @@ rule('4. PREEMPTED — a debt, reported until re-activation, and re-activation i
     failed.success === false &&
       survivorIntent.event === 'activated' &&
       failedList.preemptedAgents.length === 0 &&
-      failedList.agents.some((a) => a.agentName === 'crabcast-task-kan-42'),
+      failedList.agents.some((a) => a.path === survivor),
     'the failed stand-down wrote nothing: the survivor is still expected, still\n' +
     '    listed as running, and owed nothing.',
     `a failed teardown left a durable lie: ${JSON.stringify({ success: failed.success, intent: survivorIntent.event, owed: failedList.preemptedAgents.length })}`
@@ -495,28 +652,22 @@ rule('4. PREEMPTED — a debt, reported until re-activation, and re-activation i
 
   // -- 4c. a record that contradicts the census is not reported as fact --------
   console.log('\n  4c. preemptedAgents is cross-checked against the census, like every category:\n');
-  const phantomDir = path.join(WORKSPACES, 'task', 'kan-43');
-  fs.mkdirSync(phantomDir, { recursive: true });
+  const phantom = owned('preempt', 'phantom');
   // The census says the agent is RUNNING; the registry (via some past failure
   // this rule exists to contain) says it was preempted.
-  const phantomBridge = stubHerdr(['crabcast-task-kan-43'], { workDirs: { 'crabcast-task-kan-43': phantomDir } });
+  const phantomBridge = stubHerdr([phantom]);
   const phantomHarness = newRouter(phantomBridge, []);
-  phantomHarness.agentRegistry.recordActivated({
-    agentName: 'crabcast-task-kan-43', type: 'task', key: 'KAN-43', workDir: phantomDir, defaultAgent: 'claude'
-  });
-  phantomHarness.agentRegistry.recordDeactivated(
-    { agentName: 'crabcast-task-kan-43', type: 'task', key: 'KAN-43', workDir: phantomDir, defaultAgent: 'claude' },
-    preemption
-  );
+  phantomHarness.agentRegistry.recordActivated({ path: phantom, config: knobs() });
+  phantomHarness.agentRegistry.recordDeactivated({ path: phantom, config: knobs() }, preemption);
   const phantomList = list(phantomHarness.router, phantomHarness.sent);
-  console.log(`  census: ${phantomList.agents.map((a) => a.agentName).join(', ')}`);
+  console.log(`  census: ${phantomList.agents.map((a) => a.path).join(', ')}`);
   console.log(`  preemptedAgents: ${JSON.stringify(phantomList.preemptedAgents)}`);
 
   verdict(
-    phantomList.agents.some((a) => a.agentName === 'crabcast-task-kan-43') &&
+    phantomList.agents.some((a) => a.path === phantom) &&
       phantomList.preemptedAgents.length === 0,
     'an agent herdr can show running is never simultaneously reported as preempted\n' +
-    '    debt — reality outranks the record, in this category as in the other three.',
+    '    debt — reality outranks the record, in this category as in the others.',
     `a phantom debt was reported over a live agent: ${JSON.stringify(phantomList.preemptedAgents)}`
   );
 }
@@ -525,24 +676,23 @@ rule('4. PREEMPTED — a debt, reported until re-activation, and re-activation i
 rule('5. ALREADY GONE — standing down a dead agent records the intent, not a failure');
 
 {
-  const workDir = path.join(WORKSPACES, 'task', 'kan-41');
-  fs.mkdirSync(workDir, { recursive: true });
-  // herdr is reachable and has NO agent for this key — it died on its own.
+  const dir = owned('gone', 'agent');
+  // herdr is reachable and has NO agent here — it died on its own.
   const bridge = stubHerdr([], { closeFails: true });
-  const { router, agentRegistry, sent } = newRouter(bridge, seedOf(['crabcast-task-kan-41'], { 'crabcast-task-kan-41': workDir }));
+  const { router, agentRegistry, sent } = newRouter(bridge, seedOf([dir]));
 
   const before = list(router, sent);
-  console.log(`before: recorded active but not running → missingAgents = ${JSON.stringify(before.missingAgents.map((m) => m.agentName))}\n`);
+  console.log(`before: recorded active but not running → missingAgents = ${JSON.stringify(before.missingAgents.map((m) => m.path))}\n`);
 
   const res = await quiet(async () => {
-    router.handle({ action: 'deactivate_by_key', key: 'KAN-41' });
+    router.handle({ action: 'deactivate_agent', path: dir });
     return sent();
   });
-  console.log(`deactivate_by_key with no live pane → ${JSON.stringify({ success: res.success, alreadyGone: res.alreadyGone, note: res.note })}`);
+  console.log(`deactivate_agent with no live pane → ${JSON.stringify({ success: res.success, alreadyGone: res.alreadyGone, state: res.state, note: res.note })}`);
 
-  const intent = agentRegistry.intents().get('crabcast-task-kan-41');
+  const intent = agentRegistry.intents().get(dir);
   const after = list(router, sent);
-  console.log(`\nregistry intent: ${intent.event} (resolved through the registry — herdr could not name the type)`);
+  console.log(`\nregistry intent: ${intent.event}`);
   console.log(`missingAgents after: ${JSON.stringify(after.missingAgents)}`);
 
   verdict(
@@ -553,28 +703,43 @@ rule('5. ALREADY GONE — standing down a dead agent records the intent, not a f
     '    registry write landed, and the loss alarm stands down with it.',
     `already-gone did not work: ${JSON.stringify({ res, intent: intent?.event })}`
   );
+
+  // The other half of the same rule: a path with no record at all REFUSES,
+  // because there is no agent to make a claim about.
+  const never = owned('gone', 'never-configured');
+  const refused = await quiet(async () => {
+    router.handle({ action: 'deactivate_agent', path: never });
+    return sent();
+  });
+  console.log(`\ndeactivate on a never-configured path → ${JSON.stringify({ success: refused.success, refused: refused.refused })}`);
+  console.log(`  ${refused.error}`);
+  verdict(
+    refused.success === false && refused.refused === 'not-configured',
+    'and a path that never held an agent is REFUSED rather than answered "stopped" —\n' +
+    '    that would be success: true about a world that does not exist.',
+    `deactivate claimed to stop an agent that never existed: ${JSON.stringify(refused)}`
+  );
 }
 
 // ------------------------------------------------------------ 6. poll churn --
 rule('6. POLL CHURN — a census position is not an identity across polls');
 
 {
-  const FLEET = ['crabcast-epic-kan-39', 'crabcast-task-kan-38'];
-  for (const n of FLEET) fs.mkdirSync(path.join(WORKSPACES, n), { recursive: true });
-  const bridge = stubHerdr(FLEET);
-  const { router, sent } = newRouter(bridge, seedOf(FLEET));
+  const a = owned('churn', 'a');
+  const b = owned('churn', 'b');
+  const bridge = stubHerdr([a, b]);
+  const { router, sent } = newRouter(bridge, seedOf([a, b]));
 
-  const poll1 = list(router, sent).agents.map((a) => a.agentName);
-  await quiet(async () => router.handle({ action: 'deactivate_by_key', type: 'epic', key: 'KAN-39' }));
-  const poll2 = list(router, sent).agents.map((a) => a.agentName);
+  const poll1 = list(router, sent).agents.map((x) => x.path);
+  await quiet(async () => router.handle({ action: 'deactivate_agent', path: a }));
+  const poll2 = list(router, sent).agents.map((x) => x.path);
   console.log(`poll n:   [0]=${poll1[0]}  [1]=${poll1[1]}`);
   console.log(`poll n+1: [0]=${poll2[0]}`);
   console.log(
     '\n  Index 0 is a different agent between polls. A client keying rows — or pending\n' +
-    '  controls — by array index would carry state from one agent onto another; agent\n' +
-    '  NAME is the only stable identity a census offers. (In the extraction source this\n' +
-    '  was a rendering bug waiting to happen; the daemon-side truth it rests on is\n' +
-    '  proved here.)'
+    '  controls — by array index would carry state from one agent onto another; the\n' +
+    '  PATH is the only stable identity a census offers, and unlike the agent name it\n' +
+    '  used to offer, it is the same string the caller already had.'
   );
 
   verdict(
@@ -585,75 +750,101 @@ rule('6. POLL CHURN — a census position is not an identity across polls');
   );
 }
 
-// ---------------------------------------------------------------- 7. reset --
-rule('7. RESET — a deleted workspace is not offered a way back');
+// --------------------------------------------------------------- 7. forget --
+rule('7. FORGET — the verb that replaced `reset`, and what it will not do');
 
 {
-  const workDir = path.join(WORKSPACES, 'resettable', 'kan-77');
-  fs.mkdirSync(workDir, { recursive: true });
-  const bridge = stubHerdr(['crabcast-task-kan-77'], { workDirs: { 'crabcast-task-kan-77': workDir } });
-  const { router, agentRegistry, sent } = newRouter(bridge, seedOf(['crabcast-task-kan-77'], { 'crabcast-task-kan-77': workDir }));
-
-  await quiet(async () => router.handle({ action: 'deactivate_by_key', type: 'task', key: 'KAN-77' }));
-  const before = list(router, sent).standbyAgents.map((a) => a.key);
-  console.log(`stood down, workspace present: standbyAgents = [${before.join(', ')}]`);
-
-  // What a reset leaves behind: the same `deactivated` record, and no directory.
-  fs.rmSync(workDir, { recursive: true, force: true });
-  const after = list(router, sent).standbyAgents.map((a) => a.key);
-  console.log(`workspace deleted:             standbyAgents = [${after.join(', ')}]`);
-
-  // And reset itself records the stand-down, so the next boot cannot
-  // resurrect an agent whose working directory was deliberately deleted.
-  await quiet(async () => router.handle({ action: 'reset_by_key', type: 'task', key: 'KAN-77' }));
-  const intent = agentRegistry.intents().get('crabcast-task-kan-77');
-  console.log(`\nreset_by_key recorded: ${intent.event}`);
-
   console.log(
-    '\n  A reset is indistinguishable from an ordinary Off in the log, and the directory\n' +
-    '  is the only thing that tells them apart: it is the difference between "stopped"\n' +
-    '  and "finished with". Offering a way back for one of those would create an empty\n' +
-    '  workspace and start an agent in it with nothing to continue.'
+    '`reset` was a stand-down plus a directory delete. CrabCast no longer creates the\n' +
+    'directory an agent runs in, so the set of directories it may delete is empty BY\n' +
+    'CONSTRUCTION — and what was left of `reset` was `deactivate` with extra words. It\n' +
+    'is removed rather than redefined, so a caller still invoking it is told by name.\n' +
+    '\n`forget` is the half it never had: removing the RECORD.\n'
   );
 
+  const dir = owned('forget', 'agent');
+  const bridge = stubHerdr([dir]);
+  const { router, agentRegistry, events, sent } = newRouter(bridge, seedOf([dir]));
+
+  // While it is running: refused, and there is deliberately no force flag.
+  bridge.getSessionByPath = (p) => (p === dir
+    ? { sessionId: 'stub', path: dir, paneName: paneNameFor(dir), createdAt: new Date(),
+        status: 'active', ptyBuffer: '', onDataListeners: [] }
+    : undefined);
+  const whileRunning = await quiet(async () => {
+    router.handle({ action: 'forget_agent', path: dir });
+    return sent();
+  });
+  console.log(`  forget while it runs → ${JSON.stringify({ success: whileRunning.success, refused: whileRunning.refused })}`);
+  console.log(`    ${whileRunning.error}\n`);
+  bridge.getSessionByPath = () => undefined;
+
+  await quiet(async () => router.handle({ action: 'deactivate_agent', path: dir }));
+  const forgotten = await quiet(async () => {
+    router.handle({ action: 'forget_agent', path: dir });
+    return sent();
+  });
+  console.log(`  deactivate, then forget → ${JSON.stringify({ success: forgotten.success, existed: forgotten.existed, removed: forgotten.removed })}`);
+
+  const stillThere = fs.existsSync(dir);
+  const gone = !agentRegistry.intents().has(dir);
+  console.log(`  the record is gone:      ${gone}`);
+  console.log(`  the DIRECTORY is intact: ${stillThere}  (${dir})`);
+
+  const never = path.join(OWNED, 'forget', 'never-configured');
+  const noRecord = await quiet(async () => {
+    router.handle({ action: 'forget_agent', path: never });
+    return sent();
+  });
+  console.log(`\n  forget on a path that never held an agent → ${JSON.stringify({ success: noRecord.success, existed: noRecord.existed })}`);
+  console.log(`    ${noRecord.note}`);
+
+  const broadcast = events.find((e) => e.action === 'agent_forgotten_event');
+
   verdict(
-    before.includes('KAN-77') && !after.includes('KAN-77') && intent.event === 'deactivated',
-    'a workspace on disk is what makes an agent restorable, and a reset one is not\n' +
+    whileRunning.success === false && whileRunning.refused === 'running' &&
+      /no force flag/.test(whileRunning.error),
+    'forget REFUSES while an agent is running, and says there is no force flag — no call\n' +
+    '    that is not named "stop it" may terminate an agent as a side effect, and a force\n' +
+    '    flag is that path with a label on it.',
+    `forget destroyed a running agent's record: ${JSON.stringify(whileRunning)}`
+  );
+  verdict(
+    forgotten.success === true && gone && stillThere && Boolean(broadcast),
+    'after a stand-down it removes the RECORD and nothing else: the caller\'s directory\n' +
+    '    is untouched, which is the whole difference from the `reset` it replaced.',
+    `forget did not do exactly one thing: recordGone=${gone} dirIntact=${stillThere}`
+  );
+  verdict(
+    noRecord.success === true && noRecord.existed === false,
+    'and on a path that never held an agent it SUCCEEDS with existed: false — its\n' +
+    '    postcondition is the absence of a record, and absence is verifiable: it already\n' +
+    '    held. (`deactivate` on the same path refuses, because ITS postcondition is a\n' +
+    '    claim about an agent, and there is no agent to make one about.)',
+    `forget refused a postcondition that already held: ${JSON.stringify(noRecord)}`
+  );
+
+  // -- 7b. a deleted directory is not offered a way back ----------------------
+  console.log('\n  7b. a directory the caller deleted is not offered a way back:\n');
+  const doomed = owned('forget', 'doomed');
+  const bridge2 = stubHerdr([doomed]);
+  const h2 = newRouter(bridge2, seedOf([doomed]));
+  await quiet(async () => h2.router.handle({ action: 'deactivate_agent', path: doomed }));
+  const withDir = list(h2.router, h2.sent).standbyAgents.map((a) => a.path);
+  console.log(`  stood down, directory present: standbyAgents = [${withDir.join(', ')}]`);
+  fs.rmSync(doomed, { recursive: true, force: true });
+  const withoutDir = list(h2.router, h2.sent).standbyAgents.map((a) => a.path);
+  console.log(`  directory deleted:             standbyAgents = [${withoutDir.join(', ')}]`);
+  console.log(
+    '\n  The directory is the only thing that tells "stopped" from "finished with".\n' +
+    '  Offering a way back for one that is gone would start an agent in a directory\n' +
+    '  that does not exist, with nothing to continue.'
+  );
+  verdict(
+    withDir.includes(doomed) && !withoutDir.includes(doomed),
+    'a directory on disk is what makes an agent restorable, and a deleted one is not\n' +
     '    offered.',
-    'a reset workspace was still offered a way back.'
-  );
-
-  // -- 7b. reset resolves the full address -------------------------------------
-  console.log('\n  7b. reset is by full address — with task/K and epic/K live, resetting one');
-  console.log('  must not tear down or record against the other:\n');
-  const twinTask = path.join(WORKSPACES, 'twin', 'task-kan-88');
-  const twinEpic = path.join(WORKSPACES, 'twin', 'epic-kan-88');
-  fs.mkdirSync(twinTask, { recursive: true });
-  fs.mkdirSync(twinEpic, { recursive: true });
-  const twinBridge = stubHerdr(
-    ['crabcast-task-kan-88', 'crabcast-epic-kan-88'],
-    { workDirs: { 'crabcast-task-kan-88': twinTask, 'crabcast-epic-kan-88': twinEpic } }
-  );
-  const twins = newRouter(twinBridge, seedOf(
-    ['crabcast-task-kan-88', 'crabcast-epic-kan-88'],
-    { 'crabcast-task-kan-88': twinTask, 'crabcast-epic-kan-88': twinEpic }
-  ));
-
-  await quiet(async () => twins.router.handle({ action: 'reset_by_key', type: 'task', key: 'KAN-88' }));
-  const taskIntent = twins.agentRegistry.intents().get('crabcast-task-kan-88');
-  const epicIntent = twins.agentRegistry.intents().get('crabcast-epic-kan-88');
-  const twinCensus = list(twins.router, twins.sent).agents.map((a) => a.agentName);
-  console.log(`  after reset task/KAN-88: census = [${twinCensus.join(', ')}]`);
-  console.log(`  registry: task=${taskIntent.event}, epic=${epicIntent.event}`);
-
-  verdict(
-    taskIntent.event === 'deactivated' &&
-      epicIntent.event === 'activated' &&
-      !twinCensus.includes('crabcast-task-kan-88') &&
-      twinCensus.includes('crabcast-epic-kan-88'),
-    'the addressed agent was torn down and recorded; its key-twin of another type\n' +
-    '    was neither touched nor written about.',
-    `reset crossed types: task=${taskIntent.event} epic=${epicIntent.event} census=${twinCensus.join(',')}`
+    'a deleted directory was still offered a way back.'
   );
 }
 
@@ -661,42 +852,47 @@ rule('7. RESET — a deleted workspace is not offered a way back');
 rule('8. DURABILITY IS REPORTED — a registry that cannot be written says so');
 
 {
-  const workDir = path.join(WORKSPACES, 'task', 'kan-90');
-  fs.mkdirSync(workDir, { recursive: true });
-  const bridge = stubHerdr([], { workDirs: { 'crabcast-task-kan-90': workDir } });
+  const dir = owned('durable', 'agent');
+  const bridge = stubHerdr([]);
 
   // A registry whose directory refuses writes: the append's openSync fails,
-  // which is what a full or read-only data dir looks like from here.
+  // which is what a full or read-only data dir looks like from here. It is
+  // seeded by hand first, because `configure` would fail on the same wall.
   const sealedDir = path.join(TMP, 'sealed');
   fs.mkdirSync(sealedDir, { recursive: true });
+  const sealedLog = path.join(sealedDir, 'agents.jsonl');
+  const seedReg = new AgentRegistry(sealedLog);
+  seedReg.recordConfigured({ path: dir, config: knobs() });
+  // BOTH, and the file matters more than the directory: appending to a file
+  // that already exists needs write permission on the FILE, not on the
+  // directory holding it. Sealing only the directory would leave the append
+  // working and this section proving nothing.
+  fs.chmodSync(sealedLog, 0o400);
   fs.chmodSync(sealedDir, 0o500);
+
   const events = [];
   let last;
   const router = new MessageRouter({
-    registry,
     config,
-    promptLoader: prompts,
     herdrBridge: bridge,
     daemonStartedAt: new Date(),
-    agentRegistry: new AgentRegistry(path.join(sealedDir, 'agents.jsonl')),
+    agentRegistry: new AgentRegistry(sealedLog),
     send: (msg) => { last = msg; },
     broadcast: (msg) => events.push(msg)
   });
 
   const res = await quiet(async () => {
     let out;
-    await router.handleActivateByKey(
-      { type: 'task', key: 'KAN-90', defaultAgent: 'claude', ...PAST_THE_GATE },
-      (msg) => { out = msg; }
-    );
+    await router.handleActivate({ path: dir, ...PAST_THE_GATE }, (msg) => { out = msg; });
     return out;
   });
   fs.chmodSync(sealedDir, 0o755); // so cleanup can remove the scratch
+  fs.chmodSync(sealedLog, 0o600);
 
   const degraded = events.find((e) => e.action === 'registry_degraded_event');
   console.log('the agent exists and is verified — but the disk does not know it, and that');
   console.log('gap must be somebody\'s to act on rather than a line in a log nobody reads:\n');
-  console.log(`  activate_by_key → ${JSON.stringify({ success: res.success, verified: res.verified, durable: res.durable, durabilityError: Boolean(res.durabilityError) })}`);
+  console.log(`  activate_agent → ${JSON.stringify({ success: res.success, verified: res.verified, durable: res.durable, durabilityError: Boolean(res.durabilityError) })}`);
   console.log(`  broadcast: ${JSON.stringify(degraded && { action: degraded.action, what: degraded.what })}`);
 
   verdict(
@@ -713,136 +909,160 @@ rule('8. DURABILITY IS REPORTED — a registry that cannot be written says so');
   );
 }
 
-// ------------------------------------------------------- 9. compaction (B5) --
-rule('9. COMPACTION KEEPS THE WAY BACK — KAN-88 finding B5');
+// --------------------------------------------------------- 9. compaction --
+rule('9. COMPACTION KEEPS EVERY AGENT — including the ones that never ran (AC 6)');
 
 {
-  console.log('Compaction rewrote the log as one `activated` record per expected agent, which');
-  console.log('silently emptied the standby list the moment the 501st record landed: every');
-  console.log('agent a person had switched off stopped being offered a way back, while its');
-  console.log('workspace — and the conversation in it — sat on disk. That was never decided,');
-  console.log('it is what dropping `deactivated` records happened to do. It is decided now:');
-  console.log('standby records travel (bounded by "workspace still exists" and by a cap),');
-  console.log('preemption annotations still do not.\n');
+  console.log('Compaction preserves an ALLOWLIST: whatever a preserve set does not name is');
+  console.log('dropped when the log is rewritten. That allowlist was `activated` plus');
+  console.log('`deactivated`, which happened to be every terminal state there was — and the');
+  console.log('`configured` event broke it silently. A configured-last row matched neither');
+  console.log('set, and since `configure` is MANDATORY (there is no other place an agent\'s');
+  console.log('priority, launcher and gate flags can live), compaction at 500 records would');
+  console.log('have made a perfectly good agent STOP EXISTING. Not stop running: stop');
+  console.log('existing, with no row anywhere saying it ever had.\n');
+  console.log('The general rule, for whoever adds the next event: compaction\'s preserve set');
+  console.log('is an allowlist, so every new terminal event state must be added explicitly');
+  console.log('or it is silently dropped.\n');
 
   const logPath = path.join(TMP, 'compaction.jsonl');
   const reg = new AgentRegistry(logPath);
 
-  // One agent switched off with its workspace intact — the row a client's On
+  // The row this section exists for: configured, never activated. It is the
+  // agent — delete the row and the agent has never existed.
+  const unstarted = owned('compact', 'unstarted');
+  reg.recordConfigured({ path: unstarted, config: knobs({ priority: 7, label: 'never run' }) });
+
+  // One agent switched off with its directory intact — the row a client's On
   // button is built from.
-  const keptDir = path.join(WORKSPACES, 'compact', 'kept');
-  fs.mkdirSync(keptDir, { recursive: true });
-  const kept = { agentName: 'crabcast-task-kept', type: 'task', key: 'KEPT', workDir: keptDir, defaultAgent: 'claude' };
-  reg.recordActivated(kept);
-  reg.recordDeactivated(kept);
+  const kept = owned('compact', 'kept');
+  reg.recordActivated({ path: kept, config: knobs() });
+  reg.recordDeactivated({ path: kept, config: knobs() });
 
-  // One switched off whose workspace is gone — `reset` looks like this, and
-  // re-activating it would make an empty directory and start an agent in it.
-  const goneDir = path.join(WORKSPACES, 'compact', 'gone');
-  const gone = { agentName: 'crabcast-task-gone', type: 'task', key: 'GONE', workDir: goneDir, defaultAgent: 'claude' };
-  reg.recordActivated(gone);
-  reg.recordDeactivated(gone);
+  // One switched off whose directory the caller has since deleted.
+  const goneDir = path.join(OWNED, 'compact', 'gone');
+  fs.mkdirSync(goneDir, { recursive: true });
+  const gone = fs.realpathSync(goneDir);
+  reg.recordActivated({ path: gone, config: knobs() });
+  reg.recordDeactivated({ path: gone, config: knobs() });
+  fs.rmSync(gone, { recursive: true, force: true });
 
-  // One preempted, workspace intact: the annotation is the deliberate loss,
+  // One preempted, directory intact: the annotation is the deliberate loss,
   // the route back is not.
-  const preemptedDir = path.join(WORKSPACES, 'compact', 'preempted');
-  fs.mkdirSync(preemptedDir, { recursive: true });
-  const victim = { agentName: 'crabcast-task-victim', type: 'task', key: 'VICTIM', workDir: preemptedDir, defaultAgent: 'claude' };
-  reg.recordActivated(victim);
-  reg.recordDeactivated(victim, {
-    byAgentName: 'crabcast-epic-boss', byType: 'epic', byKey: 'BOSS', byPriority: 10,
+  const victim = owned('compact', 'victim');
+  const boss = owned('compact', 'boss');
+  reg.recordActivated({ path: victim, config: knobs() });
+  reg.recordDeactivated({ path: victim, config: knobs() }, {
+    byPath: boss, byPaneName: paneNameFor(boss), byPriority: 10,
     priority: 1, herdrStatus: 'working', derivation: 'at capacity'
   });
 
   // One still expected, so the activated half is provably untouched.
-  const liveDir = path.join(WORKSPACES, 'compact', 'live');
-  fs.mkdirSync(liveDir, { recursive: true });
-  reg.recordActivated({ agentName: 'crabcast-task-live', type: 'task', key: 'LIVE', workDir: liveDir, defaultAgent: 'claude' });
+  const live = owned('compact', 'live');
+  reg.recordActivated({ path: live, config: knobs() });
 
   const beforeCompaction = reg.readLog().length;
-  const standbyBefore = reg.intents();
-  const atBefore = new Map([...standbyBefore].map(([name, i]) => [name, i.at]));
+  const intentsBefore = reg.intents();
+  const atBefore = new Map([...intentsBefore].map(([p, i]) => [p, i.at]));
   // A second expected agent recorded a measurable moment later, so "all the
   // carried timestamps collapsed onto one value" is distinguishable from "they
   // were preserved" rather than being a coin flip on clock resolution.
   await new Promise((r) => setTimeout(r, 25));
-  const laterDir = path.join(WORKSPACES, 'compact', 'later');
-  fs.mkdirSync(laterDir, { recursive: true });
-  reg.recordActivated({ agentName: 'crabcast-task-later', type: 'task', key: 'LATER', workDir: laterDir, defaultAgent: 'claude' });
-  atBefore.set('crabcast-task-later', reg.intents().get('crabcast-task-later').at);
+  const later = owned('compact', 'later');
+  reg.recordActivated({ path: later, config: knobs() });
+  atBefore.set(later, reg.intents().get(later).at);
   await new Promise((r) => setTimeout(r, 25));
+
+  console.log(`  BEFORE compaction — ${beforeCompaction} records:`);
+  for (const [p, i] of intentsBefore) console.log(`    ${i.event.padEnd(12)} ${p}`);
+
   reg.compact();
   const after = reg.readLog();
   const intentsAfter = reg.intents();
+  // Captured HERE, before the activation below proves the carried row is still
+  // usable — that activation appends a row of its own, and reading `expected()`
+  // after it would be measuring this script rather than the compaction.
+  const expectedAfterCompaction = reg.expected().map((r) => r.path).sort().join();
 
-  console.log(`  records before compaction: ${beforeCompaction}`);
-  console.log(`  records after:             ${after.length}`);
-  console.log(`  events after: ${JSON.stringify(after.map((e) => `${e.agentName}:${e.event}`))}`);
-  console.log(`  preemption annotation survived: ${Boolean(intentsAfter.get('crabcast-task-victim')?.preemption)}`);
+  console.log(`\n  AFTER compaction — ${after.length} records:`);
+  for (const [p, i] of intentsAfter) console.log(`    ${i.event.padEnd(12)} ${p}`);
 
-  // Through a real router, because "the standby list survived" is a claim
-  // about what a client renders, not about the file.
+  // And through a real router, because "the agent still exists" is a claim
+  // about what a caller can do with it, not about the file.
   const bridge = stubHerdr([]);
   let sent9;
   const router9 = new MessageRouter({
-    registry, config, promptLoader: prompts, herdrBridge: bridge,
+    config, herdrBridge: bridge,
     daemonStartedAt: new Date(), agentRegistry: reg,
     send: (msg) => { sent9 = msg; }, broadcast: () => {}
   });
   router9.handle({ action: 'list_agents' });
-  const standbyNames = sent9.standbyAgents.map((a) => a.agentName);
-  console.log(`\n  standbyAgents after compaction: ${JSON.stringify(standbyNames)}`);
-  console.log(`  expected() after compaction:    ${JSON.stringify(reg.expected().map((r) => r.agentName))}`);
-  console.log(`  preemptedAgents after:          ${JSON.stringify(sent9.preemptedAgents.map((a) => a.agentName))}`);
+  const standbyPaths = sent9.standbyAgents.map((a) => a.path);
+
+  const unstartedAfter = intentsAfter.get(unstarted);
+  console.log(`\n  the configured-but-never-run agent after compaction: ` +
+    `${unstartedAfter ? `${unstartedAfter.event}, priority ${unstartedAfter.record.config.priority}` : 'GONE'}`);
+
+  // The proof that it is still a usable agent rather than merely a row.
+  const activated = await quiet(async () => {
+    let out;
+    await router9.handleActivate({ path: unstarted, ...PAST_THE_GATE }, (m) => { out = m; });
+    return out;
+  });
+  console.log(`  and it can still be activated: success=${activated.success}`);
 
   verdict(
-    standbyBefore.get('crabcast-task-kept')?.event === 'deactivated' &&
-      standbyNames.includes('crabcast-task-kept'),
-    'a stood-down agent whose workspace still exists is still offered a way back after\n' +
+    Boolean(unstartedAfter) &&
+      unstartedAfter.event === 'configured' &&
+      unstartedAfter.record.config.priority === 7 &&
+      activated.success === true,
+    'a configured-but-never-run agent SURVIVES compaction with its knobs intact, and is\n' +
+    '    still activatable afterwards — because `configure` is mandatory, dropping that\n' +
+    '    row would not have stopped an agent, it would have deleted one.',
+    `compaction deleted an agent: ${unstartedAfter ? JSON.stringify(unstartedAfter) : 'the configured row is gone'}`
+  );
+  verdict(
+    intentsBefore.get(kept)?.event === 'deactivated' && standbyPaths.includes(kept),
+    'a stood-down agent whose directory still exists is still offered a way back after\n' +
     '    compaction — the switch a person turned off is still a switch.',
-    `the standby row was lost to compaction: ${JSON.stringify(standbyNames)}`
+    `the standby row was lost to compaction: ${JSON.stringify(standbyPaths)}`
   );
   verdict(
-    !standbyNames.includes('crabcast-task-gone'),
-    'a stood-down agent whose workspace is gone is not carried — a reset stays a reset,\n' +
-    '    and the bound on what compaction preserves is "the work still exists".',
-    'compaction carried a record whose workspace had been deleted'
+    !standbyPaths.includes(gone) && !intentsAfter.has(gone),
+    'a stood-down agent whose directory is gone is not carried — the bound on what\n' +
+    '    compaction preserves is "the work still exists".',
+    'compaction carried a record whose directory had been deleted'
   );
   verdict(
-    !intentsAfter.get('crabcast-task-victim')?.preemption &&
+    !intentsAfter.get(victim)?.preemption &&
       sent9.preemptedAgents.length === 0 &&
-      standbyNames.includes('crabcast-task-victim'),
+      standbyPaths.includes(victim),
     'a preempted agent keeps the deliberate half of the old behaviour — the debt stops\n' +
     '    being reported past 500 records — while the route back to its work survives.',
     'the preemption annotation outlived compaction, or the victim lost its way back'
   );
   verdict(
-    reg.expected().map((r) => r.agentName).sort().join() === 'crabcast-task-later,crabcast-task-live' &&
-      after.length < beforeCompaction + 1,
+    expectedAfterCompaction === [later, live].sort().join() &&
+      after.length < beforeCompaction + 2,
     'and compaction still compacts: the expected fleet is exactly what it was, in fewer\n' +
     '    records than it took to get here.',
     `compaction changed the expected fleet or did not shrink the log`
   );
 
-  // -- 9b. carried records keep their own `at` (KAN-88 round-2 blocker 1) ------
+  // -- 9b. carried records keep their own `at` --------------------------------
   //
   // Compaction used to stamp every carried `activated` record with the time of
   // the compaction. That is not a cosmetic loss: `missingAgents` reports it as
   // `since`, and the reporting path sorts newest-first before clipping at 25 —
   // so one shared timestamp turns that sort into an all-ties comparison and
-  // the clip hides an arbitrary twenty-five instead of the oldest ones. The
-  // ordering guarantee the clip rests on only exists if the timestamps are
-  // real.
+  // the clip hides an arbitrary twenty-five instead of the oldest ones.
   console.log('\n  9b. carried records keep the timestamp of the event, not of the compaction:\n');
-  const atAfter = new Map([...intentsAfter].map(([name, i]) => [name, i.at]));
-  for (const name of ['crabcast-task-live', 'crabcast-task-later', 'crabcast-task-kept', 'crabcast-task-victim']) {
-    console.log(`  ${name}: before=${atBefore.get(name)} after=${atAfter.get(name)}`);
+  const atAfter = new Map([...intentsAfter].map(([p, i]) => [p, i.at]));
+  for (const p of [live, later, kept, victim, unstarted]) {
+    console.log(`    ${path.basename(p)}: before=${atBefore.get(p)} after=${atAfter.get(p)}`);
   }
-  const preserved = ['crabcast-task-live', 'crabcast-task-later', 'crabcast-task-kept', 'crabcast-task-victim']
-    .every((name) => atBefore.get(name) === atAfter.get(name));
-  const activatedStamps = new Set(
-    ['crabcast-task-live', 'crabcast-task-later'].map((name) => atAfter.get(name))
-  );
+  const preserved = [live, later, kept, victim, unstarted].every((p) => atBefore.get(p) === atAfter.get(p));
+  const activatedStamps = new Set([live, later].map((p) => atAfter.get(p)));
   console.log(`  distinct timestamps among the two expected agents after compaction: ${activatedStamps.size}`);
   verdict(
     preserved && activatedStamps.size === 2,
@@ -852,15 +1072,9 @@ rule('9. COMPACTION KEEPS THE WAY BACK — KAN-88 finding B5');
   );
 
   // -- 9c. an ex-preempted row does not claim somebody chose it ---------------
-  //
-  // Dropping the debt is the decision this file already argued for. Asserting
-  // that a person switched the agent off is a different thing entirely: its
-  // work was taken to make room, and the row a human reads must not say
-  // otherwise just because the annotation naming the taker has been compacted
-  // away.
   console.log('\n  9c. the carried ex-preempted row says what actually happened to it:\n');
-  const victimRow = sent9.standbyAgents.find((a) => a.agentName === 'crabcast-task-victim');
-  const keptRow = sent9.standbyAgents.find((a) => a.agentName === 'crabcast-task-kept');
+  const victimRow = sent9.standbyAgents.find((a) => a.path === victim);
+  const keptRow = sent9.standbyAgents.find((a) => a.path === kept);
   console.log(`  victim: wasPreempted=${victimRow?.wasPreempted} reason=${JSON.stringify(victimRow?.reason)}`);
   console.log(`  kept:   wasPreempted=${keptRow?.wasPreempted} reason=${JSON.stringify(keptRow?.reason)}`);
   verdict(
@@ -875,71 +1089,76 @@ rule('9. COMPACTION KEEPS THE WAY BACK — KAN-88 finding B5');
   );
 }
 
-// --------------------------------------------------- 10. mcpServers (B6) --
-rule('10. A CHANGED SERVER LIST IS RE-RECORDED — KAN-88 finding B6');
+// ----------------------------------------------------------- 10. restatement --
+rule('10. AN ACTIVATION THAT CHANGES NOTHING WRITES NOTHING');
 
 {
-  console.log('rememberActivated skips a restatement when the disk already knows exactly this');
-  console.log('activation — workDir, url, defaultAgent were compared, and mcpServers was not.');
-  console.log('So an agent whose type gained an MCP server in the config was still "exactly');
-  console.log('this", the restatement was skipped, and a restart brought it back with the');
-  console.log('server list it had the first time anyone ever activated it.\n');
+  console.log('This section used to prove that a CHANGED mcpServers list was re-recorded:');
+  console.log('`rememberActivated` compared workDir, url and defaultAgent but not the server');
+  console.log('list, so an agent whose TYPE gained a server in config was still "exactly');
+  console.log('this", the restatement was skipped, and a restart replayed the list the agent');
+  console.log('first started with.\n');
+  console.log('That drift is now impossible by construction, and saying so is the point:');
+  console.log('`activate` takes NO attributes, and every value lives on the record — so');
+  console.log('there is no second source for the record to fall out of step with. The');
+  console.log('invariant that replaces it is the one thing an activation CAN change about a');
+  console.log('record: which pane it is bound to.\n');
 
-  const typeWith = (servers) => ({
-    ...config.workspaceTypes.find((t) => t.name === 'task'),
-    mcpServers: servers
-  });
-  const routerFor = (servers, agentRegistry, bridge) => {
-    let last;
-    const router = new MessageRouter({
-      registry: new WorkspaceRegistry([
-        config.workspaceTypes.find((t) => t.name === 'epic'),
-        typeWith(servers)
-      ]),
-      config, promptLoader: prompts, herdrBridge: bridge,
-      daemonStartedAt: new Date(), agentRegistry,
-      send: (msg) => { last = msg; }, broadcast: () => {}
-    });
-    return { router, sent: () => last };
-  };
-
-  const agentRegistry = new AgentRegistry(path.join(TMP, 'mcpservers.jsonl'));
+  const dir = owned('restate', 'agent');
+  const agentRegistry = new AgentRegistry(path.join(TMP, 'restatement.jsonl'));
   const bridge = stubHerdr([]);
-  const activate = async (servers) => {
-    const { router } = routerFor(servers, agentRegistry, bridge);
-    await quiet(async () => {
-      await router.handleActivateByKey({ type: 'task', key: 'KAN-91', ...PAST_THE_GATE }, () => {});
-    });
-    return agentRegistry.readLog().length;
-  };
+  let last;
+  const router = new MessageRouter({
+    config, herdrBridge: bridge, daemonStartedAt: new Date(), agentRegistry,
+    send: (msg) => { last = msg; }, broadcast: () => {}
+  });
 
-  const afterFirst = await activate(['crabcast']);
-  const afterSame = await activate(['crabcast']);
-  const afterChanged = await activate(['crabcast', 'extra-server']);
-  const recorded = agentRegistry.intents().get('crabcast-task-kan-91')?.record.mcpServers;
+  await quiet(async () => {
+    router.handle({ action: 'configure_agent', path: dir, ...knobs() });
+  });
+  const afterConfigure = agentRegistry.readLog().length;
 
-  console.log(`  activate with mcpServers ['crabcast']              → ${afterFirst} record(s)`);
-  console.log(`  re-activate, list unchanged                        → ${afterSame} record(s) (restatement skipped)`);
-  console.log(`  re-activate after the config gained a server       → ${afterChanged} record(s)`);
-  console.log(`  what a restart would replay: ${JSON.stringify(recorded)}`);
+  await quiet(async () => router.handleActivate({ path: dir, ...PAST_THE_GATE }, () => {}));
+  const afterFirst = agentRegistry.readLog().length;
+
+  // Re-activating an agent that is already running is answered `alreadyRunning`
+  // without touching the log — a fleet client reconciling towards desired state
+  // does this on every pass.
+  await quiet(async () => router.handleActivate({ path: dir, ...PAST_THE_GATE }, () => {}));
+  const afterSame = agentRegistry.readLog().length;
+
+  // Now the pane changes underneath it: the agent died and came back somewhere
+  // else. The binding is stale, and a restart that trusted it would be checking
+  // the wrong pane.
+  bridge.alive.length = 0;
+  const before = agentRegistry.intents().get(dir).record.paneId;
+  bridge.confirmAgentPresent = async () => ({ present: true, paneId: '%NEWPANE', waitedMs: 0, checks: 1 });
+  await quiet(async () => router.handleActivate({ path: dir, ...PAST_THE_GATE }, () => {}));
+  const afterRebind = agentRegistry.readLog().length;
+  const rebound = agentRegistry.intents().get(dir).record.paneId;
+
+  console.log(`  configure                                  → ${afterConfigure} record(s)`);
+  console.log(`  activate                                   → ${afterFirst} record(s)`);
+  console.log(`  activate again, already running            → ${afterSame} record(s) (restatement skipped)`);
+  console.log(`  activate after the pane changed underneath → ${afterRebind} record(s)`);
+  console.log(`  recorded paneId: ${before} → ${rebound}`);
 
   verdict(
     afterSame === afterFirst,
-    'an unchanged re-activation still writes nothing — the dedupe that keeps fleet clients\n' +
-    '    from filling the log with restatements is intact.',
+    'an activation that changes nothing writes nothing — the dedupe that keeps fleet\n' +
+    '    clients from filling the log with restatements is intact.',
     `an unchanged re-activation appended a record: ${afterFirst} → ${afterSame}`
   );
   verdict(
-    afterChanged > afterSame &&
-      JSON.stringify(recorded) === JSON.stringify(['crabcast', 'extra-server']),
-    'a changed server list IS re-recorded, so a restart replays the list the config\n' +
-    '    actually declares rather than the one this agent first started with.',
-    `the changed list was not recorded: ${afterSame} → ${afterChanged}, recorded ${JSON.stringify(recorded)}`
+    afterRebind > afterSame && rebound === '%NEWPANE',
+    'and a re-activation that lands in a DIFFERENT pane IS recorded, so the durable\n' +
+    '    binding names the pane the agent is actually in rather than one it used to be.',
+    `the new pane binding was not recorded: ${afterSame} → ${afterRebind}, paneId ${rebound}`
   );
 }
 
-// -------------------------------------------------- 11. short writes (B7) --
-rule('11. A SHORT WRITE IS NOT SILENTLY A TORN RECORD — KAN-88 finding B7');
+// -------------------------------------------------- 11. short writes --
+rule('11. A SHORT WRITE IS NOT SILENTLY A TORN RECORD');
 
 {
   console.log('fs.writeSync returns how much it wrote and is under no obligation for that to');
@@ -977,15 +1196,15 @@ const { AgentRegistry } = await import(process.argv[2]);
 const file = process.argv[4];
 const reg = new AgentRegistry(file);
 const record = {
-  agentName: 'crabcast-task-shortwrite', type: 'task', key: 'SHORTWRITE',
-  workDir: '/tmp/kan88-shortwrite', defaultAgent: 'claude'
+  path: '/tmp/kan88-shortwrite',
+  config: { priority: 1, refusable: true, chargeable: true, preemptable: true, launcher: 'claude' }
 };
 const outcome = reg.record('activated', record);
-const raw = realWriteSync ? fsCjs.readFileSync(file, 'utf8') : '';
+const raw = fsCjs.readFileSync(file, 'utf8');
 process.stdout.write(JSON.stringify({
   outcome,
   raw,
-  parsedAgents: reg.readLog().map((e) => e.agentName)
+  parsedPaths: reg.readLog().map((e) => e.path)
 }));
 `);
 
@@ -1004,15 +1223,14 @@ process.stdout.write(JSON.stringify({
 
   console.log(`  writeSync capped at 7 bytes/call:`);
   console.log(`    record() → ${JSON.stringify(partial.outcome)}`);
-  console.log(`    file holds: ${JSON.stringify(partial.raw)}`);
-  console.log(`    readable records: ${JSON.stringify(partial.parsedAgents)}`);
+  console.log(`    readable records: ${JSON.stringify(partial.parsedPaths)}`);
   console.log(`  writeSync making no progress at all:`);
   console.log(`    record() → ${JSON.stringify(stuck.outcome)}`);
   console.log(`    file holds: ${JSON.stringify(stuck.raw)}`);
 
   verdict(
     partial.outcome?.ok === true &&
-      partial.parsedAgents?.length === 1 &&
+      partial.parsedPaths?.length === 1 &&
       partial.raw?.endsWith('\n'),
     'a write that stops part way is finished rather than fsynced half-written — the record\n' +
     '    on disk is complete and readable.',
@@ -1025,14 +1243,14 @@ process.stdout.write(JSON.stringify({
     `a stuck write claimed success: ${JSON.stringify(stuck.outcome)}`
   );
   verdict(
-    (stuck.parsedAgents ?? []).length === 0,
+    (stuck.parsedPaths ?? []).length === 0,
     'and it left nothing readable behind pretending to be a record.',
-    `a stuck write left a phantom record: ${JSON.stringify(stuck.parsedAgents)}`
+    `a stuck write left a phantom record: ${JSON.stringify(stuck.parsedPaths)}`
   );
 }
 
-// ------------------------------------------- 12. one read, one cap (B9) --
-rule('12. ONE REGISTRY READ PER POLL, AND ALL THREE CATEGORIES CAPPED — KAN-88 finding B9');
+// ------------------------------------------- 12. one read, one cap --
+rule('12. ONE REGISTRY READ PER POLL, AND EVERY CATEGORY CAPPED');
 
 {
   console.log('list_agents asked the registry four separate times per poll — missing,');
@@ -1046,41 +1264,27 @@ rule('12. ONE REGISTRY READ PER POLL, AND ALL THREE CATEGORIES CAPPED — KAN-88
 
   const N = 30;
   const reg = new AgentRegistry(path.join(TMP, 'capping.jsonl'));
-  const mkDir = (name) => {
-    const dir = path.join(WORKSPACES, 'cap', name);
-    fs.mkdirSync(dir, { recursive: true });
-    return dir;
-  };
+  const boss = owned('cap', 'boss');
 
   for (let i = 0; i < N; i++) {
     // missing: last word `activated`, and herdr will not have it.
-    reg.recordActivated({
-      agentName: `crabcast-task-miss-${i}`, type: 'task', key: `MISS-${i}`,
-      workDir: mkDir(`miss-${i}`), defaultAgent: 'claude'
-    });
-    // standby: deliberately off, workspace on disk.
-    const standby = {
-      agentName: `crabcast-task-standby-${i}`, type: 'task', key: `STANDBY-${i}`,
-      workDir: mkDir(`standby-${i}`), defaultAgent: 'claude'
-    };
-    reg.recordActivated(standby);
-    reg.recordDeactivated(standby);
+    reg.recordActivated({ path: owned('cap', `miss-${i}`), config: knobs() });
+    // standby: deliberately off, directory on disk.
+    const standby = owned('cap', `standby-${i}`);
+    reg.recordActivated({ path: standby, config: knobs() });
+    reg.recordDeactivated({ path: standby, config: knobs() });
     // preempted: a debt.
-    const victim = {
-      agentName: `crabcast-task-victim-${i}`, type: 'task', key: `VICTIM-${i}`,
-      workDir: mkDir(`victim-${i}`), defaultAgent: 'claude'
-    };
-    reg.recordActivated(victim);
-    reg.recordDeactivated(victim, {
-      byAgentName: 'crabcast-epic-boss', byType: 'epic', byKey: 'BOSS', byPriority: 10,
+    const victim = owned('cap', `victim-${i}`);
+    reg.recordActivated({ path: victim, config: knobs() });
+    reg.recordDeactivated({ path: victim, config: knobs() }, {
+      byPath: boss, byPaneName: paneNameFor(boss), byPriority: 10,
       priority: 1, herdrStatus: 'working', derivation: 'at capacity'
     });
   }
 
   // A registry that counts what the response actually costs. Every one of
-  // these entry points reads and parses the whole log once — `intents` and
-  // `preempted` both go through `readLog` — so the tally is the number of
-  // whole-file parses this one response paid for.
+  // these entry points reads and parses the whole log once, so the tally is
+  // the number of whole-file parses this one response paid for.
   const reads = { readLog: 0, intents: 0, preempted: 0 };
   const counting = new Proxy(reg, {
     get(target, prop, receiver) {
@@ -1095,7 +1299,7 @@ rule('12. ONE REGISTRY READ PER POLL, AND ALL THREE CATEGORIES CAPPED — KAN-88
   const bridge = stubHerdr([]);
   let sent12;
   const router12 = new MessageRouter({
-    registry, config, promptLoader: prompts, herdrBridge: bridge,
+    config, herdrBridge: bridge,
     daemonStartedAt: new Date(), agentRegistry: counting,
     send: (msg) => { sent12 = msg; }, broadcast: () => {}
   });
@@ -1112,7 +1316,6 @@ rule('12. ONE REGISTRY READ PER POLL, AND ALL THREE CATEGORIES CAPPED — KAN-88
   console.log(`  missingAgents   ${sent12.missingAgents.length} of missingTotal ${sent12.missingTotal}`);
   console.log(`  preemptedAgents ${sent12.preemptedAgents.length} of preemptedTotal ${sent12.preemptedTotal}`);
   console.log(`  standbyAgents   ${sent12.standbyAgents.length} of standbyTotal ${sent12.standbyTotal}`);
-  console.log(`  newest first: missing[0]=${sent12.missingAgents[0].agentName} since ${sent12.missingAgents[0].since}`);
 
   verdict(
     wholeLogReads === 1,
@@ -1148,15 +1351,13 @@ rule('12. ONE REGISTRY READ PER POLL, AND ALL THREE CATEGORIES CAPPED — KAN-88
   // The one invariant here whose regression is silent. `list_agents` is a
   // report and clipping it costs a reader the tail of a list they can see the
   // total of; the daemon's 30s missing-sweep is not a report, it is the thing
-  // that announces a loss — exactly once, latched — so an agent that fell
-  // past position 25 in a clipped sweep would never be announced at all, and
-  // nothing anywhere would say so. It was protected by code reading alone
-  // until now.
+  // that announces a loss — exactly once, latched — so an agent that fell past
+  // position 25 in a clipped sweep would never be announced at all.
   console.log('\n  12b. the daemon\'s missing-sweep is not the report, and must not be clipped:\n');
   const swept = router12.findMissingAgents();
-  const sweptNames = new Set(swept.map((row) => row.agentName));
-  const reportedNames = new Set(sent12.missingAgents.map((row) => row.agentName));
-  const onlyInSweep = [...sweptNames].filter((name) => !reportedNames.has(name));
+  const sweptPaths = new Set(swept.map((row) => row.path));
+  const reportedPaths = new Set(sent12.missingAgents.map((row) => row.path));
+  const onlyInSweep = [...sweptPaths].filter((p) => !reportedPaths.has(p));
   console.log(`  findMissingAgents() returned ${swept.length}; list_agents reported ${sent12.missingAgents.length} of ${sent12.missingTotal}`);
   console.log(`  agents the sweep can announce that the clipped report omits: ${onlyInSweep.length}`);
 
@@ -1167,6 +1368,82 @@ rule('12. ONE REGISTRY READ PER POLL, AND ALL THREE CATEGORIES CAPPED — KAN-88
     'the sweep sees every missing agent, including the five the response clipped — so a\n' +
     '    loss past position 25 is still announced rather than silently never reported.',
     `the sweep is clipped too: ${swept.length} of ${N} (that is an agent nobody is ever told about)`
+  );
+}
+
+// ------------------------------------------------------------ 13. collision --
+rule('13. THE KEY COLLISION IS GONE, NOT MERELY UNREACHED (AC 3)');
+
+{
+  console.log('Two agents whose directories share a basename would once have shared a KEY,');
+  console.log('and the daemon resolved a bare key by matching herdr agent names by suffix:');
+  console.log('one match won, several threw `Key \'<key>\' is ambiguous`, and a caller had to');
+  console.log('remember a --type flag to avoid it. The failure that mattered was not the');
+  console.log('throw — it was the SINGLE match: address the wrong agent and a stand-down,');
+  console.log('a message or a teardown lands on somebody else\'s work.\n');
+
+  const a = owned('collide', 'alpha', 'kan-38');
+  const b = owned('collide', 'beta', 'kan-38');
+  console.log(`  two directories, same basename:\n    ${a}\n    ${b}\n`);
+  console.log(`  and two DIFFERENT pane names, derived from the paths:`);
+  console.log(`    ${paneNameFor(a)}`);
+  console.log(`    ${paneNameFor(b)}\n`);
+
+  const bridge = stubHerdr([a, b]);
+  const { router, agentRegistry, sent } = newRouter(bridge, [
+    ...seedOf([a], { priority: 1, label: 'alpha' }),
+    ...seedOf([b], { priority: 5, label: 'beta' })
+  ]);
+
+  const listed = list(router, sent);
+  console.log('  both coexist in one census, addressed unambiguously:\n');
+  for (const row of listed.agents) {
+    console.log(`    ${row.path}\n      pane ${row.paneName}  label ${row.label}`);
+  }
+
+  // Address one of them and only one of them.
+  await quiet(async () => router.handle({ action: 'deactivate_agent', path: a }));
+  const after = list(router, sent);
+  const intentA = agentRegistry.intents().get(a);
+  const intentB = agentRegistry.intents().get(b);
+  console.log(`\n  deactivate ${a}`);
+  console.log(`    census after: ${after.agents.map((r) => r.path).join(', ')}`);
+  console.log(`    registry: alpha=${intentA.event}, beta=${intentB.event}`);
+
+  // And the ambiguity path is GONE from the source rather than merely
+  // unreached: there is no resolver left that could produce it.
+  const srcDir = path.join(scriptDir, '..', 'src');
+  const offenders = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) { walk(full); continue; }
+      const text = fs.readFileSync(full, 'utf8');
+      if (/is ambiguous|resolveAgentName|agentNameFor|addressFromAgentName|typeFromAgentName/.test(text)) {
+        offenders.push(path.relative(path.join(scriptDir, '..'), full));
+      }
+    }
+  };
+  walk(srcDir);
+  console.log(`\n  source files still containing the ambiguity path or a name parser: ` +
+    `${offenders.length ? offenders.join(', ') : '(none)'}`);
+
+  verdict(
+    listed.agents.length === 2 &&
+      paneNameFor(a) !== paneNameFor(b) &&
+      !after.agents.some((r) => r.path === a) &&
+      after.agents.some((r) => r.path === b) &&
+      intentA.event === 'deactivated' && intentB.event === 'activated',
+    'two agents that would have collided on a shared key coexist, and addressing one\n' +
+    '    touches only that one — the path IS the disambiguation, so there is nothing left\n' +
+    '    for a --type flag to resolve.',
+    `the two agents were not independently addressable: ${JSON.stringify({ a: intentA.event, b: intentB.event })}`
+  );
+  verdict(
+    offenders.length === 0,
+    'and the old path is gone rather than merely unreached: no `Key \'<key>\' is\n' +
+    '    ambiguous`, and no function anywhere that builds or parses an agent name.',
+    `the name-parsing machinery survives in: ${offenders.join(', ')}`
   );
 }
 

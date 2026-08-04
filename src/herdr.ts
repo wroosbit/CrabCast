@@ -2,9 +2,11 @@ import * as pty from 'node-pty';
 import * as path from 'path';
 import * as fs from 'fs';
 import { execSync, spawnSync } from 'child_process';
-import { PROMPT_FILENAME, resolveLauncher, writeWorkspaceMcpConfig } from './launchers.js';
+import { PROMPT_FILENAME, promptInstruction, resolveLauncher, writeWorkspaceMcpConfig } from './launchers.js';
 import type { AgentLauncher } from './launchers.js';
 import { diagnoseSpawnFailure } from './herdr-health.js';
+import { canonicalizeOrNull, paneNameFor, sidecarDirFor } from './identity.js';
+import type { AgentConfig } from './types.js';
 import {
   RESUME_ENV,
   ResumeCause,
@@ -14,13 +16,12 @@ import {
 
 export interface HerdrSession {
   sessionId: string;
-  type: string;
-  key: string;
-  /** The page this session is bound to, when the caller knew it. Never resolved. */
-  url?: string;
+  /** The canonical directory this agent is. The identity; nothing else is. */
+  path: string;
+  /** The opaque herdr token for that path. Nothing parses it back out. */
+  paneName: string;
   createdAt: Date;
   status: 'initializing' | 'active' | 'terminated';
-  workDir: string;
   ptyProcess?: pty.IPty;
   ptyBuffer: string;
   onDataListeners: Array<(data: string) => void>;
@@ -116,7 +117,18 @@ const AGENT_CONFIRM_POLL_MS = 250;
  * agent is dead.
  */
 export type AgentPresence =
-  | { present: true; waitedMs: number; checks: number }
+  | {
+      present: true;
+      /**
+       * The pane herdr found it in, from the same census that confirmed it.
+       * This is what becomes the record's durable binding, so it comes out of
+       * the read that proved the agent exists rather than a second call that
+       * could answer about a different moment.
+       */
+      paneId: string | null;
+      waitedMs: number;
+      checks: number;
+    }
   | {
       present: false;
       reason: 'absent' | 'unverifiable';
@@ -187,8 +199,8 @@ interface AgentTab {
 
 /** Told to clients when a PTY dies, so a dead terminal never renders as a live one. */
 export interface SessionEndedEvent {
-  type: string;
-  key: string;
+  path: string;
+  paneName: string;
   sessionId: string;
   reason: SessionEndReason;
   exitCode: number;
@@ -196,90 +208,6 @@ export interface SessionEndedEvent {
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-/**
- * The prefix every agent name this daemon creates carries. The one constant
- * behind {@link agentNameFor}, its two inverses ({@link typeFromAgentName},
- * {@link addressFromAgentName}) and resolveAgentName's census filter — four
- * places that must never disagree about what "one of ours" looks like. (In
- * the extraction source the literal was written out in each of the four,
- * which is exactly how a rename would have broken addressing silently.)
- */
-export const AGENT_NAME_PREFIX = 'crabcast-';
-
-/** The herdr agent a CrabCast session drives. Sessions are keyed by workspace. */
-export function agentNameFor(type: string, key: string): string {
-  return `${AGENT_NAME_PREFIX}${type}-${key.toLowerCase()}`;
-}
-
-/**
- * The one directory tree CrabCast owns and may therefore destroy. Every
- * workspace is created under it (see `initPty`), and reset refuses to delete
- * anything that does not resolve to a place strictly inside it. The data
- * directory comes from `crabcast.config.json`, so this takes it as an
- * argument rather than assuming a home-derived path.
- */
-export function workspacesRoot(dataDir: string): string {
-  return path.join(dataDir, 'workspaces');
-}
-
-/** Where a workspace of this type and key lives. Must match `initPty`. */
-export function workspaceDirFor(dataDir: string, type: string, key: string): string {
-  return path.join(workspacesRoot(dataDir), type, key.toLowerCase());
-}
-
-/**
- * Whether `target` sits strictly below `root` — the root itself is not
- * "inside" it, because deleting the root would take every workspace with it.
- *
- * `path.relative` rather than a `startsWith` prefix test: the latter says yes
- * to `/…/workspaces-old` for root `/…/workspaces`, and both paths must
- * already be real (symlinks resolved) for either test to mean anything.
- */
-function isStrictlyInside(root: string, target: string): boolean {
-  const rel = path.relative(root, target);
-  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
-}
-
-/**
- * Inverse of agentNameFor. When an agent is resolved through the herdr-list
- * fallback there is no session to read a type off of, but the name still
- * carries one — enough to broadcast a complete event.
- */
-export function typeFromAgentName(agentName: string, key: string): string | undefined {
-  const suffix = `-${key.toLowerCase()}`;
-  if (!agentName.startsWith(AGENT_NAME_PREFIX) || !agentName.endsWith(suffix)) return undefined;
-  return agentName.slice(AGENT_NAME_PREFIX.length, agentName.length - suffix.length) || undefined;
-}
-
-/** A workspace address recovered from an agent name alone. */
-export interface AgentAddress {
-  type: string;
-  key: string;
-}
-
-/**
- * Full inverse of agentNameFor, for the case where not even the key is known:
- * enumerating herdr's agents and working out which workspace each one is.
- *
- * `<prefix><type>-<key>` is split at the *first* dash after the prefix,
- * because workspace types are single tokens — the config loader refuses a
- * type name containing a dash for exactly this reason — while keys routinely
- * contain dashes (`kan-28`). That is a convention, not a guarantee, so the
- * parse is only trusted when it rebuilds the name it came from — a name this
- * daemon could never have produced yields null rather than a guessed address
- * that later calls would fail to resolve.
- */
-export function addressFromAgentName(agentName: string): AgentAddress | null {
-  if (!agentName.startsWith(AGENT_NAME_PREFIX)) return null;
-
-  const rest = agentName.slice(AGENT_NAME_PREFIX.length);
-  const split = rest.indexOf('-');
-  if (split <= 0 || split >= rest.length - 1) return null;
-
-  const address = { type: rest.slice(0, split), key: rest.slice(split + 1) };
-  return agentNameFor(address.type, address.key) === agentName ? address : null;
 }
 
 function toAgentStatus(value: unknown): HerdrAgentStatus {
@@ -311,8 +239,9 @@ function clampTailLines(lines: unknown): number {
  * as "the daemon didn't answer that" instead of "there is nothing to report".
  */
 export interface HerdrAgentDescription {
-  agentName: string;
-  type: string | null;
+  paneName: string;
+  paneId: string | null;
+  /** The pane's own cwd, as herdr reports it — canonicalized when it resolves. */
   workDir: string | null;
   herdrStatus: HerdrAgentStatus;
 }
@@ -323,16 +252,71 @@ export interface HerdrAgentDescription {
  *
  * `agentRuntime` is herdr's `agent` field: the CLI it launched in the pane
  * (`claude`), absent for a pane running a bare shell. It is the only evidence
- * available for whether a `crabcast-*` name has an agent behind it at all,
- * which is what separates a live agent from one of the shell panes left over
- * on the board. Absent stays null; nothing is inferred from the name.
+ * available for whether a pane has an agent behind it at all, which is what
+ * separates a live agent from one of the shell panes left over on the board.
+ * Absent stays null; nothing is inferred from the name.
+ *
+ * `workDir` is herdr's `cwd`, kept as the arbitrary string herdr reported.
+ * `canonicalWorkDir` is that string put through the same canonicalizer our own
+ * path went through, and null when it would not resolve. Both are carried
+ * because they answer different questions: the raw one is what a human sees in
+ * a refusal, the canonical one is the only form that may be compared.
  */
 export interface HerdrAgentRecord {
   name: string;
+  /**
+   * herdr's `pane_id`, when its census reports one. Null is a real answer and
+   * not an error — it means this pane cannot be *bound* as ours (the durable
+   * binding is a pane id), but it can still be an occupant, because occupancy
+   * is a question about the directory rather than about identity.
+   */
+  paneId: string | null;
   agentRuntime: string | null;
   workDir: string | null;
+  canonicalWorkDir: string | null;
   herdrStatus: HerdrAgentStatus;
 }
+
+/** One census read, and whether herdr actually answered it. */
+export interface HerdrCensus {
+  reachable: boolean;
+  agents: HerdrAgentRecord[];
+}
+
+/** A live pane sitting in a directory, as a refusal names it. */
+export interface PaneOccupant {
+  paneId: string | null;
+  name: string;
+  agentStatus: HerdrAgentStatus;
+  workDir: string | null;
+}
+
+/**
+ * What one census read says about a directory.
+ *
+ * THREE OUTCOMES, NOT TWO, and the third is the one that would otherwise fail
+ * silently. `listHerdrAgentsChecked` returns an EMPTY census when herdr does
+ * not answer, so a check built the obvious way would read its own failure as
+ * "nothing is there" and spawn into an occupied directory precisely when it
+ * cannot see it. `reachable: false` is silence, not evidence.
+ *
+ * This mirrors {@link HerdrBridge.confirmAgentPresent}'s existing
+ * absent/unverifiable split; the codebase already draws this distinction one
+ * layer up, for liveness, and this is the same rule asked about occupancy.
+ */
+export type Occupancy =
+  | { reachable: false }
+  | {
+      reachable: true;
+      /** Live panes whose canonical cwd is this directory. */
+      occupants: PaneOccupant[];
+      /**
+       * Whether one of them is ours, by THREE FACTS AGREEING: the record's
+       * `paneId` is in the census, that pane's canonical `cwd` equals our
+       * recorded path, and it has a runtime. Never `cwd` alone.
+       */
+      ours: boolean;
+    };
 
 export class HerdrBridge {
   private sessions: Map<string, HerdrSession> = new Map();
@@ -341,12 +325,13 @@ export class HerdrBridge {
   private sessionEndedListener?: (event: SessionEndedEvent) => void;
 
   /**
-   * The data directory from `crabcast.config.json`; every workspace this
-   * bridge creates or deletes lives under `<dataDir>/workspaces/`.
+   * `dataDir` from `crabcast.config.json` — where each agent's sidecar lives.
+   * NOTHING under it is a workspace any more: an agent's working directory
+   * comes from the caller and this daemon never allocates one.
    *
    * `configPath` is the file that config was loaded from, baked into each
-   * workspace's `crabcast` MCP definition so the server it spawns addresses
-   * this daemon rather than whichever one the default data dir holds.
+   * agent's `crabcast` MCP definition so the server it spawns addresses this
+   * daemon rather than whichever one the default data dir holds.
    */
   constructor(private dataDir: string, private configPath?: string) {}
 
@@ -354,14 +339,9 @@ export class HerdrBridge {
     this.sessionEndedListener = listener;
   }
 
-  /** {@link workspacesRoot} for this bridge's configured data directory. */
-  public workspacesRoot(): string {
-    return workspacesRoot(this.dataDir);
-  }
-
-  /** {@link workspaceDirFor} for this bridge's configured data directory. */
-  public workspaceDirFor(type: string, key: string): string {
-    return workspaceDirFor(this.dataDir, type, key);
+  /** Where CrabCast's own state for this agent lives. See identity.ts. */
+  public sidecarDirFor(agentPath: string): string {
+    return sidecarDirFor(this.dataDir, agentPath);
   }
 
   /**
@@ -373,10 +353,10 @@ export class HerdrBridge {
    * freeze. A session with no `ptyProcess` never got one (pty.spawn threw) and
    * holds nothing.
    */
-  private liveAttachFor(agentName: string): HerdrSession | undefined {
+  private liveAttachFor(paneName: string): HerdrSession | undefined {
     for (const session of this.sessions.values()) {
       if (session.status !== 'active' || !session.ptyProcess) continue;
-      if (agentNameFor(session.type, session.key) === agentName) return session;
+      if (session.paneName === paneName) return session;
     }
     return undefined;
   }
@@ -392,58 +372,45 @@ export class HerdrBridge {
    * different channel for no gain — and the answer is about to be irrelevant
    * anyway, because no agent is going to start.
    */
-  private launcherRestoresConversation(
-    defaultAgent?: string,
-    typeDefaultLauncher?: string
-  ): boolean {
+  private launcherRestoresConversation(launcher?: string): boolean {
     try {
-      return resolveLauncher(defaultAgent, typeDefaultLauncher).launcher.restoresConversation === true;
+      return resolveLauncher(launcher).launcher.restoresConversation === true;
     } catch {
       return false;
     }
   }
 
-  // `url` is `string | undefined` rather than optional: it sits in front of
-  // required parameters, and callers who have no URL must pass nothing rather
-  // than a placeholder. `typeDefaultLauncher` is the workspace type's
-  // `defaultLauncher` from config, consulted when the caller names no
-  // defaultAgent — see resolveLauncher for the full order.
+  /**
+   * Start an agent in the directory it is.
+   *
+   * `promptContent` is the rendered bootstrap prompt, or undefined when the
+   * agent was configured without one. It is written into the agent's SIDECAR,
+   * never into the caller's directory: this is the first PR that spawns into a
+   * directory somebody else owns, and a file we drop into it is a file we
+   * would then have to be trusted to clean up.
+   */
   public spawnSession(
-    type: string,
-    key: string,
-    url: string | undefined,
-    promptContent: string,
-    defaultAgent?: string,
-    mcpServers?: string[],
-    resume?: ResumeCause,
-    typeDefaultLauncher?: string
+    agentPath: string,
+    config: AgentConfig,
+    promptContent?: string,
+    resume?: ResumeCause
   ): HerdrSession {
-    // One attach per agent, enforced here rather than in each caller. The
-    // routers dedupe by key alone, which misses a second workspace *type* on
-    // the same key, and two clients can both ask to activate the same agent
-    // at once. A second attach would evict the first, so the only safe answer
-    // is the session we already have.
-    const agentName = agentNameFor(type, key);
-    const existing = this.liveAttachFor(agentName);
+    // One attach per agent, enforced here rather than in each caller. Two
+    // clients can ask to activate the same agent at once, and a second attach
+    // would evict the first, so the only safe answer is the session we have.
+    const paneName = paneNameFor(agentPath);
+    const existing = this.liveAttachFor(paneName);
     if (existing) {
       console.log(
-        `[HerdrBridge] Reusing live session ${existing.sessionId} for ${agentName}; ` +
+        `[HerdrBridge] Reusing live session ${existing.sessionId} for ${paneName}; ` +
         `refusing to open a second attach that would evict it`
       );
       return existing;
     }
 
-    const sessionId = `${type}-${key.toLowerCase()}-${Date.now()}`;
-    // Through the one path function, so the directory a session is created in
-    // and the directory reset deletes can never drift apart. (The extraction
-    // source had this literal inlined here, duplicating workspaceDirFor.)
-    const defaultWorkDir = this.workspaceDirFor(type, key);
+    const sessionId = `${paneName}-${Date.now()}`;
 
-    if (!fs.existsSync(defaultWorkDir)) {
-      fs.mkdirSync(defaultWorkDir, { recursive: true });
-    }
-
-    console.log(`[HerdrBridge] Spawning PTY session: ${sessionId} in ${defaultWorkDir}`);
+    console.log(`[HerdrBridge] Spawning PTY session: ${sessionId} in ${agentPath}`);
 
     // Asked *before* the spawn, because the directory is checked as it is now
     // and the launcher is about to write into it. It decides which resume
@@ -452,23 +419,16 @@ export class HerdrBridge {
     //
     // Through the launcher, because hasRestorableConversation reads *Claude
     // Code's* transcript directory (see resume.ts) and knows nothing about any
-    // other runtime's. Asked unconditionally, it answered a question about the
-    // wrong program: an `anti-gravity` agent restarted in a workspace a claude
-    // agent had once used came back reported as `resumedConversation: true` —
-    // so it was framed as having its memory back, and the nudge machinery was
-    // told to wait for a prompt it would never recognise, while the agent
-    // itself had actually started fresh. `restoresConversation` is the
-    // launcher's own declaration that its command restores a conversation
-    // *and* that this predictor is evidence about it; a launcher that does not
-    // claim it gets `false`, which is the honest answer — it starts with the
-    // degraded-resume prompt on its command line and is already working.
-    const restores = resume ? this.launcherRestoresConversation(defaultAgent, typeDefaultLauncher) : false;
+    // other runtime's. `restoresConversation` is the launcher's own declaration
+    // that its command restores a conversation *and* that this predictor is
+    // evidence about it; a launcher that does not claim it gets `false`.
+    const restores = resume ? this.launcherRestoresConversation(config.launcher) : false;
     const resumedConversation = resume
-      ? restores && hasRestorableConversation(defaultWorkDir)
+      ? restores && hasRestorableConversation(agentPath)
       : undefined;
     if (resume) {
       console.log(
-        `[HerdrBridge] Resuming ${agentName} after ${resume}: ` +
+        `[HerdrBridge] Resuming ${paneName} after ${resume}: ` +
         (resumedConversation
           ? 'a conversation is on disk, so --continue will restore it'
           : restores
@@ -479,25 +439,23 @@ export class HerdrBridge {
 
     const session: HerdrSession = {
       sessionId,
-      type,
-      key,
-      url,
+      path: agentPath,
+      paneName,
       createdAt: new Date(),
       status: 'active',
-      workDir: defaultWorkDir,
       ptyBuffer: '',
       onDataListeners: [],
       ...(resume ? { resume, resumedConversation } : {})
     };
 
     this.sessions.set(sessionId, session);
-    this.initPty(session, promptContent, defaultAgent, mcpServers, typeDefaultLauncher);
+    this.initPty(session, config, promptContent);
 
     return session;
   }
 
   /**
-   * Start `agentName` in a herdr tab of its own, running `argv`.
+   * Start `paneName` in a herdr tab of its own, running `argv`.
    *
    * `herdr agent start` with no placement flags splits whatever pane is
    * current, so every agent landed in the one tab the human happened to be on.
@@ -509,21 +467,17 @@ export class HerdrBridge {
    * A tab is the unit that fixes this because the app only lays out the tab it
    * is *rendering*. An agent sitting in a background tab keeps whatever size
    * its last attach asked for — the 80x24 the `pty.spawn` in {@link initPty}
-   * requests — no matter how many other agents exist. That is the
-   * width-independence being bought here, and it is why this is a tab rather
-   * than a wider split.
+   * requests — no matter how many other agents exist.
    *
    * herdr has no "start in a new tab" flag, so the tab is made first and the
    * agent placed into it. `tab create` opens the tab on a placeholder shell and
    * `agent start --tab` splits that, so the agent would get half a tab and
    * twice the file descriptors; {@link closeTabPlaceholder} takes the
-   * placeholder back out again. What remains is one pane per agent, the same
-   * cost as before, and herdr closes the tab on its own once that last pane
-   * exits — so finished agents leave nothing behind.
+   * placeholder back out again.
    */
-  private startAgentInOwnTab(agentName: string, workDir: string, argv: string[]): void {
+  private startAgentInOwnTab(paneName: string, workDir: string, argv: string[]): void {
     const start = (placement: string[]) => this.runHerdr([
-      'agent', 'start', agentName,
+      'agent', 'start', paneName,
       '--cwd', workDir,
       ...placement,
       // Spawning is a background event; the human is usually reading something
@@ -534,7 +488,7 @@ export class HerdrBridge {
       ...argv
     ]);
 
-    const tab = this.createAgentTab(agentName, workDir);
+    const tab = this.createAgentTab(paneName, workDir);
     if (!tab) {
       // No tab is a cosmetic loss; no agent is a broken activation. Spawn the
       // agent the old way rather than fail over where it gets drawn.
@@ -557,7 +511,7 @@ export class HerdrBridge {
         // `agent_placement_not_found` and never resolves it to somebody else's
         // tab. Falling back keeps the spawn working through that race.
         console.error(
-          `[HerdrBridge] Could not place ${agentName} in tab ${tab.tabId} ` +
+          `[HerdrBridge] Could not place ${paneName} in tab ${tab.tabId} ` +
           `(${e?.message ?? String(e)}); starting it in herdr's default placement instead`
         );
         start([]);
@@ -570,14 +524,14 @@ export class HerdrBridge {
   }
 
   /**
-   * Open a tab for an agent, labelled with the agent's name so the human can
-   * tell the fleet apart at a glance. Returns undefined rather than throwing —
-   * every caller can still spawn without one.
+   * Open a tab for an agent, labelled with the agent's pane name so the human
+   * can tell the fleet apart at a glance. Returns undefined rather than
+   * throwing — every caller can still spawn without one.
    */
-  private createAgentTab(agentName: string, cwd: string): AgentTab | undefined {
+  private createAgentTab(paneName: string, cwd: string): AgentTab | undefined {
     try {
       const result = this.runHerdr([
-        'tab', 'create', '--cwd', cwd, '--label', agentName, '--no-focus'
+        'tab', 'create', '--cwd', cwd, '--label', paneName, '--no-focus'
       ])?.result;
 
       const tabId = result?.tab?.tab_id;
@@ -590,7 +544,7 @@ export class HerdrBridge {
       return { tabId, workspaceId, placeholderTerminalId };
     } catch (e: any) {
       console.error(
-        `[HerdrBridge] Could not create a tab for ${agentName} (${e?.message ?? String(e)}); ` +
+        `[HerdrBridge] Could not create a tab for ${paneName} (${e?.message ?? String(e)}); ` +
         `it will share whichever tab herdr picks`
       );
       return undefined;
@@ -630,28 +584,42 @@ export class HerdrBridge {
     }
   }
 
-  private initPty(
-    session: HerdrSession,
-    initialPrompt?: string,
-    defaultAgent?: string,
-    mcpServers?: string[],
-    typeDefaultLauncher?: string
-  ): void {
-    const agentName = agentNameFor(session.type, session.key);
+  /**
+   * Render the agent's bootstrap prompt into its sidecar, and answer with the
+   * absolute path the launcher should point at.
+   *
+   * INTO THE SIDECAR, NOT THE AGENT'S DIRECTORY. Under the old model the
+   * working directory was allocated by CrabCast and dropping a
+   * `.crabcast-prompt.md` into it cost nobody anything. The directory now
+   * belongs to the caller — it is their repository checkout, their scratch
+   * space — and a file written there is a file somebody has to remember to
+   * remove. `<dataDir>/agents/<hash>/` is ours outright, so the prompt lives
+   * there and the launcher is handed its absolute path.
+   */
+  private writeSidecarPrompt(session: HerdrSession, promptContent: string): string {
+    const dir = this.sidecarDirFor(session.path);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, PROMPT_FILENAME);
+    fs.writeFileSync(file, promptContent);
+    return file;
+  }
 
-    // Resolved before anything else happens. An unknown defaultAgent refuses
-    // the whole activation (KAN-53), and it must do so before the workspace is
+  private initPty(session: HerdrSession, config: AgentConfig, initialPrompt?: string): void {
+    const { paneName } = session;
+
+    // Resolved before anything else happens. An unknown launcher refuses the
+    // whole activation (KAN-53), and it must do so before anything is
     // provisioned for an agent that will never exist. The refusal travels as
     // spawnError — the same channel a spawn herdr refused uses — so activate
     // answers `success: false` with the message naming the valid launchers.
     let launcher: AgentLauncher;
     let launcherName: string;
     try {
-      ({ name: launcherName, launcher } = resolveLauncher(defaultAgent, typeDefaultLauncher));
+      ({ name: launcherName, launcher } = resolveLauncher(config.launcher));
     } catch (e: any) {
       session.spawnError = e?.message ?? String(e);
       session.status = 'terminated';
-      console.error(`[HerdrBridge] Refusing to start ${agentName}: ${session.spawnError}`);
+      console.error(`[HerdrBridge] Refusing to start ${paneName}: ${session.spawnError}`);
       return;
     }
 
@@ -661,25 +629,29 @@ export class HerdrBridge {
     // asked" (`shell`).
     session.expectsRuntime = launcherName !== 'shell';
 
-    // Workspace-scoped MCP config, written for every agent type: Claude picks
-    // up .mcp.json from its cwd, and the file documents the workspace either way.
-    if (mcpServers && mcpServers.length > 0) {
-      writeWorkspaceMcpConfig(session.workDir, mcpServers, this.configPath);
+    // Workspace-scoped MCP config, and now only when the caller asked for one:
+    // `mcpServers` is a `configure` parameter rather than a property of a type,
+    // so an agent configured without servers gets no `.mcp.json` written into
+    // its directory at all. (The opt-in machinery proper — merge-never-replace
+    // and `forget`'s cleanup — is the next slice's; what T1 owes is not
+    // writing into a caller's directory for a reason the caller did not give.)
+    const mcpServers = config.mcpServers ?? [];
+    if (mcpServers.length > 0) {
+      writeWorkspaceMcpConfig(session.path, mcpServers, this.configPath);
     }
 
-    // Agent-specific provisioning, also on every activation: it is idempotent,
-    // and a workspace reset out from under a live herdr agent would otherwise
-    // never get its settings back. A setup that throws refuses the activation
-    // (KAN-54): provisioning that demonstrably did not stick — the folder
-    // trust entry above all — would otherwise spawn an agent wedged on a
-    // startup dialog behind a `success: true, verified: true` answer.
+    // Agent-specific provisioning, on every activation: it is idempotent, and
+    // a setup that throws refuses the activation (KAN-54) — provisioning that
+    // demonstrably did not stick, the folder trust entry above all, would
+    // otherwise spawn an agent wedged on a startup dialog behind a
+    // `success: true, verified: true` answer.
     if (launcher.setup) {
       try {
-        launcher.setup(session.workDir, mcpServers ?? []);
+        launcher.setup(session.path, mcpServers);
       } catch (e: any) {
         session.spawnError = e?.message ?? String(e);
         session.status = 'terminated';
-        console.error(`[HerdrBridge] Refusing to start ${agentName}: ${session.spawnError}`);
+        console.error(`[HerdrBridge] Refusing to start ${paneName}: ${session.spawnError}`);
         return;
       }
     }
@@ -688,21 +660,19 @@ export class HerdrBridge {
     // channel as every other provisioning failure here. The agent's first
     // instruction is to read this file, so spawning without it would start an
     // agent with no instructions behind a `success: true, verified: true`
-    // answer — a check that renders its own failure as an all-clear. (The
-    // extraction source logged and fell through here; the lesson its epic
-    // recorded is ported instead of the line.)
+    // answer — a check that renders its own failure as an all-clear.
+    let promptFile: string | undefined;
     if (initialPrompt) {
-      const promptFile = path.join(session.workDir, PROMPT_FILENAME);
       try {
-        fs.writeFileSync(promptFile, initialPrompt);
+        promptFile = this.writeSidecarPrompt(session, initialPrompt);
       } catch (e: any) {
         session.spawnError =
-          `Could not write ${PROMPT_FILENAME} into ${session.workDir}: ` +
-          `${e?.message ?? String(e)}. The agent's bootstrap prompt is that file, so an agent ` +
-          `spawned without it would sit with no instructions behind a success answer. ` +
+          `Could not write the bootstrap prompt into ${this.sidecarDirFor(session.path)}: ` +
+          `${e?.message ?? String(e)}. The agent's first instruction is to read that file, so an ` +
+          `agent spawned without it would sit with no instructions behind a success answer. ` +
           `Nothing was started.`;
         session.status = 'terminated';
-        console.error(`[HerdrBridge] Refusing to start ${agentName}: ${session.spawnError}`);
+        console.error(`[HerdrBridge] Refusing to start ${paneName}: ${session.spawnError}`);
         return;
       }
     }
@@ -712,15 +682,13 @@ export class HerdrBridge {
     // started an agent into — including panes restored after a reboot as bare
     // shells with nothing running in them — so `herdr agent get` answering is
     // not evidence of an agent. The record's inner `agent` field is: it is
-    // herdr's report of a live runtime in the pane, the same field
-    // listHerdrAgentsChecked surfaces as agentRuntime and list_agents uses to
-    // split agents from unbackedPanes. Reading mere registration as existence
-    // skipped the launcher, attached this session to a dead prompt, and still
-    // answered `verified: true` (KAN-58).
+    // herdr's report of a live runtime in the pane. Reading mere registration
+    // as existence skipped the launcher, attached this session to a dead
+    // prompt, and still answered `verified: true` (KAN-58).
     let agentExists = false;
     let staleRecord: any;
     try {
-      const record = this.runHerdr(['agent', 'get', agentName])?.result?.agent;
+      const record = this.runHerdr(['agent', 'get', paneName])?.result?.agent;
       if (record) {
         const backed = typeof record.agent === 'string' && record.agent !== '';
         if (backed || !session.expectsRuntime) agentExists = true;
@@ -736,12 +704,14 @@ export class HerdrBridge {
     // A stale registration blocks both roads: `agent start` would refuse the
     // taken name, and attaching would type at a dead shell. Release it the way
     // deactivate does — closing the pane drops the registration — so the
-    // launcher actually runs. A release herdr refuses stops the activation
-    // here: carrying on would hit AGENT_NAME_TAKEN and fall into the attach
-    // path, which is the very false success this branch exists to prevent.
+    // launcher actually runs. This is also the path our OWN dead pane takes:
+    // the pane name is derived from the path, so a pane left over from a
+    // previous run of this same agent is caught here by name, closed, and
+    // respawned. (It is not an *occupant* either — occupancy requires a live
+    // runtime — so the guard in activate lets it through to exactly this.)
     if (staleRecord) {
       console.log(
-        `[HerdrBridge] ${agentName} is a herdr name registration with no agent behind it ` +
+        `[HerdrBridge] ${paneName} is a herdr name registration with no agent behind it ` +
         `(pane ${staleRecord.pane_id ?? 'unknown'}, status ${staleRecord.agent_status ?? 'unknown'}); ` +
         `closing the stale pane and taking the spawn path`
       );
@@ -754,11 +724,11 @@ export class HerdrBridge {
         // Already gone is the outcome we wanted, not a failure.
         if (code !== PANE_NOT_FOUND && code !== AGENT_NOT_FOUND) {
           session.spawnError =
-            `Agent name '${agentName}' is held by a stale herdr registration with no agent ` +
+            `Pane name '${paneName}' is held by a stale herdr registration with no agent ` +
             `running behind it, and the stale pane could not be closed: ${e?.message ?? String(e)}. ` +
             `Nothing was started.`;
           session.status = 'terminated';
-          console.error(`[HerdrBridge] Refusing to activate ${agentName}: ${session.spawnError}`);
+          console.error(`[HerdrBridge] Refusing to activate ${paneName}: ${session.spawnError}`);
           return;
         }
       }
@@ -770,26 +740,23 @@ export class HerdrBridge {
       // agent greeted as if it were starting fresh would claim its work and
       // begin again, silently redoing — or conflicting with — work it had
       // already committed. See resume.ts.
-      const fallbackPrompt =
+      const coldStart = promptFile ? promptInstruction(promptFile) : undefined;
+      const promptCommand =
         session.resume && session.resumedConversation === false
-          ? degradedResumePrompt(session.type, session.key, session.resume)
-          : undefined;
+          ? degradedResumePrompt(session.path, session.resume, promptFile)
+          : coldStart;
 
       // The last daemon-side moment to look (KAN-54). Between setup and here
       // sit the prompt-file write and a subprocess round-trip to `herdr agent
       // get` — real time, in which a sibling claude's boot write-back can
-      // erase the trust entry setup just verified. Re-checking now shrinks
-      // the unguarded window to spawn-to-config-read, which is as small as it
-      // gets without watching the agent past its startup dialogs (deferred by
-      // KAN-49). A clobber that will not repair refuses the activation on the
-      // spawnError channel rather than starting a wedged agent.
+      // erase the trust entry setup just verified.
       if (launcher.preSpawnCheck) {
         try {
-          launcher.preSpawnCheck(session.workDir);
+          launcher.preSpawnCheck(session.path);
         } catch (e: any) {
           session.spawnError = e?.message ?? String(e);
           session.status = 'terminated';
-          console.error(`[HerdrBridge] Refusing to spawn ${agentName}: ${session.spawnError}`);
+          console.error(`[HerdrBridge] Refusing to spawn ${paneName}: ${session.spawnError}`);
           return;
         }
       }
@@ -802,31 +769,25 @@ export class HerdrBridge {
         // `env` avoids shell quoting entirely.
         //
         // Routed through runHerdr so a refusal is raised rather than dropped.
-        // In the extraction source this call was once a bare spawnSync whose
-        // result was discarded, so a failed spawn was indistinguishable from a
-        // successful one: it went straight on to attach to an agent that did
-        // not exist, and the session was reported active. That is the silent
-        // false success in KAN-24, and the reason `ghostty error -2` read as a
-        // mystery.
+        // A bare spawnSync whose result was discarded is the silent false
+        // success in KAN-24.
         //
         // RESUME_ENV rides in on the same `env` invocation. It raises the two
         // thresholds behind Claude Code's "Resume from summary / Resume full
         // session" prompt, which otherwise appears whenever a resumed
         // conversation is both over 70 minutes old and over 100k tokens — the
         // exact shape of an agent that has been working all afternoon, and a
-        // hard stop for one with nobody at the keyboard. It is set on every
-        // spawn, not only on resumes: the launcher tries `--continue` first
-        // every time, so any re-activation can meet that modal.
-        this.startAgentInOwnTab(agentName, session.workDir, [
+        // hard stop for one with nobody at the keyboard.
+        this.startAgentInOwnTab(paneName, session.path, [
           'env',
           `PATH=${process.env.PATH}`,
           ...Object.entries(RESUME_ENV).map(([name, value]) => `${name}=${value}`),
-          'bash', '-c', launcher.command(fallbackPrompt)
+          'bash', '-c', launcher.command(promptCommand)
         ]);
       } catch (e: any) {
         if ((e as HerdrCliError)?.herdrCode === AGENT_NAME_TAKEN) {
           // Someone created it between our check and our start. Attach to it.
-          console.log(`[HerdrBridge] Agent ${agentName} already existed; attaching to it`);
+          console.log(`[HerdrBridge] Agent ${paneName} already existed; attaching to it`);
         } else {
           session.spawnError = diagnoseSpawnFailure(e?.message ?? String(e));
           // 'terminated' rather than 'active': there is no agent to attach to,
@@ -834,7 +795,7 @@ export class HerdrBridge {
           // produce output.
           session.status = 'terminated';
           console.error(
-            `[HerdrBridge] Could not start herdr agent ${agentName}: ${session.spawnError}`
+            `[HerdrBridge] Could not start herdr agent ${paneName}: ${session.spawnError}`
           );
           return;
         }
@@ -846,16 +807,11 @@ export class HerdrBridge {
     // client froze (KAN-16). The guard in spawnSession is what actually
     // prevents that, so by the time we get here nothing of ours is attached
     // and this resolves to true; it is kept as a second line of defence for
-    // any future caller that reaches initPty another way, and because the log
-    // line below is the record of which attach asked for what.
-    //
-    // Taking over remains right when the incumbent is not ours: an attach
-    // orphaned by a daemon that died without cleaning up would otherwise
-    // strand the agent unreachable forever.
-    const takeover = !this.liveAttachFor(agentName);
-    const attachArgs = ['agent', 'attach', agentName, ...(takeover ? ['--takeover'] : [])];
+    // any future caller that reaches initPty another way.
+    const takeover = !this.liveAttachFor(paneName);
+    const attachArgs = ['agent', 'attach', paneName, ...(takeover ? ['--takeover'] : [])];
     console.log(
-      `[HerdrBridge] Attaching session ${session.sessionId} to ${agentName} ` +
+      `[HerdrBridge] Attaching session ${session.sessionId} to ${paneName} ` +
       `(takeover=${takeover}): herdr ${attachArgs.join(' ')}`
     );
 
@@ -864,12 +820,13 @@ export class HerdrBridge {
         name: 'xterm-256color',
         cols: 80,
         rows: 24,
-        cwd: session.workDir,
+        cwd: session.path,
         env: {
           ...process.env,
           TERM: 'xterm-256color',
-          CRABCAST_WORKSPACE_TYPE: session.type,
-          CRABCAST_WORKSPACE_KEY: session.key
+          // The agent's own address, for an MCP server spawned inside it. One
+          // variable now, because there is one thing to say.
+          CRABCAST_AGENT_PATH: session.path
         } as Record<string, string>
       });
 
@@ -887,7 +844,7 @@ export class HerdrBridge {
         const reason: SessionEndReason = tail.includes(TAKEOVER_NOTICE) ? 'taken-over' : 'exited';
 
         console.log(
-          `[HerdrBridge] PTY for session ${session.sessionId} (${agentName}) ` +
+          `[HerdrBridge] PTY for session ${session.sessionId} (${paneName}) ` +
           `exited with code ${exitCode}; reason=${reason}`
         );
         session.status = 'terminated';
@@ -895,8 +852,8 @@ export class HerdrBridge {
         // Tell the clients. Without this a client keeps rendering the last
         // frame it received and looks like an agent that is merely quiet.
         this.sessionEndedListener?.({
-          type: session.type,
-          key: session.key,
+          path: session.path,
+          paneName,
           sessionId: session.sessionId,
           reason,
           exitCode
@@ -911,12 +868,9 @@ export class HerdrBridge {
       // to be told. Marking the session terminated without it produced the
       // second false success in KAN-23: activate checks `spawnError` alone, so
       // an attach that threw was answered with `success: true` and, in the
-      // same object, `status: "terminated"` — a response that contradicted
-      // itself and a session id that could never carry any output. The agent
-      // itself may well be running; what failed is our route to it, and the
-      // message says so rather than claiming nothing started.
+      // same object, `status: "terminated"`.
       session.spawnError =
-        `Agent '${agentName}' could not be attached to: ${e?.message ?? String(e)}. ` +
+        `Agent '${paneName}' could not be attached to: ${e?.message ?? String(e)}. ` +
         `The agent may be running in herdr, but this activation produced no usable terminal.`;
       console.error('[HerdrBridge] Failed to spawn PTY', e);
     }
@@ -926,11 +880,10 @@ export class HerdrBridge {
     return this.sessions.get(sessionId);
   }
 
-  public getSessionByKey(key: string): HerdrSession | undefined {
+  /** The live session for a canonical path, if this daemon holds one. */
+  public getSessionByPath(agentPath: string): HerdrSession | undefined {
     for (const session of this.sessions.values()) {
-      if (session.key === key && session.status === 'active') {
-        return session;
-      }
+      if (session.status === 'active' && session.path === agentPath) return session;
     }
     return undefined;
   }
@@ -962,8 +915,14 @@ export class HerdrBridge {
    * die between the two — producing exactly the false verdict the distinction
    * exists to prevent. `reachable: false` means the list below is silence, not
    * evidence, and nothing may be declared dead on the strength of it.
+   *
+   * IT IS ALSO WHERE OCCUPANCY IS ANSWERED FROM. Every pane is canonicalized
+   * here, once, so that {@link occupancyOf} and the fleet census both compare
+   * the same resolved strings. herdr reports `cwd` as an arbitrary string; a
+   * symlinked pane cwd compared raw would look like a different directory from
+   * the one it is actually sitting in.
    */
-  public listHerdrAgentsChecked(): { reachable: boolean; agents: HerdrAgentRecord[] } {
+  public listHerdrAgentsChecked(): HerdrCensus {
     let output: string;
     try {
       output = execSync('herdr agent list', {
@@ -983,17 +942,74 @@ export class HerdrBridge {
         reachable: true,
         agents: agents
           .filter((agent: any) => agent && typeof agent.name === 'string')
-          .map((agent: any) => ({
-            name: agent.name as string,
-            agentRuntime: typeof agent.agent === 'string' && agent.agent ? agent.agent : null,
-            workDir: typeof agent.cwd === 'string' ? agent.cwd : null,
-            herdrStatus: toAgentStatus(agent.agent_status)
-          }))
+          .map((agent: any) => {
+            const workDir = typeof agent.cwd === 'string' ? agent.cwd : null;
+            return {
+              name: agent.name as string,
+              paneId: typeof agent.pane_id === 'string' && agent.pane_id ? agent.pane_id : null,
+              agentRuntime: typeof agent.agent === 'string' && agent.agent ? agent.agent : null,
+              workDir,
+              canonicalWorkDir: canonicalizeOrNull(workDir),
+              herdrStatus: toAgentStatus(agent.agent_status)
+            };
+          })
       };
     } catch (e) {
       console.error('[HerdrBridge] Could not parse `herdr agent list` output', e);
       return { reachable: false, agents: [] };
     }
+  }
+
+  /**
+   * What is live in a directory, from ONE census read.
+   *
+   * "NOT OURS" AND "NOTHING IS THERE" ARE DIFFERENT FACTS. ONLY THE CENSUS
+   * ANSWERS THE SECOND, AND IT MUST BE ASKED SEPARATELY.
+   *
+   * That sentence is the whole reason this function exists next to the
+   * three-fact binding rather than being derived from it. The two questions
+   * read the same census and are *not* complements: the binding answers "is
+   * this pane ours?", occupancy answers "is anything live in this directory?".
+   * A freshly-`configure`d record has no recorded `paneId`, so the binding
+   * says not-ours — and reading that as "nothing is there" would send
+   * `activate` down the spawn branch straight into an occupied directory. The
+   * path-derived pane name protects CrabCast against CrabCast; a foreign pane
+   * has a foreign name and is invisible to it. Cutover is exactly the foreign
+   * case for an entire fleet at once.
+   *
+   * OCCUPANTS are panes whose canonicalized `cwd` equals this path AND which
+   * have a live runtime. A pane whose cwd cannot be canonicalized is not an
+   * occupant: our path provably exists, so an unresolvable path is not it. Our
+   * own DEAD pane is not an occupant either — it has no runtime, so it fails
+   * both tests, and `activate` spawns (through initPty's stale-registration
+   * release, which clears the name first).
+   */
+  public occupancyOf(
+    census: HerdrCensus,
+    agentPath: string,
+    recordedPaneId?: string
+  ): Occupancy {
+    if (!census.reachable) return { reachable: false };
+
+    const occupants: PaneOccupant[] = [];
+    let ours = false;
+
+    for (const record of census.agents) {
+      if (record.canonicalWorkDir !== agentPath) continue;
+      if (record.agentRuntime === null) continue;
+      occupants.push({
+        paneId: record.paneId,
+        name: record.name,
+        agentStatus: record.herdrStatus,
+        workDir: record.workDir
+      });
+      // The third fact. The other two are the two `continue`s above: this
+      // record is in the census, and its canonical cwd is our path, and it has
+      // a runtime. All three, or the pane is not claimed.
+      if (recordedPaneId && record.paneId === recordedPaneId) ours = true;
+    }
+
+    return { reachable: true, occupants, ours };
   }
 
   /**
@@ -1004,9 +1020,7 @@ export class HerdrBridge {
    * only the failures herdr *tells* us about. The failure this exists for is
    * the other one: herdr acknowledges the start and no agent is there
    * afterwards — the KAN-23 false success, where `success: true` and a
-   * plausible session id were returned for an agent that never existed. The
-   * response is a factual claim about the world, so it is checked against the
-   * world before it is made.
+   * plausible session id were returned for an agent that never existed.
    *
    * The world here is {@link listHerdrAgentsChecked} — the same census
    * `list_agents` reports from, deliberately, so that activate and the fleet
@@ -1014,20 +1028,16 @@ export class HerdrBridge {
    *
    * `requireRuntime` is what "exists" means. herdr's census lists every name
    * registration, including panes that are bare shells with no agent process
-   * behind them — the entries list_agents reports as unbackedPanes — so for
-   * any launcher that delivers a runtime, presence-by-name is not presence.
-   * The agent is confirmed only when the census shows a runtime behind the
-   * pane, which is why `verified: true` can no longer be answered off a name
-   * that survived its agent (KAN-58). `false` is for `shell` workspaces,
-   * where the name is all there is to see.
+   * behind them, so for any launcher that delivers a runtime, presence-by-name
+   * is not presence (KAN-58). `false` is for `shell` agents, where the name is
+   * all there is to see.
    *
-   * Bounded by `timeoutMs` of polling: the wait cannot exceed it, and the last
-   * census in flight is itself capped by the 5s timeout inside
-   * listHerdrAgentsChecked, so the whole call is bounded by the two added
-   * together. It never throws — a caller owes its client an answer.
+   * It also returns the pane id from that same census read, because that id is
+   * what becomes the record's durable binding — taking it from a second call
+   * would bind to a different moment than the one that proved the agent there.
    */
   public async confirmAgentPresent(
-    agentName: string,
+    paneName: string,
     requireRuntime: boolean,
     timeoutMs: number = requireRuntime ? RUNTIME_CONFIRM_TIMEOUT_MS : AGENT_CONFIRM_TIMEOUT_MS
   ): Promise<AgentPresence> {
@@ -1043,10 +1053,15 @@ export class HerdrBridge {
       reachable = census.reachable;
 
       if (reachable) {
-        const record = census.agents.find(agent => agent.name === agentName);
+        const record = census.agents.find(agent => agent.name === paneName);
         registered = record !== undefined;
         if (record && (!requireRuntime || record.agentRuntime !== null)) {
-          return { present: true, waitedMs: Date.now() - startedAt, checks };
+          return {
+            present: true,
+            paneId: record.paneId,
+            waitedMs: Date.now() - startedAt,
+            checks
+          };
         }
       }
 
@@ -1066,11 +1081,11 @@ export class HerdrBridge {
           waitedMs,
           checks,
           error: registered
-            ? `herdr has a pane registered under '${agentName}' but reported no agent runtime ` +
+            ? `herdr has a pane registered under '${paneName}' but reported no agent runtime ` +
               `behind it for ${waitedMs}ms (${checks} checks): the pane is a shell, not a ` +
               `running agent. The launcher's command never became a live agent process. ` +
               `Check ~/.config/herdr/herdr-server.log and the pane itself for what it printed.`
-            : `herdr reported no error starting agent '${agentName}', but the agent was not in ` +
+            : `herdr reported no error starting agent '${paneName}', but the agent was not in ` +
               `\`herdr agent list\` ${waitedMs}ms and ${checks} checks later. No agent is running ` +
               `for this activation. Check ~/.config/herdr/herdr-server.log for the pane.spawn line ` +
               `covering this attempt.`
@@ -1081,7 +1096,7 @@ export class HerdrBridge {
           waitedMs,
           checks,
           error:
-            `Could not confirm agent '${agentName}' exists: herdr did not answer ` +
+            `Could not confirm agent '${paneName}' exists: herdr did not answer ` +
             `\`agent list\` within ${waitedMs}ms (${checks} attempts). The agent may or may not ` +
             `be running — this is an unverified activation, not a failed one, and nothing has ` +
             `been torn down. Check that the herdr server is up before retrying.`
@@ -1092,7 +1107,7 @@ export class HerdrBridge {
    * Give up on a session whose agent is known not to exist.
    *
    * Without this the failure is sticky rather than merely reported: a session
-   * left `active` is what {@link getSessionByKey} and {@link liveAttachFor}
+   * left `active` is what {@link getSessionByPath} and {@link liveAttachFor}
    * answer with, so the next activate would be handed this dead session and
    * refuse to spawn a real one — the caller could never retry its way out.
    *
@@ -1120,10 +1135,7 @@ export class HerdrBridge {
    * {@link listHerdrAgents} deliberately flattens "herdr said nothing" and
    * "herdr has no agents" into an empty list, which is right for a status
    * display and wrong for boot-time reconciliation: there, the two answers lead
-   * to opposite actions — wait, or start the whole fleet. This is the question
-   * that separates them, and it is asked as its own call rather than by
-   * changing what listHerdrAgents returns, so no existing caller has to think
-   * about a new empty-ish value.
+   * to opposite actions — wait, or start the whole fleet.
    */
   public herdrReachable(): boolean {
     try {
@@ -1135,15 +1147,15 @@ export class HerdrBridge {
   }
 
   /**
-   * The same view as {@link listHerdrAgents}, keyed by name, for callers that
-   * only want to decorate something they already have with a status.
+   * The same view as {@link listHerdrAgents}, keyed by pane name, for callers
+   * that only want to decorate something they already have with a status.
    */
   public listHerdrStatuses(): Map<string, HerdrAgentStatus> {
     return new Map(this.listHerdrAgents().map(agent => [agent.name, agent.herdrStatus]));
   }
 
   /**
-   * One herdr CLI call, argv-level so nothing we pass through (agent names,
+   * One herdr CLI call, argv-level so nothing we pass through (pane names,
    * arbitrary message text) is ever handed to a shell. Returns herdr's parsed
    * JSON and throws with herdr's own message on failure — herdr reports errors
    * as a nonzero exit plus an `error` object, on stdout for some commands and
@@ -1181,71 +1193,31 @@ export class HerdrBridge {
   }
 
   /**
-   * The herdr agent behind a workspace key. The in-memory session map is the
-   * fast path, but it dies with the daemon while the herdr pane outlives it —
-   * so fall back to matching herdr's own agent list, which is the case that
-   * matters most here (messaging an agent that has been running a while).
-   */
-  private resolveAgentName(key: string): string {
-    const session = this.getSessionByKey(key);
-    if (session) return agentNameFor(session.type, session.key);
-
-    const suffix = `-${key.toLowerCase()}`;
-    const matches = Array.from(this.listHerdrStatuses().keys())
-      .filter(name => name.startsWith(AGENT_NAME_PREFIX) && name.endsWith(suffix));
-
-    if (matches.length === 1) return matches[0];
-    if (matches.length > 1) {
-      throw new Error(`Key '${key}' is ambiguous; it matches herdr agents: ${matches.join(', ')}`);
-    }
-    throw new Error(`No agent found for key '${key}'`);
-  }
-
-  /**
-   * The agent named by an address. A caller that knows the workspace type
-   * names the agent exactly, which is the only unambiguous form when several
-   * types share a key; a bare key keeps the resolve-by-suffix fallback.
-   */
-  private agentNameForAddress(key: string, type?: string): string {
-    const trimmedType = typeof type === 'string' ? type.trim() : '';
-    return trimmedType ? agentNameFor(trimmedType, key) : this.resolveAgentName(key);
-  }
-
-  /**
-   * The session for an address, if this daemon owns one. An explicit type has
-   * to match: a session for a different type is a different agent, and
-   * answering with it would silently ignore the address the caller gave.
+   * Ask herdr directly about the agent in a directory. This is the answer for
+   * a path whose session died with a previous daemon: the pane outlives us, so
+   * its status and cwd are still there to be read. Throws when herdr has no
+   * such agent.
    *
-   * A scan, not a filter of the first key match: two types can legitimately
-   * hold sessions for the same key, and a typed caller must get its own —
-   * taking whichever session the map yields first and rejecting it on type
-   * would answer "no session" while the right one sits live beside it.
+   * NO RESOLUTION STEP, and that is the whole of the re-key. The pane name is
+   * a pure function of the path, so there is nothing to search, nothing to
+   * match by suffix, and no ambiguity for a caller to disambiguate — two
+   * agents that would once have collided on a shared key are two different
+   * directories and therefore two different names. (The refusal that used to
+   * report that ambiguity is described rather than quoted, here and
+   * everywhere: `verify-agent-power-controls.mjs` greps `src/` for it, and a
+   * check somebody has to eyeball to see the hits are only comments is a check
+   * that has stopped working.)
    */
-  public getSessionByAddress(key: string, type?: string): HerdrSession | undefined {
-    const trimmedType = typeof type === 'string' ? type.trim() : '';
-    for (const session of this.sessions.values()) {
-      if (session.key !== key || session.status !== 'active') continue;
-      if (trimmedType && session.type !== trimmedType) continue;
-      return session;
-    }
-    return undefined;
-  }
-
-  /**
-   * Ask herdr directly about an agent. This is the answer for a key whose
-   * session died with a previous daemon: the pane outlives us, so its status
-   * and cwd are still there to be read. Throws when herdr has no such agent.
-   */
-  public describeAgent(key: string, type?: string): HerdrAgentDescription {
-    const agentName = this.agentNameForAddress(key, type);
-    const agent = this.runHerdr(['agent', 'get', agentName])?.result?.agent;
+  public describeAgent(agentPath: string): HerdrAgentDescription {
+    const paneName = paneNameFor(agentPath);
+    const agent = this.runHerdr(['agent', 'get', paneName])?.result?.agent;
     if (!agent) {
-      throw new Error(`No agent found for key '${key}'`);
+      throw new Error(`No agent found for path '${agentPath}'`);
     }
 
     return {
-      agentName,
-      type: typeFromAgentName(agentName, key) ?? null,
+      paneName,
+      paneId: typeof agent.pane_id === 'string' && agent.pane_id ? agent.pane_id : null,
       workDir: typeof agent.cwd === 'string' ? agent.cwd : null,
       herdrStatus: toAgentStatus(agent.agent_status)
     };
@@ -1258,27 +1230,26 @@ export class HerdrBridge {
    * make visible. Never throws; the caller owes its client a response.
    */
   public tailAgent(
-    key: string,
-    type?: string,
+    agentPath: string,
     lines?: number
   ): { success: boolean; text?: string; truncated?: boolean; error?: string } {
+    const paneName = paneNameFor(agentPath);
     try {
-      const agentName = this.agentNameForAddress(key, type);
       const read = this.runHerdr([
-        'agent', 'read', agentName,
+        'agent', 'read', paneName,
         '--source', 'recent-unwrapped',
         '--format', 'text',
         '--lines', String(clampTailLines(lines))
       ])?.result?.read;
 
       if (!read || typeof read.text !== 'string') {
-        throw new Error(`herdr returned no readable output for agent '${agentName}'`);
+        throw new Error(`herdr returned no readable output for agent '${paneName}'`);
       }
 
       return { success: true, text: read.text, truncated: read.truncated === true };
     } catch (e: any) {
       const error = e?.message ?? String(e);
-      console.error(`[HerdrBridge] Failed to tail agent for key '${key}':`, error);
+      console.error(`[HerdrBridge] Failed to tail agent at '${agentPath}':`, error);
       return { success: false, error };
     }
   }
@@ -1288,8 +1259,8 @@ export class HerdrBridge {
    * agent but it has no pane (already closed); throws with herdr's own message
    * when herdr is unreachable or does not know the agent at all.
    */
-  private closePaneForAgent(agentName: string): boolean {
-    const paneId = this.runHerdr(['agent', 'get', agentName])?.result?.agent?.pane_id;
+  private closePaneForAgent(paneName: string): boolean {
+    const paneId = this.runHerdr(['agent', 'get', paneName])?.result?.agent?.pane_id;
     if (typeof paneId !== 'string' || !paneId) return false;
 
     this.runHerdr(['pane', 'close', paneId]);
@@ -1297,38 +1268,24 @@ export class HerdrBridge {
   }
 
   /**
-   * Tear down the agent behind a workspace key without needing a session. The
-   * session map dies with the daemon while the herdr pane outlives it, so both
-   * deactivate and reset resolve the agent through the same herdr-list
-   * fallback `sendToAgent` uses. Never throws — the caller is a request
-   * handler that owes its client a response either way.
+   * Tear down the agent in a directory without needing a session. The session
+   * map dies with the daemon while the herdr pane outlives it, so deactivate
+   * resolves the pane from the path the same way every other read does. Never
+   * throws — the caller is a request handler that owes its client a response.
    */
-  public closeAgentByKey(
-    key: string,
-    type?: string
-  ): { success: boolean; agentName?: string; error?: string } {
-    let agentName: string;
+  public closeAgentByPath(
+    agentPath: string
+  ): { success: boolean; paneName: string; error?: string } {
+    const paneName = paneNameFor(agentPath);
     try {
-      // A caller that knows the type names the agent exactly — the only
-      // unambiguous form when several types share a key, and the form the
-      // preempt path must use: closing by key-suffix there could take down an
-      // agent the refusal never named. A bare key keeps the suffix fallback.
-      agentName = this.agentNameForAddress(key, type);
-    } catch (e: any) {
-      const error = e?.message ?? String(e);
-      console.error(`[HerdrBridge] Could not resolve an agent for key '${key}':`, error);
-      return { success: false, error };
-    }
-
-    try {
-      if (!this.closePaneForAgent(agentName)) {
-        return { success: false, agentName, error: `Agent '${agentName}' has no pane to close` };
+      if (!this.closePaneForAgent(paneName)) {
+        return { success: false, paneName, error: `Agent '${paneName}' has no pane to close` };
       }
-      return { success: true, agentName };
+      return { success: true, paneName };
     } catch (e: any) {
       const error = e?.message ?? String(e);
-      console.error(`[HerdrBridge] Failed to close pane for agent '${agentName}':`, error);
-      return { success: false, agentName, error };
+      console.error(`[HerdrBridge] Failed to close pane for agent '${paneName}':`, error);
+      return { success: false, paneName, error };
     }
   }
 
@@ -1337,12 +1294,12 @@ export class HerdrBridge {
    * whatever is half-typed, type the message, submit it. Never throws — the
    * caller is a request handler that owes its client a response either way.
    */
-  public async sendToAgent(key: string, message: string, type?: string): Promise<{ success: boolean; error?: string }> {
+  public async sendToAgent(agentPath: string, message: string): Promise<{ success: boolean; error?: string }> {
+    const paneName = paneNameFor(agentPath);
     try {
-      const agentName = this.agentNameForAddress(key, type);
-      const paneId = this.runHerdr(['agent', 'get', agentName])?.result?.agent?.pane_id;
+      const paneId = this.runHerdr(['agent', 'get', paneName])?.result?.agent?.pane_id;
       if (typeof paneId !== 'string' || !paneId) {
-        throw new Error(`Agent '${agentName}' has no pane to send to`);
+        throw new Error(`Agent '${paneName}' has no pane to send to`);
       }
 
       // Exactly one Ctrl+C. It clears a partially typed line, but a second
@@ -1356,65 +1313,7 @@ export class HerdrBridge {
       return { success: true };
     } catch (e: any) {
       const error = e?.message ?? String(e);
-      console.error(`[HerdrBridge] Failed to send message to agent for key '${key}':`, error);
-      return { success: false, error };
-    }
-  }
-
-  /**
-   * Delete a workspace directory, and nothing else. This is a recursive
-   * delete, so the containment check in front of it is the only thing standing
-   * between a malformed key (`../..`), a symlinked workspace, or some future
-   * caller that invents its own workspace location, and an `rm -rf` pointed
-   * somewhere CrabCast does not own. Refusals return an error rather than
-   * falling through: there is no path here that deletes an unvalidated target.
-   *
-   * `error` is set only when the delete was *refused*; a workspace that was
-   * already gone reports `success: false` with no error.
-   */
-  public resetWorkspace(type: string, key: string): { success: boolean; error?: string } {
-    const root = this.workspacesRoot();
-    const workDir = this.workspaceDirFor(type, key);
-
-    const refuse = (reason: string) => {
-      const error =
-        `Refusing to reset workspace '${type}/${key}': ${reason}. ` +
-        `Only directories strictly inside '${root}' may be deleted.`;
-      console.error(`[HerdrBridge] ${error}`);
-      return { success: false, error };
-    };
-
-    // Lexical check first, so a traversal key is rejected by name even when it
-    // points at nothing — the answer must not depend on what happens to exist.
-    if (!isStrictlyInside(root, workDir)) {
-      return refuse(`'${workDir}' is not inside the workspaces root`);
-    }
-
-    try {
-      if (!fs.existsSync(workDir)) {
-        return { success: false }; // Already gone
-      }
-
-      // Then the real check. A symlink at (or above) the workspace passes the
-      // lexical test while pointing anywhere on the filesystem, so both sides
-      // are resolved before they are compared.
-      let realRoot: string;
-      let realTarget: string;
-      try {
-        realRoot = fs.realpathSync(root);
-        realTarget = fs.realpathSync(workDir);
-      } catch (e: any) {
-        return refuse(`'${workDir}' could not be resolved (${e?.message ?? String(e)})`);
-      }
-      if (!isStrictlyInside(realRoot, realTarget)) {
-        return refuse(`'${workDir}' resolves to '${realTarget}', outside the workspaces root`);
-      }
-
-      fs.rmSync(workDir, { recursive: true, force: true });
-      return { success: true };
-    } catch (e: any) {
-      const error = `Failed to reset workspace '${workDir}': ${e?.message ?? String(e)}`;
-      console.error('[HerdrBridge]', error);
+      console.error(`[HerdrBridge] Failed to send message to agent at '${agentPath}':`, error);
       return { success: false, error };
     }
   }
@@ -1499,15 +1398,15 @@ export class HerdrBridge {
       session.ptyProcess.kill();
     }
 
-    const agentName = agentNameFor(session.type, session.key);
+    const { paneName } = session;
     let error: string | undefined;
     try {
-      this.closePaneForAgent(agentName);
+      this.closePaneForAgent(paneName);
     } catch (e: any) {
       const code = (e as HerdrCliError)?.herdrCode;
       if (code !== AGENT_NOT_FOUND && code !== PANE_NOT_FOUND) {
         error =
-          `Could not close the pane for agent '${agentName}': ${e?.message ?? String(e)}. ` +
+          `Could not close the pane for agent '${paneName}': ${e?.message ?? String(e)}. ` +
           `This daemon's terminal attach is gone, but the agent may still be running.`;
         console.error(`[HerdrBridge] ${error}`);
       }

@@ -47,7 +47,7 @@ const EXCLUSIONS = [
       'Terminal attach. CrabCast is a management layer and never embeds a terminal — a ' +
       'settled product boundary, not a deferral (KAN-59 decision 4, KAN-92 constraint 6). ' +
       '`tail` is how the CLI reads a pane; it does not stream one.',
-    evidence: 'src/router.ts:2052 handlePtyInit registers a data listener that streams pty_output frames'
+    evidence: 'src/router.ts:2416 handlePtyInit registers a data listener that streams pty_output frames'
   },
   {
     action: 'pty_input',
@@ -55,32 +55,34 @@ const EXCLUSIONS = [
       'Terminal attach, write half. Same boundary as pty_init: keystrokes into a live PTY are ' +
       'an embedded terminal by another name. The CLI steers agents with `send`, which the daemon ' +
       'delivers as a whole message, not as a keystroke stream.',
-    evidence: 'src/router.ts:2091 handlePtyInput writes raw data to a PTY by session id'
+    evidence: 'src/router.ts:2455 handlePtyInput writes raw data to a PTY by session id'
   },
   {
     action: 'pty_resize',
     reason:
       'Terminal attach, geometry half. Only meaningful to a client that is drawing the PTY, ' +
       'which by the boundary above CrabCast never is.',
-    evidence: 'src/router.ts:2108 handlePtyResize sets cols/rows on a PTY by session id'
+    evidence: 'src/router.ts:2472 handlePtyResize sets cols/rows on a PTY by session id'
   },
   {
     action: 'deactivate',
     reason:
-      'Session-addressed stand-down. Addressing in this system is <type>/<key>; a sessionId is ' +
-      'transport-internal — it is minted by the daemon that holds the attach and dies with it. ' +
-      'The by-key form is the human-facing one and is a strict superset: it resolves through the ' +
-      'session map when there is one, falls back to herdr when there is not, and still records the ' +
-      'stand-down for an agent that has already died. The session form can address none of those. ' +
-      'Concretely, every agent that outlived a daemon restart is reported with sessionId: null, so ' +
-      'a `crabcast deactivate --session <id>` would be unusable in precisely the case a human most ' +
-      'often needs it. The one caller in the tree is a verify script tearing down a session it just ' +
-      'created; the MCP server — the only other client of this socket — uses deactivate_by_key.',
+      'Session-addressed stand-down. Addressing in this system is the canonical path of the ' +
+      'directory an agent runs in; a sessionId is transport-internal — it is minted by the daemon ' +
+      'that holds the attach and dies with it. The path-addressed form is the human-facing one and ' +
+      'is a strict superset: it resolves through the session map when there is one, falls back to ' +
+      "herdr's pane when there is not, and still records the stand-down for an agent that has " +
+      'already died. The session form can address none of those. Concretely, every agent that ' +
+      'outlived a daemon restart is reported with sessionId: null, so a ' +
+      '`crabcast deactivate --session <id>` would be unusable in precisely the case a human most ' +
+      'often needs it. It also cannot answer the state question the path form does — unstarted vs ' +
+      'standby — because a configured-but-never-run agent has no session to name. The MCP server, ' +
+      'the only other client of this socket, uses deactivate_agent.',
     evidence:
-      'src/router.ts:1136-1181 handleDeactivate requires data.sessionId and looks up the session map only; ' +
-      'src/router.ts:1183-1299 handleDeactivateByKey resolves by address, falls back to closeAgentByKey ' +
-      'and to the registry for a dead agent; src/router.ts:1999 sessionless rows carry sessionId: null; ' +
-      'src/mcp.ts:373 crabcast_deactivate_agent calls deactivate_by_key'
+      'src/router.ts:1582 handleDeactivateSession requires data.sessionId and looks up the session ' +
+      'map only; src/router.ts:1644 handleDeactivateAgent resolves by canonical path, falls back to ' +
+      'closeAgentByPath and to the registry for a dead agent; src/router.ts:2228 sessionless rows ' +
+      'carry sessionId: null; src/mcp.ts:423 crabcast_deactivate_agent calls deactivate_agent'
   }
 ];
 

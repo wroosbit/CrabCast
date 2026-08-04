@@ -1,7 +1,6 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { PROMPT_FILENAME } from './launchers.js';
 
 /**
  * Bringing an agent back after the machine died under it.
@@ -145,11 +144,11 @@ function causeSentence(cause: ResumeCause): string {
  * agent's last remembered turn may have completed after its final transcript
  * write; the workspace is the ground truth, not its memory of it.
  */
-export function resumeNudge(type: string, key: string, cause: ResumeCause = 'reboot'): string {
+export function resumeNudge(agentPath: string, cause: ResumeCause = 'reboot'): string {
   return [
     `[crabcast] You were interrupted mid-work. ${causeSentence(cause)}`,
     `You have been restored automatically and this conversation is your own history — but your last remembered action may not have finished, and nothing has been done on your behalf since.`,
-    `Do not start over. First establish what already exists: check this workspace and, if you have a repository checkout here, its status, diff, branch, commits and whether your work is already published. Re-check ${key} for anything recorded there while you were gone.`,
+    `Do not start over. First establish what already exists: check ${agentPath} and, if you have a repository checkout here, its status, diff, branch, commits and whether your work is already published. Re-check whatever tracks this work for anything recorded there while you were gone.`,
     `Then continue the task from wherever that evidence says you actually got to, and say in one line what state you found before you resume work.`
   ].join(' ');
 }
@@ -168,19 +167,23 @@ export function resumeNudge(type: string, key: string, cause: ResumeCause = 'reb
  * redoing — or worse, conflicting with — work already committed and pushed.
  */
 export function degradedResumePrompt(
-  type: string,
-  key: string,
-  cause: ResumeCause = 'reboot'
+  agentPath: string,
+  cause: ResumeCause = 'reboot',
+  promptFile?: string
 ): string {
   return [
-    `You are a CrabCast agent for ${type} ${key}, and you have just been restarted with NO memory of your previous session.`,
+    `You are a CrabCast agent working in ${agentPath}, and you have just been restarted with NO memory of your previous session.`,
     causeSentence(cause),
     `Your prior conversation could not be recovered, so treat everything you would normally remember as lost — but assume work was already done.`,
     ``,
     `Before doing anything else, find out what you already did:`,
-    `1. Read ${PROMPT_FILENAME} in this directory for your original instructions.`,
-    `2. Inspect this workspace. If it contains a repository checkout, check its branch, status, diff, log, and whether your work is already published or in review.`,
-    `3. Re-check ${key} — including any notes your previous self may have left.`,
+    // Named by absolute path, because the file is in CrabCast's sidecar rather
+    // than in this directory — and omitted entirely when the agent was
+    // configured without a prompt, rather than pointing at a file that does
+    // not exist.
+    ...(promptFile ? [`1. Read ${promptFile} for your original instructions.`] : []),
+    `${promptFile ? '2' : '1'}. Inspect ${agentPath}. If it contains a repository checkout, check its branch, status, diff, log, and whether your work is already published or in review.`,
+    `${promptFile ? '3' : '2'}. Re-check whatever tracks this work — including any notes your previous self may have left.`,
     ``,
     `Then state in a few lines what you found and what remains, and continue from there. Do not restart the task from scratch, and do not duplicate work that is already committed or already in review.`
   ].join('\n');

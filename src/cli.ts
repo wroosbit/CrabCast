@@ -242,24 +242,18 @@ function field(label: string, value: unknown, width = 14): string | null {
   return `${INDENT}${(label + ':').padEnd(width)} ${String(value)}`;
 }
 
-function address(type: unknown, key: unknown): string {
-  const t = typeof type === 'string' && type ? type : '?';
-  return `${t}/${String(key ?? '?')}`;
-}
-
 /**
  * The agent this invocation is about, for a heading.
  *
- * The response's own address wins whenever it carries one — it is the daemon
- * saying which agent it acted on, which is not always the one the caller
- * named (a bare key resolves through herdr). The request fills the gap:
- * `reset_response` sends no address at all, and a failed lookup has none to
- * send, and `?/?` in a heading helps nobody.
+ * The response's own path wins whenever it carries one — it is the daemon
+ * saying which agent it acted on, and it is the CANONICAL form, which is not
+ * always what the caller typed (a relative path, a symlink, a trailing slash).
+ * The request fills the gap only when the daemon sent none, which is a refusal
+ * that never got as far as resolving one.
  */
 function addressed(reader: ResponseReader, request: Record<string, unknown>): string {
-  const type = reader.take('type') ?? request.type;
-  const key = reader.take('key') ?? request.key;
-  return address(type, key);
+  const p = reader.take('path') ?? request.path;
+  return typeof p === 'string' && p ? p : '(no path)';
 }
 
 /**
@@ -382,9 +376,7 @@ function priorityRows(priorities: any): string | null {
   return lines(
     `\npriorities — what an activation would have to strictly outrank:`,
     ...priorities.map(
-      (p: any) =>
-        `${INDENT}${address(p.type, p.key)}  priority ${p.priority}  ` +
-        `[${p.herdrStatus}]  ${p.agentName}`
+      (p: any) => `${INDENT}${p.path}  priority ${p.priority}  [${p.herdrStatus}]`
     )
   );
 }
@@ -394,8 +386,8 @@ function preemptionOffer(offer: any): string | null {
   if (!offer || typeof offer !== 'object') return null;
   return lines(
     `\npreemption available — this activation outranks a running agent:`,
-    field('agent', offer.agentName),
-    field('address', address(offer.type, offer.key)),
+    field('agent', offer.path),
+    field('pane', offer.paneName),
     field('priority', `${offer.priority} against this activation's ${offer.incomingPriority}`),
     field('herdr status', offer.herdrStatus),
     // The daemon's own sentence about what would be stood down and what
@@ -425,19 +417,25 @@ function categoryHeading(label: string, rows: unknown, total: unknown, gloss: st
   return `\n${label} (${count})${clipped}${count ? ` — ${gloss}` : ''}`;
 }
 
+/** The three gate flags, printed only where they differ from the safe default. */
+function gateFlags(a: any): string {
+  const off = (['refusable', 'chargeable', 'preemptable'] as const).filter((f) => a[f] === false);
+  return off.length ? `  ${off.map((f) => `not-${f}`).join(' ')}` : '';
+}
+
 function agentRow(a: any): string {
   const head =
-    `${INDENT}${address(a.type, a.key)}  [${a.herdrStatus}]` +
+    `${INDENT}${a.path}  [${a.herdrStatus}]` +
     (a.agentRuntime ? `  runtime ${a.agentRuntime}` : '  runtime (none reported)') +
-    (a.gateExempt ? '  gate-exempt' : '');
+    gateFlags(a);
   const session = a.sessionless
-    ? `${INDENT}${INDENT}no session held by this daemon (sessionless) — agent name ${a.agentName}`
+    ? `${INDENT}${INDENT}no session held by this daemon (sessionless) — pane ${a.paneName}`
     : `${INDENT}${INDENT}session ${a.sessionId} (${a.status}), created ${a.createdAt}`;
   return lines(
     head,
     session,
-    a.url ? `${INDENT}${INDENT}url ${a.url}` : null,
-    a.workDir ? `${INDENT}${INDENT}workdir ${a.workDir}` : null
+    a.label ? `${INDENT}${INDENT}label ${a.label}` : null,
+    a.paneId ? `${INDENT}${INDENT}pane ${a.paneName} (${a.paneId})` : null
   );
 }
 
@@ -459,13 +457,17 @@ function renderActivate(reader: ResponseReader, request: Record<string, unknown>
     const capacity = capacityBlock(reader.take('capacity'));
     return lines(
       failure(reader, `activate ${what}`),
-      field('refused by', reader.take('refusedBy')),
+      field('refused by', reader.take('refusedBy') ?? reader.take('refused')),
       field('reason', reader.take('reason')),
       field('priority', reader.take('priority')),
-      field('url', reader.take('url')),
+      reader.take('started') === false
+        ? `${INDENT}started:       false — NOTHING was spawned`
+        : null,
       reader.take('verified') === false
         ? `${INDENT}verified:      false — the daemon could not confirm the agent exists`
         : null,
+      occupiedBlock(reader.take('occupiedBy')),
+      missingKnobs(reader.take('missing')),
       alreadyInError ? null : verbatim('derivation:', derivation),
       capacity ? `\ncapacity:\n${capacity}` : null,
       preemptionOffer(reader.take('preemption')),
@@ -476,14 +478,24 @@ function renderActivate(reader: ResponseReader, request: Record<string, unknown>
 
   const preempted = reader.take('preempted');
   const override = reader.take('capacityOverride');
+  if (reader.take('alreadyRunning') === true) {
+    // Not an error and not a second pane: the agent this call asked for is
+    // running, which is what the caller wanted. Said in words because
+    // "activated" would claim something happened.
+    return lines(
+      `${what} is already running — nothing was started`,
+      field('pane', `${reader.take('paneName')} (${reader.take('paneId')})`),
+      field('verified', reader.take('verified')),
+      residue(reader)
+    );
+  }
   return lines(
     `activated ${what}`,
     field('session', `${reader.take('sessionId')} (${reader.take('status')})`),
-    field('workdir', reader.take('workDir')),
-    field('url', reader.take('url')),
+    field('pane', `${reader.take('paneName')} (${reader.take('paneId')})`),
     field('created', reader.take('createdAt')),
     field('priority', reader.take('priority')),
-    field('mcp servers', (reader.take<string[]>('mcpServers') ?? []).join(', ') || null),
+    field('launcher', reader.take('launcher')),
     // `verified: true` is the difference between this response and a false
     // success (KAN-23): the agent was found in herdr's census before the
     // daemon answered. Printed rather than assumed.
@@ -498,8 +510,8 @@ function renderActivate(reader: ResponseReader, request: Record<string, unknown>
     preempted
       ? lines(
           `\npreempted to make room — somebody else's work was interrupted:`,
-          `${INDENT}${address(preempted.victim?.type, preempted.victim?.key)} ` +
-            `(${preempted.victim?.agentName}), priority ${preempted.victim?.priority}, ` +
+          `${INDENT}${preempted.victim?.path} ` +
+            `(${preempted.victim?.paneName}), priority ${preempted.victim?.priority}, ` +
             `herdr status ${preempted.victim?.herdrStatus} — stood down at ${preempted.at}`,
           preempted.victim?.offer ? `${INDENT}${preempted.victim.offer}` : null,
           `${INDENT}It is reported as preempted by \`crabcast list\` until somebody puts it back.`,
@@ -521,38 +533,117 @@ function renderActivate(reader: ResponseReader, request: Record<string, unknown>
 function renderDeactivate(reader: ResponseReader, request: Record<string, unknown>): string {
   const what = addressed(reader, request);
   const alreadyGone = reader.take('alreadyGone');
+  const wasRunning = reader.take('wasRunning');
+  const state = reader.take('state');
   const note = reader.take('note');
   if (!reader.success) {
-    return lines(failure(reader, `deactivate ${what}`), durability(reader), residue(reader));
+    return lines(
+      failure(reader, `deactivate ${what}`),
+      field('refused', reader.take('refused')),
+      durability(reader),
+      residue(reader)
+    );
   }
   return lines(
-    alreadyGone ? `deactivated ${what} — nothing was running` : `deactivated ${what}`,
-    // The daemon's own words about why a stand-down of nothing is a success.
+    // Never a bare "deactivated": the daemon distinguishes an agent it stopped
+    // from one that was already down and from one that never ran, and
+    // flattening the three here would answer a question the daemon refused to.
+    wasRunning === false
+      ? `${what} was not running${state ? ` — ${state}` : ''}`
+      : `deactivated ${what}${state ? ` — now ${state}` : ''}`,
     note ? `${INDENT}${note}` : null,
+    field('pane', reader.take('paneName')),
     field('session', reader.take('sessionId')),
+    alreadyGone ? `${INDENT}alreadyGone:   true` : null,
     reader.take('preempted') ? `${INDENT}preempted:     true (stood down to free capacity)` : null,
     durability(reader),
     residue(reader)
   );
 }
 
-function renderReset(reader: ResponseReader, request: Record<string, unknown>): string {
+/** The advisory/refusal list of panes sitting in the target directory. */
+function occupiedBlock(occupants: unknown): string | null {
+  if (!Array.isArray(occupants) || !occupants.length) return null;
+  return lines(
+    `\nlive panes already in that directory (${occupants.length}):`,
+    ...occupants.map(
+      (o: any) =>
+        `${INDENT}pane_id ${o.paneId ?? '(not reported)'}  name ${o.name}  ` +
+        `[${o.agentStatus}]${o.workDir ? `  cwd ${o.workDir}` : ''}`
+    )
+  );
+}
+
+/** Which `configure` knobs the daemon says are missing. */
+function missingKnobs(missing: unknown): string | null {
+  if (!Array.isArray(missing) || !missing.length) return null;
+  return `${INDENT}missing:       ${missing.join(', ')}`;
+}
+
+function renderConfigure(reader: ResponseReader, request: Record<string, unknown>): string {
   const what = addressed(reader, request);
-  const agentClosed = reader.take('agentClosed');
-  const agentError = reader.take('agentError');
   if (!reader.success) {
     return lines(
-      failure(reader, `reset ${what}`),
-      field('agent closed', agentClosed),
-      agentError ? `${INDENT}the agent's own complaint: ${agentError}` : null,
+      failure(reader, `configure ${what}`),
+      field('refused', reader.take('refused')),
+      missingKnobs(reader.take('missing')),
+      reader.take('applied') !== undefined
+        ? `${INDENT}applied:       nothing — configure is all-or-nothing`
+        : null,
+      field('pane', reader.take('paneId')),
       durability(reader),
       residue(reader)
     );
   }
+  const config = reader.take<any>('config') ?? {};
+  const occupied = reader.take('occupiedBy');
+  const note = reader.take('note');
   return lines(
-    `reset ${what} — workspace directory deleted`,
-    field('agent closed', agentClosed),
-    agentError ? `${INDENT}the agent's own complaint: ${agentError}` : null,
+    `${reader.take('reconfigured') ? 'reconfigured' : 'configured'} ${what}`,
+    field('pane name', reader.take('paneName')),
+    field('priority', config.priority),
+    field('launcher', config.launcher),
+    field('gate', `refusable ${config.refusable}, chargeable ${config.chargeable}, preemptable ${config.preemptable}`),
+    // The size, not the text. A prompt is finished bytes of arbitrary length
+    // and reprinting it here would bury every other field; the sidecar is
+    // where it can be read in full.
+    field('prompt', typeof config.prompt === 'string'
+      ? `${config.prompt.length} characters (written to the agent's sidecar verbatim)`
+      : null),
+    field('mcp servers', (config.mcpServers ?? []).join(', ') || null),
+    field('label', config.label),
+    reader.take('occupancyUnknown')
+      ? `${INDENT}occupancy:     UNKNOWN — herdr did not answer, so nothing was checked`
+      : null,
+    occupiedBlock(occupied),
+    note ? `\n${note}` : null,
+    durability(reader),
+    residue(reader)
+  );
+}
+
+function renderForget(reader: ResponseReader, request: Record<string, unknown>): string {
+  const what = addressed(reader, request);
+  if (!reader.success) {
+    return lines(
+      failure(reader, `forget ${what}`),
+      field('refused', reader.take('refused')),
+      field('pane', reader.take('paneId')),
+      durability(reader),
+      residue(reader)
+    );
+  }
+  const existed = reader.take('existed');
+  const removed = reader.take<string[]>('removed') ?? [];
+  const left = reader.take<string[]>('left') ?? [];
+  const note = reader.take('note');
+  return lines(
+    existed ? `forgot ${what}` : `${what} was not configured — nothing to forget`,
+    removed.length ? `${INDENT}removed:       ${removed.join(', ')}` : null,
+    // What was deliberately NOT removed, named rather than left for somebody
+    // to find later.
+    ...left.map((l) => `${INDENT}left in place: ${l}`),
+    note ? `\n${note}` : null,
     durability(reader),
     residue(reader)
   );
@@ -563,6 +654,8 @@ function renderList(reader: ResponseReader): string {
 
   const agents = reader.take<any[]>('agents') ?? [];
   const unbacked = reader.take<any[]>('unbackedPanes') ?? [];
+  const foreign = reader.take<any[]>('foreignPanes') ?? [];
+  const foreignTotal = reader.take('foreignPanesTotal');
   const missing = reader.take<any[]>('missingAgents') ?? [];
   const missingTotal = reader.take('missingTotal');
   const preempted = reader.take<any[]>('preemptedAgents') ?? [];
@@ -579,10 +672,34 @@ function renderList(reader: ResponseReader): string {
 
     unbacked.length
       ? lines(
-          `\nunbacked panes (${unbacked.length}) — named like agents, nothing behind them:`,
+          `\nunbacked panes (${unbacked.length}) — our panes, nothing behind them:`,
           ...unbacked.map(
-            (p: any) =>
-              `${INDENT}${address(p.type, p.key)} (${p.agentName}) [${p.herdrStatus}] — ${p.reason}`
+            (p: any) => `${INDENT}${p.path} (${p.paneName}) [${p.herdrStatus}] — ${p.reason}`
+          )
+        )
+      : null,
+
+    // Live panes that are not ours. The rows carrying `occupies` are the ones
+    // that will REFUSE an activation, so they are called out rather than left
+    // for the refusal to introduce.
+    foreign.length
+      ? lines(
+          categoryHeading(
+            'foreign panes',
+            foreign,
+            foreignTotal,
+            'live agents this daemon did not start'
+          ),
+          ...foreign.map((p: any) =>
+            lines(
+              `${INDENT}${p.paneName} [${p.herdrStatus}]  runtime ${p.agentRuntime}` +
+                (p.paneId ? `  pane_id ${p.paneId}` : ''),
+              p.workDir ? `${INDENT}${INDENT}cwd ${p.workDir}` : null,
+              p.occupies
+                ? `${INDENT}${INDENT}OCCUPIES ${p.occupies} — activating that agent will be refused ` +
+                  `until this pane is gone`
+                : null
+            )
           )
         )
       : null,
@@ -600,9 +717,8 @@ function renderList(reader: ResponseReader): string {
       ...(missing.length
         ? missing.map((m: any) =>
             lines(
-              `${INDENT}${address(m.type, m.key)} — since ${m.since}`,
-              `${INDENT}${INDENT}${m.reason}`,
-              m.workDir ? `${INDENT}${INDENT}workdir ${m.workDir}` : null
+              `${INDENT}${m.path} — since ${m.since}` + (m.label ? ` (${m.label})` : ''),
+              `${INDENT}${INDENT}${m.reason}`
             )
           )
         : [`${INDENT}(none)`])
@@ -618,10 +734,10 @@ function renderList(reader: ResponseReader): string {
       ...(preempted.length
         ? preempted.map((p: any) =>
             lines(
-              `${INDENT}${address(p.type, p.key)} — at ${p.at}, priority ${p.priority}, ` +
-                `for ${address(p.by?.type, p.by?.key)} (priority ${p.by?.priority})`,
+              `${INDENT}${p.path} — at ${p.at}, priority ${p.priority}, ` +
+                `for ${p.by?.path} (priority ${p.by?.priority})`,
               `${INDENT}${INDENT}${p.reason}`,
-              p.derivation ? verbatim(`the capacity figures that took it (${address(p.type, p.key)}):`, p.derivation) : null
+              p.derivation ? verbatim(`the capacity figures that took it (${p.path}):`, p.derivation) : null
             )
           )
         : [`${INDENT}(none)`])
@@ -637,8 +753,8 @@ function renderList(reader: ResponseReader): string {
       ...(standby.length
         ? standby.map((s: any) =>
             lines(
-              `${INDENT}${address(s.type, s.key)} — since ${s.since}` +
-                (s.defaultAgent ? `, launcher ${s.defaultAgent}` : '') +
+              `${INDENT}${s.path} — since ${s.since}` +
+                (s.launcher ? `, launcher ${s.launcher}` : '') +
                 (s.wasPreempted ? ' [its work was taken, not switched off]' : ''),
               `${INDENT}${INDENT}${s.reason}`
             )
@@ -670,7 +786,10 @@ function renderStatus(reader: ResponseReader, request: Record<string, unknown>):
   const sessionless = reader.take('sessionless');
   return lines(
     `${what} — ${reader.take('herdrStatus')}`,
-    field('agent name', reader.take('agentName')),
+    field('pane name', reader.take('paneName')),
+    field('pane id', reader.take('paneId')),
+    field('label', reader.take('label')),
+    field('configured', reader.take('configured')),
     // The sessionless shape is not a degraded answer, and must not read as
     // one: the agent is alive in herdr and this daemon simply does not hold
     // its session — which is every agent that outlived a daemon restart, and
@@ -681,15 +800,14 @@ function renderStatus(reader: ResponseReader, request: Record<string, unknown>):
       : null,
     field('session', reader.take('sessionId')),
     field('status', reader.take('status')),
-    field('url', reader.take('url')),
     field('created', reader.take('createdAt')),
-    field('workdir', reader.take('workDir')),
+    field('pane cwd', reader.take('workDir')),
     residue(reader)
   );
 }
 
 function renderTail(reader: ResponseReader, request: Record<string, unknown>): string {
-  const key = reader.take('key') ?? request.key;
+  const key = addressed(reader, request);
   if (!reader.success) return lines(failure(reader, `tail ${key}`), residue(reader));
   const text = reader.take<string>('text');
   const truncated = reader.take('truncated');
@@ -707,7 +825,7 @@ function renderTail(reader: ResponseReader, request: Record<string, unknown>): s
 }
 
 function renderSend(reader: ResponseReader, request: Record<string, unknown>): string {
-  const key = reader.take('key') ?? request.key;
+  const key = addressed(reader, request);
   if (!reader.success) return lines(failure(reader, `send to ${key}`), residue(reader));
   return lines(
     `sent to ${key} — the message was typed into its terminal and Enter pressed`,
@@ -743,59 +861,114 @@ function renderCapacity(reader: ResponseReader): string {
  * costs this renderer nothing — ResponseReader already treats `action` as
  * framing — but is why the client correlates by `id` alone.
  *
- * `workspaceTypes` is the config's type table verbatim, and it is here rather
- * than summarized because it is the answer to the question people actually
- * arrive with: not "is a daemon up" but "is the daemon up with the config I
- * just edited". A count would answer neither.
+ * It used to print the config's workspace-type table, because that answered
+ * the question people actually arrive with: not "is a daemon up" but "is the
+ * daemon up with the config I just edited". There are no types any more — an
+ * agent is a directory plus the knobs `configure` froze onto it — so the same
+ * question is now about the durable registry, which is the only place an
+ * agent's configuration exists. `crabcast list` is what shows the agents
+ * themselves; this shows where they are kept.
  */
 function renderDaemonStatus(reader: ResponseReader): string {
   if (!reader.success) return lines(failure(reader, 'daemon status'), residue(reader));
-  const types = reader.take<any[]>('workspaceTypes') ?? [];
   return lines(
     'daemon: running',
     field('pid', reader.take('pid')),
     field('started', reader.take('startedAt')),
     field('config', reader.take('configPath')),
     field('data dir', reader.take('dataDir')),
-    `\nworkspace types (${types.length}):`,
-    ...(types.length
-      ? types.map(
-          (t) =>
-            `${INDENT}${String(t?.name)}` +
-            `  priority ${String(t?.priority)}` +
-            `, launcher ${String(t?.defaultLauncher)}` +
-            `, prompt ${String(t?.promptFile)}` +
-            (t?.gateExempt ? ', gate-exempt' : '') +
-            (Array.isArray(t?.mcpServers) && t.mcpServers.length
-              ? `, mcp: ${t.mcpServers.join(' ')}`
-              : '')
-        )
-      : // A daemon with no types is loadable and useless — it can activate
-        // nothing. Said out loud, because an empty list and a renderer that
-        // printed nothing look the same and only one of them is an answer.
-        [`${INDENT}(none — this daemon can activate nothing; its config declares no types)`]),
+    field('registry', reader.take('registryPath')),
+    field('agents', `${reader.take('configuredAgents')} configured, ` +
+      `${reader.take('expectedAgents')} expected to be running`),
     residue(reader)
   );
 }
 
 // ------------------------------------------------------------------ the table
 
-const TYPE_ARG: PositionalSpec = {
-  name: 'type',
+/**
+ * The one operand every agent-addressing command takes.
+ *
+ * It replaced `<type> <key>` and a `--type` disambiguator, and the thing worth
+ * saying about it is what it removes rather than what it adds: there is no
+ * ambiguity left to disambiguate. Two agents could share a key and be told
+ * apart only by a type flag a caller had to remember; two agents cannot share
+ * a directory.
+ */
+const PATH_ARG: PositionalSpec = {
+  name: 'path',
   required: true,
-  help: 'workspace type, as declared in the daemon config (e.g. shell)'
+  help: 'the directory the agent runs in — its whole address. Must already exist.'
 };
-const KEY_ARG: PositionalSpec = {
-  name: 'key',
-  required: true,
-  help: 'workspace key naming which workspace of that type (e.g. demo)'
-};
-const TYPE_FLAG: FlagSpec = {
-  name: 'type',
-  kind: 'string',
-  value: '<type>',
-  help: 'address the agent exactly; without it the key is resolved against herdr'
-};
+
+/**
+ * `configure`'s knobs.
+ *
+ * Nothing here is validated by the CLI beyond its own type. `priority` and
+ * `launcher` are required by the daemon, not by this table, and that is on
+ * purpose: a required-flag check here would be a second copy of a rule the
+ * daemon already owns, and the copy is the one that is wrong after the daemon
+ * changes. Omitting them produces the daemon's refusal, which names them and
+ * says why — a better answer than anything this file could print.
+ */
+const CONFIGURE_FLAGS: FlagSpec[] = [
+  { name: 'priority', kind: 'number', value: '<n>', help: 'what this agent outranks when the machine is full (required)' },
+  { name: 'launcher', kind: 'string', value: '<name>', help: 'the runtime to run in the pane, e.g. claude (required)' },
+  { name: 'prompt', kind: 'string', value: '<text>', help: "the agent's bootstrap prompt, as literal text" },
+  { name: 'prompt-file', kind: 'string', value: '<file>', help: 'read the prompt from this file; its BYTES cross the wire, not the path' },
+  { name: 'mcp', kind: 'string', value: '<a,b>', help: 'comma-separated MCP servers to offer this agent' },
+  { name: 'label', kind: 'string', value: '<text>', help: 'display text; never parsed, never an address, duplicates fine' },
+  { name: 'refusable', kind: 'boolean', help: 'may the capacity gate refuse it (default true; --refusable=false to exempt)' },
+  { name: 'chargeable', kind: 'boolean', help: 'does it occupy a charged slot (default true)' },
+  { name: 'preemptable', kind: 'boolean', help: 'may it be stood down to make room (default true)' },
+  { name: 'gate-exempt', kind: 'boolean', help: 'shorthand for all three of the above false; refused alongside any of them' }
+];
+
+/** `--mcp a,b,c` → `['a','b','c']`; absent stays absent. */
+function mcpList(value: unknown): string[] | undefined {
+  if (typeof value !== 'string') return undefined;
+  const servers = value.split(',').map((s) => s.trim()).filter(Boolean);
+  return servers.length ? servers : [];
+}
+
+/**
+ * The prompt text this invocation is sending.
+ *
+ * `--prompt-file` reads the file HERE and puts its bytes on the wire; the
+ * daemon never learns a path existed. That is the whole shape of the
+ * hand-off: CrabCast takes finished text and does not interpolate, resolve or
+ * inspect it, so a path crossing the socket would be a template system
+ * smuggled back in — the daemon would have to open the file, and then it would
+ * have to decide whose filesystem the path meant.
+ *
+ * Reading it in the client also puts the failure where it belongs: a file that
+ * is not there is this shell's problem, reported by this process, before
+ * anything is asked of the daemon.
+ *
+ * Both flags at once is a usage error rather than a precedence rule. Which one
+ * won would be a silent choice about the instructions an agent is about to
+ * act on.
+ */
+function promptText(flags: Record<string, string | number | boolean>): string | undefined {
+  const literal = flags.prompt;
+  const file = flags['prompt-file'];
+  if (literal !== undefined && file !== undefined) {
+    throw new UsageError(
+      '--prompt and --prompt-file both name the agent\'s bootstrap prompt. Pass one: ' +
+        'which of them won would be a silent choice about the instructions the agent acts on.'
+    );
+  }
+  if (typeof literal === 'string') return literal;
+  if (typeof file !== 'string') return undefined;
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch (err: any) {
+    throw new UsageError(
+      `--prompt-file ${JSON.stringify(file)} could not be read: ${err?.message ?? String(err)}. ` +
+        `The file is read here and its bytes are what cross the wire, so nothing was sent.`
+    );
+  }
+}
 
 /**
  * Command → action → argument spec → one-line help.
@@ -827,68 +1000,93 @@ const TYPE_FLAG: FlagSpec = {
  */
 export const COMMANDS: CommandSpec[] = [
   {
+    name: 'configure',
+    action: 'configure_agent',
+    responseAction: 'configure_response',
+    summary: 'make an agent exist: freeze a directory plus its knobs into the durable registry',
+    positionals: [PATH_ARG],
+    flags: CONFIGURE_FLAGS,
+    spawnsDaemon: true,
+    build: ({ positionals, flags }) => ({
+      path: positionals[0],
+      priority: flags.priority,
+      launcher: flags.launcher,
+      prompt: promptText(flags),
+      mcpServers: mcpList(flags.mcp),
+      label: flags.label,
+      // Booleans or absent, never the strings the shell handed us: the daemon
+      // refuses a non-boolean here rather than reading it for truthiness.
+      refusable: flags.refusable,
+      chargeable: flags.chargeable,
+      preemptable: flags.preemptable,
+      gateExempt: flags['gate-exempt']
+    }),
+    render: renderConfigure
+  },
+  {
     name: 'activate',
-    action: 'activate_by_key',
+    action: 'activate_agent',
     responseAction: 'activate_response',
-    summary: 'start an agent for a workspace type and key (or re-attach to one already running)',
-    positionals: [TYPE_ARG, KEY_ARG],
+    summary: 'start a configured agent (or report that it is already running)',
+    positionals: [PATH_ARG],
+    // No inline options, deliberately: everything an agent IS comes from its
+    // record, so there is nothing here a caller could pass that might disagree
+    // with what the agent already is. These two are not attributes of the
+    // agent — they are decisions about the machine.
     flags: [
-      { name: 'url', kind: 'string', value: '<url>', help: 'opaque page URL to bind and interpolate into the prompt' },
-      { name: 'agent', kind: 'string', value: '<launcher>', help: "agent runtime to launch (e.g. claude); default comes from the type" },
       { name: 'override', kind: 'boolean', help: 'start it even at capacity — recorded with the figures it bypassed' },
       { name: 'preempt', kind: 'boolean', help: 'make room by standing down an agent this one STRICTLY outranks; destructive' }
     ],
     spawnsDaemon: true,
     build: ({ positionals, flags }) => ({
-      type: positionals[0],
-      key: positionals[1],
-      url: flags.url,
-      defaultAgent: flags.agent,
-      // Booleans or absent, never the strings the shell handed us: the router
-      // refuses a non-boolean here before it looks anything up.
+      path: positionals[0],
       override: flags.override,
       preempt: flags.preempt
     }),
     render: renderActivate
   },
   {
-    // `deactivate_by_key`, not the bare `deactivate` the router also
+    // `deactivate_agent`, not the bare `deactivate` the router also
     // dispatches (router.ts). Both spellings exist and they are different
     // handlers: the bare one requires a `sessionId` and resolves through the
     // session map alone, so it cannot address any agent that outlived a
     // daemon restart — `sessionId` is null on every `sessionless: true` row,
     // which is exactly the agent a human most needs to stand down.
-    // `deactivate_by_key` is a strict superset and is what `src/mcp.ts` uses,
+    // `deactivate_agent` is a strict superset and is what `src/mcp.ts` uses,
     // so the by-session form gets no CLI command. That is a deliberate
-    // omission rather than an oversight; KAN-94 owns the mechanism that
-    // records such exclusions formally, and this note is here so the gap is
-    // not a silent one in the meantime.
+    // omission rather than an oversight, recorded formally in
+    // `scripts/verify-cli-parity.mjs`.
     name: 'deactivate',
-    action: 'deactivate_by_key',
+    action: 'deactivate_agent',
     responseAction: 'deactivate_response',
-    summary: 'stand an agent down, and record that it should not come back',
-    positionals: [KEY_ARG],
-    flags: [TYPE_FLAG],
+    summary: 'stop an agent and record that it should not come back; the record survives',
+    positionals: [PATH_ARG],
+    flags: [],
     spawnsDaemon: true,
-    build: ({ positionals, flags }) => ({ key: positionals[0], type: flags.type }),
+    build: ({ positionals }) => ({ path: positionals[0] }),
     render: renderDeactivate
   },
   {
-    name: 'reset',
-    action: 'reset_by_key',
-    responseAction: 'reset_response',
-    summary: 'stand an agent down AND delete its workspace directory',
-    positionals: [TYPE_ARG, KEY_ARG],
+    // Where `reset` used to be. `reset` was a stand-down plus a directory
+    // delete; CrabCast no longer creates the directory an agent runs in, so
+    // the set of directories it may delete is empty by construction and what
+    // was left was `deactivate` with extra words. `forget` is the other half
+    // it never had: removing the RECORD.
+    name: 'forget',
+    action: 'forget_agent',
+    responseAction: 'forget_response',
+    summary: 'make an agent stop existing: remove its record. Refuses while it is running.',
+    positionals: [PATH_ARG],
     flags: [],
     spawnsDaemon: true,
-    build: ({ positionals }) => ({ type: positionals[0], key: positionals[1] }),
-    render: renderReset
+    build: ({ positionals }) => ({ path: positionals[0] }),
+    render: renderForget
   },
   {
     name: 'list',
     action: 'list_agents',
     responseAction: 'list_agents_response',
-    summary: 'the whole fleet: running, missing, preempted, on standby, plus capacity',
+    summary: 'the whole fleet: running, missing, preempted, on standby, foreign panes, plus capacity',
     positionals: [],
     flags: [],
     spawnsDaemon: false,
@@ -900,10 +1098,10 @@ export const COMMANDS: CommandSpec[] = [
     action: 'agent_status',
     responseAction: 'agent_status_response',
     summary: 'everything known about one agent',
-    positionals: [KEY_ARG],
-    flags: [TYPE_FLAG],
+    positionals: [PATH_ARG],
+    flags: [],
     spawnsDaemon: false,
-    build: ({ positionals, flags }) => ({ key: positionals[0], type: flags.type }),
+    build: ({ positionals }) => ({ path: positionals[0] }),
     render: renderStatus
   },
   {
@@ -911,15 +1109,13 @@ export const COMMANDS: CommandSpec[] = [
     action: 'tail_agent',
     responseAction: 'tail_agent_response',
     summary: "read an agent's recent terminal output without attaching to it",
-    positionals: [KEY_ARG],
+    positionals: [PATH_ARG],
     flags: [
-      TYPE_FLAG,
       { name: 'lines', kind: 'number', value: '<n>', help: 'trailing lines to return (daemon default 40, max 200)' }
     ],
     spawnsDaemon: false,
     build: ({ positionals, flags }) => ({
-      key: positionals[0],
-      type: flags.type,
+      path: positionals[0],
       lines: flags.lines
     }),
     render: renderTail
@@ -930,7 +1126,7 @@ export const COMMANDS: CommandSpec[] = [
     responseAction: 'send_to_agent_response',
     summary: "type a message into a running agent's terminal, as a human would",
     positionals: [
-      KEY_ARG,
+      PATH_ARG,
       {
         name: 'message',
         required: true,
@@ -938,12 +1134,11 @@ export const COMMANDS: CommandSpec[] = [
         help: 'the message; remaining arguments are joined with single spaces'
       }
     ],
-    flags: [TYPE_FLAG],
+    flags: [],
     spawnsDaemon: true,
-    build: ({ positionals, flags }) => ({
-      key: positionals[0],
-      message: positionals[1],
-      type: flags.type
+    build: ({ positionals }) => ({
+      path: positionals[0],
+      message: positionals[1]
     }),
     render: renderSend
   },
@@ -977,7 +1172,7 @@ export const COMMANDS: CommandSpec[] = [
     // did not record what it answers with" are different facts, and the
     // parity check reads this one.
     responseAction: null,
-    summary: 'the daemon itself: pid, uptime, the config it loaded, the types it knows',
+    summary: 'the daemon itself: pid, uptime, the config it loaded, where the registry lives',
     positionals: [],
     flags: [],
     // Never. This is the command whose entire question is "is a daemon
@@ -1549,7 +1744,16 @@ export async function main(argv: string[]): Promise<ExitCode> {
   const spawnIfMissing = spec.spawnsDaemon && target.maySpawn;
   const timeout = typeof flags.timeout === 'number' ? flags.timeout : DEFAULT_TIMEOUT_MS;
 
-  const payload = spec.build({ positionals: operands, flags });
+  // `build` can refuse: --prompt-file reads the file in this process, so a
+  // missing file is a usage error here rather than a request the daemon has to
+  // fail. Same channel as every other bad argument.
+  let payload: Record<string, unknown>;
+  try {
+    payload = spec.build({ positionals: operands, flags });
+  } catch (err: any) {
+    process.stderr.write(`crabcast: ${err.message}\n`);
+    return EXIT.USAGE;
+  }
 
   let client: DaemonClient | null = null;
   let response: any;

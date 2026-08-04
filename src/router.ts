@@ -1,18 +1,20 @@
 import * as fs from 'fs';
+import * as path from 'path';
 import { CrabcastConfig } from './config.js';
-import { WorkspaceRegistry } from './registry.js';
-import { PromptLoader } from './prompt.js';
-import { DaemonResponse, WorkspaceTypeConfig } from './types.js';
+import { MAX_LINE_CHARS } from './ipc.js';
+import { AgentConfig, DaemonResponse } from './types.js';
 import {
   HerdrBridge,
+  HerdrCensus,
   HerdrSession,
   HerdrAgentRecord,
   HerdrAgentStatus,
-  RUNTIME_CONFIRM_TIMEOUT_MS,
-  addressFromAgentName,
-  agentNameFor,
-  typeFromAgentName
+  Occupancy,
+  PaneOccupant,
+  RUNTIME_CONFIRM_TIMEOUT_MS
 } from './herdr.js';
+import { PathError, canonicalPath, canonicalizeOrNull, paneNameFor } from './identity.js';
+import { knownLaunchers, resolveLauncher } from './launchers.js';
 import { readFdUsage, isFdPressureHigh, PTMX_FDS_PER_PANE } from './herdr-health.js';
 import { ResumeCause } from './resume.js';
 import {
@@ -39,23 +41,6 @@ import { nudgeResumedAgent } from './nudge.js';
 type Respond = (msg: any) => void;
 
 /**
- * What a client is told about a session. Sessions are never sent over the wire
- * directly: they carry a ~100KB ptyBuffer and a live ptyProcess handle, and
- * fleet clients poll list_agents continuously.
- */
-interface AgentDto {
-  sessionId: string;
-  type: string;
-  key: string;
-  /** Absent when the session was activated by key without a known page URL. */
-  url?: string;
-  createdAt: string;
-  status: HerdrSession['status'];
-  workDir: string;
-  herdrStatus: HerdrAgentStatus;
-}
-
-/**
  * One row of `list_agents`. Two kinds of entry share this shape, and the
  * difference between them is the point of the field that names it:
  *
@@ -66,46 +51,85 @@ interface AgentDto {
  *   session-only fields are null because there is no session, not because the
  *   agent is impaired.
  *
- * Nulls are explicit rather than omitted, for the reason HerdrAgentDescription
- * gives: over JSON an absent field reads as "not answered", and these are
- * answered — with nothing.
+ * Nulls are explicit rather than omitted: over JSON an absent field reads as
+ * "not answered", and these are answered — with nothing.
  */
 interface ListedAgent {
   sessionless: boolean;
-  agentName: string;
+  /** The canonical directory this agent is. The address; nothing else is. */
+  path: string;
+  /** The opaque herdr token for that path. Nothing parses it back out. */
+  paneName: string;
+  paneId: string | null;
   sessionId: string | null;
-  type: string | null;
-  key: string;
-  url: string | null;
   createdAt: string | null;
   status: HerdrSession['status'] | null;
-  workDir: string | null;
   herdrStatus: HerdrAgentStatus;
   /** herdr's own `agent` field: the CLI running in the pane, null for a shell. */
   agentRuntime: string | null;
+  /** Display only. Never parsed, never an address. */
+  label: string | null;
   /**
-   * The type's `gateExempt` flag from config — the generalized form of the
-   * extraction source's hardcoded supervisor set. Sent so a client does not
-   * have to know which workspace types are never refused by the capacity
-   * gate; a client deciding that from its own list of types would be a second
-   * copy of a rule that already lives in the config, and the copy is the one
-   * that gets forgotten when the config changes.
+   * The gate triple from this agent's record, replacing the single
+   * `gateExempt` boolean this row used to carry.
+   *
+   * Three decisions were wearing one flag, and they are genuinely different
+   * questions: whether the capacity gate may refuse this agent, whether it
+   * occupies a charged slot, and whether anything may stand it down to make
+   * room. `gateExempt: true` meant all three at once, which is only ever right
+   * by coincidence — a low-priority always-on watchdog wants to be uncharged
+   * and unpreemptable but has no business being un-refusable.
+   *
+   * Sent because a client cannot derive them: they live on the agent's own
+   * record, and a client re-deriving them from anything else would be a second
+   * copy of a rule — the copy that is wrong after somebody reconfigures.
    */
-  gateExempt: boolean;
+  refusable: boolean;
+  chargeable: boolean;
+  preemptable: boolean;
 }
 
 /**
- * A `crabcast-*` pane that is not an agent by any test we can apply: herdr
- * reports no agent running in it and this daemon holds no session for it.
- * Reported separately rather than dropped — see handleListAgents.
+ * A pane sitting in one of our directories with nothing running in it.
+ *
+ * Reported separately rather than dropped: it is not an agent (nothing to
+ * message, tail or supervise) and counting it would give a supervisor a number
+ * it cannot act on, but silently dropping it would repeat the mistake the
+ * census exists to fix.
  */
 interface UnbackedPane {
-  agentName: string;
-  type: string;
-  key: string;
-  workDir: string | null;
+  paneName: string;
+  paneId: string | null;
+  path: string;
   herdrStatus: HerdrAgentStatus;
   reason: string;
+}
+
+/**
+ * A live pane that is not ours.
+ *
+ * NEW, AND THE DIRECT CONSEQUENCE OF DELETING THE CENSUS PREFIX FILTER. This
+ * daemon used to decide what was "one of ours" by testing whether a pane name
+ * started with `crabcast-` and parsed back into a type and key — a convention
+ * masquerading as a filter. What is ours is now a question the durable
+ * registry answers: a pane whose canonical `cwd` is a path we have a record
+ * for AND whose name is the one that path derives. Everything else is
+ * somebody's pane, and herdr hosts more than CrabCast.
+ *
+ * They are reported rather than dropped because one of them is the reason
+ * `activate` refuses: `occupies` is non-null exactly when a stranger's agent
+ * is sitting in a directory we have been configured for, which is the state
+ * that would otherwise put two agents in one directory.
+ */
+interface ForeignPane {
+  paneName: string;
+  paneId: string | null;
+  /** herdr's `cwd`, as herdr reported it. */
+  workDir: string | null;
+  /** Set when that cwd is a directory we hold a record for. */
+  occupies: string | null;
+  herdrStatus: HerdrAgentStatus;
+  agentRuntime: string | null;
 }
 
 /**
@@ -139,8 +163,6 @@ function capacityDto(c: Capacity) {
     agentCores: c.cost.cores,
     // Where the two cost figures came from (KAN-56): 'override', 'measured'
     // or 'seed', plus the sample's metadata when a measurement was consulted.
-    // A caller deciding whether to trust the cap can see whether anyone
-    // measured it.
     agentMemorySource: c.costSource.residentBytes,
     agentCoresSource: c.costSource.cores,
     measuredAt: c.measured ? new Date(c.measured.sampledAt).toISOString() : null,
@@ -153,19 +175,6 @@ function capacityDto(c: Capacity) {
     headroomByMemory: c.headroomByMemory,
     summary: summarizeCapacity(c)
   };
-}
-
-/**
- * The addressing convention shared by every agent-targeted action: a key is
- * required, a type is optional but must be meaningful when present. Returns
- * the complaint, or null when the address is usable.
- */
-function invalidAddress(key: unknown, type: unknown): string | null {
-  if (typeof key !== 'string' || !key.trim()) return 'Missing or invalid key';
-  if (type !== undefined && (typeof type !== 'string' || !type.trim())) {
-    return 'Invalid type: expected a non-empty string';
-  }
-  return null;
 }
 
 /**
@@ -190,20 +199,6 @@ function invalidFlag(name: string, value: unknown): string | null {
 }
 
 /**
- * Whether two activations were given the same MCP server list.
- *
- * Order-sensitive on purpose: this decides whether to append a restatement to
- * a 500-record log, and the cost of being wrong in the cheap direction is one
- * line. Being wrong in the expensive direction is a restored agent holding a
- * tool set nobody configured.
- */
-function sameServerList(a?: string[], b?: string[]): boolean {
-  const left = a ?? [];
-  const right = b ?? [];
-  return left.length === right.length && left.every((name, i) => name === right[i]);
-}
-
-/**
  * An agent the registry says should be running that herdr does not have.
  *
  * This is the whole of the detectability half of the extraction source's
@@ -215,11 +210,9 @@ function sameServerList(a?: string[], b?: string[]): boolean {
  * rather than written to a log.
  */
 interface MissingAgent {
-  agentName: string;
-  type: string;
-  key: string;
-  workDir: string;
-  url: string | null;
+  path: string;
+  paneName: string;
+  label: string | null;
   /** When the registry last recorded this agent as activated. */
   since: string;
   reason: string;
@@ -237,23 +230,18 @@ interface MissingAgent {
  *   - preempted (see below)   — stood down so something else could run. A debt.
  *   - StandbyAgent            — stood down because a person said so.
  *
- * The three are disjoint on purpose, so no agent grows two switches. This one
- * is what makes Off reversible from the client that offers it: without it,
- * turning an agent off would drop it off every list the client renders and
- * there would be no way back except reconstructing the activation by hand.
+ * The three are disjoint on purpose, so no agent grows two switches.
  *
- * Only agents whose workspace still exists are offered. A `reset` also records
- * a stand-down, and the directory it deleted is the evidence that "turn this
- * back on" is not what anyone means by it.
+ * Only agents whose directory still exists are offered: a directory the caller
+ * has since deleted is the evidence that "turn this back on" is not what
+ * anyone means by it.
  */
 interface StandbyAgent {
-  agentName: string;
-  type: string;
-  key: string;
-  workDir: string;
-  url: string | null;
+  path: string;
+  paneName: string;
+  label: string | null;
   /** Which launcher it last ran, so it comes back as what it was. */
-  defaultAgent: string | null;
+  launcher: string;
   /** When the registry recorded the stand-down. */
   since: string;
   /**
@@ -267,18 +255,10 @@ interface StandbyAgent {
 }
 
 /**
- * How many agents each of `list_agents`' registry-derived categories will
- * carry. The registry compacts at 500 records, so these are bounded already —
- * the cap is about clients that poll continuously, not about the log. Anything
- * beyond it is *counted* rather than dropped silently: see `standbyTotal`,
- * `missingTotal`, `preemptedTotal`.
- *
- * One number for all three. Standby was capped and the other two were not,
- * which is the wrong way round if either is: a fleet that has lost forty agents
- * is exactly the fleet whose `list_agents` response a client can least afford
- * to have grow without limit, and it is also the one where the first
- * twenty-five names plus "and 15 more" says everything the reader needs to act.
- * A cap that only applies to the harmless category protects nothing.
+ * How many agents each of `list_agents`' categories will carry. The registry
+ * compacts at 500 records, so these are bounded already — the cap is about
+ * clients that poll continuously, not about the log. Anything beyond it is
+ * *counted* rather than dropped silently.
  */
 const FLEET_CATEGORY_LIMIT = 25;
 
@@ -287,7 +267,7 @@ const FLEET_CATEGORY_LIMIT = 25;
  *
  * The order matters as much as the cap: clipping an unordered list hides an
  * arbitrary subset, while clipping a newest-first one hides the oldest — which
- * for all three of these categories is the least urgent thing in it.
+ * for all of these categories is the least urgent thing in it.
  */
 function clipFleetCategory<T>(
   rows: T[],
@@ -308,9 +288,8 @@ function clipFleetCategory<T>(
  * presence in the payload is what the consent criterion is satisfied by.
  */
 interface PreemptionOfferDto {
-  agentName: string;
-  type: string | null;
-  key: string;
+  path: string;
+  paneName: string;
   priority: number;
   herdrStatus: HerdrAgentStatus;
   /** The priority of the activation being refused, for the comparison. */
@@ -337,13 +316,12 @@ interface CapacityGateResult {
 
 /** Everything the capacity gate needs to know about the activation it is judging. */
 interface GateRequest {
-  /** `shell/demo-1`, for refusal prose. */
-  what: string;
-  type: string;
-  key: string;
-  agentName: string;
+  path: string;
+  paneName: string;
   /** What this activation outranks. See priority.ts. */
   priority: number;
+  /** Whether the gate is permitted to refuse this activation at all. */
+  refusable: boolean;
   /**
    * Start it past the cap without freeing anything. Booleans only — the
    * handler validates before it gets here (see invalidFlag), so the gate is
@@ -355,22 +333,217 @@ interface GateRequest {
 }
 
 export interface RouterDeps {
-  registry: WorkspaceRegistry;
   config: CrabcastConfig;
-  promptLoader: PromptLoader;
   herdrBridge: HerdrBridge;
   daemonStartedAt: Date;
   /**
-   * The durable record of which agents should exist — the one piece of state
-   * that outlives the daemon, herdr, and the machine. Everything the router
-   * remembers or reports about agents that are *not* running (missing,
-   * preempted, standby) is derived from it, and never from the session map.
+   * The durable record of which agents exist and which should be running — the
+   * one piece of state that outlives the daemon, herdr, and the machine.
+   *
+   * It is now the ONLY place an agent's priority, launcher, prompt and gate
+   * flags exist: with workspace types deleted there is nothing left to look
+   * them up in. That is what makes `configure` mandatory.
    */
   agentRegistry: AgentRegistry;
   /** Replies to the requesting client. */
   send: (msg: DaemonResponse) => void;
   /** Events for every connected client (activations, teardowns, PTY deaths). */
   broadcast: (msg: DaemonResponse) => void;
+}
+
+/**
+ * The longest bootstrap prompt `configure` accepts.
+ *
+ * A prompt is finished text now, so it travels INLINE over the socket, and
+ * that puts it under the framing bound: `onJsonLines` gives up on a line past
+ * {@link MAX_LINE_CHARS} and DESTROYS the connection (ipc.ts). That is the
+ * right behaviour for its own job — at that point there is no message to
+ * answer, only a peer streaming bytes at a daemon whose memory is the thing
+ * being defended — but it is the wrong thing for a caller to meet, because it
+ * names the framing bound rather than the prompt and hangs up either way.
+ *
+ * So `configure` refuses first, on a bound strictly below the framing one, and
+ * answers with the limit and the actual size on a connection that survives.
+ *
+ * THE NUMBER IS DERIVED, not chosen. JSON escaping can expand a string by a
+ * factor of six in the worst case — a control byte becomes `\u00XX` — so a
+ * prompt this daemon accepts must satisfy `6 × MAX_PROMPT_CHARS` plus the rest
+ * of the request comfortably under `MAX_LINE_CHARS`. At 128 KiB that is
+ * 786,432 characters of escaped prompt against a 1,048,576 bound, leaving room
+ * for the path, the flags and the id several times over. The consequence is
+ * the property worth having: **every prompt `configure` accepts is guaranteed
+ * to fit on the wire.** There is no size that passes validation here and then
+ * dies in the framing, which would be the same silent-truncation failure this
+ * bound exists to prevent, one layer down.
+ */
+export const MAX_PROMPT_CHARS = 128 * 1024;
+
+/** A parsed `configure` payload, or the complaint that stopped it. */
+type ConfigParse =
+  | { ok: true; config: AgentConfig }
+  | { ok: false; error: string; missing: string[] };
+
+/**
+ * `configure`'s argument list, validated.
+ *
+ * REFUSES RATHER THAN DEFAULTS, on exactly the fields the deleted config
+ * loader refused on. A silently-defaulted `priority` sits at the floor, is
+ * preemptable by everything, and nobody finds out until the work is destroyed
+ * — that was true when priority came from a workspace type and it is true now
+ * that it comes from here. `launcher` is required for the reason KAN-53
+ * records: an omitted launcher used to fall back to `shell`, which staffed
+ * work with a bare bash prompt that answered `success: true` and executed
+ * messages as shell commands.
+ *
+ * The three gate flags DEFAULT to `true` rather than being required, and that
+ * asymmetry is deliberate: `true` is the safe reading of each (refusable
+ * means the cap applies to you, chargeable means you cost a slot, preemptable
+ * means you can be asked to give it up), so a caller who says nothing gets an
+ * agent that is fully subject to the machine's limits. Only the exemptions
+ * have to be asked for.
+ */
+function parseAgentConfig(data: any): ConfigParse {
+  const missing: string[] = [];
+  const refuse = (error: string): ConfigParse => ({ ok: false, error, missing });
+
+  if (!('priority' in data) || data.priority === undefined) missing.push('priority');
+  if (!('launcher' in data) || data.launcher === undefined) missing.push('launcher');
+  if (missing.length) {
+    return refuse(
+      `configure needs ${missing.join(' and ')}. There is no workspace type to inherit ` +
+        `from — an agent is a directory plus the knobs you freeze onto it, so every ` +
+        `required knob arrives here or nowhere. ` +
+        `priority: what this agent outranks when the machine is full (a defaulted one ` +
+        `would sit at the floor and be preemptable by everything). ` +
+        `launcher: one of ${knownLaunchers().join(', ')}.`
+    );
+  }
+
+  const priority = data.priority;
+  if (typeof priority !== 'number' || !Number.isFinite(priority)) {
+    return refuse(`Invalid priority: expected a finite number, got ${JSON.stringify(priority)}`);
+  }
+
+  const launcher = data.launcher;
+  if (typeof launcher !== 'string' || !launcher.trim()) {
+    return refuse(`Invalid launcher: expected a non-empty string, got ${JSON.stringify(launcher)}`);
+  }
+  try {
+    resolveLauncher(launcher.trim());
+  } catch (e: any) {
+    return refuse(e?.message ?? String(e));
+  }
+
+  // `gateExempt: true` is accepted as shorthand for all three flags false —
+  // it is what the old per-type flag meant, and callers carrying it forward
+  // should not have to translate. Supplying BOTH the shorthand and an explicit
+  // flag is refused rather than resolved: whichever won would be a silent
+  // choice about whether an agent can be refused, charged or preempted.
+  const explicit = (['refusable', 'chargeable', 'preemptable'] as const).filter(
+    (name) => data[name] !== undefined
+  );
+  let defaults = true;
+  if (data.gateExempt !== undefined) {
+    if (typeof data.gateExempt !== 'boolean') {
+      return refuse(
+        `Invalid gateExempt: expected true or false, got ${JSON.stringify(data.gateExempt)}`
+      );
+    }
+    if (explicit.length) {
+      return refuse(
+        `gateExempt is shorthand for refusable/chargeable/preemptable all false, and you ` +
+          `also passed ${explicit.join(', ')}. Which wins would be a silent decision about ` +
+          `whether this agent can be refused, charged or stood down — pass the three flags ` +
+          `you mean, or the shorthand, not both.`
+      );
+    }
+    defaults = !data.gateExempt;
+  }
+
+  const flags: Record<string, boolean> = {};
+  for (const name of ['refusable', 'chargeable', 'preemptable'] as const) {
+    const value = data[name];
+    if (value === undefined) {
+      flags[name] = defaults;
+      continue;
+    }
+    if (typeof value !== 'boolean') {
+      return refuse(`Invalid ${name}: expected true or false, got ${JSON.stringify(value)}`);
+    }
+    flags[name] = value;
+  }
+
+  // The cross-field rule, and it gets a better addressee than it used to.
+  // Standing down an uncharged agent frees no charged slot, so a preempt would
+  // admit a newcomer over the cap on a false premise. As workspace-type config
+  // this failed a daemon BOOT, where the person who wrote the mistake was long
+  // gone; as a `configure` parameter it is refused synchronously, to the caller
+  // who made it.
+  if (!flags.chargeable && flags.preemptable) {
+    return refuse(
+      `chargeable: false with preemptable: true is incoherent. An uncharged agent does not ` +
+        `occupy a slot, so standing it down frees nothing — the preempt path would admit a ` +
+        `newcomer over the cap on the false premise that room had been made. Either charge ` +
+        `it (chargeable: true) or take it out of preemption too (preemptable: false).`
+    );
+  }
+
+  let prompt: string | undefined;
+  if (data.prompt !== undefined) {
+    // Text, and NOT trimmed, NOT parsed, NOT resolved as a path. These are the
+    // bytes the agent will read; the only thing done to them is a length
+    // check. A prompt that happens to contain doubled-brace placeholder syntax,
+    // or to look like a filename, reaches the sidecar exactly as written.
+    if (typeof data.prompt !== 'string' || !data.prompt.length) {
+      return refuse(
+        `Invalid prompt: expected the agent's bootstrap text as a non-empty string, got ` +
+          `${JSON.stringify(data.prompt)}. It is finished text rather than a path or a ` +
+          `template — CrabCast writes it verbatim and never inspects it, so render it before ` +
+          `you send it.`
+      );
+    }
+    if (data.prompt.length > MAX_PROMPT_CHARS) {
+      return refuse(
+        `Prompt is too large: ${data.prompt.length} characters, and the limit is ` +
+          `${MAX_PROMPT_CHARS}. The prompt travels inline over the socket, whose framing ` +
+          `gives up on a line past ${MAX_LINE_CHARS} characters and closes the connection — ` +
+          `this limit sits below that with room for JSON escaping, so every prompt accepted ` +
+          `here is one that arrives. NOTHING WAS TRUNCATED and nothing was configured: an ` +
+          `agent silently given half its instructions is worse than one that was refused.`
+      );
+    }
+    prompt = data.prompt;
+  }
+
+  let mcpServers: string[] | undefined;
+  if (data.mcpServers !== undefined) {
+    if (!Array.isArray(data.mcpServers) || data.mcpServers.some((s: any) => typeof s !== 'string')) {
+      return refuse(`Invalid mcpServers: expected an array of strings`);
+    }
+    mcpServers = data.mcpServers as string[];
+  }
+
+  let label: string | undefined;
+  if (data.label !== undefined) {
+    if (typeof data.label !== 'string') {
+      return refuse(`Invalid label: expected a string, got ${JSON.stringify(data.label)}`);
+    }
+    label = data.label;
+  }
+
+  return {
+    ok: true,
+    config: {
+      priority,
+      refusable: flags.refusable,
+      chargeable: flags.chargeable,
+      preemptable: flags.preemptable,
+      launcher: launcher.trim(),
+      ...(prompt ? { prompt } : {}),
+      ...(mcpServers ? { mcpServers } : {}),
+      ...(label !== undefined ? { label } : {})
+    }
+  };
 }
 
 export class MessageRouter {
@@ -406,28 +579,38 @@ export class MessageRouter {
 
     switch (data.action) {
       case 'daemon_status': {
-        const { registry, config, daemonStartedAt } = this.deps;
+        const { config, daemonStartedAt, agentRegistry } = this.deps;
+        const intents = agentRegistry.intents();
         respond({
           success: true,
           pid: process.pid,
           startedAt: daemonStartedAt.toISOString(),
           configPath: config.configPath,
           dataDir: config.dataDir,
-          workspaceTypes: registry.all()
+          // What used to be `workspaceTypes` — the answer to "is the daemon up
+          // with the config I just edited". There is no type table any more, so
+          // the equivalent question is about the durable registry, which is now
+          // the only place an agent's configuration exists.
+          registryPath: agentRegistry.path,
+          configuredAgents: intents.size,
+          expectedAgents: Array.from(intents.values()).filter((i) => i.event === 'activated').length
         });
         return;
       }
-      case 'activate_by_key':
-        void guard(this.handleActivateByKey(data, respond), 'activate');
+      case 'configure_agent':
+        this.handleConfigure(data, respond);
+        return;
+      case 'activate_agent':
+        void guard(this.handleActivate(data, respond), 'activate');
         return;
       case 'deactivate':
-        this.handleDeactivate(data, respond);
+        this.handleDeactivateSession(data, respond);
         return;
-      case 'deactivate_by_key':
-        this.handleDeactivateByKey(data, respond);
+      case 'deactivate_agent':
+        this.handleDeactivateAgent(data, respond);
         return;
-      case 'reset_by_key':
-        this.handleResetByKey(data, respond);
+      case 'forget_agent':
+        this.handleForget(data, respond);
         return;
       case 'send_to_agent':
         this.handleSendToAgent(data, respond);
@@ -454,36 +637,317 @@ export class MessageRouter {
         this.handlePtyResize(data, ack);
         return;
       default:
+        // `reset_by_key` lands here, by name, and that is the point of removing
+        // the verb rather than redefining it: `reset` was a stand-down plus a
+        // deletion that is now refused unconditionally (CrabCast allocates no
+        // directories, so the set of directories it may delete is empty by
+        // construction). A redefined `reset` would let every caller keep
+        // calling it and quietly mean something else; an unknown action makes
+        // them notice.
         respond({
           success: false,
-          error: `Unknown action: ${typeof data?.action === 'string' ? data.action : JSON.stringify(data?.action)}`
+          error:
+            `Unknown action: ${typeof data?.action === 'string' ? data.action : JSON.stringify(data?.action)}` +
+            (typeof data?.action === 'string' && /reset/.test(data.action)
+              ? `. \`reset\` was removed: CrabCast no longer creates the directory an agent runs ` +
+                `in, so it may not delete one either. Use \`deactivate_agent\` to stop an agent ` +
+                `and \`forget_agent\` to remove its record.`
+              : '')
         });
     }
   }
+
+  // ------------------------------------------------------------- addressing
+
+  /**
+   * The canonical path a request is about, or the refusal.
+   *
+   * `strict` is the difference between "run something here" and "say something
+   * about a record". An activation needs a directory that exists — it is about
+   * to spawn a process into it. `deactivate` and `forget` must keep working
+   * after the caller has deleted the directory, because that is exactly when
+   * "stop expecting this" is asked for; they fall back to the lexical resolve
+   * so the record can still be addressed.
+   */
+  private addressOfRequest(input: unknown, strict: boolean): { path: string } | { error: string } {
+    try {
+      return { path: canonicalPath(input) };
+    } catch (e: any) {
+      if (strict || !(e instanceof PathError) || typeof input !== 'string' || !input.trim()) {
+        return { error: e?.message ?? String(e) };
+      }
+      // Lexical only. It is what the record would have been keyed by if the
+      // directory were still there, and looking it up is harmless — the record
+      // either exists under that string or it does not.
+      return { path: path.resolve(input.trim()) };
+    }
+  }
+
+  // -------------------------------------------------------------- configure
+
+  /**
+   * `configure(path, knobs)` — the verb that makes an agent exist.
+   *
+   * IT DOES NOT REFUSE AN OCCUPIED DIRECTORY, and that is load-bearing rather
+   * than lax. The adopting caller's day-one sequence is: configure the fleet,
+   * stand down their own panes, activate. A `configure` that inherited
+   * `activate`'s occupancy guard would fail every call on cutover day and make
+   * the required ordering undiscoverable. So it succeeds and hands back
+   * `occupiedBy` as advisory, hours before the occupant would otherwise bite.
+   * That is the difference between the guard being safe and being usable.
+   *
+   * IT MAY NOT `mkdir`. Every path now comes from the caller, so the
+   * filesystem is the only thing left that can tell a directory you meant from
+   * one you mistyped — see identity.ts.
+   */
+  private handleConfigure(data: any, respond: Respond): void {
+    const fail = (error: string, extra: Record<string, unknown> = {}) =>
+      respond({ action: 'configure_response', success: false, error, ...extra });
+
+    const address = this.addressOfRequest(data.path, true);
+    if ('error' in address) {
+      fail(address.error);
+      return;
+    }
+    const agentPath = address.path;
+
+    const parsed = parseAgentConfig(data);
+    if (!parsed.ok) {
+      fail(parsed.error, { path: agentPath, ...(parsed.missing.length ? { missing: parsed.missing } : {}) });
+      return;
+    }
+
+    const intents = this.deps.agentRegistry.intents();
+    const existing = intents.get(agentPath);
+
+    // ONE census read, shared by the running check and the advisory below.
+    const census = this.deps.herdrBridge.listHerdrAgentsChecked();
+    const occupancy = this.deps.herdrBridge.occupancyOf(census, agentPath, existing?.record.paneId);
+    const session = this.deps.herdrBridge.getSessionByPath(agentPath);
+    const running = Boolean(session) || (occupancy.reachable && occupancy.ours);
+
+    // RECONFIGURING A RUNNING AGENT IS REFUSED WHOLE, HERE.
+    //
+    // The per-attribute answer — priority, the gate flags and label change in
+    // place while launcher, prompt and mcpServers refuse — is the next-but-two
+    // slice's, and it is strictly more permissive than this. Shipping the
+    // permissive half first would mean this PR could rewrite the launcher or
+    // the prompt under a live agent, which is a different process and a file
+    // it has already read: a destroy-and-recreate wearing a config diff's
+    // clothes. So the conservative superset ships with the verb, and the
+    // relaxation ships with the per-attribute rules that make it safe.
+    if (running && existing) {
+      fail(
+        `Refusing to reconfigure ${agentPath} while an agent is running in it. Some of these ` +
+          `values are read once, at spawn: the launcher IS the process, and the prompt has ` +
+          `already been read. Applying them under a live agent would either do nothing or ` +
+          `mean a different agent, and neither is what a configuration change asks for. ` +
+          `Stand it down first: deactivate(path), configure(path, …), activate(path).`,
+        {
+          path: agentPath,
+          refused: 'running',
+          applied: [],
+          ...(occupancy.reachable && occupancy.ours
+            ? { paneId: existing.record.paneId ?? null }
+            : {})
+        }
+      );
+      return;
+    }
+
+    const record: AgentRecord = {
+      path: agentPath,
+      config: parsed.config,
+      // Carried forward rather than cleared. A stopped agent's last pane id is
+      // still the evidence that a pane bearing it is OUR dead one rather than
+      // a stranger's live one, which is what keeps `activate` on the spawn
+      // branch instead of the refuse-occupied branch.
+      ...(existing?.record.paneId ? { paneId: existing.record.paneId } : {})
+    };
+
+    const durable = this.surfaceRegistryOutcome(
+      this.deps.agentRegistry.recordConfigured(record),
+      `configured ${agentPath}`
+    );
+
+    const occupiedBy = occupancy.reachable ? occupancy.occupants : [];
+
+    this.deps.broadcast({
+      action: 'agent_configured_event',
+      success: true,
+      path: agentPath,
+      config: parsed.config
+    });
+
+    respond({
+      action: 'configure_response',
+      success: true,
+      path: agentPath,
+      paneName: paneNameFor(agentPath),
+      config: parsed.config,
+      reconfigured: Boolean(existing),
+      // Advisory, never a refusal. Empty means the census answered and found
+      // nothing live here.
+      occupiedBy,
+      // And when the census could NOT answer, that is said rather than
+      // rendered as an all-clear: an empty `occupiedBy` from an unreachable
+      // herdr would be a check reporting its own failure as good news.
+      ...(occupancy.reachable
+        ? {}
+        : {
+            occupancyUnknown: true,
+            note:
+              'herdr did not answer, so this configure could not check whether anything is ' +
+              'already running in that directory. The record is written either way; ' +
+              'activate will refuse rather than guess.'
+          }),
+      ...(occupiedBy.length
+        ? {
+            note:
+              `Something is already running in ${agentPath}. The record is written, but ` +
+              `activate will REFUSE until that pane is gone — stand it down, then activate.`
+          }
+        : {}),
+      ...(durable.ok ? {} : { durable: false, durabilityError: durable.error })
+    });
+  }
+
+  // ----------------------------------------------------------------- forget
+
+  /**
+   * `forget(path)` — the verb that makes an agent stop existing.
+   *
+   * IT REFUSES A RUNNING AGENT, and there is deliberately no `force`. No verb
+   * here may terminate an agent as a side effect of a call that is not named
+   * "stop it": only `deactivate` does that, and preemption, which is explicit,
+   * opt-in, strictly-greater and reported. A `forget` that implicitly stopped a
+   * live agent would be destroy-and-recreate wearing a different name, and a
+   * force flag is that same path with a label on it. `deactivate` then `forget`
+   * is the same two calls and leaves TWO decisions in the append-only log
+   * instead of one flag nobody can audit.
+   *
+   * IT SUCCEEDS ON A PATH THAT WAS NEVER CONFIGURED, where `deactivate`
+   * refuses, and the asymmetry has a rule behind it: `forget`'s postcondition
+   * is the absence of a record, and absence is verifiable — it already holds.
+   * `deactivate`'s postcondition is a claim about an agent, and there is no
+   * agent to make a claim about; answering "stopped" for a path that never
+   * held one is `success: true` about a world that does not exist.
+   */
+  private handleForget(data: any, respond: Respond): void {
+    const fail = (error: string, extra: Record<string, unknown> = {}) =>
+      respond({ action: 'forget_response', success: false, error, ...extra });
+
+    const address = this.addressOfRequest(data.path, false);
+    if ('error' in address) {
+      fail(address.error);
+      return;
+    }
+    const agentPath = address.path;
+
+    const existing = this.deps.agentRegistry.intents().get(agentPath);
+    if (!existing) {
+      respond({
+        action: 'forget_response',
+        success: true,
+        path: agentPath,
+        existed: false,
+        removed: [],
+        note: 'No agent was configured there. The postcondition — no record for this path — already held.'
+      });
+      return;
+    }
+
+    const census = this.deps.herdrBridge.listHerdrAgentsChecked();
+    const occupancy = this.deps.herdrBridge.occupancyOf(census, agentPath, existing.record.paneId);
+    const session = this.deps.herdrBridge.getSessionByPath(agentPath);
+
+    if (session || (occupancy.reachable && occupancy.ours)) {
+      fail(
+        `Refusing to forget ${agentPath}: an agent is running in it. Forgetting the record ` +
+          `would leave a live pane nothing here can address — no stand-down, no status, no ` +
+          `tail. Stop it first: deactivate(path), then forget(path). There is no force flag, ` +
+          `deliberately: two calls leave two decisions in the log, and a flag leaves one ` +
+          `nobody can audit.`,
+        { path: agentPath, refused: 'running', paneId: existing.record.paneId ?? null }
+      );
+      return;
+    }
+
+    // The census could not answer AND the record says this agent is supposed
+    // to be running. Silence is not evidence: forgetting on the strength of it
+    // is the same mistake as spawning on the strength of it, one verb over.
+    if (!occupancy.reachable && existing.event === 'activated') {
+      fail(
+        `Refusing to forget ${agentPath}: herdr did not answer, so whether an agent is ` +
+          `running there could not be checked — and the registry records this agent as ` +
+          `active. An unreachable herdr is silence, not evidence that nothing is there. ` +
+          `Bring herdr up, or deactivate first.`,
+        { path: agentPath, refused: 'unverifiable' }
+      );
+      return;
+    }
+
+    const durable = this.surfaceRegistryOutcome(
+      this.deps.agentRegistry.recordForgotten(existing.record),
+      `forgot ${agentPath}`
+    );
+
+    // What was removed and what was deliberately left. The sidecar holds this
+    // agent's rendered prompt and is entirely inside CrabCast's own data
+    // directory, so it is safe to delete — but residue cleanup (the sidecar,
+    // the `.mcp.json` key, the trust entry) is the next slice's, and naming
+    // what is left is how that stays visible rather than becoming a surprise.
+    const sidecar = this.deps.herdrBridge.sidecarDirFor(agentPath);
+
+    this.deps.broadcast({
+      action: 'agent_forgotten_event',
+      success: true,
+      path: agentPath,
+      removed: ['record']
+    });
+
+    respond({
+      action: 'forget_response',
+      success: true,
+      path: agentPath,
+      existed: true,
+      removed: ['record'],
+      left: fs.existsSync(sidecar) ? [sidecar] : [],
+      ...(fs.existsSync(sidecar)
+        ? {
+            note:
+              `The record is gone. ${sidecar} still holds this agent's rendered prompt — ` +
+              `removing it is not yet implemented, and it is named here rather than left ` +
+              `for somebody to find.`
+          }
+        : {}),
+      ...(durable.ok ? {} : { durable: false, durabilityError: durable.error })
+    });
+  }
+
+  // ------------------------------------------------------------- the gate
 
   /**
    * Whether the machine can carry another agent, checked before spawning one.
    *
    * Only consulted when a *new* agent would be created: re-attaching to an
    * agent that is already running costs the machine nothing, and refusing that
-   * would be refusing to look at work already in flight. The caller's own
-   * session miss is not enough to establish that, because the session map dies
-   * with the daemon while the herdr pane does not — so the census check below
-   * asks herdr, and every re-attach after a daemon restart skips the gate.
-   * Without it a client could not get back to agents it was already
-   * supervising, and precisely when the machine was busiest.
+   * would be refusing to look at work already in flight.
    *
    * An override is honoured — a cap that cannot be exceeded on purpose is a
    * cap people work around — but it is recorded rather than waved through.
-   * Someone reading the log later should be able to see that the machine was
-   * over-staffed deliberately, and what the numbers were at the time.
    *
-   * Activations of `gateExempt` types are never refused at all — see the
-   * exemption below, which is where the capacity model's "exempt types are
-   * not part of the limit" decision is actually honoured.
+   * `refusable: false` passes unconditionally. This is the first of the three
+   * decisions the old `gateExempt` boolean was carrying (the other two are in
+   * {@link preemptionCandidates} and {@link capacityOf}), and the argument for
+   * it is unchanged: the capacity model has already declined to charge an
+   * unchargeable agent, so refusing one here would be the gate arguing with
+   * its own arithmetic. It was also a lockout in practice — desktop baseline
+   * load alone can pin headroom at 0 indefinitely, so an always-on agent could
+   * never start without a manual override.
    */
   private capacityGate(request: GateRequest): CapacityGateResult {
-    const { what, type, key, agentName, priority, override, preempt } = request;
+    const { path: agentPath, paneName, priority, refusable, override, preempt } = request;
     const pass = (capacity: Capacity): CapacityGateResult => ({
       capacity,
       refusal: null,
@@ -494,44 +958,26 @@ export class MessageRouter {
 
     const { agents } = this.surveyAgents();
 
-    if (agents.some((a) => a.agentName === agentName)) {
+    if (agents.some((a) => a.path === agentPath)) {
       // Already alive and already counted. Starting nothing costs nothing.
       return pass(this.capacityOf(agents));
     }
 
     const capacity = this.capacityOf(agents);
 
-    // gateExempt types pass unconditionally (KAN-57, generalized from the
-    // extraction source's hardcoded supervisor set to the flag in
-    // crabcast.config.json). The capacity model already decided they are not
-    // part of the limit: they are neither counted in `running` nor charged a
-    // slot (see capacity.ts's header for the argument), so a load- or
-    // headroom-bound refusal here was refusing an agent whose cost the model
-    // had already declined to charge — the gate arguing with its own
-    // arithmetic. It was also a lockout in practice: desktop baseline load
-    // alone can pin headroomByLoad at 0 indefinitely, which meant always-on
-    // supervising agents could never start or auto-restore without a manual
-    // override. They are higher priority by convention and always-on by
-    // intent, so the gate has nothing to ration for them: no refusal, and
-    // therefore no override to record and no preemption to offer. Charged
-    // activations below are untouched, and exempt agents still appear in
-    // every capacity report as `exemptAgents`.
-    if (this.deps.registry.get(type)?.gateExempt === true) return pass(capacity);
+    if (!refusable) return pass(capacity);
 
     if (!capacity.atCapacity) return pass(capacity);
 
     // Everything running that this activation could conceivably displace, and
-    // the one it would take. `victim` is null in the ordinary case — a worker
-    // agent on a machine full of workers of its own priority outranks
-    // nothing, and neither does anything at all when only top-of-scale agents
-    // are running.
-    const candidates = this.preemptionCandidates(agents, agentName);
+    // the one it would take. `victim` is null in the ordinary case — an agent
+    // on a machine full of agents of its own priority outranks nothing.
+    const candidates = this.preemptionCandidates(agents, agentPath);
     const victim = selectVictim(candidates, priority);
     const derivation = describeCapacity(capacity);
     const offer = (v: PreemptionCandidate): PreemptionOfferDto => ({
-      agentName: v.agentName,
-      type: v.type,
-      key: v.key,
+      path: v.path,
+      paneName: v.paneName,
       priority: v.priority,
       herdrStatus: v.herdrStatus,
       incomingPriority: priority,
@@ -541,9 +987,8 @@ export class MessageRouter {
     if (preempt && victim) {
       const at = new Date().toISOString();
       const preemption: PreemptionRecord = {
-        byAgentName: agentName,
-        byType: type,
-        byKey: key,
+        byPath: agentPath,
+        byPaneName: paneName,
         byPriority: priority,
         priority: victim.priority,
         herdrStatus: victim.herdrStatus,
@@ -551,13 +996,13 @@ export class MessageRouter {
       };
 
       // Through the ordinary stand-down path rather than a teardown of its
-      // own. `deactivate_by_key` already handles every case this needs — a
-      // live session and an agent that outlived its daemon — and answers
-      // honestly about which it found. Preemption reusing it means there is
-      // one way an agent stops, not two.
+      // own. `deactivate_agent` already handles every case this needs — a live
+      // session and an agent that outlived its daemon — and answers honestly
+      // about which it found. Preemption reusing it means there is one way an
+      // agent stops, not two.
       let standDown: any = null;
-      this.handleDeactivateByKey(
-        { key: victim.key, type: victim.type ?? undefined, preemption },
+      this.handleDeactivateAgent(
+        { path: victim.path, preemption },
         (msg: any) => {
           standDown = msg;
         }
@@ -568,7 +1013,7 @@ export class MessageRouter {
         // important half: proceeding would leave the machine over capacity
         // *and* have announced a preemption that did not happen.
         const error =
-          `Refusing to activate ${what}: standing down ${addressOf(victim)} to make room ` +
+          `Refusing to activate ${agentPath}: standing down ${addressOf(victim)} to make room ` +
           `failed (${standDown?.error ?? 'no reason given'}), so no capacity was freed.\n` +
           derivation;
         console.error(`[capacity] preemption aborted: ${error}`);
@@ -576,21 +1021,20 @@ export class MessageRouter {
       }
 
       console.warn(
-        `[capacity] preemption: ${what} (priority ${priority}) stood down ` +
+        `[capacity] preemption: ${agentPath} (priority ${priority}) stood down ` +
         `${describeCandidate(victim)} at ${at}\n${derivation}`
       );
       // The event carries the full PreemptionRecord. The durable copy was
-      // written by the stand-down above — handleDeactivateByKey persists it
-      // via recordDeactivated(record, preemption), which is what keeps
-      // `preemptedAgents` reporting this debt until somebody re-activates the
-      // victim. The broadcast is the live announcement, not the record, but
-      // nothing here may drop a field of it: it is also what a client renders.
+      // written by the stand-down above, which is what keeps `preemptedAgents`
+      // reporting this debt until somebody re-activates the victim. The
+      // broadcast is the live announcement, not the record, but nothing here
+      // may drop a field of it: it is also what a client renders.
       this.deps.broadcast({
         action: 'agent_preempted_event',
         success: true,
         at,
         victim: offer(victim),
-        by: { agentName, type, key, priority },
+        by: { path: agentPath, paneName, priority },
         record: preemption,
         capacity: capacityDto(capacity)
       });
@@ -603,8 +1047,7 @@ export class MessageRouter {
       // average is a one-minute mean and the kernel has not yet reclaimed the
       // memory — so re-running the whole gate here would sometimes refuse
       // *after* destroying an agent's work, which is the worst of both
-      // outcomes. A slot was freed on purpose; the machine is strictly better
-      // off than it was a moment ago, and it is about to look it.
+      // outcomes.
       const after = this.capacityOf(this.surveyAgents().agents);
       return {
         capacity: after,
@@ -619,7 +1062,7 @@ export class MessageRouter {
       // Both branches name what is running and what it is worth. Losing a slot
       // is survivable; not being able to see who you lost it to is not.
       const refusal =
-        `${capacityRefusal(capacity, what)}\n` +
+        `${capacityRefusal(capacity, agentPath)}\n` +
         (victim ? preemptionOffer(victim, priority) : noVictimReason(candidates, priority));
       return {
         capacity,
@@ -632,12 +1075,12 @@ export class MessageRouter {
 
     const at = new Date().toISOString();
     console.warn(
-      `[capacity] override: starting ${what} past capacity at ${at}\n${derivation}`
+      `[capacity] override: starting ${agentPath} past capacity at ${at}\n${derivation}`
     );
     this.deps.broadcast({
       action: 'capacity_override_event',
       success: true,
-      what,
+      what: agentPath,
       at,
       capacity: capacityDto(capacity)
     });
@@ -653,27 +1096,18 @@ export class MessageRouter {
   /**
    * Everything running that could be considered for a stand-down.
    *
-   * The same filter the capacity model uses, for the same reason it exists
-   * there: a list that counted panes with nothing behind them would offer to
-   * kill one, and a list that disagreed with `running` would offer to free a
-   * slot that was never occupied.
-   *
-   * gateExempt-type agents are *excluded*, and the reason is arithmetic, not
-   * protection: an exempt agent was never counted in `running`, so standing
-   * one down frees no charged slot — the machine would be exactly as full a
-   * moment later, and the preempt path would admit the newcomer over the cap
-   * on the false premise that room was made. In the extraction source the
-   * exempt set was the hardcoded top of the priority scale, so the
-   * strictly-greater ordering happened to protect it; here `gateExempt` and
-   * `priority` are independent config fields — a low-priority exempt type
-   * (a watchdog, say) is legitimate, and only this exclusion keeps it from
-   * being selected as a victim whose death buys nothing. Exemption from the
-   * gate is exemption from its rationing in both directions: never refused,
-   * never a victim.
+   * `preemptable: false` agents are *excluded*, and the reason is arithmetic
+   * as much as protection: an agent that is also unchargeable was never
+   * counted in `running`, so standing one down frees no charged slot — the
+   * machine would be exactly as full a moment later, and the preempt path
+   * would admit the newcomer over the cap on the false premise that room was
+   * made. This is the second of the three decisions the old `gateExempt`
+   * boolean was carrying, and splitting them is what lets a caller have a
+   * low-priority always-on agent that is charged but never taken.
    */
   private preemptionCandidates(
     agents: ListedAgent[],
-    exclude?: string,
+    excludePath?: string,
     sharedIntents?: Map<string, AgentIntent>
   ): PreemptionCandidate[] {
     const candidates: PreemptionCandidate[] = [];
@@ -684,26 +1118,26 @@ export class MessageRouter {
     const intents = sharedIntents ?? this.deps.agentRegistry.intents();
 
     for (const entry of agents) {
-      if (!this.countsAsAgent(entry)) continue;
-      if (exclude && entry.agentName === exclude) continue;
-      if (entry.gateExempt) continue;
+      if (excludePath && entry.path === excludePath) continue;
+      if (!entry.preemptable) continue;
 
-      const intent = intents.get(entry.agentName);
+      const intent = intents.get(entry.path);
+      // No record means no priority, and priority is not derivable from
+      // anything else now that types are gone. An agent we cannot price is one
+      // we must not offer as a victim — the comparison that authorises the kill
+      // would have nothing on one side of it.
+      if (!intent) continue;
+
       candidates.push({
-        agentName: entry.agentName,
-        type: entry.type,
-        // The registry's spelling of the key, when it has one. A sessionless
-        // entry's key comes from the agent name, which carries the lower-cased
-        // form the name was built from — and this key is about to be shown to
-        // a person next to work that is spelled KAN-38.
-        key: intent?.record.key ?? entry.key,
-        priority: this.deps.registry.priorityFor(entry.type),
+        path: entry.path,
+        paneName: entry.paneName,
+        priority: intent.record.config.priority,
         herdrStatus: entry.herdrStatus,
         // The recorded activation time, which survives a daemon restart; the
-        // session's creation time is the fallback for an agent the registry
-        // has no record of. Null when neither knows — absent data stays
-        // absent rather than being invented for the victim ordering.
-        activatedAt: (intent?.event === 'activated' ? intent.at : null) ?? entry.createdAt
+        // session's creation time is the fallback. Null when neither knows —
+        // absent data stays absent rather than being invented for the victim
+        // ordering.
+        activatedAt: (intent.event === 'activated' ? intent.at : null) ?? entry.createdAt
       });
     }
 
@@ -714,33 +1148,25 @@ export class MessageRouter {
    * Write an activation down before it is acknowledged.
    *
    * Called on every successful activate, but only appends when it would change
-   * something: re-attaching to an agent already recorded as activated is a
-   * no-op, and fleet clients re-activate often enough that recording each one
-   * would fill the log with restatements of the same intent.
+   * something: re-activating an agent already recorded as activated with the
+   * same pane is a no-op, and fleet clients activate often enough that
+   * recording each one would fill the log with restatements of the same intent.
+   *
+   * The comparison is on the pane binding rather than on the configuration,
+   * and that is not a shortcut: `activate` takes no attributes at all now, so
+   * there is nothing a caller could pass that might disagree with the record.
+   * The only thing an activation can change about the record is which pane it
+   * is bound to.
    */
   private rememberActivated(record: AgentRecord): RecordOutcome {
-    const current = this.deps.agentRegistry.intents().get(record.agentName);
-    if (
-      current?.event === 'activated' &&
-      current.record.workDir === record.workDir &&
-      current.record.url === record.url &&
-      current.record.defaultAgent === record.defaultAgent &&
-      // Every other field of the activation's argument list is compared, and
-      // this one was not — so an agent whose type gained or lost an MCP server
-      // in the config was still "exactly what the disk knows", the restatement
-      // was skipped, and a restart brought it back with the server list it had
-      // the first time anyone activated it. Silently handing a restored agent
-      // a tool set that no longer matches its config is the same class of
-      // wrong as bringing it back as the wrong launcher, which is why
-      // defaultAgent is on this list already.
-      sameServerList(current.record.mcpServers, record.mcpServers)
-    ) {
+    const current = this.deps.agentRegistry.intents().get(record.path);
+    if (current?.event === 'activated' && current.record.paneId === record.paneId) {
       // The disk already knows exactly this — a skipped restatement is durable.
       return { ok: true };
     }
     return this.surfaceRegistryOutcome(
       this.deps.agentRegistry.recordActivated(record),
-      `activated ${record.type}/${record.key}`
+      `activated ${record.path}`
     );
   }
 
@@ -778,44 +1204,19 @@ export class MessageRouter {
    * anyone had ever run. Recorded even when the teardown failed — the caller
    * asked for the agent to be gone, and that is the intent to honour.
    *
-   * Everything the last activation knew is carried onto the stand-down, and
-   * that is not tidiness. `AgentRecord` is the argument list of an activation,
-   * and `defaultAgent` is one of its arguments: an agent recorded without it
-   * and then switched back on falls to the type's `defaultLauncher`, which may
-   * not be the launcher it actually ran — it would come back as something
-   * other than what it was. The url and workDir travel for the same reason.
+   * The whole configuration travels onto the stand-down, and that is not
+   * tidiness: it is the only copy. An agent recorded without it and then
+   * switched back on would have no priority, no launcher and no gate flags,
+   * which is not a degraded activation — it is an agent that cannot be
+   * activated at all.
    */
   private rememberDeactivated(
-    type: string,
-    key: string,
-    workDir?: string,
+    record: AgentRecord,
     preemption?: PreemptionRecord
   ): RecordOutcome {
-    const agentName = agentNameFor(type, key);
-    const previous = this.deps.agentRegistry.intents().get(agentName)?.record;
-    const outcome = this.deps.agentRegistry.recordDeactivated(
-      {
-        agentName,
-        type,
-        // The registry's spelling of the key, when it has one. `agentName` is
-        // built from a lower-cased key, so an agent addressed from a census
-        // arrives here as `kan-38`, and recording that would quietly replace a
-        // key spelled the way its ticket is. This key is about to be shown to
-        // a person next to work that is spelled KAN-38.
-        key: previous?.key ?? key,
-        // The caller's own answer wins — it is looking at the live session —
-        // and the registry's is the fallback for the by-key paths that have no
-        // session to read one from.
-        workDir: workDir ?? previous?.workDir ?? '',
-        ...(previous?.url ? { url: previous.url } : {}),
-        ...(previous?.defaultAgent ? { defaultAgent: previous.defaultAgent } : {}),
-        ...(previous?.mcpServers ? { mcpServers: previous.mcpServers } : {})
-      },
-      preemption
-    );
     return this.surfaceRegistryOutcome(
-      outcome,
-      `deactivated ${type}/${key}${preemption ? ' (preempted)' : ''}`
+      this.deps.agentRegistry.recordDeactivated(record, preemption),
+      `deactivated ${record.path}${preemption ? ' (preempted)' : ''}`
     );
   }
 
@@ -831,9 +1232,9 @@ export class MessageRouter {
    *
    * An explicit cause always wins; only boot-time reconciliation sets one.
    */
-  private resumeCauseFor(agentName: string, explicit?: ResumeCause): ResumeCause | undefined {
+  private resumeCauseFor(agentPath: string, explicit?: ResumeCause): ResumeCause | undefined {
     if (explicit) return explicit;
-    return this.deps.agentRegistry.preemptionFor(agentName) ? 'preempted' : undefined;
+    return this.deps.agentRegistry.preemptionFor(agentPath) ? 'preempted' : undefined;
   }
 
   /**
@@ -841,30 +1242,21 @@ export class MessageRouter {
    *
    * Fire-and-forget on purpose: the nudge waits up to two minutes for the
    * agent's prompt to appear, and an activate that blocked on that would time
-   * out in every client. The response has already gone; this is the part that
-   * happens afterwards, and its outcome lands in the daemon log.
-   *
-   * Scheduled onto a later turn rather than merely un-awaited, which is not
-   * fussiness. The first thing the nudge does is read the agent's pane, and
-   * `herdr agent read` is an `execSync` with a five-second ceiling — starting
-   * it inside this call would run it *before* the handler reaches `respond`,
-   * and the caller would watch an activation hang on a message it is not
-   * waiting for.
-   *
-   * Only when a conversation actually came back. The other branch started with
-   * the degraded-resume prompt on its command line and is already working.
+   * out in every client. Scheduled onto a later turn rather than merely
+   * un-awaited, which is not fussiness — the first thing the nudge does is
+   * read the agent's pane through an `execSync` with a five-second ceiling, and
+   * starting that inside this call would run it BEFORE the handler reaches
+   * `respond`.
    */
-  private nudgeIfResumed(session: HerdrSession, defaultAgent?: string): void {
+  private nudgeIfResumed(session: HerdrSession, config: AgentConfig): void {
     if (!session.resume || session.resumedConversation !== true) return;
     const cause = session.resume;
     setTimeout(() => {
       void nudgeResumedAgent({
         herdrBridge: this.deps.herdrBridge,
-        type: session.type,
-        key: session.key,
+        path: session.path,
         cause,
-        defaultAgent,
-        typeDefaultLauncher: this.deps.registry.get(session.type)?.defaultLauncher,
+        launcher: config.launcher,
         log: (...args: any[]) => console.log(...args)
       });
     }, 0);
@@ -874,11 +1266,10 @@ export class MessageRouter {
    * The step that makes an activate response a statement about the world
    * rather than about our own intentions.
    *
-   * Returns the complaint when success cannot honestly be claimed, and
-   * `undefined` when the agent has been confirmed to exist. It runs after
-   * herdr's own errors have been dealt with, before anything is broadcast or
-   * answered — so there is exactly one point at which activate decides it
-   * succeeded.
+   * Returns the complaint when success cannot honestly be claimed, and the
+   * pane id when the agent has been confirmed to exist. It runs after herdr's
+   * own errors have been dealt with, before anything is broadcast or answered
+   * — so there is exactly one point at which activate decides it succeeded.
    *
    * A confirmed-absent agent takes its session down with it. That is not a
    * retry and not a cleanup: it is the difference between a failure a caller
@@ -887,119 +1278,197 @@ export class MessageRouter {
    * nothing — see abandonSession.
    */
   private async confirmActivation(
-    session: HerdrSession,
-    agentName: string
-  ): Promise<string | undefined> {
+    session: HerdrSession
+  ): Promise<{ error: string } | { paneId: string | null }> {
     // Existence means a live runtime for every launcher but `shell` — a name
     // registration over a dead pane must not verify (KAN-58). Sessions that
     // reached this point were built by initPty, which sets the field; an
     // unset one gets the strict reading rather than the lenient one.
     const presence = await this.deps.herdrBridge.confirmAgentPresent(
-      agentName,
+      session.paneName,
       session.expectsRuntime ?? true
     );
-    if (presence.present) return undefined;
+    if (presence.present) return { paneId: presence.paneId };
 
     console.error(
-      `[Router] Refusing to report ${agentName} activated: ${presence.error}`
+      `[Router] Refusing to report ${session.paneName} activated: ${presence.error}`
     );
     if (presence.reason === 'absent') {
       this.deps.herdrBridge.abandonSession(session.sessionId, presence.error);
     }
-    return presence.error;
+    return { error: presence.error };
   }
 
-  public async handleActivateByKey(data: any, respond: Respond) {
-    const { herdrBridge, registry, promptLoader } = this.deps;
-    const key: unknown = data.key;
-    const type: unknown = data.type;
+  /** How a refusal names a pane that is not ours. */
+  private describeOccupant(o: PaneOccupant): string {
+    return (
+      `pane_id ${o.paneId ?? '(not reported)'}, name '${o.name}', ` +
+      `agent_status ${o.agentStatus}${o.workDir ? `, cwd ${o.workDir}` : ''}`
+    );
+  }
 
-    if (typeof key !== 'string' || !key.trim()) {
-      respond({ action: 'activate_response', success: false, error: 'Missing or invalid key' });
+  // --------------------------------------------------------------- activate
+
+  /**
+   * `activate(path)` — the verb that makes a configured agent run.
+   *
+   * NO INLINE OPTIONS. Everything an agent is comes from its record, so there
+   * is nothing here a caller could pass that might disagree with what the
+   * agent already is. `override` and `preempt` are not attributes of the
+   * agent; they are decisions about the machine, taken by whoever pressed the
+   * button.
+   *
+   * THREE OUTCOMES BEFORE ANYTHING SPAWNS, and the third is the whole point:
+   *
+   *   - nothing live in the directory        → spawn
+   *   - something live and it is ours        → alreadyRunning
+   *   - something live and it is NOT ours    → REFUSE, naming every pane
+   *   - the census could not answer at all   → REFUSE as unverifiable
+   *
+   * The last one is the case that would otherwise fail silently.
+   * `listHerdrAgentsChecked` returns an EMPTY census when herdr does not
+   * answer, so a guard built the obvious way reads its own failure as an
+   * all-clear and spawns into an occupied directory precisely when it cannot
+   * see it. `reachable: false` is silence, not evidence.
+   *
+   * ACCEPTED RESIDUAL RISK, WRITTEN DOWN RATHER THAN CLOSED: the occupancy
+   * check and the spawn are not atomic. A pane appearing in the target
+   * directory between them defeats the guard. CrabCast-against-CrabCast is
+   * still caught by the path-derived pane name (herdr refuses the taken name);
+   * CrabCast-against-a-stranger inside that window is not. The window is small
+   * and closing it properly needs a lock that does not exist here, so it is
+   * stated rather than papered over.
+   */
+  public async handleActivate(data: any, respond: Respond): Promise<void> {
+    const { herdrBridge } = this.deps;
+    const fail = (error: string, extra: Record<string, unknown> = {}) =>
+      respond({ action: 'activate_response', success: false, error, ...extra });
+
+    const address = this.addressOfRequest(data.path, true);
+    if ('error' in address) {
+      fail(address.error);
       return;
     }
-    if (typeof type !== 'string' || !type.trim()) {
-      respond({ action: 'activate_response', success: false, error: 'Missing or invalid type' });
-      return;
-    }
+    const agentPath = address.path;
+    const paneName = paneNameFor(agentPath);
 
     // Before anything is looked up, because both of these decide what happens
     // to agents other than this one. See invalidFlag.
     const badFlag = invalidFlag('override', data.override) ?? invalidFlag('preempt', data.preempt);
     if (badFlag) {
-      respond({ action: 'activate_response', success: false, type, key, error: badFlag });
+      fail(badFlag, { path: agentPath });
       return;
     }
 
-    // The config file is the whole definition of what this daemon can run
-    // (KAN-69), so a type it does not declare is refused by name — with the
-    // declared types listed, because a caller that is only told "no" will
-    // retry the same spelling forever.
-    const config: WorkspaceTypeConfig | undefined = registry.get(type);
-    if (!config) {
-      respond({
-        action: 'activate_response',
-        success: false,
-        type,
-        key,
-        error:
-          `Unknown workspace type '${type}'. Declared types: ` +
-          `${registry.all().map((t) => t.name).join(', ') || '(none)'}. ` +
-          `Add the type to ${this.deps.config.configPath} and restart the daemon.`
-      });
+    // `configure` is mandatory and this is where that is enforced. The refusal
+    // names what is missing rather than merely saying no, because a caller
+    // that is only told "no" retries the same call forever.
+    const intent = this.deps.agentRegistry.intents().get(agentPath);
+    if (!intent) {
+      fail(
+        `No agent is configured at ${agentPath}. \`activate\` takes no attributes — an agent ` +
+          `is its directory plus the knobs \`configure\` froze onto it, and nothing here can ` +
+          `invent them. Missing: priority, launcher (and optionally prompt, mcpServers, label, ` +
+          `refusable, chargeable, preemptable). Call configure(path, …) first.`,
+        { path: agentPath, refused: 'not-configured', missing: ['priority', 'launcher'] }
+      );
+      return;
+    }
+    const config = intent.record.config;
+
+    // ONE census read, answering both "is anything live here" and "is it ours".
+    const census = herdrBridge.listHerdrAgentsChecked();
+    const occupancy = herdrBridge.occupancyOf(census, agentPath, intent.record.paneId);
+
+    if (!occupancy.reachable) {
+      fail(
+        `Refusing to activate ${agentPath}: herdr did not answer \`agent list\`, so whether ` +
+          `anything is already running in that directory could not be checked. An empty ` +
+          `census from an unreachable herdr is silence, not evidence — spawning on the ` +
+          `strength of it would put a second agent into an occupied directory precisely ` +
+          `when we cannot see it. NOTHING WAS STARTED. Bring the herdr server up and retry.`,
+        { path: agentPath, refused: 'unverifiable', verified: false, started: false }
+      );
       return;
     }
 
-    // A key alone does not determine a URL, and this daemon never resolves
-    // pages: `url` is opaque caller-supplied metadata, carried for prompt
-    // interpolation and reporting. Never invent one — a fabricated link is
-    // worse than no link.
-    const url =
-      typeof data.url === 'string' && data.url.trim() ? data.url.trim() : undefined;
+    if (occupancy.occupants.length > 0) {
+      if (occupancy.ours) {
+        // Not an error, and no second pane. `activate` on a running agent is
+        // the ordinary state of a caller reconciling towards desired state.
+        respond({
+          action: 'activate_response',
+          success: true,
+          path: agentPath,
+          paneName,
+          alreadyRunning: true,
+          paneId: intent.record.paneId ?? null,
+          verified: true
+        });
+        return;
+      }
 
-    const defaultAgent =
-      typeof data.defaultAgent === 'string' && data.defaultAgent.trim()
-        ? data.defaultAgent.trim()
-        : undefined;
+      fail(
+        `Refusing to activate ${agentPath}: ${occupancy.occupants.length} live pane(s) are ` +
+          `already running in that directory and none of them is ours.\n` +
+          occupancy.occupants.map((o) => `  ${this.describeOccupant(o)}`).join('\n') +
+          `\nNOTHING WAS STARTED. Two agents in one directory is how work gets overwritten ` +
+          `and neither of them finds out. Stop the pane above, or point CrabCast at a ` +
+          `different directory. This is not a claim on that pane: CrabCast never closes a ` +
+          `pane it did not start.`,
+        {
+          path: agentPath,
+          refused: 'occupied',
+          verified: false,
+          started: false,
+          occupiedBy: occupancy.occupants
+        }
+      );
+      return;
+    }
 
-    const agentName = agentNameFor(type, key);
-    // By full address, not by key alone: a session for a different type is a
-    // different agent. A key-only lookup here would reuse `{A, k}`'s session
-    // for an activation of `{B, k}`, then confirm existence against the name
-    // `crabcast-B-k` — which is absent — and abandonSession would tear down
-    // A's live PTY. A mistyped type must never destroy an unrelated agent.
-    let session = herdrBridge.getSessionByAddress(key, type);
+    let session = herdrBridge.getSessionByPath(agentPath);
+
+    // The census says nothing is live here, so a session we still hold is a
+    // corpse. Releasing it up front is what lets THIS activate spawn, rather
+    // than reusing a dead session and failing confirmation a full poll later.
+    // Only past the runtime-confirm window: inside it, an empty pane is the
+    // ordinary state of an agent still booting, and abandoning the session
+    // would kill an activation another caller is still confirming.
+    if (session && Date.now() - session.createdAt.getTime() >= RUNTIME_CONFIRM_TIMEOUT_MS) {
+      herdrBridge.abandonSession(
+        session.sessionId,
+        `herdr has no live agent in ${agentPath}; the session was released before re-activating`
+      );
+      session = undefined;
+    }
+
     let gate: CapacityGateResult | null = null;
 
     if (!session) {
       // Before the prompt is even rendered: the cheapest refusal is the one
       // that happens before any work is done for an agent that will not exist.
       gate = this.capacityGate({
-        what: `${type}/${key}`,
-        type,
-        key,
-        agentName,
+        path: agentPath,
+        paneName,
         priority: config.priority,
+        refusable: config.refusable,
         override: data.override === true,
         preempt: data.preempt === true
       });
       if (gate.refusal) {
-        respond({
-          action: 'activate_response',
-          success: false,
-          type,
-          key,
-          url,
+        fail(gate.refusal, {
+          path: agentPath,
           // `error` is the whole refusal, for the log and for MCP callers.
           // `refusedBy`, `reason` and `derivation` are the same thing split
           // into the pieces a UI can lay out — a client that shows none of
           // this leaves the user at a dead switch.
-          error: gate.refusal,
           refusedBy: 'capacity',
           reason: capacityReason(gate.capacity),
           derivation: describeCapacity(gate.capacity),
           capacity: capacityDto(gate.capacity),
           priority: config.priority,
+          started: false,
           // Named, so a client can offer a button that says whose work it
           // ends. Absent when there is nothing this activation outranks.
           ...(gate.preemptable ? { preemption: gate.preemptable } : {})
@@ -1007,37 +1476,25 @@ export class MessageRouter {
         return;
       }
 
-      const renderedPrompt = promptLoader.loadAndRender(config.promptFile, {
-        KEY: key,
-        URL: url ?? ''
-      });
-
       // An explicit `resume` is set only by boot-time reconciliation, never by
       // an ordinary client: it changes what the agent is told when there is
       // nothing to continue, and an ordinary activation is not an interrupted
       // one. What a client *can* produce without saying so is the
-      // re-activation of an agent it previously preempted, which is an
+      // re-activation of an agent it previously preempted, which IS an
       // interrupted one — resumeCauseFor is where that is recognised rather
       // than trusted to the caller.
       const explicit: ResumeCause | undefined =
         data.resume === 'reboot' || data.resume === 'daemon-restart' ? data.resume : undefined;
-      const resume = this.resumeCauseFor(agentName, explicit);
+      const resume = this.resumeCauseFor(agentPath, explicit);
 
-      session = herdrBridge.spawnSession(
-        type,
-        key,
-        url,
-        renderedPrompt,
-        defaultAgent,
-        config.mcpServers,
-        resume,
-        config.defaultLauncher
-      );
+      // `config.prompt` verbatim. There is nothing between the caller's bytes
+      // and the file the agent reads.
+      session = herdrBridge.spawnSession(agentPath, config, config.prompt, resume);
 
       // Reconciliation nudges its own restores, in sequence and with the
       // stagger it needs; it passes an explicit cause, which is how the two
       // are told apart. A preemption resume has nobody else to do it.
-      if (!explicit && !session.spawnError) this.nudgeIfResumed(session, defaultAgent);
+      if (!explicit && !session.spawnError) this.nudgeIfResumed(session, config);
     }
 
     // A spawn herdr refused is the one case where activate can say for certain
@@ -1047,49 +1504,34 @@ export class MessageRouter {
     // leave no agent behind, and that case is answered by looking rather than
     // by trusting.
     if (session.spawnError) {
-      respond({
-        action: 'activate_response',
-        success: false,
-        type,
-        key,
-        url,
-        error: session.spawnError
-      });
+      fail(session.spawnError, { path: agentPath });
       return;
     }
 
-    const unconfirmed = await this.confirmActivation(session, agentName);
-    if (unconfirmed) {
-      respond({
-        action: 'activate_response',
-        success: false,
-        type,
-        key,
-        url,
-        error: unconfirmed,
-        verified: false
-      });
+    const confirmed = await this.confirmActivation(session);
+    if ('error' in confirmed) {
+      fail(confirmed.error, { path: agentPath, verified: false });
       return;
     }
 
     // After confirmation, deliberately: the registry records agents that
     // provably exist, and an fsync'd record of an agent that was never there
     // would have reconciliation resurrecting a ghost on every boot.
+    //
+    // The pane id comes from the census that PROVED the agent is there, which
+    // is what makes it a binding rather than a guess.
     const durable = this.rememberActivated({
-      agentName,
-      type,
-      key,
-      workDir: session.workDir,
-      url,
-      defaultAgent,
-      mcpServers: config.mcpServers
+      path: agentPath,
+      config,
+      ...(confirmed.paneId ? { paneId: confirmed.paneId } : {})
     });
 
     this.deps.broadcast({
       action: 'agent_activated_event',
       success: true,
-      type,
-      key,
+      path: agentPath,
+      paneName,
+      paneId: confirmed.paneId,
       sessionId: session.sessionId,
       status: session.status
     });
@@ -1097,35 +1539,32 @@ export class MessageRouter {
     respond({
       action: 'activate_response',
       success: true,
-      type,
-      key,
-      url: session.url,
+      path: agentPath,
+      paneName,
+      paneId: confirmed.paneId,
       sessionId: session.sessionId,
       status: session.status,
-      workDir: session.workDir,
       createdAt: session.createdAt.toISOString(),
-      mcpServers: config.mcpServers,
       priority: config.priority,
+      launcher: config.launcher,
       // Not decoration: it is the difference between this response and the
       // KAN-23 false success. `true` means the agent was found in herdr's
       // census before this was sent, and success is never reported without it.
       verified: true,
       // Present only when the registry write FAILED: the agent is running and
       // verified, but a daemon restart will not know to restore it. `verified`
-      // answers "does it exist"; this answers "will it survive" — conflating
-      // them would hide a degraded registry behind a healthy activation.
+      // answers "does it exist"; this answers "will it survive".
       ...(durable.ok ? {} : { durable: false, durabilityError: durable.error }),
       // Only present on a restore. `false` means the agent came up with the
       // degraded-resume prompt and is already working; `true` means it was
       // handed its old conversation and is sitting at an empty prompt, which
-      // is the case that needs a nudge — delivered by the registry slice's
-      // reconcile (T4), which reads exactly these fields.
+      // is the case that needs a nudge.
       ...(session.resume
         ? { resume: session.resume, resumedConversation: session.resumedConversation }
         : {}),
       // What this activation cost somebody else. Reported to the caller as
-      // well as broadcast, so an MCP client that started an agent by
-      // preemption learns whose work it interrupted from the same response.
+      // well as broadcast, so a client that started an agent by preemption
+      // learns whose work it interrupted from the same response.
       ...(gate?.preempted ? { preempted: gate.preempted } : {}),
       ...(gate?.overrode
         ? { capacityOverride: { ...gate.overrode, capacity: capacityDto(gate.capacity) } }
@@ -1133,7 +1572,14 @@ export class MessageRouter {
     });
   }
 
-  private handleDeactivate(data: any, respond: Respond) {
+  // ------------------------------------------------------------- deactivate
+
+  /**
+   * The session-addressed stand-down. Kept for the one caller that holds a
+   * session id and nothing else; every human-facing path uses the
+   * path-addressed form below, which is a strict superset.
+   */
+  private handleDeactivateSession(data: any, respond: Respond) {
     if (!data.sessionId) {
       respond({
         action: 'deactivate_response',
@@ -1149,23 +1595,22 @@ export class MessageRouter {
     const session = this.deps.herdrBridge.getSession(data.sessionId);
     const { success, error } = this.deps.herdrBridge.terminateSession(data.sessionId);
 
-    // Recorded only after a confirmed teardown. A stand-down that did not
-    // take, written down as if it had, is a durable lie with three faces: the
-    // agent leaves `expected()` (a reboot will not restore it), it can be
-    // reported stood-down while running, and — on the preempt path — it reads
-    // as owed work that was never actually interrupted. The caller sees
-    // `success: false` and decides; recording is the consequence of the
-    // teardown, not of the request.
-    const durable = success && session
-      ? this.rememberDeactivated(session.type, session.key, session.workDir)
-      : undefined;
+    // Recorded only after a confirmed teardown, and only for an agent we hold
+    // a record for. A stand-down that did not take, written down as if it had,
+    // is a durable lie with three faces: the agent leaves `expected()` (a
+    // reboot will not restore it), it can be reported stood-down while
+    // running, and — on the preempt path — it reads as owed work that was
+    // never actually interrupted.
+    const intent = session ? this.deps.agentRegistry.intents().get(session.path) : undefined;
+    const durable =
+      success && intent ? this.rememberDeactivated(intent.record) : undefined;
 
     if (success && session) {
       this.deps.broadcast({
         action: 'agent_deactivated_event',
         success: true,
-        type: session.type,
-        key: session.key,
+        path: session.path,
+        paneName: session.paneName,
         sessionId: session.sessionId
       });
     }
@@ -1174,44 +1619,66 @@ export class MessageRouter {
       action: 'deactivate_response',
       success,
       sessionId: data.sessionId,
-      ...(session ? { type: session.type, key: session.key } : {}),
+      ...(session ? { path: session.path, paneName: session.paneName } : {}),
       ...(durable && !durable.ok ? { durable: false, durabilityError: durable.error } : {}),
       ...(error ? { error } : {})
     });
   }
 
-  public handleDeactivateByKey(data: any, respond: Respond) {
-    const { key } = data;
+  /**
+   * `deactivate(path)` — stop the agent, keep the record.
+   *
+   * NEVER A BARE SUCCESS. A caller polling for "is it down" and a caller who
+   * mistyped a path deserve different answers, so every success carries
+   * `wasRunning` and a `state`:
+   *
+   *   - `unstarted` — configured, never activated. Nothing to stop, and
+   *     nothing is recorded: writing a stand-down here would move the agent
+   *     into the standby list, which promises that switching it back on
+   *     resumes the conversation it was stopped in. It has no conversation.
+   *   - `standby`   — it ran and it is down now.
+   *
+   * A path with NO record refuses, where `forget` on the same path succeeds.
+   * See {@link handleForget} for the rule that decides the asymmetry.
+   */
+  public handleDeactivateAgent(data: any, respond: Respond) {
+    const fail = (error: string, extra: Record<string, unknown> = {}) =>
+      respond({ action: 'deactivate_response', success: false, error, ...extra });
+
+    const address = this.addressOfRequest(data.path, false);
+    if ('error' in address) {
+      fail(address.error);
+      return;
+    }
+    const agentPath = address.path;
+
     // Set by the capacity gate's preempt path, never invented here: it is the
-    // record of why this stand-down was not the agent's own idea. Persisted
-    // onto the registry record below, which is what keeps `list_agents`
-    // reporting the interrupted work until somebody decides about it — see
-    // PreemptionRecord in priority.ts and preempted() in agent-registry.ts.
+    // record of why this stand-down was not the agent's own idea.
     const preemption: PreemptionRecord | undefined = data.preemption;
-    // By full address when the caller gave one, for the same reason activate
-    // resolves that way (see handleActivateByKey): a session for a different
-    // type is a different agent, and with `task/K` and `hotfix/K` both live a
-    // key-only lookup here would tear down whichever one the map yields —
-    // for the preempt path, that is killing an agent the refusal never named.
-    // A bare key keeps the key-only behaviour for callers that have no type.
-    const type =
-      typeof data.type === 'string' && data.type.trim() ? data.type.trim() : undefined;
-    const session = this.deps.herdrBridge.getSessionByAddress(key, type);
+
+    const intent = this.deps.agentRegistry.intents().get(agentPath);
+    if (!intent) {
+      fail(
+        `No agent is configured at ${agentPath}, so there is nothing to stand down. ` +
+          `Reporting a stand-down for a path that never held an agent would be success ` +
+          `about a world that does not exist. (\`forget\` on this path succeeds — its ` +
+          `postcondition is the absence of a record, and that already holds.)`,
+        { path: agentPath, refused: 'not-configured' }
+      );
+      return;
+    }
+
+    const session = this.deps.herdrBridge.getSessionByPath(agentPath);
 
     if (session) {
       const { success, error } = this.deps.herdrBridge.terminateSession(session.sessionId);
 
       // Recorded only after a confirmed teardown — the same rule as the
-      // broadcast below, for a sharper reason: the preempt path *aborts the
-      // whole preemption* when this teardown fails, and a durable record
-      // written first would say the victim was preempted while it is alive
-      // and working. It would then be owed a resume it is not owed, be absent
-      // from `expected()` so a reboot forgets it, and get the interrupted-work
-      // framing on its next ordinary re-activation. The record follows the
-      // teardown or does not happen.
-      const durable = success
-        ? this.rememberDeactivated(session.type, session.key, session.workDir, preemption)
-        : undefined;
+      // broadcast below, for a sharper reason: the preempt path ABORTS THE
+      // WHOLE PREEMPTION when this teardown fails, and a durable record
+      // written first would say the victim was preempted while it is alive and
+      // working.
+      const durable = success ? this.rememberDeactivated(intent.record, preemption) : undefined;
 
       // Not broadcast when the teardown could not be confirmed: the event is
       // what fleet clients act on, and announcing an agent deactivated while
@@ -1221,8 +1688,8 @@ export class MessageRouter {
         this.deps.broadcast({
           action: 'agent_deactivated_event',
           success: true,
-          type: session.type,
-          key: session.key,
+          path: agentPath,
+          paneName: session.paneName,
           sessionId: session.sessionId,
           ...(preemption ? { preempted: true } : {})
         });
@@ -1231,12 +1698,11 @@ export class MessageRouter {
       respond({
         action: 'deactivate_response',
         success,
-        // The address, so a caller that asked about several agents can tell
-        // which one this answers for — a fleet list showing every agent at
-        // once cannot attribute a bare `success: false` to a row.
-        type: session.type,
-        key: session.key,
+        path: agentPath,
+        paneName: session.paneName,
         sessionId: session.sessionId,
+        wasRunning: true,
+        state: 'standby',
         ...(preemption ? { preempted: true } : {}),
         ...(durable && !durable.ok ? { durable: false, durabilityError: durable.error } : {}),
         ...(error ? { error } : {})
@@ -1244,136 +1710,85 @@ export class MessageRouter {
       return;
     }
 
+    // Configured and never started. There is no pane to close and no
+    // conversation to come back to, so nothing is torn down and nothing is
+    // written — but the caller is told which of the two "it is down" states
+    // this is, because they are not the same fact.
+    if (intent.event === 'configured') {
+      respond({
+        action: 'deactivate_response',
+        success: true,
+        path: agentPath,
+        paneName: paneNameFor(agentPath),
+        wasRunning: false,
+        state: 'unstarted',
+        note:
+          'This agent is configured but has never been activated. Nothing was running and ' +
+          'nothing was recorded — a stand-down row would put it on the standby list, which ' +
+          'promises that switching it back on resumes the conversation it was stopped in.'
+      });
+      return;
+    }
+
     // No session, but the agent may well be alive: the session map dies with
-    // the daemon and the herdr pane does not. Close it through the fallback
-    // rather than telling the caller an obviously-running agent is gone.
-    const result = this.deps.herdrBridge.closeAgentByKey(key, type);
+    // the daemon and the herdr pane does not.
+    const result = this.deps.herdrBridge.closeAgentByPath(agentPath);
 
-    // The type comes from the caller, from the agent herdr just closed, or —
-    // when herdr has no such agent — from the registry.
-    //
-    // That last source is not a nicety. An agent that has already died cannot
-    // be resolved through herdr at all, so without it the one case where a
-    // human most needs to say "stop expecting this" would record nothing, and
-    // the next boot would resurrect an agent someone had explicitly given up
-    // on. Standing down something that is already gone has to work, because
-    // that is exactly when it is asked for.
-    const closedType =
-      type ??
-      (result.agentName ? typeFromAgentName(result.agentName, key) : undefined) ??
-      this.registeredTypeFor(key);
-
-    // Standing down an agent that has already died is not a failure — it is the
-    // request working. There was no pane to close, and the thing actually being
-    // asked for ("stop expecting this agent back") is the registry write below.
-    // Reporting `success: false` there tells a supervisor its stand-down did
-    // not take, inviting it either to retry forever or to conclude the agent
-    // is still owed a slot; the next boot would then be the first anyone
-    // learns the intent was recorded all along.
+    // Standing down an agent that has already died is not a failure — it is
+    // the request working. There was no pane to close, and the thing actually
+    // being asked for ("stop expecting this agent back") is the registry write
+    // below. Reporting `success: false` there tells a supervisor its
+    // stand-down did not take, inviting it either to retry forever or to
+    // conclude the agent is still owed a slot.
     //
     // Only when herdr *answered* though. An unreachable herdr also fails to
     // close the pane, and calling that "already gone" would report an agent
     // stood down while it is still running.
     const goneAlready =
-      !result.success && Boolean(closedType) && this.deps.herdrBridge.listHerdrAgentsChecked().reachable;
+      !result.success && this.deps.herdrBridge.listHerdrAgentsChecked().reachable;
 
-    // Recorded only when the world matches the record: the pane provably
-    // closed, or herdr answered and provably has no such agent. A close that
-    // failed against an unreachable herdr records nothing — the agent may
-    // well be running, and a durable stand-down for a running agent is the
-    // lie the confirmed-teardown rule exists to prevent.
+    // Already recorded as stood down AND provably not running: nothing
+    // changed, so nothing is written. A second identical row would say a
+    // decision was taken twice.
+    const alreadyStandby = intent.event === 'deactivated' && goneAlready;
+
     const durable =
-      closedType && (result.success || goneAlready)
-        ? this.rememberDeactivated(closedType, key, undefined, preemption)
+      (result.success || goneAlready) && !alreadyStandby
+        ? this.rememberDeactivated(intent.record, preemption)
         : undefined;
 
-    if (result.success || goneAlready) {
+    if ((result.success || goneAlready) && !alreadyStandby) {
       this.deps.broadcast({
         action: 'agent_deactivated_event',
         success: true,
-        ...(closedType ? { type: closedType } : {}),
-        key,
+        path: agentPath,
+        paneName: result.paneName,
         ...(preemption ? { preempted: true } : {})
       });
     }
 
     respond({
       action: 'deactivate_response',
-      key,
-      ...(closedType ? { type: closedType } : {}),
+      path: agentPath,
+      paneName: result.paneName,
       success: result.success || goneAlready,
+      wasRunning: result.success,
+      ...(result.success || goneAlready ? { state: 'standby' } : {}),
       ...(preemption ? { preempted: true } : {}),
       ...(goneAlready
-        ? { alreadyGone: true, note: 'No agent was running. Its stand-down is recorded, so it will not be restored.' }
+        ? {
+            alreadyGone: true,
+            note: alreadyStandby
+              ? 'No agent was running and its stand-down was already recorded. Nothing changed.'
+              : 'No agent was running. Its stand-down is recorded, so it will not be restored.'
+          }
         : {}),
       ...(durable && !durable.ok ? { durable: false, durabilityError: durable.error } : {}),
       ...(result.error && !goneAlready ? { error: result.error } : {})
     });
   }
 
-  public handleResetByKey(data: any, respond: Respond) {
-    const { type, key } = data;
-    const badAddress = invalidAddress(key, type);
-    if (badAddress || typeof type !== 'string' || !type.trim()) {
-      respond({
-        action: 'reset_response',
-        success: false,
-        error: badAddress ?? 'Missing or invalid type'
-      });
-      return;
-    }
-    // By full address, for the same reason activate and deactivate resolve
-    // that way — and with a sharper stake here: this handler both deletes a
-    // directory and writes a durable record for `type/key`. A key-only lookup
-    // with `task/K` and `hotfix/K` live could terminate one agent while
-    // recording the *other* as stood down — a teardown and a record about two
-    // different agents.
-    const session = this.deps.herdrBridge.getSessionByAddress(key, type);
-
-    // Tear the agent down *before* resetWorkspace deletes the directory it is
-    // running in. Without a session the agent is still reachable through the
-    // herdr-list fallback, and skipping that would leave the agent alive in a
-    // cwd that no longer exists.
-    const { success: agentClosed, error: agentError } = session
-      ? this.deps.herdrBridge.terminateSession(session.sessionId)
-      : this.deps.herdrBridge.closeAgentByKey(key, type);
-
-    // The workspace still goes away even if no agent was there to close —
-    // reset's job is to leave nothing behind. Unless the target isn't ours to
-    // delete, in which case `resetError` says which path was refused and why.
-    const { success, error: resetError } = this.deps.herdrBridge.resetWorkspace(type, key);
-
-    // Recorded when anything actually changed: the workspace is gone (the
-    // agent must not be resurrected into a recreated empty directory), or the
-    // agent was closed (a deliberate stop, restorable while its directory
-    // survives — the standby list checks the disk for exactly that). When
-    // both the teardown and the delete failed, nothing happened, and a record
-    // claiming otherwise would be the durable lie the confirmed-teardown rule
-    // exists to prevent.
-    const durable =
-      success || agentClosed
-        ? this.rememberDeactivated(type, key, session?.workDir)
-        : undefined;
-
-    this.deps.broadcast({
-      action: 'agent_reset_event',
-      success,
-      type,
-      key,
-      agentClosed
-    });
-
-    respond({
-      action: 'reset_response',
-      success,
-      agentClosed,
-      ...(agentError ? { agentError } : {}),
-      ...(durable && !durable.ok ? { durable: false, durabilityError: durable.error } : {}),
-      // A refusal outranks the agent's complaint: it is the reason the reset
-      // did not happen, and the caller needs to see the path that was rejected.
-      ...(success ? {} : { error: resetError ?? agentError ?? `No workspace directory for ${type}/${key}` })
-    });
-  }
+  // ------------------------------------------------------------------ reads
 
   /**
    * Type a message into a running agent's terminal. The delivery is
@@ -1382,22 +1797,22 @@ export class MessageRouter {
    * be turned back into a response; the caller is blocked on one.
    */
   private handleSendToAgent(data: any, respond: Respond) {
-    const { key, type, message } = data;
     const fail = (error: string) =>
       respond({ action: 'send_to_agent_response', success: false, error });
 
-    const badAddress = invalidAddress(key, type);
-    if (badAddress) {
-      fail(badAddress);
+    const address = this.addressOfRequest(data.path, true);
+    if ('error' in address) {
+      fail(address.error);
       return;
     }
+    const { message } = data;
     if (typeof message !== 'string' || !message.trim()) {
       fail('Missing or invalid message');
       return;
     }
 
-    this.deps.herdrBridge.sendToAgent(key, message, type).then(
-      (result) => respond({ action: 'send_to_agent_response', key, ...result }),
+    this.deps.herdrBridge.sendToAgent(address.path, message).then(
+      (result) => respond({ action: 'send_to_agent_response', path: address.path, ...result }),
       (err) => fail(err?.message ?? String(err))
     );
   }
@@ -1407,15 +1822,15 @@ export class MessageRouter {
    * agent is in the state it reports, without attaching to its pane.
    */
   private handleTailAgent(data: any, respond: Respond) {
-    const { key, type, lines } = data;
     const fail = (error: string) =>
       respond({ action: 'tail_agent_response', success: false, error });
 
-    const badAddress = invalidAddress(key, type);
-    if (badAddress) {
-      fail(badAddress);
+    const address = this.addressOfRequest(data.path, true);
+    if ('error' in address) {
+      fail(address.error);
       return;
     }
+    const { lines } = data;
     if (lines !== undefined && (typeof lines !== 'number' || !Number.isFinite(lines))) {
       fail('Invalid lines: expected a number');
       return;
@@ -1424,8 +1839,8 @@ export class MessageRouter {
     try {
       respond({
         action: 'tail_agent_response',
-        key,
-        ...this.deps.herdrBridge.tailAgent(key, type, lines)
+        path: address.path,
+        ...this.deps.herdrBridge.tailAgent(address.path, lines)
       });
     } catch (err: any) {
       fail(err?.message ?? String(err));
@@ -1433,96 +1848,100 @@ export class MessageRouter {
   }
 
   /**
-   * Everything known about one agent, by address. A daemon restart empties
-   * the session map while the herdr pane keeps running, so a missing session
+   * Everything known about one agent, by path. A daemon restart empties the
+   * session map while the herdr pane keeps running, so a missing session
    * degrades to herdr's own view (`sessionless: true`) rather than failing —
    * an agent that outlived its daemon is exactly the one a supervisor most
    * needs to inspect.
    */
   private handleAgentStatus(data: any, respond: Respond) {
-    const { key, type } = data;
-    const fail = (error: string) =>
-      respond({ action: 'agent_status_response', success: false, error });
+    const fail = (error: string, extra: Record<string, unknown> = {}) =>
+      respond({ action: 'agent_status_response', success: false, error, ...extra });
 
-    const badAddress = invalidAddress(key, type);
-    if (badAddress) {
-      fail(badAddress);
+    const address = this.addressOfRequest(data.path, false);
+    if ('error' in address) {
+      fail(address.error);
       return;
     }
+    const agentPath = address.path;
+    const intent = this.deps.agentRegistry.intents().get(agentPath);
 
     try {
-      const session = this.deps.herdrBridge.getSessionByAddress(key, type);
+      const session = this.deps.herdrBridge.getSessionByPath(agentPath);
       if (session) {
+        const statuses = this.deps.herdrBridge.listHerdrStatuses();
         respond({
           action: 'agent_status_response',
           success: true,
           sessionless: false,
-          agentName: agentNameFor(session.type, session.key),
-          ...this.toAgentDto(session, this.deps.herdrBridge.listHerdrStatuses())
+          path: agentPath,
+          paneName: session.paneName,
+          paneId: intent?.record.paneId ?? null,
+          sessionId: session.sessionId,
+          createdAt: session.createdAt.toISOString(),
+          status: session.status,
+          herdrStatus: statuses.get(session.paneName) ?? 'unknown',
+          label: intent?.record.config.label ?? null,
+          configured: Boolean(intent)
         });
         return;
       }
 
-      const described = this.deps.herdrBridge.describeAgent(key, type);
+      const described = this.deps.herdrBridge.describeAgent(agentPath);
       respond({
         action: 'agent_status_response',
         success: true,
         sessionless: true,
-        agentName: described.agentName,
+        path: agentPath,
+        paneName: described.paneName,
+        paneId: described.paneId,
         sessionId: null,
-        type: described.type,
-        key,
-        url: null,
         createdAt: null,
         status: null,
         workDir: described.workDir,
-        herdrStatus: described.herdrStatus
+        herdrStatus: described.herdrStatus,
+        label: intent?.record.config.label ?? null,
+        configured: Boolean(intent)
       });
     } catch (err: any) {
-      fail(err?.message ?? String(err));
+      // The record is reported even when herdr has nothing, because "this
+      // agent is configured and not running" and "there is no such agent" are
+      // different answers and only one of them means the caller mistyped.
+      fail(err?.message ?? String(err), {
+        path: agentPath,
+        configured: Boolean(intent),
+        ...(intent ? { state: intent.event === 'configured' ? 'unstarted' : intent.event } : {})
+      });
     }
   }
 
-  private toAgentDto(session: HerdrSession, statuses: Map<string, HerdrAgentStatus>): AgentDto {
-    return {
-      sessionId: session.sessionId,
-      type: session.type,
-      key: session.key,
-      url: session.url,
-      createdAt: session.createdAt.toISOString(),
-      status: session.status,
-      workDir: session.workDir,
-      herdrStatus: statuses.get(agentNameFor(session.type, session.key)) ?? 'unknown'
-    };
-  }
-
   /**
-   * Everything running, from herdr's view unioned with our own.
+   * Everything running, from herdr's view joined against the durable registry.
    *
    * The session map is emptied by a daemon restart while the herdr panes keep
    * running, so a list built from sessions alone answers "nothing is running"
    * for a machine full of working agents — and that is the reading a
-   * supervisor acts on. herdr is therefore the source of existence here,
-   * exactly as it already is for `agent_status`, `deactivate` and `reset`;
-   * sessions only add what herdr cannot know (session id, bound url, creation
-   * time).
+   * supervisor acts on. herdr is therefore the source of existence here;
+   * sessions only add what herdr cannot know (session id, creation time).
    *
-   * An entry counts as an agent when *either* test passes: this daemon holds a
-   * live session for it, or herdr reports an agent runtime behind its pane.
-   * What fails both is a `crabcast-*` name with a bare shell behind it and no
-   * session of ours — nothing to message, tail or supervise. Those are kept
-   * out of `agents`, because a supervisor counting the list must get a number
-   * it can act on, and reported under `unbackedPanes`, because silently
-   * dropping them would repeat the mistake this handler exists to fix.
+   * WHAT COUNTS AS OURS is the part that changed. It used to be a pane name
+   * starting with `crabcast-` that parsed back into a type and key — a
+   * convention masquerading as a filter. It is now: a pane whose canonical
+   * `cwd` is a path this registry holds a record for, AND whose name is the
+   * one that path derives. Both halves are needed. The cwd join is what makes
+   * the registry authoritative; the name check is what keeps a stranger's pane
+   * sitting in one of our directories from being reported as our agent — it is
+   * reported as a foreign pane occupying that path, which is exactly what a
+   * reader needs to see.
    */
   private handleListAgents(_data: any, respond: Respond) {
-    const { agents, unbackedPanes, staleSessions } = this.surveyAgents();
-
-    // One read of the registry for the whole response. Four of the fields
-    // below are derived from it, and asking it four times was both four
-    // whole-file parses per poll and four chances for an append landing
+    // One read of the registry for the whole response. Several of the fields
+    // below are derived from it, and asking it repeatedly was both several
+    // whole-file parses per poll and several chances for an append landing
     // mid-response to make the categories contradict each other.
     const intents = this.deps.agentRegistry.intents();
+
+    const { agents, unbackedPanes, foreignPanes, staleSessions } = this.surveyAgents(intents);
 
     // Agents that should be here and are not. Computed from the same census the
     // list is built from, so the two can never disagree about what is running.
@@ -1541,17 +1960,13 @@ export class MessageRouter {
     // an agent that is running must never be offered an On button.
     const { standby, total: standbyTotal } = this.standbyAgents(agents, intents);
 
+    const foreign = clipFleetCategory(foreignPanes, (row) => row.paneName);
+
     // Descriptor headroom, reported where someone looking at agents will see
-    // it. In the extraction source the herdr server's fd usage was invisible
-    // until spawning broke (KAN-24), and the only way to learn it was to read
-    // /proc by hand. Expressed in panes because that is the unit the reader
-    // can act on — "room for 12 more agents" is a decision, "62000
-    // descriptors" is trivia.
+    // it. Expressed in panes because that is the unit the reader can act on.
     const usage = readFdUsage();
 
-    // CPU and memory headroom, for the same reason and in the same place. A
-    // supervisor reading this list is about to decide whether to staff
-    // another agent; this is the number that decision needs.
+    // CPU and memory headroom, for the same reason and in the same place.
     const capacity = this.capacityOf(agents);
 
     respond({
@@ -1559,45 +1974,35 @@ export class MessageRouter {
       success: true,
       agents,
       unbackedPanes,
+      // Live panes that are not ours. The rows whose `occupies` is non-null
+      // are the ones that will refuse an activation, so a reader can see the
+      // refusal coming rather than meeting it.
+      foreignPanes: foreign.rows,
+      foreignPanesTotal: foreign.total,
       // Always present, even when empty: a caller that has to distinguish "no
       // agents are missing" from "this daemon does not track that" cannot do it
       // from an absent field. Empty array means the fleet is whole.
       missingAgents: missing.rows,
-      // The unclipped count, by the same rule as `standbyTotal`: a list that
-      // silently stopped at the cap would read as "that is all of them", and
-      // "that is all of them" is the one thing a reader must not conclude
-      // wrongly about work that has silently stopped.
       missingTotal: missing.total,
       // Work that was taken off the machine to make room for something more
-      // important, and has not been put back. Always present, empty when
-      // nothing is owed — a caller distinguishing "nothing was preempted" from
-      // "this daemon does not track that" cannot do it from an absent field.
-      //
-      // It is a queue of decisions still owed rather than a log of events: the
-      // moment one of these is re-activated it leaves the list. Nothing here
-      // restarts them, deliberately — a preemption queue that restarts its own
-      // entries is a scheduler, and preemption must never be automatic.
+      // important, and has not been put back. It is a queue of decisions still
+      // owed rather than a log of events: the moment one of these is
+      // re-activated it leaves the list. Nothing here restarts them,
+      // deliberately — a preemption queue that restarts its own entries is a
+      // scheduler, and preemption must never be automatic.
       preemptedAgents: preempted.rows,
-      /** The unclipped count — see `missingTotal`. */
       preemptedTotal: preempted.total,
-      // Where a fleet client's On button gets its candidates. Always present
-      // and empty rather than absent, by the same rule as the two lists above:
-      // "nothing is switched off" and "this daemon does not track that" are
-      // different answers and a client cannot tell them apart from a missing
-      // field. `standbyTotal` is the unclipped count — a list that silently
-      // stopped at FLEET_CATEGORY_LIMIT would read as "that is all of them".
+      // Where a fleet client's On button gets its candidates.
       standbyAgents: standby,
       standbyTotal,
       capacity: capacityDto(capacity),
       // What each running agent is worth, and therefore what a would-be
-      // activation would have to outrank. Sent alongside the capacity figures
-      // because "there is no room" and "there is no room *for you*" are
-      // different answers, and a supervisor deciding whether to staff
-      // something needs both.
+      // activation would have to outrank. "There is no room" and "there is no
+      // room *for you*" are different answers, and a supervisor deciding
+      // whether to staff something needs both.
       priorities: this.preemptionCandidates(agents, undefined, intents).map((c) => ({
-        agentName: c.agentName,
-        type: c.type,
-        key: c.key,
+        path: c.path,
+        paneName: c.paneName,
         priority: c.priority,
         herdrStatus: c.herdrStatus
       })),
@@ -1633,9 +2038,8 @@ export class MessageRouter {
       // stand down?", and answering it here saves a caller from working the
       // ordering out for itself — or, worse, guessing at it.
       priorities: candidates.map((c) => ({
-        agentName: c.agentName,
-        type: c.type,
-        key: c.key,
+        path: c.path,
+        paneName: c.paneName,
         priority: c.priority,
         herdrStatus: c.herdrStatus
       })),
@@ -1644,52 +2048,22 @@ export class MessageRouter {
   }
 
   /**
-   * Whether a `list_agents` entry costs an agent's worth of machine.
+   * The capacity model applied to a census: chargeable agents in `running`,
+   * unchargeable ones counted separately as `exemptAgents` (reported, never
+   * charged — see capacity.ts).
    *
-   * Not everything the list reports does. The extraction source's daemon once
-   * opened a bare shell for itself, and it appeared in this list because a
-   * session was held for it — the right answer to "what can I attach to" and
-   * the wrong one to "what is this machine carrying"; on a 4-core box it was
-   * silently occupying one of two slots (KAN-25). This daemon starts nothing
-   * for itself, but herdr hosts more than CrabCast and the distinction still
-   * has to be drawn.
-   *
-   * The test is whether the entry is a workspace type this daemon starts
-   * agents into, or whether herdr can see an agent runtime behind the pane.
-   * Either is enough; a registered type does not wait for herdr to notice a
-   * freshly spawned agent, and a runtime catches anything the config has not
-   * heard of.
-   *
-   * Shared by the capacity count and the preemption candidate list, so an
-   * agent that occupies a slot is exactly an agent that can be asked to give
-   * it up.
-   */
-  private countsAsAgent(entry: ListedAgent): boolean {
-    const registered = entry.type !== null && this.deps.registry.get(entry.type) !== undefined;
-    return registered || entry.agentRuntime !== null;
-  }
-
-  /**
-   * The capacity model applied to a census: charged agents in `running`,
-   * gateExempt-type agents counted separately as `exemptAgents` (reported,
-   * never charged — see capacity.ts).
-   *
-   * Every capacity answer in this daemon goes through here, so `running`
-   * means the same thing in the refusal, in `list_agents` and in the
-   * `capacity` action. The extraction source once passed `agents.length` at
-   * each call site and its then-single supervisor was silently one of them —
-   * on a 4-core machine that was half the budget spent on the supervisor
-   * (KAN-34).
+   * This is the third of the three decisions the old `gateExempt` boolean was
+   * carrying. Every capacity answer in this daemon goes through here, so
+   * `running` means the same thing in the refusal, in `list_agents` and in the
+   * `capacity` action.
    */
   private capacityOf(agents: ListedAgent[]): Capacity {
     let fleet = 0;
     let exempt = 0;
 
     for (const entry of agents) {
-      if (!this.countsAsAgent(entry)) continue;
-
-      if (entry.gateExempt) exempt++;
-      else fleet++;
+      if (entry.chargeable) fleet++;
+      else exempt++;
     }
 
     return readCapacity(fleet, exempt);
@@ -1698,45 +2072,33 @@ export class MessageRouter {
   /**
    * Agents stood down to make room, in the shape a client renders.
    *
-   * Reported until they are re-activated. Restarting them is deliberately not
-   * done here — a preemption queue that restarts its own entries is a
-   * scheduler — so what this buys is that the decision is *owed to someone*
-   * rather than lost: a supervising caller sees it on every poll and can put
-   * the work back, and a human sees whose work is waiting.
-   *
-   * Cross-checked against the same census as the other three categories: an
-   * agent the registry believes preempted that herdr can show running is not
-   * owed anything — the record and reality disagree, and reality is the one a
-   * supervisor acts on. (A stale record can only arise from a failure — the
-   * confirmed-teardown rule refuses to write one on purpose — but a category
-   * that reports records as facts without looking would turn any such failure
-   * into a permanent phantom debt.)
+   * Cross-checked against the same census as the other categories: an agent
+   * the registry believes preempted that herdr can show running is not owed
+   * anything — the record and reality disagree, and reality is the one a
+   * supervisor acts on.
    */
   private preemptedAgents(agents: ListedAgent[], sharedIntents?: Map<string, AgentIntent>) {
-    const alive = new Set(agents.map((a) => a.agentName));
+    const alive = new Set(agents.map((a) => a.path));
     const preempted = sharedIntents
       ? AgentRegistry.preemptedFrom(sharedIntents)
       : this.deps.agentRegistry.preempted();
     return preempted
-      .filter((entry) => !alive.has(entry.agentName))
+      .filter((entry) => !alive.has(entry.path))
       .map((entry) => ({
-        agentName: entry.agentName,
-        type: entry.record.type,
-        key: entry.record.key,
-        workDir: entry.record.workDir,
-        url: entry.record.url ?? null,
+        path: entry.path,
+        paneName: paneNameFor(entry.path),
+        label: entry.record.config.label ?? null,
         at: entry.at,
         priority: entry.preemption.priority,
         herdrStatusWhenPreempted: entry.preemption.herdrStatus,
         by: {
-          agentName: entry.preemption.byAgentName,
-          type: entry.preemption.byType,
-          key: entry.preemption.byKey,
+          path: entry.preemption.byPath,
+          paneName: entry.preemption.byPaneName,
           priority: entry.preemption.byPriority
         },
         reason:
           `Stood down at ${entry.at} to free capacity for ` +
-          `${entry.preemption.byType}/${entry.preemption.byKey} ` +
+          `${entry.preemption.byPath} ` +
           `(priority ${entry.preemption.byPriority} against this agent's ` +
           `${entry.preemption.priority}). Its work was interrupted, not finished. ` +
           `Re-activating it resumes the conversation it was stopped in; until then ` +
@@ -1759,30 +2121,28 @@ export class MessageRouter {
     staleSessions?: Set<string>,
     sharedIntents?: Map<string, AgentIntent>
   ): MissingAgent[] {
-    const alive = new Set(agents.map((a) => a.agentName));
+    const alive = new Set(agents.map((a) => a.path));
     const missing: MissingAgent[] = [];
 
-    for (const [agentName, intent] of sharedIntents ?? this.deps.agentRegistry.intents()) {
+    for (const [agentPath, intent] of sharedIntents ?? this.deps.agentRegistry.intents()) {
       if (intent.event !== 'activated') continue;
-      if (alive.has(agentName)) continue;
+      if (alive.has(agentPath)) continue;
 
       missing.push({
-        agentName,
-        type: intent.record.type,
-        key: intent.record.key,
-        workDir: intent.record.workDir,
-        url: intent.record.url ?? null,
+        path: agentPath,
+        paneName: paneNameFor(agentPath),
+        label: intent.record.config.label ?? null,
         since: intent.at,
         // Both cases are "not running", but they are not the same event and a
         // reader acting on this deserves the difference: an agent that never
         // came back, versus one that was running under this daemon and died
         // while we held its session. The second is a crash we witnessed.
-        reason: staleSessions?.has(agentName)
+        reason: staleSessions?.has(agentPath)
           ? 'The registry records this agent as active and this daemon held a session ' +
-            'for it, but herdr has no agent by that name: it started and then died. ' +
+            'for it, but herdr has no live agent in its directory: it started and then died. ' +
             'It is not running.'
-          : 'The registry records this agent as active, but herdr has no agent by that name ' +
-            'and this daemon holds no session for it. It is not running.'
+          : 'The registry records this agent as active, but herdr has no live agent in its ' +
+            'directory and this daemon holds no session for it. It is not running.'
       });
     }
 
@@ -1798,15 +2158,12 @@ export class MessageRouter {
    *   - still running — the stand-down failed, or it was started again since.
    *     Offering On for something already on is how a control starts lying.
    *   - preempted — reported separately, with the name of what took its slot.
-   *     One agent, one switch: a row in two lists is a row that can be pressed
-   *     twice. (Once compaction has dropped that annotation the agent does
-   *     land here — there is no longer a debt to report it as — but it arrives
-   *     carrying `wasPreempted` and a reason that says what actually happened
-   *     to it. It is still in exactly one list.)
-   *   - no workspace on disk — `reset` records a stand-down too, and the
-   *     directory it deleted is the whole difference between "stopped" and
-   *     "finished with". Re-activating one of those would create an empty
-   *     workspace and start an agent in it with nothing to continue.
+   *     One agent, one switch. (Once compaction has dropped that annotation
+   *     the agent does land here — there is no longer a debt to report it as —
+   *     but it arrives carrying `wasPreempted` and a reason that says what
+   *     actually happened to it. It is still in exactly one list.)
+   *   - directory gone — the caller deleted it, and that is the difference
+   *     between "stopped" and "finished with".
    *
    * Newest first, because the thing you just switched off is the thing you are
    * most likely to want back.
@@ -1815,36 +2172,31 @@ export class MessageRouter {
     agents: ListedAgent[],
     sharedIntents?: Map<string, AgentIntent>
   ): { standby: StandbyAgent[]; total: number } {
-    const alive = new Set(agents.map((a) => a.agentName));
+    const alive = new Set(agents.map((a) => a.path));
     const standby: StandbyAgent[] = [];
 
-    for (const [agentName, intent] of sharedIntents ?? this.deps.agentRegistry.intents()) {
+    for (const [agentPath, intent] of sharedIntents ?? this.deps.agentRegistry.intents()) {
       if (intent.event !== 'deactivated') continue;
       if (intent.preemption) continue;
-      if (alive.has(agentName)) continue;
-
-      const workDir = intent.record.workDir;
-      if (!workDir || !fs.existsSync(workDir)) continue;
+      if (alive.has(agentPath)) continue;
+      if (!fs.existsSync(agentPath)) continue;
 
       standby.push({
-        agentName,
-        type: intent.record.type,
-        key: intent.record.key,
-        workDir,
-        url: intent.record.url ?? null,
-        defaultAgent: intent.record.defaultAgent ?? null,
+        path: agentPath,
+        paneName: paneNameFor(agentPath),
+        label: intent.record.config.label ?? null,
+        launcher: intent.record.config.launcher,
         since: intent.at,
         // Set on a row that reached this list through compaction dropping a
-        // preemption annotation. It is here so a client can tell the two
-        // apart, and so the sentence below can stop short of claiming a
-        // decision nobody made.
+        // preemption annotation, so a client can tell the two apart and the
+        // sentence below can stop short of claiming a decision nobody made.
         ...(intent.wasPreempted ? { wasPreempted: true } : {}),
         reason: intent.wasPreempted
           ? 'Stopped to free capacity for higher-priority work, long enough ago that the ' +
-            'record of what took its slot has been compacted away. Its workspace is still ' +
-            'on disk, so switching it back on resumes the conversation it was stopped in ' +
+            'record of what took its slot has been compacted away. Its directory is still ' +
+            'there, so switching it back on resumes the conversation it was stopped in ' +
             'rather than starting a new one.'
-          : 'Switched off deliberately. Its workspace is still on disk, so switching it back ' +
+          : 'Switched off deliberately. Its directory is still there, so switching it back ' +
             'on resumes the conversation it was stopped in rather than starting a new one.'
       });
     }
@@ -1854,28 +2206,47 @@ export class MessageRouter {
   }
 
   /**
-   * The workspace type the registry has on file for a key, when it is
-   * unambiguous. Used to address an agent that no longer exists anywhere else —
-   * see handleDeactivateByKey. Two registered agents sharing a key differ only
-   * by type, which is precisely what this cannot guess, so it declines rather
-   * than picking one.
-   */
-  private registeredTypeFor(key: string): string | undefined {
-    const lower = key.toLowerCase();
-    const matches = Array.from(this.deps.agentRegistry.intents().values()).filter(
-      (intent) => intent.event === 'activated' && intent.record.key.toLowerCase() === lower
-    );
-    return matches.length === 1 ? matches[0].record.type : undefined;
-  }
-
-  /**
    * `missingAgents`, for callers outside a request — the daemon's periodic
    * sweep. Public because the sweep runs on a timer rather than in response to
    * a client, and must ask the same question the list answers.
    */
   public findMissingAgents(): MissingAgent[] {
-    const { agents, staleSessions } = this.surveyAgents();
-    return this.missingAgents(agents, staleSessions);
+    const intents = this.deps.agentRegistry.intents();
+    const { agents, staleSessions } = this.surveyAgents(intents);
+    return this.missingAgents(agents, staleSessions, intents);
+  }
+
+  private rowFrom(
+    agentPath: string,
+    paneName: string,
+    census: HerdrAgentRecord | undefined,
+    session: HerdrSession | undefined,
+    intent: AgentIntent | undefined
+  ): ListedAgent {
+    const config = intent?.record.config;
+    return {
+      sessionless: !session,
+      path: agentPath,
+      paneName,
+      paneId: census?.paneId ?? intent?.record.paneId ?? null,
+      // Session-only fields are null, not invented: there is no session id to
+      // report and no creation time we saw. Filling them in to match the
+      // attached shape would be a fabrication.
+      sessionId: session?.sessionId ?? null,
+      createdAt: session ? session.createdAt.toISOString() : null,
+      status: session?.status ?? null,
+      herdrStatus: census?.herdrStatus ?? 'unknown',
+      agentRuntime: census?.agentRuntime ?? null,
+      label: config?.label ?? null,
+      // An agent with no record cannot be priced, refused or preempted — so it
+      // is treated as fully subject to the machine (charged, refusable) and
+      // never offered as a victim. That combination is the safe reading of
+      // every unknown: it costs a slot, which is true, and nothing may kill it
+      // on the strength of a priority nobody wrote down.
+      refusable: config?.refusable ?? true,
+      chargeable: config?.chargeable ?? true,
+      preemptable: config ? config.preemptable : false
+    };
   }
 
   /**
@@ -1883,17 +2254,19 @@ export class MessageRouter {
    * know what is running. Split out so every consumer counts exactly what the
    * list reports; two answers to "what is running" is one answer too many.
    */
-  private surveyAgents(): {
+  private surveyAgents(sharedIntents?: Map<string, AgentIntent>): {
     agents: ListedAgent[];
     unbackedPanes: UnbackedPane[];
+    foreignPanes: ForeignPane[];
     staleSessions: Set<string>;
+    census: HerdrCensus;
   } {
-    const { reachable, agents: herdrAgents } = this.deps.herdrBridge.listHerdrAgentsChecked();
-    const byName = new Map<string, HerdrAgentRecord>(herdrAgents.map(a => [a.name, a]));
-    const statuses = new Map(herdrAgents.map(a => [a.name, a.herdrStatus]));
+    const census = this.deps.herdrBridge.listHerdrAgentsChecked();
+    const intents = sharedIntents ?? this.deps.agentRegistry.intents();
+    const byPaneName = new Map<string, HerdrAgentRecord>(census.agents.map((a) => [a.name, a]));
 
     const agents: ListedAgent[] = [];
-    const attached = new Set<string>();
+    const covered = new Set<string>();
 
     /**
      * Sessions this daemon still holds for agents herdr no longer has.
@@ -1902,89 +2275,93 @@ export class MessageRouter {
      * that the thing is still alive, and it outlives the agent whenever the
      * pane dies without us tearing it down — which is precisely what a crashed
      * or killed agent looks like. Listing one as running is how a dead agent
-     * reads as work in progress with nothing behind it: the silent loss this
-     * census exists to remove, reintroduced one layer up.
+     * reads as work in progress with nothing behind it.
      */
     const staleSessions = new Set<string>();
 
     for (const session of this.deps.herdrBridge.listActiveSessions()) {
-      const agentName = agentNameFor(session.type, session.key);
-      attached.add(agentName);
-
       // herdr is the authority on whether an agent exists — but only when it
       // answered. An unreachable herdr returns an empty census, and treating
       // that silence as "they are all dead" would condemn a perfectly healthy
       // fleet, so in that case we keep trusting the session map.
       //
-      // Two different deaths, and only one of them is unconditional. A name
-      // herdr has never heard of is gone, full stop. A name it *has* with no
-      // runtime behind it is a pane whose agent exited — dead too, except for
-      // a `shell` workspace, where a bare prompt and no runtime is the entire
-      // point. Calling one of those missing would be a false alarm about
-      // something working exactly as asked. The session records which reading
-      // applies — initPty set expectsRuntime when it resolved the launcher.
-      if (reachable) {
-        const record = byName.get(agentName);
+      // Two different deaths, and only one of them is unconditional. A pane
+      // herdr has never heard of is gone, full stop. A pane it *has* with no
+      // runtime behind it is one whose agent exited — dead too, except for a
+      // `shell` agent, where a bare prompt and no runtime is the entire point.
+      if (census.reachable) {
+        const record = byPaneName.get(session.paneName);
         const dead = !record || (!record.agentRuntime && (session.expectsRuntime ?? true));
         // An empty pane is only evidence of death once the launcher has had
         // its runtime-confirm window: a freshly spawned agent legitimately
-        // shows no runtime for up to RUNTIME_CONFIRM_TIMEOUT_MS — that gap is
-        // exactly why confirmActivation polls — and any concurrent
-        // list_agents/capacity call (or the 30s sweep) landing inside it
-        // would otherwise abandon the session the in-flight activate is
-        // still confirming, which then answers `success: true` over a killed
-        // PTY. Inside the window the session is reported as it is; the next
-        // census after the window closes is the one entitled to a verdict.
+        // shows no runtime for up to RUNTIME_CONFIRM_TIMEOUT_MS, and any
+        // concurrent list_agents/capacity call landing inside it would
+        // otherwise abandon the session the in-flight activate is still
+        // confirming, which then answers `success: true` over a killed PTY.
         const settled =
           Date.now() - session.createdAt.getTime() >= RUNTIME_CONFIRM_TIMEOUT_MS;
         if (dead && settled) {
-          staleSessions.add(agentName);
+          staleSessions.add(session.path);
           // Release the corpse, not just skip it. A session left `active` for
-          // a dead pane is the one the next activate for this address would
+          // a dead pane is the one the next activate for this path would
           // reuse — it would then fail confirmation only after a full
           // confirm-timeout poll, tearing the session down at the moment the
-          // caller is waiting on it. The extraction source computed this set
-          // and discarded it (flagged in KAN-70's review); releasing here
-          // means the next activation spawns fresh instead of inheriting a
-          // session whose agent it can never confirm.
+          // caller is waiting on it.
           this.deps.herdrBridge.abandonSession(
             session.sessionId,
-            `herdr has no live agent behind ${agentName}; the session was released by the census`
+            `herdr has no live agent behind ${session.paneName}; the session was released by the census`
           );
           continue;
         }
       }
 
-      const dto = this.toAgentDto(session, statuses);
-      agents.push({
-        sessionless: false,
-        agentName,
-        sessionId: dto.sessionId,
-        type: dto.type,
-        key: dto.key,
-        url: dto.url ?? null,
-        createdAt: dto.createdAt,
-        status: dto.status,
-        workDir: dto.workDir,
-        herdrStatus: dto.herdrStatus,
-        agentRuntime: byName.get(agentName)?.agentRuntime ?? null,
-        gateExempt: this.deps.registry.get(dto.type)?.gateExempt ?? false
-      });
+      covered.add(session.path);
+      agents.push(
+        this.rowFrom(
+          session.path,
+          session.paneName,
+          byPaneName.get(session.paneName),
+          session,
+          intents.get(session.path)
+        )
+      );
     }
 
     const unbackedPanes: UnbackedPane[] = [];
+    const foreignPanes: ForeignPane[] = [];
 
-    for (const record of herdrAgents) {
-      if (attached.has(record.name)) continue;
-      const address = addressFromAgentName(record.name);
-      if (!address) continue; // Not one of ours; herdr hosts more than CrabCast.
+    for (const record of census.agents) {
+      const cwd = record.canonicalWorkDir;
+      // Ours by BOTH halves: the registry holds a record for that directory,
+      // and the pane wears the name that directory derives. The cwd join is
+      // what makes the registry authoritative; the name check is what stops a
+      // stranger's pane in one of our directories being reported as our agent.
+      const ours = cwd !== null && intents.has(cwd) && record.name === paneNameFor(cwd);
+
+      if (!ours) {
+        // Only live ones. A bare shell somebody left open elsewhere on the
+        // machine is not news; a running agent in a directory we hold a record
+        // for is exactly the thing that will refuse our next activation.
+        if (record.agentRuntime) {
+          foreignPanes.push({
+            paneName: record.name,
+            paneId: record.paneId,
+            workDir: record.workDir,
+            occupies: cwd !== null && intents.has(cwd) ? cwd : null,
+            herdrStatus: record.herdrStatus,
+            agentRuntime: record.agentRuntime
+          });
+        }
+        continue;
+      }
+
+      if (covered.has(cwd!)) continue;
 
       if (!record.agentRuntime) {
         unbackedPanes.push({
-          agentName: record.name,
-          type: address.type,
-          key: address.key,
-          workDir: record.workDir,
+          paneName: record.name,
+          paneId: record.paneId,
+          path: cwd!,
           herdrStatus: record.herdrStatus,
           reason:
             'herdr reports no agent running in this pane and this daemon holds no session for it'
@@ -1992,27 +2369,14 @@ export class MessageRouter {
         continue;
       }
 
-      // Session-only fields are null, not invented. There is no session id to
-      // report, no url the agent was bound to and no creation time we saw —
-      // filling them in to match the attached shape would be a fabrication.
-      agents.push({
-        sessionless: true,
-        agentName: record.name,
-        sessionId: null,
-        type: address.type,
-        key: address.key,
-        url: null,
-        createdAt: null,
-        status: null,
-        workDir: record.workDir,
-        herdrStatus: record.herdrStatus,
-        agentRuntime: record.agentRuntime,
-        gateExempt: this.deps.registry.get(address.type)?.gateExempt ?? false
-      });
+      covered.add(cwd!);
+      agents.push(this.rowFrom(cwd!, record.name, record, undefined, intents.get(cwd!)));
     }
 
-    return { agents, unbackedPanes, staleSessions };
+    return { agents, unbackedPanes, foreignPanes, staleSessions, census };
   }
+
+  // -------------------------------------------------------------------- pty
 
   /**
    * The session id a PTY request names, when it named one at all.
@@ -2044,8 +2408,8 @@ export class MessageRouter {
     return (
       `${named}. A PTY session id is only valid for the daemon process that issued it, ` +
       'and this one is not among them — most likely it was issued by a previous daemon ' +
-      'and the client has not re-resolved since. Ask for the workspace again (activate ' +
-      'by key) and use the session id that comes back; retrying this one cannot succeed.'
+      'and the client has not re-resolved since. Ask for the agent again (activate by ' +
+      'path) and use the session id that comes back; retrying this one cannot succeed.'
     );
   }
 
