@@ -486,8 +486,9 @@ check(fs.existsSync(registry), 'scripts/verify-proof-registry.mjs exists');
 const registryRun = /node\s+scripts\/verify-proof-registry\.mjs/;
 const ciText = fs.existsSync(ciYml) ? fs.readFileSync(ciYml, 'utf8') : '';
 const registryCalls = findRunInvocations(ciText, registryRun);
-const registryLive = registryCalls.filter((f) => f.disabled.length === 0);
-const registryOff = registryCalls.filter((f) => f.disabled.length > 0);
+const registryLive = registryCalls.filter((f) => f.position === 'command' && f.disabled.length === 0);
+const registryOff = registryCalls.filter((f) => f.position === 'command' && f.disabled.length > 0);
+const registryMentioned = registryCalls.filter((f) => f.position === 'argument');
 
 check(
   registryLive.length > 0,
@@ -498,6 +499,10 @@ check(
       ? `the invocation is at ci.yml:${registryOff.map((f) => f.line).join(', ci.yml:')} but does not gate CI — ` +
         `${registryOff.flatMap((f) => f.disabled).join('; ')}. A proof can now leave the CI array ` +
         'with nothing left to say so'
+      : registryMentioned.length
+        ? `at ci.yml:${registryMentioned.map((f) => f.line).join(', ci.yml:')} the name appears only as an ` +
+          'ARGUMENT or inside quotes, never as the command the shell runs — a proof can now leave the CI array ' +
+          'with nothing left to say so'
       : findAnywhere(ciText, registryRun).length
         ? `the text appears at ci.yml:${findAnywhere(ciText, registryRun).join(', ci.yml:')} but not as a step ` +
           'at all — a proof can now leave the CI array with nothing left to say so'

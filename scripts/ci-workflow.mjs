@@ -30,10 +30,26 @@
 // comments out a CI step to be clever; plenty of people add `|| true` to get
 // past a red check while iterating and forget to take it off.
 //
+// Round 3 then fixed one member of a category and described the category:
+// "cuts a trailing shell comment before matching, SO THE INVOCATION HAS TO BE
+// THE COMMAND rather than a comment beside one." Cutting the comment does not
+// make it the command. The match still only had to appear SOMEWHERE in the
+// surviving text, so six more shapes ran nothing and stayed green:
+//
+//     echo "node scripts/verify-proof-registry.mjs"
+//     echo node scripts/verify-proof-registry.mjs
+//     : node scripts/verify-proof-registry.mjs
+//     bash -c 'node scripts/verify-proof-registry.mjs' || true
+//
+// commandStarts is what makes that sentence true, and it is asserted now.
+//
 // The lesson, and it is the same one this suite keeps relearning one level
 // up: THE SENTENCE DESCRIBING WHAT A GUARD COVERS IS ITSELF A CLAIM, and it
-// needs the same standard of proof as the guard. Write the assertion first,
-// then the sentence.
+// needs the same standard of proof as the guard. Three times in this one
+// change the code fixed a member and the prose asserted the category. The
+// habit that catches all three: WHEN YOU WRITE "SO X CAN NO LONGER HAPPEN,"
+// GO AND MAKE X HAPPEN. If it still can, the sentence describes your intent
+// rather than your code. Write the assertion first, then the sentence.
 //
 // So this answers the question the regex only appeared to: is that command run
 // by a step that will actually execute, and will its failure fail the build? A
@@ -59,10 +75,16 @@
 //      trigger would be the weaker of the two controls, and duplicating a
 //      control that already works is how the weaker one comes to be trusted.
 //
-//   3. Shapes of exit-code laundering beyond the list in shellDisablers:
-//      `if node x.mjs; then …; fi`, a trap, a wrapper script that exits 0.
-//      What IS asserted is enumerated there and demonstrated by mutation on
-//      the PR. Nothing here claims the set is exhaustive.
+//   3. Shapes of exit-code laundering beyond the list in shellDisablers — a
+//      `trap` that exits 0, or a wrapper SCRIPT whose own exit code is 0
+//      whatever it ran. (`if node x.mjs; then …; fi` is NOT in this gap: it
+//      is caught, via the `;` operator. That example was an under-claim and
+//      is corrected here.) A wrapper on the command line — `timeout 60 node
+//      x.mjs`, `bash -c '…'` — is not in this gap either: the invocation is
+//      not at command position, so it reads as absent and fails closed.
+//      What IS asserted is enumerated in shellDisablers and commandStarts and
+//      demonstrated by mutation on the PR. Nothing here claims the set is
+//      exhaustive.
 //
 // This is not a YAML parser and does not want to be. It reads the two levels
 // of structure these checks depend on and is honest about a shape it does not
@@ -201,6 +223,69 @@ export function stripShellComment(text) {
   return out.trim();
 }
 
+/**
+ * Shell keywords that precede a command without consuming its position: after
+ * `if`, the next word is still a command being run.
+ */
+const LEADING_KEYWORDS = new Set(['if', 'then', 'elif', 'else', 'do', 'while', 'until', 'time', '!', 'exec', 'command']);
+
+/**
+ * Offsets in `text` at which a COMMAND begins — outside quotes, at the start
+ * or just past a `;`, `&&`, `||`, `|`, `&`, newline, `(` or `{`.
+ *
+ * This is what round 3 was missing. `re.exec(command)` matched anywhere, so
+ * every one of these read as a live invocation while running nothing:
+ *
+ *     echo "node scripts/verify-proof-registry.mjs"
+ *     echo node scripts/verify-proof-registry.mjs
+ *     : node scripts/verify-proof-registry.mjs
+ *     bash -c 'node scripts/verify-proof-registry.mjs' || true
+ *
+ * The last compounded: the match landed mid-string, so the text after it began
+ * with an unbalanced quote, `firstOperator` entered quote mode and never left,
+ * and the trailing `|| true` went unseen too. One defect defeated both the
+ * mention check and the swallowed-exit check.
+ *
+ * Requiring command position closes all of them at once, and closes the quote
+ * bug by construction rather than by patch: a position inside quotes is never
+ * a command start, so the text after a match never begins mid-quote.
+ *
+ * A wrapper — `timeout 60 node x.mjs`, `xvfb-run node x.mjs` — is NOT a
+ * command position and reads as absent. That is a deliberate fail-closed: a
+ * wrapper changes what the exit status means, and admitting one should be a
+ * reviewed edit rather than an inference. The message says which case it is.
+ */
+export function commandStarts(text) {
+  const starts = [];
+  let quote = null;
+  let atStart = true;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (quote) {
+      if (c === '\\' && quote === '"') { i += 1; continue; }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '\\') { atStart = false; i += 1; continue; }
+    if (c === "'" || c === '"') { quote = c; atStart = false; continue; }
+    if (atStart && !/\s/.test(c)) { starts.push(i); atStart = false; }
+    const two = text.slice(i, i + 2);
+    if (two === '&&' || two === '||') { atStart = true; i += 1; continue; }
+    if (c === ';' || c === '|' || c === '&' || c === '\n' || c === '(' || c === '{') { atStart = true; continue; }
+  }
+
+  // `if node x.mjs` runs `node`: step past a leading keyword and count the
+  // word after it as a command start too.
+  for (let n = 0; n < starts.length; n += 1) {
+    const rest = text.slice(starts[n]);
+    const word = /^(\S+)\s+/.exec(rest);
+    if (!word || !LEADING_KEYWORDS.has(word[1])) continue;
+    const next = starts[n] + word[0].length;
+    if (next < text.length && !starts.includes(next)) starts.push(next);
+  }
+  return starts.sort((a, b) => a - b);
+}
+
 /** The first unquoted shell control operator in `text`, if any. */
 function firstOperator(text) {
   let quote = null;
@@ -290,15 +375,24 @@ function shellDisablers(runLines, at, after) {
 /**
  * Every place `needle` appears in the `run` value of a real step.
  *
- * Each result is `{ line, job, disabled }`, where `disabled` is empty for a
- * step that will genuinely execute and otherwise holds the reasons it will
- * not. Callers are expected to require at least one live result AND no
- * disabled ones — a disabled invocation is a distinct, and more misleading,
- * failure than an absent one.
+ * Each result is `{ line, job, position, disabled }`.
  *
- * A commented-out line is never a result, and neither is a comment BESIDE a
- * command: the needle is matched against the run text with any trailing shell
- * comment already cut, so `run: true  # node scripts/x.mjs` finds nothing.
+ *   position 'command'  — the needle begins a command the shell will run.
+ *   position 'argument' — it appears only as an argument or inside quotes:
+ *                         `echo "node x.mjs"`, `bash -c '…'`, `timeout 60
+ *                         node x.mjs`. Mentioned, not executed.
+ *
+ * `disabled` is empty for a step that will genuinely execute and otherwise
+ * holds the reasons it will not. A caller wanting proof that something runs
+ * must require a result with position 'command' AND an empty `disabled` —
+ * mentioned-only and switched-off are each a distinct, and more misleading,
+ * failure than an absent one, so they are reported separately rather than
+ * folded into "not found".
+ *
+ * What is NOT a result: a commented-out line (a YAML comment is not a step, a
+ * `#` in a block scalar is not a command), and a comment beside a command —
+ * the needle is matched against the run text with any trailing shell comment
+ * already cut, so `run: true  # node scripts/x.mjs` finds nothing.
  */
 export function findRunInvocations(text, needle) {
   const re = new RegExp(needle.source ?? needle, (needle.flags ?? '').replace('g', ''));
@@ -325,14 +419,33 @@ export function findRunInvocations(text, needle) {
       const keyReasons = keyDisablers(job.id, job.keys, keys);
       for (let at = 0; at < runLines.length; at += 1) {
         const command = stripShellComment(runLines[at].text);
-        const m = re.exec(command);
-        if (!m) continue;
-        const after = command.slice(m.index + m[0].length);
-        found.push({
-          line: runLines[at].idx + 1,
-          job: job.id,
-          disabled: [...keyReasons, ...shellDisablers(runLines, at, after)]
-        });
+        const starts = new Set(commandStarts(command));
+
+        // Every match on the line, not just the first: `echo node x.mjs && node
+        // x.mjs` mentions it once and runs it once, and the run is what counts.
+        const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+        let m;
+        let executed = false;
+        const mentions = [];
+        while ((m = scan.exec(command)) !== null) {
+          if (m[0] === '') { scan.lastIndex += 1; continue; }
+          if (!starts.has(m.index)) { mentions.push(m.index); continue; }
+          executed = true;
+          found.push({
+            line: runLines[at].idx + 1,
+            job: job.id,
+            position: 'command',
+            disabled: [...keyReasons, ...shellDisablers(runLines, at, command.slice(m.index + m[0].length))]
+          });
+        }
+
+        // Mentioned but never run: `echo "node x.mjs"`, `bash -c '…'`, or a
+        // wrapper like `timeout 60 node x.mjs`. Reported so the caller can say
+        // WHICH of "absent" it is, instead of leaving a reader staring at a
+        // line that plainly contains the string.
+        if (!executed && mentions.length) {
+          found.push({ line: runLines[at].idx + 1, job: job.id, position: 'argument', disabled: keyReasons });
+        }
       }
     }
   }

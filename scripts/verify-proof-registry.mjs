@@ -373,8 +373,10 @@ console.log('\n=== 4. This check runs in CI, from outside the list it audits ===
 const invocation = new RegExp(`node\\s+scripts/${SELF}\\.mjs`);
 const outsideArray = (line) => !arrayRegion || line < arrayRegion.start || line > arrayRegion.end;
 const invocations = findRunInvocations(yaml, invocation).filter((f) => outsideArray(f.line));
-const live = invocations.filter((f) => f.disabled.length === 0);
-const disabled = invocations.filter((f) => f.disabled.length > 0);
+const live = invocations.filter((f) => f.position === 'command' && f.disabled.length === 0);
+const disabled = invocations.filter((f) => f.position === 'command' && f.disabled.length > 0);
+// Mentioned but never executed — `echo "node …"`, `bash -c '…'`, a wrapper.
+const mentioned = invocations.filter((f) => f.position === 'argument');
 
 // Diagnostic for the exact confusion round 1 shipped: the text is there, the
 // step is not. Saying "not found" over a file that visibly contains the string
@@ -389,6 +391,10 @@ check(
     : disabled.length
       ? `the invocation is at ci.yml:${disabled.map((f) => f.line).join(', ci.yml:')} but does not gate CI — ` +
         `${disabled.flatMap((f) => f.disabled).join('; ')}.`
+      : mentioned.length
+        ? `at ci.yml:${mentioned.map((f) => f.line).join(', ci.yml:')} the name appears only as an ARGUMENT or ` +
+          'inside quotes — echoed, passed to another command, or wrapped — never as the command the shell runs. ' +
+          'Nothing in CI executes this audit.'
       : textAt.length
         ? `the text appears at ci.yml:${textAt.join(', ci.yml:')} but not as a step at all — ` +
           'commented out, or not a `run:` value. Nothing in CI executes this audit.'
