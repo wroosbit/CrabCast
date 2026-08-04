@@ -56,6 +56,29 @@ the field there would break a read that shipped in T3 for cosmetic gain. It is
 prose explaining why the daemon says the agent is absent. `agent.deactivated`'s
 `reason` is a different field on a different event and takes one of two words.
 
+### `agent.deactivated`'s `reason` is NOT optional, and this is the one to read twice
+
+`reason` is on **every** `agent.deactivated`, always, and takes exactly one of
+`requested` or `preempted`. It is not a flag that appears when true and it is
+never absent.
+
+That matters more here than it would elsewhere, because of what this merge did.
+`agent_preempted_event` used to be its own event: the distinction lived in the
+event **name**, where it could not be dropped. Merging it into
+`agent.deactivated` moved that distinction into a **field**, where it can. And
+the two are not shades of the same thing — in the consumer's words:
+
+> **preempted means the machine took this and owes it back.**
+
+A subscriber that keeps preempted and standby as distinct states — which is the
+correct thing to do, because one is a debt somebody owes and the other is a
+decision somebody made — distinguishes them **by this field alone**. An absent
+`reason` would not fail loudly at such a subscriber; it would quietly render
+work the machine seized as work someone chose to switch off. So: not optional,
+declared required in `src/events.ts`, and `verify-event-contract.mjs` audits
+every emission site statically rather than trusting the sites it happens to
+exercise.
+
 ### `agent.deactivated`'s `preemption` block
 
 Present exactly when `reason === 'preempted'`. It carries everything the
@@ -193,6 +216,20 @@ polling `agent_status` harder on their side, not by CrabCast pushing faster.
   rather than a caveat: `agent.status_changed` tells you the status is
   different from the last one you were told about, never that it took a
   particular route to get there.
+
+  The consumer was asked whether this needed a different mechanism and declined,
+  with a better reason than the one offered: their reconciler compares desired
+  against actual **as observed now**, so a flap that resolved itself changed
+  neither — and for supervision, not being woken about a child that unblocked
+  itself in thirty seconds is a filter rather than a gap.
+
+  **The sharper form of this limit, which is worth knowing before it bites: an
+  agent flapping faster than the sample rate looks like it is steadily working,
+  forever.** Not "you miss one transition" — you get a steady reading that is
+  never true. That is a property of sampling rather than of this design, and any
+  poll on any timer has it identically; catching it would need something
+  watching *progress* rather than *status*, which this daemon does not do and
+  does not claim to.
 * **A first sighting is not a transition.** A freshly activated agent, or one
   that came back after disappearing, seeds the daemon's memory silently. There
   is no `from` that anybody observed, and inventing one would be a claim about
@@ -350,16 +387,31 @@ allowlist forwards the published events with structured payloads on both paths,
 that the retired `endsWith('_event')` filter would have dropped every one of
 them, that an off-allowlist action is dropped and logged on both sides, that
 `agent.status_changed` fires on a real transition within the documented bound —
-asserted at 32s, the 30s sweep plus census slack, so a sweep that overran the
-figure quoted in §2 fails rather than printing a number larger than the bound
-it cites — and that a subscriber reconnecting across a daemon restart sees a
-new `bootId` and recovers the fleet. It also asserts `seq` is **contiguous**
-rather than merely increasing, which is what makes "your `seq` jumped, so you
-missed events" mean anything.
+asserted at 32s, which is the 30s sweep plus census slack, so a sweep that
+overran the bound in §2 fails rather than passing — and that a subscriber
+reconnecting across a daemon restart sees a new `bootId` and recovers the
+fleet. It also asserts `seq` is **contiguous** rather than merely increasing,
+which is what makes "your `seq` jumped, so you missed events" mean anything.
+
+Read that 32s figure against §2's bound, which is **30s plus one census read**
+and not a flat 30s. The script's own success line says "inside the 30-second
+documented bound", which is shorthand: at a 31-second sweep it prints 30.9s
+beside those words, and 30.9 honours the real bound while reading like a
+contradiction against the shorthand. The number it asserts is right; the
+sentence it prints is loose.
 
 One limit of that script, stated here rather than left to be discovered: its
 guard against this document re-acquiring a unilateral convergence guarantee is
-a **tripwire over known phrasings**, not a proof of absence. It rejects the
-shapes that mistake has actually taken — and both are on file — but a
-sufficiently novel sentence asserting the same falsehood would pass it. The
-real defence is a reviewer trying to write the sentence.
+a **tripwire over known phrasings**, not a proof of absence — and the honest
+summary is stronger than that. **It does not work on novel phrasings at all.**
+Review attacked it with ten paraphrases the pattern list had never seen and
+**all ten passed** — among them one that located the guarantee on the daemon's
+side and denied it depended on the consumer at all, which is exactly the claim
+§2 rejects. (The specimens are quoted in the script's own header comment rather
+than here, so that widening a pattern later cannot turn this section red for
+containing a sentence it is warning you about.) It catches the shapes the
+mistake has actually taken, which are on file; it catches nothing else, and no
+addition to that list will change the kind of thing it is, because "asserts
+convergence unilaterally" is not a lexical property of English. **The real
+defence is a reviewer trying to write the sentence** — that is what caught it
+both times.

@@ -507,11 +507,22 @@ console.log(`   documented but unpublished: ${unpublished.length ? unpublished.j
  * sentence claiming CrabCast provides convergence on its own is false however
  * it is phrased, so the check rejects the SHAPE.
  *
- * WHAT IT STILL WILL NOT CATCH, said plainly rather than claimed away: this is
- * a tripwire over known phrasings, not a proof of absence. A sufficiently
- * novel sentence asserting the same falsehood passes it. It exists to make the
- * easy version of the mistake loud, and the only real defence is the one that
- * caught it here — a reviewer trying to write the sentence.
+ * WHAT IT STILL WILL NOT CATCH, said plainly rather than claimed away, and
+ * without a ratio that flatters it: THIS DOES NOT WORK ON NOVEL PHRASINGS AT
+ * ALL. Review attacked the list with ten paraphrases it had never seen and all
+ * ten passed — including "This is enforced on our daemon's side, not yours".
+ * An earlier draft of this comment reported two misses out of four probes,
+ * which reads like a coin flip; ten out of ten reads like the truth, which is
+ * that the list catches the shapes the mistake has actually taken and nothing
+ * else.
+ *
+ * No addition to the list changes the KIND of thing it is. "Asserts
+ * convergence unilaterally" is not a lexical property of English, so there is
+ * no set of patterns that closes this category — which is why the category is
+ * left open and LABELLED open rather than papered over with a longer list. It
+ * exists to make the easy version of the mistake loud. The only real defence
+ * is the one that caught it both times: a reviewer trying to write the
+ * sentence.
  */
 const REFUTED_REGION = /<!--\s*refuted-claim:start[\s\S]*?refuted-claim:end\s*-->/g;
 const refutedRegions = docText.match(REFUTED_REGION) ?? [];
@@ -579,6 +590,80 @@ verdict(
   `undocumented=[${undocumented}], unpublished=[${unpublished}], ` +
   `unilateral claims outside the refuted region=[${unilateral.join(' ')}], ` +
   `refuted regions=${refutedRegions.length} (${refutedLength} chars)`
+);
+
+// ---- `reason` is structurally non-optional, and every site actually sends it --
+//
+// WHY THIS CHECK EXISTS, and it is a consequence of a merge THIS SLICE CHOSE.
+// Folding `agent_preempted_event` into `agent.deactivated` moved a distinction
+// out of the event NAME — where it could not be dropped — into a FIELD, where
+// it can. Butchr's Agents page keeps preempted and standby distinct because
+// **preempted means the machine took this and owes it back**; a missing
+// `reason` does not fail loudly on their side, it silently downgrades that
+// into "somebody switched it off". Two different obligations, one absent
+// field.
+//
+// The runtime drift check catches a missing required field only on the sites
+// this script happens to exercise. This is static and covers ALL of them.
+//
+// IT MUST NOT BE ABLE TO PASS VACUOUSLY. A scan that found no sites — because
+// the action was renamed, or the emitting shape changed — would satisfy "every
+// site carries reason" over an empty set, which is the failure this whole epic
+// keeps finding. So the site count is asserted to be at least the three that
+// exist, and printed.
+const routerSrc = fs.readFileSync(path.join(repoRoot, 'src', 'router.ts'), 'utf8');
+
+/** The object literal passed to `broadcast(...)` around a given index. */
+function enclosingLiteral(src, at) {
+  const open = src.lastIndexOf('{', at);
+  let depth = 0;
+  for (let j = open; j < src.length; j++) {
+    if (src[j] === '{') depth++;
+    else if (src[j] === '}' && --depth === 0) return src.slice(open, j + 1);
+  }
+  return src.slice(open);
+}
+
+const deactivationSites = [];
+for (let i = -1; (i = routerSrc.indexOf("action: 'agent.deactivated'", i + 1)) !== -1; ) {
+  const literal = enclosingLiteral(routerSrc, i);
+  deactivationSites.push({
+    line: routerSrc.slice(0, i).split('\n').length,
+    // Either the field is written out, or the site spreads the one helper that
+    // supplies it. Both are "carries a reason"; neither is "probably fine".
+    carriesReason: /\breason:/.test(literal) || /deactivationCause\(/.test(literal)
+  });
+}
+
+// The helper two of the three sites spread. Every one of its returns must
+// carry `reason`, or a site that looks correct inherits an absence.
+const dcAt = routerSrc.indexOf('function deactivationCause(');
+const dcBody = dcAt === -1 ? '' : enclosingLiteral(routerSrc, routerSrc.indexOf('{', dcAt));
+const dcReturns = [...dcBody.matchAll(/\breturn\b/g)].map((m) => dcBody.slice(m.index, m.index + 140));
+const dcCarriesReason = dcReturns.length >= 2 && dcReturns.every((r) => /reason:/.test(r));
+
+const spec = EVENT_CONTRACT['agent.deactivated'];
+const reasonRequired = spec.required.includes('reason') && !spec.optional.includes('reason');
+
+console.log(`\n   agent.deactivated emission sites in src/router.ts: ${deactivationSites.length}`);
+for (const s of deactivationSites) {
+  console.log(`     router.ts:${s.line}  carries a reason: ${s.carriesReason}`);
+}
+console.log(`   deactivationCause() returns: ${dcReturns.length}, every one carrying reason: ${dcCarriesReason}`);
+console.log(`   EVENT_CONTRACT declares reason REQUIRED (not optional): ${reasonRequired}`);
+
+verdict(
+  reasonRequired &&
+    deactivationSites.length >= 3 &&
+    deactivationSites.every((s) => s.carriesReason) &&
+    dcCarriesReason,
+  '`reason` is a required field of agent.deactivated, every emission site carries one,\n' +
+  '    and both branches of the helper the other sites spread supply it — so "preempted"\n' +
+  '    cannot silently degrade to "somebody switched it off", which is what a consumer\n' +
+  '    would render from its absence',
+  `reason is not structurally guaranteed: required=${reasonRequired}, ` +
+  `sites=${deactivationSites.length} (${deactivationSites.filter((s) => !s.carriesReason).length} without), ` +
+  `deactivationCause returns=${dcReturns.length} all-carry=${dcCarriesReason}`
 );
 
 // ======================================================== 2. all nine, live --
