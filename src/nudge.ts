@@ -1,4 +1,5 @@
 import { HerdrBridge } from './herdr.js';
+import type { SendVerdict } from './delivery.js';
 import { ResumeCause, resumeNudge } from './resume.js';
 import { resolveLauncher } from './launchers.js';
 
@@ -87,6 +88,13 @@ export async function waitForAgentReady(
 /** What the nudge did, for the log and for the caller's outcome record. */
 export interface NudgeResult {
   nudged: boolean;
+  /**
+   * The delivery verdict, when a send was actually attempted. Absent when the
+   * nudge was never sent at all — a launcher that restores nothing, or an agent
+   * that never reached a prompt — which is a different fact from a send whose
+   * outcome is unknown.
+   */
+  verdict?: SendVerdict;
   error?: string;
 }
 
@@ -139,13 +147,25 @@ export async function nudgeResumedAgent(opts: {
     }
 
     const sent = await herdrBridge.sendToAgent(agentPath, resumeNudge(agentPath, cause));
+    // THREE OUTCOMES SURVIVE THE LOG LINE. Collapsing `unverifiable` into "could
+    // NOT send" is the same flattening this whole change exists to undo, and it
+    // is the more damaging direction here: the restored agent may be working on
+    // the nudge right now, so a log saying it will sit idle sends a human to
+    // retype an instruction it already has.
     log(
       `[nudge] ${label} restored its conversation; ` +
-      (sent.success
-        ? 'sent it the interrupted-work message.'
-        : `could NOT send the interrupted-work message: ${sent.error}. It will sit idle.`)
+      (sent.verdict === 'delivered'
+        ? `sent it the interrupted-work message and confirmed it landed${sent.retried ? ' (after a second Enter)' : ''}.`
+        : sent.verdict === 'unverifiable'
+          ? `typed the interrupted-work message but could NOT confirm it landed: ${sent.error}. ` +
+            `Read the pane before assuming it is idle.`
+          : `could NOT deliver the interrupted-work message: ${sent.error}. It will sit idle.`)
     );
-    return { nudged: sent.success, ...(sent.success ? {} : { error: sent.error }) };
+    return {
+      nudged: sent.delivered,
+      verdict: sent.verdict,
+      ...(sent.delivered ? {} : { error: sent.error })
+    };
   } catch (e: any) {
     const error = e?.message ?? String(e);
     log(`[nudge] ${label} could not be nudged: ${error}`);

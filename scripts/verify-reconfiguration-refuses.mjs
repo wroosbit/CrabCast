@@ -216,6 +216,37 @@ if (argv[0] === 'pane' && argv[1] === 'close') {
   save();
   ok({});
 }
+// A PANE WITH A COMPOSER, kept on the census row itself so it lives and dies
+// with the pane. This stub answered NOTHING to \`agent read\`, so a send could
+// only ever report that keystrokes were dispatched — section 1's "it still
+// answers the verbs" asserted \`success: true\` and would have gone on asserting
+// it with the Enter dropped. Since KAN-114 that answer is read off the pane,
+// so the pane has to be able to show the difference: typed text sits after the
+// caret and only Enter moves it above.
+const paneOf = (id) => panes.find((p) => p.pane_id === id);
+if (argv[0] === 'agent' && argv[1] === 'read') {
+  const found = panes.find((p) => p.name === argv[2]);
+  if (!found) err('agent_not_found', 'no such agent');
+  ok({ read: { text: (found.transcript ?? 'bypass permissions on') + '\\n❯ ' + (found.composer ?? ''), truncated: false } });
+}
+if (argv[0] === 'pane' && argv[1] === 'send-text') {
+  const p = paneOf(argv[2]);
+  if (p) { p.composer = argv[3] || ''; save(); }
+  ok({});
+}
+if (argv[0] === 'pane' && argv[1] === 'send-keys') {
+  const p = paneOf(argv[2]);
+  if (p) {
+    if (argv[3] === 'Enter') {
+      if (p.composer) p.transcript = (p.transcript ?? 'bypass permissions on') + '\\n❯ ' + p.composer;
+      p.composer = '';
+    } else if (argv[3] === 'C-c') {
+      p.composer = '';
+    }
+    save();
+  }
+  ok({});
+}
 ok({});
 `,
   { mode: 0o755 }
@@ -517,9 +548,13 @@ let versionBeforeRefusal;
     'the daemon still holds a live session for it: state running, sessionless false',
     `state ${status.state}, sessionless ${status.sessionless}`);
   const sent = await h1.invoke({ action: 'send_to_agent', path: theAgent, message: 'still there?' });
-  check(sent.success === true,
+  // `delivered`, not merely `success` — since KAN-114 the send reports whether
+  // the message LANDED, and this check's own sentence claims delivery. Reading
+  // the verdict is what makes the sentence true rather than aspirational.
+  check(sent.success === true && sent.verdict === 'delivered' &&
+        sent.evidence?.landedAfter > sent.evidence?.landedBefore,
     'AND IT STILL ANSWERS THE VERBS: a message is delivered to the pane it is still in',
-    `send: ${JSON.stringify({ success: sent.success, error: sent.error })}`);
+    `send: ${JSON.stringify({ success: sent.success, verdict: sent.verdict, error: sent.error })}`);
 
   // THE ECHO STILL DESCRIBES WHAT IS RUNNING. This is the honesty interlock
   // requirement 1 depends on: the refusal is what makes the echoed config the
@@ -1414,6 +1449,44 @@ if (a === 'agent' && b === 'start') {
 }
 if (a === 'agent' && b === 'list') {
   out({ result: { agents: load().map((s) => ({ name: s.name, pane_id: s.pane_id, agent: 'claude', cwd: s.cwd, agent_status: 'working' })) } });
+}
+// A PANE WITH A COMPOSER, because this script's "it still answers the verbs"
+// check now means something. It had no \`agent read\` at all, so \`send_to_agent\`
+// could only ever report that keystrokes were dispatched — the check asserted
+// \`success: true\` and would have gone on asserting it with the Enter dropped.
+// Since KAN-114 that answer is read off the pane, so the pane has to be able
+// to show the difference: typed text sits after the caret and only Enter moves
+// it above.
+const paneFileFor = (name) => path.join(state, 'pane-' + Buffer.from(name).toString('hex') + '.json');
+const readPane = (name) => fs.existsSync(paneFileFor(name))
+  ? JSON.parse(fs.readFileSync(paneFileFor(name), 'utf8'))
+  : { transcript: 'bypass permissions on', composer: '' };
+const writePane = (name, p) => fs.writeFileSync(paneFileFor(name), JSON.stringify(p));
+const nameOfPane = (id) => (load().find((s) => s.pane_id === id) || {}).name;
+
+if (a === 'agent' && b === 'read') {
+  const f = load().find((s) => s.name === args[2]);
+  if (!f) {
+    process.stderr.write(JSON.stringify({ error: { code: 'not_found', message: 'no agent' } }));
+    process.exit(1);
+  }
+  const p = readPane(args[2]);
+  out({ result: { read: { text: p.transcript + '\\n❯ ' + p.composer, truncated: false } } });
+}
+if (a === 'pane' && b === 'send-text') {
+  const n = nameOfPane(args[2]);
+  if (n) { const p = readPane(n); p.composer = args[3] || ''; writePane(n, p); }
+  out({ result: {} });
+}
+if (a === 'pane' && b === 'send-keys') {
+  const n = nameOfPane(args[2]);
+  if (n) {
+    const p = readPane(n);
+    if (args[3] === 'Enter') { if (p.composer) p.transcript += '\\n❯ ' + p.composer; p.composer = ''; }
+    else if (args[3] === 'C-c') { p.composer = ''; }
+    writePane(n, p);
+  }
+  out({ result: {} });
 }
 if (a === 'agent' && b === 'attach') { setInterval(() => {}, 60000); }
 else if (a === 'pane' && b === 'close') { save(load().filter((s) => s.pane_id !== args[2])); out({ result: {} }); }
