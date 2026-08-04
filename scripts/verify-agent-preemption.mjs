@@ -6,10 +6,18 @@
 // In the extraction source this proof also drove the durable registry (a
 // preempted agent's record, its resumption, and why a reboot does not bring
 // it back). That registry is the T4 slice of KAN-68 and has not landed;
-// until it does, the preemption record's only carrier is the
-// `agent_preempted_event` broadcast and the deactivate payload — so that is
-// what section 5 pins down, field by field, as the seam T4 plugs into
-// (`recordDeactivated(record, preemption)`).
+// until it does, the preemption record's only carrier is the ONE
+// `agent.deactivated` event the stand-down broadcasts and the deactivate
+// payload — so that is what section 5 pins down, field by field, as the seam
+// T4 plugs into (`recordDeactivated(record, preemption)`).
+//
+// KAN-128 MERGED THE TWO EVENTS THIS USED TO READ. A preemption used to
+// broadcast `agent_preempted_event` AND `agent_deactivated_event` for the same
+// agent, naming the victim `victim.path` on one and `path` on the other, and
+// leaving a subscriber to correlate them. The event contract publishes one
+// `agent.deactivated` carrying `reason: 'preempted'` and a `preemption` block
+// holding everything the second event carried. Every assertion below reads
+// that one event; nothing it used to check has been dropped.
 //
 // Eight sections:
 //
@@ -493,28 +501,37 @@ rule('5. PREEMPTION — capacity before and after, and the record of what went')
   console.log(`\nAFTER   ${summarizeCapacity(after)}`);
   console.log(`        alive: ${bridge.alive.join(', ')}`);
 
-  const preemptedEvent = events.find((e) => e.action === 'agent_preempted_event');
-  const deactivatedEvent = events.find((e) => e.action === 'agent_deactivated_event');
-  console.log(`\nbroadcast to every connected client:\n`);
-  console.log(`  ${preemptedEvent.action}: ${preemptedEvent.victim.path} ` +
-    `(priority ${preemptedEvent.victim.priority}, ${preemptedEvent.victim.herdrStatus}) ` +
-    `stood down for ${preemptedEvent.by.path} (priority ${preemptedEvent.by.priority})`);
-  console.log(`  ${deactivatedEvent.action}: ${deactivatedEvent.path} preempted=${deactivatedEvent.preempted}`);
+  const deactivatedEvent = events.find((e) => e.action === 'agent.deactivated');
+  console.log(`\nbroadcast to every connected client — ONE event, not two:\n`);
+  console.log(`  ${deactivatedEvent.action}: ${deactivatedEvent.path} ` +
+    `(priority ${deactivatedEvent.preemption.priority}, ${deactivatedEvent.preemption.herdrStatus}) ` +
+    `stood down for ${deactivatedEvent.preemption.by.path} ` +
+    `(priority ${deactivatedEvent.preemption.by.priority}), reason=${deactivatedEvent.reason}`);
+  console.log(`  and there is no second broadcast: ` +
+    `${events.filter((e) => e.action === 'agent.deactivated').length} agent.deactivated, ` +
+    `${events.filter((e) => e.reason === 'preempted').length} of them preempted`);
 
   // The full PreemptionRecord rides the event AND is what the durable registry
   // persists through recordDeactivated(record, preemption). Every field is
   // pinned here because it is also what a client renders.
-  const record = preemptedEvent.record;
-  console.log(`\nthe PreemptionRecord on the event, and in the durable log:\n`);
-  console.log(JSON.stringify(record, null, 2).split('\n').map((l) => '  ' + l).slice(0, 10).join('\n'));
+  const record = deactivatedEvent.preemption;
+  console.log(`\nthe preemption block on the event, and the PreemptionRecord in the durable log:\n`);
+  console.log(JSON.stringify(record, null, 2).split('\n').map((l) => '  ' + l).slice(0, 12).join('\n'));
   const recordOk =
     record &&
-    record.byPath === agentDir('hotfix-kan-50') &&
-    record.byPaneName === paneNameFor(agentDir('hotfix-kan-50')) &&
-    record.byPriority === 2 &&
+    deactivatedEvent.reason === 'preempted' &&
+    deactivatedEvent.path === agentDir('task-kan-10') &&
+    record.by?.path === agentDir('hotfix-kan-50') &&
+    record.by?.paneName === paneNameFor(agentDir('hotfix-kan-50')) &&
+    record.by?.priority === 2 &&
     record.priority === 1 &&
     record.herdrStatus === 'idle' &&
-    /cap:/.test(record.derivation);
+    typeof record.at === 'string' &&
+    /cap:/.test(record.derivation) &&
+    // The capacity arithmetic the retired event carried separately.
+    typeof record.capacity?.cap === 'number' &&
+    // And ONE event describes this stand-down, not two.
+    events.filter((e) => e.action === 'agent.deactivated').length === 1;
 
   // And it really reached the disk: the victim's last event is a stand-down
   // carrying the annotation, which is what keeps the debt reported.
@@ -562,7 +579,7 @@ rule('6. TOP-OF-SCALE SAFETY — the highest priority cannot be touched');
   console.log(`with preempt: true → success: ${res.success}, stood down: ${res.preempted?.victim?.path ?? '(nothing)'}`);
   console.log(`  the epic supervisor still running: ${bridge.alive.includes('epic-kan-39')}`);
   console.log(`  every prior agent still running:    ${FULL.every((n) => bridge.alive.includes(n))}`);
-  console.log(`  agent_preempted_event broadcast:    ${events.some((e) => e.action === 'agent_preempted_event')}`);
+  console.log(`  preemption broadcast:               ${events.some((e) => e.reason === 'preempted')}`);
 
   console.log(
     '\n  Two protections, and only one of them is a rule anyone wrote. The ordering\n' +
@@ -580,7 +597,7 @@ rule('6. TOP-OF-SCALE SAFETY — the highest priority cannot be touched');
       res.success === true &&
       !res.preempted &&
       FULL.every((n) => bridge.alive.includes(n)) &&
-      !events.some((e) => e.action === 'agent_preempted_event'),
+      !events.some((e) => e.reason === 'preempted'),
     'an epic agent cannot be selected at any priority, and a top-of-scale unrefusable\n' +
     '    activation on a full machine started without standing anything down.',
     'the epic activation was refused, or something was stood down for it.'
@@ -628,7 +645,7 @@ rule('7. PROTECTED VICTIMS — a low-priority unpreemptable agent is never offer
       bridge.alive.includes('watchdog-kan-90') &&
       bridge.alive.length === FULL_HOTFIX.length &&
       !/watchdog/.test(res.error ?? '') &&
-      !events.some((e) => e.action === 'agent_preempted_event'),
+      !events.some((e) => e.reason === 'preempted'),
     'the unpreemptable agent is not offered, not named in the fleet list, and not\n' +
     '    killed — even with preempt: true, even though it is the only lower-priority\n' +
     '    agent running, and even though it IS charged. `preemptable` is doing the work\n' +
@@ -670,19 +687,18 @@ rule('8. VICTIM ADDRESS — the stand-down takes the agent the refusal named');
 
   const res = await quiet(() => call(harness, 'hotfix-kan-99', { preempt: true }));
 
-  const preemptedEvent = events.find((e) => e.action === 'agent_preempted_event');
-  const deactivatedEvent = events.find((e) => e.action === 'agent_deactivated_event');
+  const deactivatedEvent = events.find((e) => e.action === 'agent.deactivated');
   console.log(`activate a priority-2 hotfix agent with preempt: true →`);
   console.log(`  success: ${res.success}, stood down: ${res.preempted?.victim?.path}`);
-  console.log(`  broadcast victim: ${preemptedEvent?.victim?.path}`);
-  console.log(`  deactivated event address: ${deactivatedEvent?.path}`);
+  console.log(`  broadcast victim: ${deactivatedEvent?.path} (reason ${deactivatedEvent?.reason})`);
+  console.log(`  the agent that took the slot: ${deactivatedEvent?.preemption?.by?.path}`);
   console.log(`  task-shared gone:        ${!bridge.alive.includes('task-shared')}`);
   console.log(`  hotfix-shared survives:  ${bridge.alive.includes('hotfix-shared')}`);
 
   verdict(
     res.success === true &&
       res.preempted?.victim?.path === agentDir('task-shared') &&
-      preemptedEvent?.victim?.path === agentDir('task-shared') &&
+      deactivatedEvent?.reason === 'preempted' &&
       deactivatedEvent?.path === agentDir('task-shared') &&
       !bridge.alive.includes('task-shared') &&
       bridge.alive.includes('hotfix-shared'),

@@ -1193,7 +1193,7 @@ export class HerdrBridge {
    *
    * WITHOUT THE ATTACH THERE IS NO WAY BACK. The session is what gives this
    * daemon a terminal to read, a terminal to type into, and — through
-   * `ptyProcess.onExit` — the immediate `agent_detached_event` that tells
+   * `ptyProcess.onExit` — the immediate `agent.detached` event that tells
    * clients the agent died. An agent recognised but not attached is one the
    * daemon can see and cannot reach: `list_agents` reports it `sessionless`,
    * every client is told to re-activate by path to obtain a session id, and

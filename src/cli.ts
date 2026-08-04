@@ -139,7 +139,7 @@ export interface CommandSpec {
    * (see {@link DaemonClient}). Every reply carries a label as of KAN-122 —
    * `daemon_status` was the last one that did not — and correlating on those
    * labels would still be wrong, because the same socket also carries
-   * unsolicited broadcasts (`agent_lost_event`, `agent_detached_event`) and
+   * unsolicited broadcasts (`agent.lost`, `agent.detached`) and
    * nothing about an action name distinguishes somebody's answer from
    * somebody else's event. The field is here for the parity check, which
    * verifies each recorded label against the router that sends it.
@@ -1332,6 +1332,12 @@ function renderDaemonStatus(reader: ResponseReader): string {
     field('registry', reader.take('registryPath')),
     field('agents', `${reader.take('configuredAgents')} configured, ` +
       `${reader.take('expectedAgents')} expected to be running`),
+    // The event stream's identity, for a human asking the question a
+    // subscriber asks programmatically: is this the same daemon boot I was
+    // talking to? A different `bootId` means every sequence number anyone held
+    // is meaningless and the fleet must be re-read from `list`.
+    field('events', `bootId ${reader.take('bootId')}, ` +
+      `${reader.take('eventSeq')} published since boot`),
     buildBlock(reader.take('build')),
     freshnessBlock(reader.take('freshness')),
     residue(reader)
@@ -2060,7 +2066,7 @@ function operandsFor(spec: CommandSpec, given: string[]): string[] {
  * because `daemon_status` used to reply with no `action` field at all, and a
  * client matching on names would have hung on it; KAN-122 gave it one, and the
  * rule is unchanged for the reason that outlives that case — the same socket
- * carries unsolicited broadcasts (`agent_lost_event`, `agent_detached_event`),
+ * carries unsolicited broadcasts (`agent.lost`, `agent.detached`),
  * so an action name tells a client what a frame is ABOUT and never whose
  * request it answers. The `id === undefined` line below is that rule.
  */

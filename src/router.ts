@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { CrabcastConfig } from './config.js';
 import { MAX_LINE_CHARS } from './ipc.js';
+import { EventFrame, events } from './events.js';
 import { AgentConfig, DaemonResponse, McpServerSpec } from './types.js';
 import { removeProvisionedArtifacts } from './provisioning.js';
 import {
@@ -375,13 +376,33 @@ function invalidFlag(name: string, value: unknown): string | null {
  * it that herdr cannot show is a loss, reported on every `list_agents` poll
  * rather than written to a log.
  */
-interface MissingAgent extends ConfigEcho {
+export interface MissingAgent extends ConfigEcho {
   path: string;
   paneName: string;
   label: string | null;
   /** When the registry last recorded this agent as activated. */
   since: string;
   reason: string;
+}
+
+/**
+ * One agent's herdr status as of a particular census, for the sweep that
+ * publishes `agent.status_changed`.
+ */
+export interface FleetStatusReading {
+  path: string;
+  paneName: string;
+  /** Observed, never durable: herdr renumbers panes whenever any pane closes. */
+  paneId: string | null;
+  herdrStatus: HerdrAgentStatus;
+}
+
+/** One sweep's worth of observation. See {@link MessageRouter.observeFleet}. */
+export interface FleetObservation {
+  /** Whether herdr answered at all. False means every field below is silence. */
+  reachable: boolean;
+  missing: MissingAgent[];
+  statuses: FleetStatusReading[];
 }
 
 /**
@@ -570,7 +591,7 @@ export interface RouterDeps {
   /** Replies to the requesting client. */
   send: (msg: DaemonResponse) => void;
   /** Events for every connected client (activations, teardowns, PTY deaths). */
-  broadcast: (msg: DaemonResponse) => void;
+  broadcast: (msg: EventFrame) => void;
 }
 
 /**
@@ -936,6 +957,57 @@ function configEcho(intent: AgentIntent | undefined): ConfigEcho {
   };
 }
 
+/**
+ * `bootId` and the current `seq`, for a subscriber deciding whether to resync.
+ *
+ * Read from the process-wide event stream rather than threaded through the
+ * router's deps, because there is one boot per process and the daemon's
+ * broadcast stamps from the same object — two copies could disagree, and the
+ * one a subscriber compares against would be the one that was wrong.
+ */
+function eventWatermark() {
+  return { bootId: events.bootId, eventSeq: events.seq };
+}
+
+/**
+ * `agent.deactivated`'s reason, and the preemption block when there is one.
+ *
+ * WHY THIS EXISTS AS A DISCRIMINATOR RATHER THAN A FLAG. The event used to
+ * carry `preempted: true` and only when true, so "was this the agent's own
+ * idea" was read from a field's ABSENCE — indistinguishable from a daemon that
+ * forgot to set it, which is the same defect `alreadyRunning`/`started` were
+ * put on every activate response to remove. `reason` is on every stand-down,
+ * always, and takes one of two words.
+ *
+ * The block is everything the retired `agent_preempted_event` carried: who
+ * took the slot and what they were worth, what the victim was worth and was
+ * doing, the capacity arithmetic that made the slot necessary, and when. The
+ * victim itself is the event's own `path`, which is why the old event's
+ * separate `victim` object is gone rather than lost — it was the same agent
+ * named twice.
+ */
+function deactivationCause(data: any, preemption?: PreemptionRecord) {
+  if (!preemption) return { reason: 'requested' as const };
+  return {
+    reason: 'preempted' as const,
+    preemption: {
+      // The gate's own timestamp, which is the moment it DECIDED. Falling back
+      // to now would silently re-date a preemption to whenever the teardown
+      // finished, and the two differ by however long herdr took.
+      at: typeof data?.preemptedAt === 'string' ? data.preemptedAt : new Date().toISOString(),
+      by: {
+        path: preemption.byPath,
+        paneName: preemption.byPaneName,
+        priority: preemption.byPriority
+      },
+      priority: preemption.priority,
+      herdrStatus: preemption.herdrStatus,
+      derivation: preemption.derivation,
+      ...(data?.preemptionCapacity ? { capacity: data.preemptionCapacity } : {})
+    }
+  };
+}
+
 export class MessageRouter {
   private activePtyListeners = new Map<string, () => void>();
 
@@ -997,6 +1069,11 @@ export class MessageRouter {
           registryPath: agentRegistry.path,
           configuredAgents: intents.size,
           expectedAgents: Array.from(intents.values()).filter((i) => i.event === 'activated').length,
+          // The same two fields `list_agents` carries. Here too because this is
+          // the cheapest call on the socket, and a subscriber whose only
+          // question is "did the daemon restart" should not have to survey the
+          // whole fleet to find out.
+          ...eventWatermark(),
           build,
           freshness
         });
@@ -1215,8 +1292,7 @@ export class MessageRouter {
     const occupiedBy = occupancy.reachable ? occupancy.occupants : [];
 
     this.deps.broadcast({
-      action: 'agent_configured_event',
-      success: true,
+      action: 'agent.configured',
       path: agentPath,
       config: parsed.config,
       configVersion: record.configVersion,
@@ -1425,8 +1501,7 @@ export class MessageRouter {
     const removed = ['record', ...residue.removed];
 
     this.deps.broadcast({
-      action: 'agent_forgotten_event',
-      success: true,
+      action: 'agent.forgotten',
       path: agentPath,
       removed
     });
@@ -1530,7 +1605,12 @@ export class MessageRouter {
       // agent stops, not two.
       let standDown: any = null;
       this.handleDeactivateAgent(
-        { path: victim.path, preemption },
+        // `preemptedAt` and `preemptionCapacity` ride along with the record for
+        // the same reason the record does: the stand-down is where the
+        // `agent.deactivated` event is built, and since the merge these three
+        // are what that event's `preemption` block is made of. They used to be
+        // fields of a SECOND broadcast this path sent afterwards.
+        { path: victim.path, preemption, preemptedAt: at, preemptionCapacity: capacityDto(capacity) },
         (msg: any) => {
           standDown = msg;
         }
@@ -1552,20 +1632,15 @@ export class MessageRouter {
         `[capacity] preemption: ${agentPath} (priority ${priority}) stood down ` +
         `${describeCandidate(victim)} at ${at}\n${derivation}`
       );
-      // The event carries the full PreemptionRecord. The durable copy was
-      // written by the stand-down above, which is what keeps `preemptedAgents`
-      // reporting this debt until somebody re-activates the victim. The
-      // broadcast is the live announcement, not the record, but nothing here
-      // may drop a field of it: it is also what a client renders.
-      this.deps.broadcast({
-        action: 'agent_preempted_event',
-        success: true,
-        at,
-        victim: offer(victim),
-        by: { path: agentPath, paneName, priority },
-        record: preemption,
-        capacity: capacityDto(capacity)
-      });
+      // NO SECOND BROADCAST HERE. `agent_preempted_event` used to be sent from
+      // this line, immediately after the stand-down above had already sent
+      // `agent_deactivated_event` for the same agent — two events describing
+      // one thing, arriving in an order a subscriber had to correlate, with
+      // the victim named `path` on one and `victim.path` on the other. The
+      // contract merges them: the stand-down emits ONE `agent.deactivated`
+      // carrying `reason: 'preempted'` and a `preemption` block built from the
+      // record, the timestamp and the capacity arithmetic handed to it above.
+      // Nothing that event carried has been dropped; it is carried once.
 
       // Re-surveyed rather than reused: the caller is about to be told what the
       // machine looks like, and it is not the machine that refused a moment ago.
@@ -1606,8 +1681,10 @@ export class MessageRouter {
       `[capacity] override: starting ${agentPath} past capacity at ${at}\n${derivation}`
     );
     this.deps.broadcast({
-      action: 'capacity_override_event',
-      success: true,
+      action: 'capacity.overridden',
+      // `what` rather than `path`, and the contract says so: the subject of
+      // this event is the machine that was overcommitted, and `what` names the
+      // activation that overcommitted it.
       what: agentPath,
       at,
       capacity: capacityDto(capacity)
@@ -1716,8 +1793,7 @@ export class MessageRouter {
   private surfaceRegistryOutcome(outcome: RecordOutcome, what: string): RecordOutcome {
     if (!outcome.ok) {
       this.deps.broadcast({
-        action: 'registry_degraded_event',
-        success: false,
+        action: 'registry.degraded',
         what,
         error: outcome.error ?? 'registry write failed',
         consequence:
@@ -2057,13 +2133,17 @@ export class MessageRouter {
       // broadcasts nothing, because nothing changed.
       if (reattached) {
         this.deps.broadcast({
-          action: 'agent_activated_event',
-          success: true,
+          action: 'agent.activated',
           path: agentPath,
           paneName,
           paneId: occupancy.ours.paneId,
           sessionId: session.sessionId,
-          status: session.status
+          status: session.status,
+          // The version of the configuration this agent is running under, so a
+          // subscriber can tell from the event alone whether the agent that
+          // just came up is the one it configured — without a second call, and
+          // without keeping a shadow copy that is wrong after a reconfigure.
+          configVersion: intent.configVersion
         });
       }
 
@@ -2262,13 +2342,13 @@ export class MessageRouter {
     const durable = this.rememberActivated(intent.record);
 
     this.deps.broadcast({
-      action: 'agent_activated_event',
-      success: true,
+      action: 'agent.activated',
       path: agentPath,
       paneName,
       paneId: confirmed.paneId,
       sessionId: session.sessionId,
-      status: session.status
+      status: session.status,
+      configVersion: intent.configVersion
     });
 
     respond({
@@ -2377,11 +2457,14 @@ export class MessageRouter {
 
     if (success && session) {
       this.deps.broadcast({
-        action: 'agent_deactivated_event',
-        success: true,
+        action: 'agent.deactivated',
         path: session.path,
         paneName: session.paneName,
-        sessionId: session.sessionId
+        sessionId: session.sessionId,
+        // Session-addressed stand-downs are never the preempt path — that one
+        // goes through `handleDeactivateAgent` by path, because a preemption
+        // has to work on an agent that outlived the daemon holding its session.
+        reason: 'requested'
       });
     }
 
@@ -2485,12 +2568,11 @@ export class MessageRouter {
       // exists to prevent, arriving as an event instead of as a response.
       if (success) {
         this.deps.broadcast({
-          action: 'agent_deactivated_event',
-          success: true,
+          action: 'agent.deactivated',
           path: agentPath,
           paneName: session.paneName,
           sessionId: session.sessionId,
-          ...(preemption ? { preempted: true } : {})
+          ...deactivationCause(data, preemption)
         });
       }
 
@@ -2577,11 +2659,10 @@ export class MessageRouter {
 
     if ((result.success || goneAlready) && !alreadyStandby) {
       this.deps.broadcast({
-        action: 'agent_deactivated_event',
-        success: true,
+        action: 'agent.deactivated',
         path: agentPath,
         paneName: result.paneName,
-        ...(preemption ? { preempted: true } : {})
+        ...deactivationCause(data, preemption)
       });
     }
 
@@ -2970,6 +3051,16 @@ export class MessageRouter {
       // for the same reason `missingAgents` is.
       unstartedAgents: unstarted,
       unstartedTotal,
+      // THE RESYNC HANDLE, on the authoritative read rather than only on the
+      // events. This is what closes the event contract's resync path: a
+      // subscriber that reconnects has no event to compare `bootId` against —
+      // it has whatever arrives next, which may be nothing for an hour — so
+      // the poll it is REQUIRED to make anyway is where "am I talking to the
+      // same daemon" gets answered, in the same round trip that gives it the
+      // whole fleet. `eventSeq` is the highest sequence number stamped so far,
+      // so a subscriber can also tell whether it has missed anything since its
+      // last event without waiting for the next one.
+      ...eventWatermark(),
       // Which fields above are durable, which were observed just now, and
       // which this daemon computed. See MessageRouter.provenance.
       provenance: this.provenance(census),
@@ -3258,14 +3349,50 @@ export class MessageRouter {
   }
 
   /**
+   * Everything the daemon's periodic sweep needs, from ONE census read.
+   *
+   * Two questions are asked on that timer — which recorded agents are absent,
+   * and which live agents changed what herdr says they are doing — and they
+   * are answered together rather than by two passes, for the reason this file
+   * gives everywhere else: two reads of herdr can disagree, and a sweep that
+   * announced a loss from one census and a status transition from another
+   * would be publishing two incompatible pictures of the same instant. It is
+   * also what makes `agent.status_changed` free: the census was being taken
+   * anyway.
+   *
+   * `reachable` is carried out because the caller must be able to tell an
+   * observation from a silence. An unreachable herdr answers with an empty
+   * census, and every status in `statuses` then reads `unknown` — which is
+   * this daemon's blindness rather than the agents' behaviour, and must not be
+   * published as a transition.
+   */
+  public observeFleet(): FleetObservation {
+    const intents = this.deps.agentRegistry.intents();
+    const { agents, staleSessions, census } = this.surveyAgents(intents);
+    return {
+      reachable: census.reachable,
+      missing: this.missingAgents(agents, staleSessions, intents),
+      // Ours only. A foreign pane's status is not ours to publish — it belongs
+      // to whoever started it, and this daemon holds no record it could name
+      // the agent by.
+      statuses: agents
+        .filter((agent) => agent.configured)
+        .map((agent) => ({
+          path: agent.path,
+          paneName: agent.paneName,
+          paneId: agent.paneId,
+          herdrStatus: agent.herdrStatus
+        }))
+    };
+  }
+
+  /**
    * `missingAgents`, for callers outside a request — the daemon's periodic
    * sweep. Public because the sweep runs on a timer rather than in response to
    * a client, and must ask the same question the list answers.
    */
   public findMissingAgents(): MissingAgent[] {
-    const intents = this.deps.agentRegistry.intents();
-    const { agents, staleSessions } = this.surveyAgents(intents);
-    return this.missingAgents(agents, staleSessions, intents);
+    return this.observeFleet().missing;
   }
 
   private rowFrom(
