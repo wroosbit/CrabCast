@@ -71,8 +71,53 @@ export function claudeTranscriptDir(workDir: string): string {
 }
 
 /**
+ * THE RESUME RULE — whose conversation may be resumed at a caller-owned path.
+ *
+ *   CrabCast resumes a conversation at a path only when its OWN durable record
+ *   shows CrabCast previously ran an agent there. Everywhere else the launcher
+ *   starts a new session, {@link hasRestorableConversation} is not consulted,
+ *   and the answer is `false`.
+ *
+ * WHY, and this is the hazard the rule exists for rather than a tidiness
+ * argument. Claude Code keys its transcripts on the WORKING DIRECTORY (see
+ * {@link claudeTranscriptDir}), and under path identity that directory belongs
+ * to the caller. A human who has ever run `claude` in `/home/them/code/thing`
+ * has a conversation of theirs sitting at exactly the key an agent activated
+ * there would resume from. Without this rule the first activation in their
+ * repository runs `claude --continue`, restores THEIR session into an agent
+ * pane, and then nudges it to carry on with work it never started — an agent
+ * acting on a human's private conversation, having been told it is its own.
+ *
+ * WHERE IT IS ENFORCED, because the obvious place is the wrong one. Suppressing
+ * only the PREDICTOR would change which prompt the agent is handed and nothing
+ * else: `claude --continue || claude <prompt>` still runs the `--continue`
+ * first and still restores the transcript. So the rule reaches the launcher's
+ * command line — `mayResume: false` drops the `--continue` branch entirely (see
+ * `LauncherCommandContext` in launchers.ts) — and the predictor below is gated
+ * on the same fact so the two can never disagree.
+ *
+ * ONE RULE, TWO PROBLEMS. It also answers the never-run agent: an agent that
+ * has been configured but never activated has no conversation to restore, so
+ * the "switching this back on resumes the conversation it was stopped in"
+ * promise must not be made about it. Both cases are the same question — does
+ * OUR record show us running here before — so both get the same answer from one
+ * place.
+ *
+ * WHAT IT COSTS, stated rather than glossed: an agent whose CrabCast record has
+ * been forgotten and re-configured starts fresh even though its own prior
+ * conversation is on disk. That is the safe direction. The alternative failure
+ * — resuming somebody else's session into an agent — is not recoverable by
+ * anyone noticing afterwards.
+ */
+
+/**
  * Whether `claude --continue` will have something to restore in this
  * workspace.
+ *
+ * ONLY MEANINGFUL ONCE THE RESUME RULE ABOVE HAS ALREADY SAID YES. This
+ * function answers "is there a transcript at this path", which at a
+ * caller-owned path is NOT the same question as "is there a transcript of
+ * OURS". Callers must gate it; `spawnSession` (herdr.ts) is the one that does.
  *
  * Used to choose which resume framing the agent gets, and deliberately not
  * used for anything that would break if it were wrong:

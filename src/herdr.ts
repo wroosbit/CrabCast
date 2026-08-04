@@ -4,14 +4,21 @@ import * as fs from 'fs';
 import { execSync, spawnSync } from 'child_process';
 import {
   PROMPT_FILENAME,
+  agyMcpConfigPath,
+  builtinMcpServer,
   launcherDeliversRuntime,
   promptInstruction,
-  resolveLauncher,
-  writeWorkspaceMcpConfig
+  resolveLauncher
 } from './launchers.js';
 import type { AgentLauncher } from './launchers.js';
 import { diagnoseSpawnFailure } from './herdr-health.js';
 import { canonicalizeOrNull, paneNameFor, sidecarDirFor } from './identity.js';
+import {
+  ProvisioningError,
+  noteTrustEntry,
+  provisionMcpConfig
+} from './provisioning.js';
+import type { ArtifactDisclosure } from './provisioning.js';
 import type { AgentConfig } from './types.js';
 import {
   RESUME_ENV,
@@ -63,6 +70,34 @@ export interface HerdrSession {
    * however many name registrations point at it (KAN-58).
    */
   expectsRuntime?: boolean;
+  /**
+   * Whether this activation was allowed to resume a conversation at this path.
+   *
+   * THE RESUME RULE, carried on the session because the launcher's command line
+   * is built from it: `false` means the command starts a NEW session and no
+   * `--continue` is passed. See resume.ts for what it is protecting against —
+   * transcripts at a caller-owned path are very often a human's own.
+   */
+  mayResume?: boolean;
+  /**
+   * Every artifact this activation wrote or relied on OUTSIDE CrabCast's own
+   * data directory, for the activation response to name.
+   *
+   * Silence is what made file-dropping unacceptable, so this is not decoration:
+   * it is the "named in the activation response" half of what makes writing
+   * into somebody else's directory acceptable at all. Empty is the ordinary
+   * case — an agent that opted into nothing has nothing written for it.
+   */
+  provisioned?: ArtifactDisclosure[];
+  /**
+   * The RESOLVED MCP server definitions this activation wrote — caller-supplied
+   * ones verbatim, plus any builtin CrabCast filled in.
+   *
+   * Set only once every requested server produced a definition. A launcher's
+   * `setup` reads it rather than the raw request, so nothing downstream can see
+   * a partially-resolved set and act on it as though it were complete.
+   */
+  mcpDefinitions?: Record<string, unknown>;
 }
 
 /**
@@ -472,12 +507,19 @@ export class HerdrBridge {
    * never into the caller's directory: this is the first PR that spawns into a
    * directory somebody else owns, and a file we drop into it is a file we
    * would then have to be trusted to clean up.
+   *
+   * `ranBefore` is the resume rule's input and the caller must supply it — it
+   * is a fact about the DURABLE RECORD, which the bridge cannot read. `false`
+   * means CrabCast has never run an agent at this path, so any conversation on
+   * disk there belongs to somebody else and nothing may continue it. See
+   * resume.ts.
    */
   public spawnSession(
     agentPath: string,
     config: AgentConfig,
     promptContent?: string,
-    resume?: ResumeCause
+    resume?: ResumeCause,
+    ranBefore: boolean = false
   ): HerdrSession {
     // One attach per agent, enforced here rather than in each caller. Two
     // clients can ask to activate the same agent at once, and a second attach
@@ -506,18 +548,37 @@ export class HerdrBridge {
     // other runtime's. `restoresConversation` is the launcher's own declaration
     // that its command restores a conversation *and* that this predictor is
     // evidence about it; a launcher that does not claim it gets `false`.
-    const restores = resume ? this.launcherRestoresConversation(config.launcher) : false;
+    // THE RESUME RULE, and it is asked before the predictor rather than after
+    // it. `ranBefore` is whether OUR OWN record shows CrabCast running an agent
+    // here before; a conversation at a path we have never run in is not ours to
+    // continue, and at a caller-owned directory it is very often the human's.
+    // See resume.ts for the whole of the reasoning.
+    const mayResume = ranBefore;
+    const restores = this.launcherRestoresConversation(config.launcher);
+    // Gated on mayResume, so the predictor is never even consulted about
+    // somebody else's transcripts. `hasRestorableConversation` reads a
+    // directory keyed only on the path and cannot tell whose history it found.
     const resumedConversation = resume
-      ? restores && hasRestorableConversation(agentPath)
+      ? mayResume && restores && hasRestorableConversation(agentPath)
       : undefined;
+
+    if (!mayResume) {
+      console.log(
+        `[HerdrBridge] ${paneName} starts a NEW session: CrabCast has no record of ever ` +
+        `running an agent in ${agentPath}, so any conversation on disk there is not ours ` +
+        `to continue`
+      );
+    }
     if (resume) {
       console.log(
         `[HerdrBridge] Resuming ${paneName} after ${resume}: ` +
         (resumedConversation
           ? 'a conversation is on disk, so --continue will restore it'
-          : restores
-            ? 'no conversation on disk, so it will start with the degraded-resume prompt'
-            : "this launcher does not restore conversations, so it will start with the degraded-resume prompt")
+          : !mayResume
+            ? 'this path has no prior CrabCast activation, so it will start with the degraded-resume prompt'
+            : restores
+              ? 'no conversation on disk, so it will start with the degraded-resume prompt'
+              : "this launcher does not restore conversations, so it will start with the degraded-resume prompt")
       );
     }
 
@@ -529,6 +590,7 @@ export class HerdrBridge {
       status: 'active',
       ptyBuffer: '',
       onDataListeners: [],
+      mayResume,
       ...(resume ? { resume, resumedConversation } : {})
     };
 
@@ -713,15 +775,84 @@ export class HerdrBridge {
     // asked" (`shell`).
     session.expectsRuntime = launcherDeliversRuntime(launcherName);
 
-    // Workspace-scoped MCP config, and now only when the caller asked for one:
-    // `mcpServers` is a `configure` parameter rather than a property of a type,
-    // so an agent configured without servers gets no `.mcp.json` written into
-    // its directory at all. (The opt-in machinery proper — merge-never-replace
-    // and `forget`'s cleanup — is the next slice's; what T1 owes is not
-    // writing into a caller's directory for a reason the caller did not give.)
-    const mcpServers = config.mcpServers ?? [];
-    if (mcpServers.length > 0) {
-      writeWorkspaceMcpConfig(session.path, mcpServers, this.configPath);
+    // EVERYTHING WRITTEN OUTSIDE CRABCAST'S OWN DATA DIRECTORY IS COLLECTED
+    // HERE, so the activation response can name all of it. See provisioning.ts
+    // for the principle; this is where it is applied.
+    const sidecarDir = this.sidecarDirFor(session.path);
+    const disclosures: ArtifactDisclosure[] = [];
+    session.provisioned = disclosures;
+
+    // Workspace-scoped MCP config: consented to by being supplied, merged,
+    // disclosed, reversible.
+    //
+    // RESOLUTION IS COUNTED, NOT FILTERED, and that sentence is the whole of
+    // KAN-121. The chain this replaces filtered: `mcpServerDefinitions` kept
+    // the names it recognised and dropped the rest without a word, and the
+    // write early-returned on the resulting empty map — so asking for a server
+    // this daemon could not supply produced a running agent with no tools, no
+    // `.mcp.json` at all, and `success: true`. Three defensible steps composing
+    // into a guard that read as a check and was not one.
+    //
+    // So: every requested key must produce exactly one definition, the count is
+    // compared, and a shortfall REFUSES naming the servers that fell out.
+    //
+    // PARTIAL IS WORSE THAN EMPTY. A `.mcp.json` holding only the servers we
+    // managed to write is a file whose PRESENCE LOOKS LIKE SUCCESS — the agent
+    // starts, its runtime finds a config, and the missing tool is discovered
+    // only by the work it silently cannot do. Nothing is written unless
+    // everything can be.
+    const requested = config.mcpServers ?? {};
+    const requestedNames = Object.keys(requested);
+    if (requestedNames.length > 0) {
+      const definitions: Record<string, unknown> = {};
+      const unsupplied: string[] = [];
+      // Insertion order preserved: the caller's map is iterated in the order it
+      // arrived and each value is carried across untouched, so "nothing is
+      // resolved, renamed or reordered" holds by construction rather than by
+      // care.
+      for (const name of requestedNames) {
+        const spec = requested[name];
+        if (spec === 'builtin') {
+          const builtin = builtinMcpServer(name, this.configPath);
+          if (builtin === null) unsupplied.push(name);
+          else definitions[name] = builtin;
+          continue;
+        }
+        definitions[name] = spec;
+      }
+
+      if (unsupplied.length || Object.keys(definitions).length !== requestedNames.length) {
+        session.spawnError =
+          `Refusing to activate: ${unsupplied.length || 'some'} of the ${requestedNames.length} ` +
+          `MCP server(s) this agent was configured with cannot be supplied` +
+          (unsupplied.length ? ` — ${unsupplied.map((n) => `'${n}'`).join(', ')}` : '') +
+          `. Starting anyway would write a .mcp.json holding only what could be produced, and a ` +
+          `file that EXISTS looks like success: the agent would come up, its runtime would find a ` +
+          `config, and the missing server would surface as work it quietly cannot do. NOTHING WAS ` +
+          `WRITTEN and nothing was started. Send a definition for it — ` +
+          `{"command": "…", "args": [], "env": {}} — rather than asking CrabCast to supply it.`;
+        session.status = 'terminated';
+        console.error(`[HerdrBridge] Refusing to start ${paneName}: ${session.spawnError}`);
+        return;
+      }
+
+      try {
+        disclosures.push(
+          ...provisionMcpConfig({ agentPath: session.path, sidecarDir, definitions })
+        );
+      } catch (e: any) {
+        // KAN-84's lesson, and the reason this is a refusal rather than a
+        // logged warning: a swallowed provisioning failure once let an
+        // uninstructed agent start behind `verified: true`.
+        session.spawnError =
+          e instanceof ProvisioningError
+            ? e.message
+            : `Could not provision ${session.path}: ${e?.message ?? String(e)}. NOTHING WAS STARTED.`;
+        session.status = 'terminated';
+        console.error(`[HerdrBridge] Refusing to start ${paneName}: ${session.spawnError}`);
+        return;
+      }
+      session.mcpDefinitions = definitions;
     }
 
     // Agent-specific provisioning, on every activation: it is idempotent, and
@@ -731,13 +862,52 @@ export class HerdrBridge {
     // `success: true, verified: true` answer.
     if (launcher.setup) {
       try {
-        launcher.setup(session.path, mcpServers);
+        launcher.setup({
+          workDir: session.path,
+          mcpServers: session.mcpDefinitions ?? {},
+          // What the launcher wrote outside our data dir. The trust entry is
+          // the whole reason this channel exists: it is written by the claude
+          // launcher, into the user's GLOBAL config, and neither this bridge
+          // nor the router would otherwise know it had happened.
+          note: (artifact) => {
+            disclosures.push(
+              noteTrustEntry({
+                agentPath: session.path,
+                sidecarDir,
+                file: artifact.file,
+                trustKey: artifact.trustKey,
+                wroteIt: artifact.wroteIt
+              })
+            );
+          }
+        });
       } catch (e: any) {
         session.spawnError = e?.message ?? String(e);
         session.status = 'terminated';
         console.error(`[HerdrBridge] Refusing to start ${paneName}: ${session.spawnError}`);
         return;
       }
+    }
+
+    // The anti-gravity launcher's setup writes the user's GLOBAL agy MCP
+    // config, which is shared by every agent under that launcher. Disclosed
+    // here rather than through `note` because there is no honest reversal to
+    // offer: removing our key when one agent is forgotten would take the
+    // servers away from every other agent still using it. Saying so is the
+    // truthful answer; a `forget` that broke a sibling would not be.
+    if (launcherName === 'anti-gravity' && Object.keys(session.mcpDefinitions ?? {}).length > 0) {
+      disclosures.push({
+        artifact: 'mcp-config',
+        file: agyMcpConfigPath(),
+        detail:
+          `mcpServers.${Object.keys(session.mcpDefinitions ?? {}).join(', mcpServers.')} — this is ` +
+          `your GLOBAL antigravity CLI config, outside ${session.path}`,
+        origin: 'crabcast',
+        reversal:
+          `not removed by \`forget\`: this file is shared by every anti-gravity agent, so ` +
+          `taking the key out when one agent is forgotten would remove it from the others ` +
+          `too. Remove the entry by hand when no anti-gravity agents are left.`
+      });
     }
 
     // A write that fails refuses the activation, on the same spawnError
@@ -866,7 +1036,11 @@ export class HerdrBridge {
           'env',
           `PATH=${process.env.PATH}`,
           ...Object.entries(RESUME_ENV).map(([name, value]) => `${name}=${value}`),
-          'bash', '-c', launcher.command(promptCommand)
+          // `mayResume` is the resume rule reaching the only place it can be
+          // enforced: with it false, the command carries no `--continue` and
+          // the pane starts a new session rather than restoring whatever
+          // transcript this directory happens to hold. See resume.ts.
+          'bash', '-c', launcher.command({ promptCommand, mayResume: session.mayResume === true })
         ]);
       } catch (e: any) {
         if ((e as HerdrCliError)?.herdrCode === AGENT_NAME_TAKEN) {

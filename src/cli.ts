@@ -283,6 +283,29 @@ function durability(reader: ResponseReader): string | null {
   );
 }
 
+/**
+ * Everything CrabCast wrote outside its own data directory, printed at the
+ * person whose directory it is.
+ *
+ * NOT OPTIONAL AND NOT ABBREVIATED. The whole argument for writing anything
+ * into somebody's repository is that they are told about it in the same breath;
+ * a renderer that dropped this to save four lines would make the daemon's
+ * disclosure true and the product's disclosure false. `forget` is named per
+ * artifact rather than once at the bottom, because a pre-existing trust entry
+ * is NOT undone by it and printing one blanket sentence would claim otherwise.
+ */
+function provisionedBlock(value: unknown): string | null {
+  if (!Array.isArray(value) || !value.length) return null;
+  return lines(
+    `\nwritten outside CrabCast's own data directory:`,
+    ...value.flatMap((a: any) => [
+      `${INDENT}${a.file}`,
+      `${INDENT}  ${a.detail}`,
+      `${INDENT}  ${a.origin === 'crabcast' ? 'written by CrabCast' : 'ALREADY THERE — not ours'}; undo: ${a.reversal}`
+    ])
+  );
+}
+
 /** Whatever the renderer above did not claim. */
 function residue(reader: ResponseReader): string | null {
   const rest = reader.leftovers();
@@ -504,6 +527,15 @@ function renderActivate(reader: ResponseReader, request: Record<string, unknown>
     field('resumed', reader.has('resume')
       ? `${reader.take('resume')} (conversation restored: ${reader.take('resumedConversation')})`
       : null),
+    // THE RESUME RULE, said out loud on every activation rather than only when
+    // it bites. "started a new conversation" is the sentence that tells a
+    // person their own session in this directory was left alone — and the
+    // absence of that sentence is what would have hidden the opposite.
+    field('conversation', reader.take('resumedExistingConversation') === true
+      ? 'continued the one CrabCast last ran here'
+      : 'started a NEW one — CrabCast has not run an agent in this directory before, so ' +
+        'nothing on disk here was continued'),
+    provisionedBlock(reader.take('provisioned')),
     durability(reader),
     // `preempted` is `{ at, victim, derivation }` — the victim named, not
     // just a count. Whose work this activation ended is the part a caller
@@ -611,8 +643,19 @@ function renderConfigure(reader: ResponseReader, request: Record<string, unknown
     field('prompt', typeof config.prompt === 'string'
       ? `${config.prompt.length} characters (written to the agent's sidecar verbatim)`
       : null),
-    field('mcp servers', (config.mcpServers ?? []).join(', ') || null),
+    // NAMES ONLY. The definitions are the caller's own command lines and can
+    // carry credentials in `env`; echoing them into a terminal — and into
+    // whatever scrollback or CI log it lands in — is not something this
+    // command needs to do to be useful.
+    field('mcp servers', Object.keys(config.mcpServers ?? {}).join(', ') || null),
     field('label', config.label),
+    // What activation will write into the caller's directory, said BEFORE
+    // anything is written. This is what stands in for a consent flag: the
+    // caller is told the consequence rather than asked to assert it.
+    ...(reader.take<any[]>('willWrite') ?? []).map(
+      (w) => `${INDENT}will write:    ${w.file} — ${w.keys.join(', ')} ${w.when}\n` +
+             `${INDENT}               ${w.note}`
+    ),
     reader.take('occupancyUnknown')
       ? `${INDENT}occupancy:     UNKNOWN — herdr did not answer, so nothing was checked`
       : null,
@@ -937,7 +980,8 @@ const CONFIGURE_FLAGS: FlagSpec[] = [
   { name: 'launcher', kind: 'string', value: '<name>', help: 'the runtime to run in the pane, e.g. claude (required)' },
   { name: 'prompt', kind: 'string', value: '<text>', help: "the agent's bootstrap prompt, as literal text" },
   { name: 'prompt-file', kind: 'string', value: '<file>', help: 'read the prompt from this file; its BYTES cross the wire, not the path' },
-  { name: 'mcp', kind: 'string', value: '<a,b>', help: 'comma-separated MCP servers to offer this agent' },
+  { name: 'mcp', kind: 'string', value: '<a,b>', help: 'comma-separated MCP servers CrabCast builds itself (crabcast)' },
+  { name: 'mcp-config', kind: 'string', value: '<file>', help: 'JSON file of your own server DEFINITIONS, {"name":{"command":…}}; its bytes cross the wire and are written verbatim' },
   { name: 'label', kind: 'string', value: '<text>', help: 'display text; never parsed, never an address, duplicates fine' },
   { name: 'refusable', kind: 'boolean', help: 'may the capacity gate refuse it (default true; --refusable=false to exempt)' },
   { name: 'chargeable', kind: 'boolean', help: 'does it occupy a charged slot (default true)' },
@@ -945,11 +989,83 @@ const CONFIGURE_FLAGS: FlagSpec[] = [
   { name: 'gate-exempt', kind: 'boolean', help: 'shorthand for all three of the above false; refused alongside any of them' }
 ];
 
-/** `--mcp a,b,c` → `['a','b','c']`; absent stays absent. */
-function mcpList(value: unknown): string[] | undefined {
-  if (typeof value !== 'string') return undefined;
-  const servers = value.split(',').map((s) => s.trim()).filter(Boolean);
-  return servers.length ? servers : [];
+/**
+ * The `mcpServers` map this invocation is sending, assembled from the two
+ * flags that can contribute to it.
+ *
+ * TWO FLAGS BECAUSE THERE ARE TWO KINDS OF ENTRY, and the split is the same one
+ * the daemon's value type draws:
+ *
+ *  - `--mcp crabcast` names a server CRABCAST builds itself. A name works here
+ *    precisely because the definition depends on facts about this daemon, so
+ *    there is nothing for the caller to write.
+ *  - `--mcp-config <file>` carries the caller's OWN definitions. It is a file
+ *    rather than a flag value for the reason `--prompt-file` is: the bytes are
+ *    read here and put on the wire, so the daemon never learns a path existed
+ *    and never has to decide whose filesystem it meant. Arbitrary JSON also
+ *    does not survive a comma-separated list.
+ *
+ * A name in both is a usage error rather than a precedence rule — which one won
+ * would be a silent choice about what an agent's tooling actually is.
+ */
+function mcpServers(
+  flags: Record<string, string | number | boolean>
+): Record<string, unknown> | undefined {
+  const builtins = typeof flags.mcp === 'string'
+    ? flags.mcp.split(',').map((s) => s.trim()).filter(Boolean)
+    : [];
+  const file = flags['mcp-config'];
+
+  let supplied: Record<string, unknown> = {};
+  if (typeof file === 'string') {
+    let text: string;
+    try {
+      text = fs.readFileSync(file, 'utf8');
+    } catch (e: any) {
+      throw new UsageError(
+        `could not read --mcp-config ${file}: ${e?.message ?? String(e)}. Nothing was sent.`
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e: any) {
+      throw new UsageError(
+        `--mcp-config ${file} is not valid JSON (${e?.message ?? String(e)}). It is written into ` +
+          `your agent's .mcp.json verbatim, so it has to be JSON before it leaves here. Nothing ` +
+          `was sent.`
+      );
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new UsageError(
+        `--mcp-config ${file} must hold an object keyed by server name, e.g. ` +
+          `{"atlassian": {"command": "npx", "args": ["-y", "mcp-remote", "…"]}}. Nothing was sent.`
+      );
+    }
+    // A file wrapped as `{"mcpServers": {…}}` is what somebody copying an
+    // existing .mcp.json will have. Accepted at its own top level, because
+    // refusing it would be pedantry about a shape the caller obviously meant —
+    // and it is unwrapped rather than nested, which a silent pass-through
+    // would get wrong by writing an `mcpServers` server.
+    const record = parsed as Record<string, unknown>;
+    const inner = record.mcpServers;
+    supplied = (Object.keys(record).length === 1 && inner && typeof inner === 'object' && !Array.isArray(inner))
+      ? (inner as Record<string, unknown>)
+      : record;
+  }
+
+  const collisions = builtins.filter((name) => Object.prototype.hasOwnProperty.call(supplied, name));
+  if (collisions.length) {
+    throw new UsageError(
+      `${collisions.map((c) => `'${c}'`).join(', ')} appears in both --mcp and --mcp-config. Pass ` +
+        `it once: which definition won would be a silent choice about what the agent's tooling is.`
+    );
+  }
+
+  if (!builtins.length && typeof file !== 'string') return undefined;
+  // Builtins first, then the caller's, and the caller's order preserved within
+  // their own half.
+  return { ...Object.fromEntries(builtins.map((name) => [name, 'builtin'])), ...supplied };
 }
 
 /**
@@ -1055,7 +1171,7 @@ export const COMMANDS: CommandSpec[] = [
       priority: flags.priority,
       launcher: flags.launcher,
       prompt: promptText(flags),
-      mcpServers: mcpList(flags.mcp),
+      mcpServers: mcpServers(flags),
       label: flags.label,
       // Booleans or absent, never the strings the shell handed us: the daemon
       // refuses a non-boolean here rather than reading it for truthiness.

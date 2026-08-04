@@ -12,6 +12,47 @@
  * config loader used to refuse a workspace type with no `priority` rather than
  * silently flooring it, and that decision travels to this shape unchanged.
  */
+/**
+ * What one MCP server is, as `configure` receives it.
+ *
+ * TWO FORMS, AND THE UNION IS THE POINT:
+ *
+ *  - an **object** — the caller's own definition, written into `.mcp.json`
+ *    VERBATIM. CrabCast does not read it, validate its interior, resolve
+ *    anything in it, or reorder it. Whatever JSON arrives under this key is the
+ *    JSON that appears in the file.
+ *  - the string `'builtin'` — a server CrabCast constructs itself. Exactly one
+ *    name qualifies (`crabcast`), and it qualifies because its definition
+ *    depends on facts only this daemon has: its own `node`, its own `mcp.js`,
+ *    and the config path that decides WHICH daemon a workspace-spawned server
+ *    addresses. A caller could not write it correctly, so it is the one entry
+ *    CrabCast legitimately owns.
+ *
+ * WHY DEFINITIONS RATHER THAN NAMES, which is the third time this call has come
+ * up in this project and the third time the answer is the same. A consumer
+ * assembles their server set at activation time from whichever integrations are
+ * enabled *and hold a valid credential* — runtime state that lives on their side
+ * of the boundary and never crosses it. So a name is not a thing they can send:
+ * there is nothing here for it to name. `"atlassian"` is the consumer's
+ * vocabulary in exactly the way a Jira ticket key was, and this daemon gave up
+ * the right to hold either. Requiring a name would also require the
+ * name-resolution table consumers have already deleted on their own side.
+ *
+ * WHY A MAP KEYED BY NAME rather than a list of `{name, …}` records. The
+ * destination is a map — Claude Code reads `{"mcpServers": {"<name>": {…}}}` —
+ * so a map is the shape that lets "written verbatim" be LITERALLY true: the
+ * value written under key K is the value the caller supplied under key K, with
+ * no step in between that could rename or reorder anything. A list would have
+ * to be reshaped into a map here, which is the exact class of work this field
+ * promises not to do, and it would introduce a duplicate-name question the map
+ * makes unaskable.
+ *
+ * It also makes one whole class of mistake unrepresentable: a caller cannot
+ * both supply their own definition for a name AND ask for CrabCast's builtin
+ * under it, because one key holds one value.
+ */
+export type McpServerSpec = 'builtin' | Record<string, unknown>;
+
 export interface AgentConfig {
   /**
    * What this agent outranks when the machine is full. Required: a
@@ -71,8 +112,37 @@ export interface AgentConfig {
    * prompt rather than being handed an instruction nobody wrote.
    */
   prompt?: string;
-  /** MCP servers offered to this agent. Defaults to `[]`. */
-  mcpServers?: string[];
+  /**
+   * MCP servers offered to this agent, keyed by name. See {@link McpServerSpec}.
+   *
+   * SUPPLYING THIS IS THE CONSENT TO WRITE `.mcp.json` INTO THE CALLER'S
+   * DIRECTORY. There is no second flag, and the absence of one is a decision
+   * with a reason.
+   *
+   * An earlier revision of the design required `provision: { mcpConfig: true }`
+   * beside this field, on the grounds that asking for a CAPABILITY ("the
+   * atlassian server") is a different act from agreeing to a FILE appearing in
+   * your repository. That reasoning was right about names — and definitions
+   * dissolve it. A caller supplying definitions is handing over the literal
+   * bytes of the `mcpServers` block; there is no gap left between "here are the
+   * exact contents" and "please write them". A separate flag would then be a
+   * box to tick beside the thing it consents to, which is not a second decision,
+   * only a second chance to forget one.
+   *
+   * And forgetting it would not have been loud where it mattered. A consumer
+   * whose agents reach their issue tracker *through* MCP, cutting over a whole
+   * fleet at once, would have needed the flag on every activation to get any
+   * tools at all. One field cannot be half-supplied, so that failure has no
+   * path here.
+   *
+   * What the flag was buying — a caller LEARNING that CrabCast writes into their
+   * directory — is bought better by the `configure` response, which names the
+   * file and the keys it will write at activation, before anything is written.
+   * Being told the consequence beats being asked to assert it.
+   *
+   * Absent or empty means nothing is written into the caller's directory at all.
+   */
+  mcpServers?: Record<string, McpServerSpec>;
   /**
    * Opaque display text. Never parsed, never looked up by, duplicates fine.
    * The enforcement that matters is structural rather than stated: `label` is

@@ -27,72 +27,101 @@ export function promptInstruction(promptFile: string): string {
   return `Please read and follow the instructions in ${promptFile} to begin.`;
 }
 
-// MCP server definitions CrabCast can attach to an agent workspace.
-function mcpServerDefinitions(servers: string[], daemonConfigPath?: string): Record<string, any> {
-  const defs: Record<string, any> = {};
-  // Absolute commands: the agent spawns these with the *pane's* PATH, which
-  // can be thinner than ours (a login-started herdr server has no nvm) and
-  // resolve `node` to an ancient system install. The daemon rewrites this
-  // file on every activation, so the baked paths never go stale.
-  //
-  // `crabcast` is the daemon's own MCP server — how agents inspect and steer
-  // each other over the same unix socket. mcp.js finds that socket through
-  // the config (the socket lives under the config's dataDir), and the pane
-  // environment does not carry it, so the definition bakes this daemon's own
-  // config path in as CRABCAST_CONFIG — the same variable mcp.js's config
-  // resolution already reads. Without it, a server spawned inside a
-  // workspace would fall back to the default data dir and could address a
-  // different daemon than the one that provisioned it.
-  if (servers.includes('crabcast')) {
-    defs['crabcast'] = {
-      command: process.execPath,
-      args: [path.join(__dirname, 'mcp.js')],
-      ...(daemonConfigPath ? { env: { CRABCAST_CONFIG: daemonConfigPath } } : {})
-    };
-  }
-  return defs;
-}
+/**
+ * Every MCP server CrabCast can construct itself. A CLOSED SET OF EXACTLY ONE,
+ * and it earns its place rather than heading a list somebody is expected to
+ * extend.
+ *
+ * A caller supplies their own servers as definitions — the command, args and
+ * env that spawn them — because the set they want depends on which of their
+ * integrations hold a live credential, which is runtime state on their side of
+ * the boundary. CrabCast resolves none of it and holds no table of names.
+ *
+ * This one is different in kind, not in degree: its definition depends on facts
+ * only THIS DAEMON has, so a caller could not write it correctly if they tried.
+ */
+export const BUILTIN_MCP_SERVERS = ['crabcast'] as const;
 
-// Claude Code reads .mcp.json from the project root, and each session's
-// workDir is its project — so MCP config is scoped to the workspace instead
-// of being injected into the user's global ~/.claude.json.
-export function writeWorkspaceMcpConfig(
-  workDir: string,
-  servers: string[],
+/**
+ * The definition for a server CrabCast builds itself, or `null` for a name it
+ * does not know.
+ *
+ * `null` rather than an empty map, and the difference is the whole of KAN-121:
+ * an empty result used to mean both "nothing was asked for" and "everything
+ * asked for was silently dropped", and the caller could not tell which. One
+ * name in, one answer out — so a name this daemon cannot supply is a fact the
+ * caller is told rather than a gap in a map nobody counted.
+ *
+ * Absolute commands: the agent spawns these with the *pane's* PATH, which can
+ * be thinner than ours (a login-started herdr server has no nvm) and resolve
+ * `node` to an ancient system install. The daemon rewrites its own keys on
+ * every activation, so the baked paths never go stale.
+ *
+ * `crabcast` is the daemon's own MCP server — how agents inspect and steer each
+ * other over the same unix socket. mcp.js finds that socket through the config
+ * (the socket lives under the config's dataDir), and the pane environment does
+ * not carry it, so the definition bakes this daemon's own config path in as
+ * CRABCAST_CONFIG — the same variable mcp.js's config resolution already reads.
+ * Without it, a server spawned inside a workspace would fall back to the default
+ * data dir and could address a different daemon than the one that provisioned
+ * it. That is why this is the one definition CrabCast owns: the caller has no
+ * way to know which daemon they are being provisioned by.
+ */
+export function builtinMcpServer(
+  name: string,
   daemonConfigPath?: string
-): void {
-  const defs = mcpServerDefinitions(servers, daemonConfigPath);
-  if (Object.keys(defs).length === 0) return;
-
-  const configPath = path.join(workDir, '.mcp.json');
-  let config: any = {};
-  if (fs.existsSync(configPath)) {
-    try {
-      config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    } catch (e) {
-      // CrabCast owns this file; a corrupt one is replaced, not preserved.
-      console.error('[Launchers] Replacing unparseable workspace .mcp.json', e);
-      config = {};
-    }
-  }
-  config.mcpServers = { ...config.mcpServers, ...defs };
-
-  try {
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-  } catch (e) {
-    console.error('[Launchers] Failed to write workspace .mcp.json', e);
-  }
+): Record<string, unknown> | null {
+  if (name !== 'crabcast') return null;
+  return {
+    command: process.execPath,
+    args: [path.join(__dirname, 'mcp.js')],
+    ...(daemonConfigPath ? { env: { CRABCAST_CONFIG: daemonConfigPath } } : {})
+  };
 }
+
+// WHAT USED TO BE HERE: `writeWorkspaceMcpConfig`.
+//
+// It wrote `.mcp.json` into the agent's working directory, merging our servers
+// in — and, when the existing file could not be parsed, REPLACING it, on the
+// stated grounds that "CrabCast owns this file". That was true of a workspace
+// CrabCast allocated. The directory is the caller's now, the file is theirs,
+// and both halves of the old behaviour were wrong under that: it wrote without
+// being asked, and it destroyed a file it could not read.
+//
+// It moved to `provisioning.ts`, which is where writing outside CrabCast's own
+// data directory now lives, and gained the four properties that make an
+// exception to "the consumer's directory is theirs" acceptable: it is opted
+// into, merged rather than replaced, named in the activation response, and
+// reversible by `forget`. The definitions themselves stay here, next to the
+// launchers that need them — see `mcpServerDefinitions` above.
 
 // The antigravity CLI has no project-scoped equivalent, so its global config
 // is merged into — and never written when the existing file cannot be parsed,
 // which would otherwise replace the user's config with just our entries.
-export function configureAgyMcp(servers: string[], configPath?: string): void {
-  const defs = mcpServerDefinitions(servers);
+//
+// GLOBAL, and therefore SHARED between every agent this daemon runs under this
+// launcher. That is why `forget` does not remove our key from it and why
+// nothing here pretends otherwise: two agents both have it written on their
+// behalf, so removing it when the first is forgotten would take the second's
+// servers away. It is disclosed in the activation response with that fact and
+// with how to remove it by hand — disclosure without a reversal we cannot
+// honestly perform, rather than a reversal that would break the other agent.
+// (The per-directory `.mcp.json` has no such problem: one directory, one agent,
+// so removal is unambiguous. See provisioning.ts.)
+export function agyMcpConfigPath(): string {
+  return path.join(os.homedir(), '.gemini', 'antigravity-cli', 'mcp.json');
+}
+
+export function configureAgyMcp(defs: Record<string, unknown>, configPath?: string): void {
   // Nothing to contribute: leave the user's global config alone entirely.
+  // Safe here in a way it was NOT safe at the workspace `.mcp.json` (KAN-121):
+  // `defs` is the ALREADY-RESOLVED set, so an empty one means the caller asked
+  // for nothing rather than that a resolution step dropped what they asked for.
+  // The dropping cannot happen any more — a name this daemon cannot supply
+  // refuses the activation before reaching here.
   if (Object.keys(defs).length === 0) return;
 
-  const agyConfigPath = configPath ?? path.join(os.homedir(), '.gemini', 'antigravity-cli', 'mcp.json');
+  const agyConfigPath = configPath ?? agyMcpConfigPath();
   const agyConfigDir = path.dirname(agyConfigPath);
   let config: any = {};
   if (fs.existsSync(agyConfigPath)) {
@@ -210,19 +239,34 @@ const TRUST_SETTLE_MS = 60;
 // before the new claude reads the file — closes at the pre-spawn re-check
 // (herdr.ts) and cannot be closed entirely from this side of the spawn;
 // watching agents past their startup dialogs was explicitly deferred (KAN-49).
+/**
+ * The user's global Claude Code configuration — the ONLY file folder trust can
+ * be recorded in.
+ *
+ * Exported so the activation response can name it without a second copy of the
+ * path, and so `forget` removes the entry from the same file the write went to.
+ */
+export function claudeConfigPath(): string {
+  return path.join(os.homedir(), '.claude.json');
+}
+
+/** Claude Code keys projects by the normalized absolute path, nothing more. */
+export function trustKeyFor(workDir: string): string {
+  return path.normalize(path.resolve(workDir));
+}
+
 export function trustClaudeWorkspace(workDir: string, configPath?: string): TrustResult {
-  const claudeConfigPath = configPath ?? path.join(os.homedir(), '.claude.json');
-  // Claude Code keys projects by the normalized absolute path, nothing more.
-  const trustKey = path.normalize(path.resolve(workDir));
+  const claudeConfigFile = configPath ?? claudeConfigPath();
+  const trustKey = trustKeyFor(workDir);
 
   const read = (): { config: any } | { unreadable: string } => {
-    if (!fs.existsSync(claudeConfigPath)) return { config: {} };
+    if (!fs.existsSync(claudeConfigFile)) return { config: {} };
     try {
-      return { config: JSON.parse(fs.readFileSync(claudeConfigPath, 'utf8')) };
+      return { config: JSON.parse(fs.readFileSync(claudeConfigFile, 'utf8')) };
     } catch (e: any) {
       return {
         unreadable:
-          `${claudeConfigPath} exists but is unparseable; refusing to overwrite it ` +
+          `${claudeConfigFile} exists but is unparseable; refusing to overwrite it ` +
           `(${e?.message ?? String(e)})`
       };
     }
@@ -258,14 +302,14 @@ export function trustClaudeWorkspace(workDir: string, configPath?: string): Trus
     // Same directory as the target so the rename cannot cross filesystems and
     // stays atomic; pid + attempt keeps concurrent daemons off each other's
     // temp files.
-    const tmpPath = `${claudeConfigPath}.crabcast-${process.pid}-${attempt}.tmp`;
+    const tmpPath = `${claudeConfigFile}.crabcast-${process.pid}-${attempt}.tmp`;
     try {
       fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2));
-      fs.renameSync(tmpPath, claudeConfigPath);
+      fs.renameSync(tmpPath, claudeConfigFile);
     } catch (e: any) {
       try { fs.unlinkSync(tmpPath); } catch {}
       const error =
-        `Failed to record workspace trust in ${claudeConfigPath}: ${e?.message ?? String(e)}`;
+        `Failed to record workspace trust in ${claudeConfigFile}: ${e?.message ?? String(e)}`;
       console.error(`[Launchers] ${error}`);
       return { ok: false, attempts: attempt, error };
     }
@@ -280,12 +324,12 @@ export function trustClaudeWorkspace(workDir: string, configPath?: string): Trus
     }
     console.error(
       `[Launchers] Trust entry for ${trustKey} was clobbered after write ` +
-      `${attempt}/${TRUST_WRITE_ATTEMPTS} — a concurrent writer rewrote ${claudeConfigPath}`
+      `${attempt}/${TRUST_WRITE_ATTEMPTS} — a concurrent writer rewrote ${claudeConfigFile}`
     );
   }
 
   const error =
-    `Trust entry for ${trustKey} in ${claudeConfigPath} would not stick after ` +
+    `Trust entry for ${trustKey} in ${claudeConfigFile} would not stick after ` +
     `${TRUST_WRITE_ATTEMPTS} attempts; a concurrent writer keeps rewriting the file. ` +
     `Starting claude now would wedge it on the folder-trust dialog.`;
   console.error(`[Launchers] ${error}`);
@@ -305,29 +349,80 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export interface AgentLauncher {
+/**
+ * What a launcher needs to know to build its command line.
+ *
+ * AN OBJECT RATHER THAN POSITIONAL ARGUMENTS, and `mayResume` is why: it
+ * decides whether `--continue` appears at all, and a boolean that can be
+ * omitted is a boolean that will be omitted. Every launcher below reads it, and
+ * a launcher added later cannot get a resume by forgetting to ask about one.
+ */
+export interface LauncherCommandContext {
   /**
-   * Shell command run inside the herdr pane (via bash -c).
-   *
-   * A function rather than a constant because the prompt is not always the
-   * same sentence: an agent being restored after a reboot whose conversation
-   * could not be recovered must be told that, not greeted as if it were
-   * starting fresh. `promptCommand` is what to say when there is no
-   * conversation to continue.
+   * What to say to an agent that is starting fresh, or `undefined` when the
+   * agent was configured without a prompt.
    *
    * `undefined` is a real case rather than a default: `prompt` is an optional
    * `configure` parameter, and an agent configured without one is started with
    * no opening instruction at all. Substituting a generic one would be this
    * daemon inventing an instruction nobody wrote.
    */
-  command: (promptCommand?: string) => string;
+  promptCommand?: string;
+  /**
+   * WHETHER THIS LAUNCHER MAY RESUME A CONVERSATION AT THIS PATH. The resume
+   * rule (see resume.ts) in the one place it has to be obeyed.
+   *
+   * `false` means the command must start a NEW session — no `--continue`, no
+   * `--resume`, nothing that reads a transcript keyed by the directory. The
+   * transcripts at a caller-owned path may be a HUMAN'S, and resuming one into
+   * an agent pane hands their session to an agent that then acts on it.
+   */
+  mayResume: boolean;
+}
+
+/**
+ * What a launcher's `setup` may report having written outside CrabCast's own
+ * data directory, so the activation response can name it.
+ *
+ * The trust entry is the reason this exists: it is written by the claude
+ * launcher, into the user's GLOBAL config, and neither the router nor the
+ * bridge would otherwise know it happened.
+ */
+export interface LauncherSetupContext {
+  workDir: string;
+  /**
+   * The RESOLVED server definitions — caller-supplied ones verbatim, plus any
+   * builtin CrabCast filled in. Resolved before this is called, so a launcher
+   * never sees a name it would have to look up, and an empty map means the
+   * caller asked for nothing rather than that something was dropped.
+   */
+  mcpServers: Record<string, unknown>;
+  /**
+   * Called once per artifact this setup wrote or relied on. `wroteIt` is the
+   * difference between an entry CrabCast put there and one that was already
+   * true — which is what decides whether `forget` may take it away again.
+   */
+  note?: (artifact: { kind: 'folder-trust'; file: string; trustKey: string; wroteIt: boolean }) => void;
+}
+
+export interface AgentLauncher {
+  /**
+   * Shell command run inside the herdr pane (via bash -c).
+   *
+   * A function rather than a constant because neither half of it is fixed: an
+   * agent being restored after a reboot whose conversation could not be
+   * recovered must be told that rather than greeted as if it were starting
+   * fresh, and an agent in a directory CrabCast has never run in before must
+   * not be handed whatever conversation happens to be on disk there.
+   */
+  command: (context: LauncherCommandContext) => string;
   /**
    * Optional pre-launch setup, e.g. CLI-specific MCP config. Throwing refuses
    * the activation: initPty answers with session.spawnError + terminated, the
    * same channel as an unknown launcher, so setup that did not stick is never
    * papered over with `success: true`.
    */
-  setup?: (workDir: string, mcpServers: string[]) => void;
+  setup?: (context: LauncherSetupContext) => void;
   /**
    * Re-run immediately before the pane spawn, after everything between setup
    * and the spawn (prompt write, `herdr agent get`) has had time to happen —
@@ -406,13 +501,16 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
     //
     // `exec` so the shell is still PID 1 of the pane and closing it closes the
     // pane, exactly as `bash` alone did.
-    command: (promptCommand) =>
+    //
+    // `mayResume` is not read here and nothing is missing: a bare shell has no
+    // conversation to restore, so there is no resume to suppress.
+    command: ({ promptCommand }) =>
       promptCommand ? `printf '%s\\n' ${shellQuote(promptCommand)}; exec bash` : 'bash'
   },
   claude: {
-    // Interactive session: resume if a conversation exists, else start one
-    // seeded with the bootstrap prompt. (`claude -p` would run one headless
-    // turn and exit, leaving a dead pane.)
+    // Interactive session: resume if a conversation exists AND resuming is
+    // permitted, else start one seeded with the bootstrap prompt. (`claude -p`
+    // would run one headless turn and exit, leaving a dead pane.)
     // --permission-mode backs up the settings file on the --continue path,
     // where a resumed session could otherwise carry a stale mode forward.
     //
@@ -421,20 +519,46 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
     // continue", so the fallback is reached exactly when there is nothing to
     // restore — which is what makes it the right place to put the degraded
     // resume prompt.
-    command: (promptCommand) =>
-      `claude --permission-mode bypassPermissions --continue || ` +
-      `claude --permission-mode bypassPermissions${promptCommand ? ' ' + shellQuote(promptCommand) : ''}`,
-    setup: (workDir) => {
+    //
+    // `mayResume: false` DROPS THE `--continue` BRANCH ENTIRELY, and that is
+    // the resume rule's teeth. A predictor answering `false` would only have
+    // changed which prompt was passed to the fallback — the `--continue` in
+    // front of it would still have run and still have restored whatever
+    // transcript the directory had. At a caller-owned path that transcript is
+    // very often a HUMAN'S: Claude Code keys history on the working directory,
+    // so anyone who has ever run it in their own repository has one waiting
+    // there. Suppressing the flag is the only place this can be stopped, and it
+    // is stopped here rather than upstream so a launcher cannot resume by
+    // accident.
+    command: ({ promptCommand, mayResume }) => {
+      const fresh =
+        `claude --permission-mode bypassPermissions` +
+        (promptCommand ? ' ' + shellQuote(promptCommand) : '');
+      return mayResume
+        ? `claude --permission-mode bypassPermissions --continue || ${fresh}`
+        : fresh;
+    },
+    setup: ({ workDir, note }) => {
       const trust = trustClaudeWorkspace(workDir);
       if (!trust.ok) {
         throw new Error(`Refusing to start claude in an untrusted workspace: ${trust.error}`);
       }
+      // `attempts: 0` means the entry was already true on the first read, so
+      // CrabCast did not put it there. Anything above zero means we wrote one.
+      // That distinction is what `forget` needs: an entry a human accepted
+      // themselves is theirs, and is never removed on our way out.
+      note?.({
+        kind: 'folder-trust',
+        file: claudeConfigPath(),
+        trustKey: trustKeyFor(workDir),
+        wroteIt: trust.attempts > 0
+      });
     },
     // trustClaudeWorkspace is its own verifier: present-and-true returns fast
     // with no write, a clobbered entry is rewritten, and only an entry that
     // will not stick throws. So the pre-spawn check is simply setup's trust
     // half again, run as late as the daemon can run anything (KAN-54).
-    preSpawnCheck: (workDir) => {
+    preSpawnCheck: (workDir: string) => {
       const trust = trustClaudeWorkspace(workDir);
       if (!trust.ok) {
         throw new Error(`Refusing to spawn claude: ${trust.error}`);
@@ -450,9 +574,17 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
     readyMarkers: ['bypass permissions', 'for shortcuts', '❯']
   },
   'anti-gravity': {
-    command: (promptCommand) =>
-      `agy --continue || agy${promptCommand ? ' -i ' + shellQuote(promptCommand) : ''}`,
-    setup: (_workDir, mcpServers) => configureAgyMcp(mcpServers),
+    // Same resume rule as claude, and for the same reason rather than for
+    // symmetry: `agy --continue` restores whatever session agy keeps for this
+    // directory, and at a caller-owned path that session may be the human's.
+    // The rule is about whose conversation lives at a path, which is a fact
+    // about the directory rather than about any particular runtime — so it
+    // binds every launcher that can continue anything.
+    command: ({ promptCommand, mayResume }) => {
+      const fresh = `agy${promptCommand ? ' -i ' + shellQuote(promptCommand) : ''}`;
+      return mayResume ? `agy --continue || ${fresh}` : fresh;
+    },
+    setup: ({ mcpServers }) => configureAgyMcp(mcpServers),
     runtimeComm: 'agy'
     // No restoresConversation, deliberately, despite the `--continue` above:
     // the restore *predictor* (hasRestorableConversation in resume.ts) reads
