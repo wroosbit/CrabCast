@@ -917,9 +917,28 @@ function renderConfigure(reader: ResponseReader, request: Record<string, unknown
       : null,
     occupiedBlock(occupied),
     outcomesBlock(reader.take('outcomes')),
+    // OURS BY NAME, AND UNKNOWN TO THE RECORD. Printed above the daemon's
+    // `note` rather than folded into it: it is the one thing on a successful
+    // `configure` that changes what the NEXT command will do, and a caller who
+    // reads it at `activate` instead has already adopted a pane they did not
+    // mean to. The sentence is the daemon's, verbatim — which pane state means
+    // what is its rule, and a copy here is the copy that goes stale.
+    unrecordedPaneBlock(reader.take('unrecordedPane')),
     note ? `\n${note}` : null,
     durability(reader),
     residue(reader)
+  );
+}
+
+function unrecordedPaneBlock(pane: unknown): string | null {
+  if (!pane || typeof pane !== 'object') return null;
+  const p = pane as any;
+  return lines(
+    `\nA LIVE PANE OF OURS IS ALREADY THERE, and nothing had been configured for it:`,
+    `${INDENT}pane name:     ${p.paneName ?? '(not reported)'}` +
+      (p.paneId ? `  (${p.paneId})` : ''),
+    indent(String(p.meaning ?? ''), INDENT),
+    p.remedy ? `${INDENT}remedy:        ${p.remedy}` : null
   );
 }
 

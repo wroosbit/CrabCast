@@ -175,10 +175,18 @@ jobs:
       #                                      It iterates the classification
       #                                      table itself, so a knob added
       #                                      without a decision fails it; and it
-      #                                      MUTATES the compiled daemon four
+      #                                      MUTATES the compiled daemon five
       #                                      ways — including the exact bug the
       #                                      task exists to prevent — to prove
-      #                                      the assertions can go red.
+      #                                      the assertions can go red. Its
+      #                                      section 2B is the refusal's
+      #                                      BOUNDARY (KAN-153): a FIRST
+      #                                      configure over a live pane of ours
+      #                                      with no record must be answered
+      #                                      rather than refused or thrown at,
+      #                                      and it produces that state by
+      #                                      losing the registry while the
+      #                                      stub's panes survive.
       #   verify-state-read-echoes-config    every fleet category echoes the
       #                                      agent's frozen configuration, and
       #                                      `unstartedAgents` is distinct from
