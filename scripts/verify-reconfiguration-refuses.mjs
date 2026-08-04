@@ -81,7 +81,7 @@
 //   npm run build
 //   node scripts/verify-reconfiguration-refuses.mjs [distDir]
 
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -230,11 +230,24 @@ const panesIn = (dir) => censusPanes().filter((p) => p.cwd === dir);
 const paneIdIn = (dir) => panesIn(dir)[0]?.pane_id ?? null;
 
 const resetArgvLog = () => fs.writeFileSync(ARGV_LOG, '');
+/**
+ * Every argv the stub was called with since the last reset.
+ *
+ * IT THROWS RATHER THAN ANSWERING `[]`. This used to swallow a read error, and
+ * that turns every `startsIssued() === 0` assertion in this file into one that
+ * cannot tell "nothing happened" from "I could not look" — a zero-assertion
+ * that passes when its own evidence is missing. A broken harness should stop
+ * the run loudly, not report the world it failed to observe as quiet.
+ */
 const herdrCalls = () => {
   try {
     return fs.readFileSync(ARGV_LOG, 'utf8').split('\n').filter(Boolean);
-  } catch {
-    return [];
+  } catch (e) {
+    throw new Error(
+      `could not read the stub's argv log at ${ARGV_LOG}: ${e?.message ?? e}. Every ` +
+        `"nothing was spawned" assertion in this script is counted from it, so an unreadable ` +
+        `log is a broken proof rather than a quiet one.`
+    );
   }
 };
 const startsIssued = () => herdrCalls().filter((l) => /^agent start\b/.test(l)).length;
@@ -287,7 +300,7 @@ function conversationDigest(dir) {
           .readdirSync(t)
           .sort()
           .map((n) => `${n}:${fs.readFileSync(path.join(t, n), 'utf8')}`)
-          .join(' ')
+          .join('\u0000')
       )
       .digest('hex')
       .slice(0, 16);
@@ -450,6 +463,14 @@ rule('2. THE REFUSAL — a respawn-requiring change on a running agent');
 let versionBeforeRefusal;
 {
   const before = conversationDigest(theAgent);
+  // `conversationDigest` answers '(no conversation)' when it cannot read the
+  // directory, so a transcript that vanished would make BOTH sides of the
+  // comparison below equal and the assertion vacuous. Anchoring to "there is
+  // something there to preserve" is what keeps it a measurement.
+  check(before !== '(no conversation)',
+    '(setup) there is a conversation on disk to preserve — otherwise "intact" compares ' +
+      'nothing against nothing',
+    before);
   const pane = watchPane(theAgent);
   const record = h1.agentRegistry.intents().get(theAgent);
   versionBeforeRefusal = record.configVersion;
@@ -627,8 +648,16 @@ rule('4. EVERY KNOB, ONE AT A TIME, AGAINST THE CLASSIFICATION TABLE');
     // them would silently un-run the agent the later sections are about.
     resetArgvLog();
     await h.invoke({ action: 'configure_agent', path: dir, ...BASE });
-    await h.invoke({ action: 'activate_agent', path: dir, ...PAST_THE_GATE });
+    const up = await h.invoke({ action: 'activate_agent', path: dir, ...PAST_THE_GATE });
     const pane = paneIdIn(dir);
+    // WITHOUT THIS, `paneIdIn(dir) === pane` BELOW DEGRADES TO `null === null`.
+    // Every claim in this loop is "…on a running agent, same pane"; if the
+    // activate above ever no-opped, the loop would assert it about a world with
+    // no agent in it and stay green. Sections 1 and 5 already guard their own
+    // setups this way.
+    check(up.success === true && up.started === true && pane !== null,
+      `${knob.padEnd(11)} (setup) the agent really is running, in a pane this loop can name`,
+      `success ${up.success}, started ${up.started}, pane ${pane}`);
 
     // `chargeable: false` needs `preemptable: false` alongside it or the
     // cross-field rule refuses the document for a reason that has nothing to
@@ -666,6 +695,16 @@ rule('4. EVERY KNOB, ONE AT A TIME, AGAINST THE CLASSIFICATION TABLE');
 
     // AND THE SAME KNOB CHANGES FREELY ONCE IT IS STOPPED. The rule is about
     // liveness, not about the attribute being immutable.
+    //
+    // WHICH KNOBS THIS CLAIM IS LIVE FOR, said rather than left to be worked
+    // out: only the three RESTART-REQUIRED ones. For the five in-place knobs
+    // the value already landed on the running agent above, so the value sent
+    // here is the value on the record and the outcome is `unchanged` — the
+    // `applied` half of the disjunction below cannot fail for them. They are
+    // still run, because a knob that started REFUSING once stopped would be a
+    // real regression and this is where it would surface; but the assertion
+    // that carries weight is `launcher`, `prompt` and `mcpServers` moving from
+    // `refused-restart-required` to `applied` across a stand-down.
     await h.invoke({ action: 'deactivate_agent', path: dir });
     const stopped = await h.invoke({
       action: 'configure_agent', path: dir, ...seed, ...extra, [knob]: NEW_VALUE[knob]
@@ -691,6 +730,10 @@ rule('5. THE DOCUMENTED REMEDY ACTUALLY WORKS');
 
 {
   const conversationBefore = conversationDigest(theAgent);
+  check(conversationBefore !== '(no conversation)',
+    '(setup) section 1\'s conversation is still readable, so "still on disk" below is a ' +
+      'comparison rather than two absences agreeing',
+    conversationBefore);
   const NEW_PROMPT = 'KAN-126: this is the prompt the caller chose to respawn for.';
   resetArgvLog();
   check(panesIn(theAgent).length === 1,
@@ -804,6 +847,35 @@ rule('7. THE TOKEN — configVersion moves on acceptance and NEVER on a refusal'
   const no = await h.invoke({ action: 'configure_agent', path: dir, ...BASE, priority: 5, launcher: 'claude' });
   const v3 = await h.invoke({ action: 'configure_agent', path: dir, ...BASE, priority: 6 });
 
+  // THE THREE FIELDS ARE ON EVERY SUCCESS, INCLUDING THE FIRST ONE.
+  //
+  // This daemon's rule, stated for `activate` at mcp.ts and applied here: a
+  // field that appears only sometimes asks the caller to read meaning into an
+  // absence. Our consumer has no second source to fall back on, so a missing
+  // field is exactly what this slice is trying to stop them inferring from —
+  // and gating these on "is there a previous record" would make a first
+  // configure and a reconfigure-that-changed-nothing look identical from
+  // outside. Both silent, different worlds.
+  for (const [when, res] of [['a FIRST configure', v1], ['a RECONFIGURE', v2]]) {
+    check(
+      Array.isArray(res.applied) && Array.isArray(res.withheld) &&
+        res.outcomes && typeof res.outcomes === 'object' &&
+        Object.keys(res.outcomes).sort().join() === Object.keys(RECONFIGURATION_COST).sort().join(),
+      `${when} carries applied, withheld and a COMPLETE outcomes map — presence is never the ` +
+        `signal`,
+      `applied ${JSON.stringify(res.applied)}, withheld ${JSON.stringify(res.withheld)}, ` +
+        `outcomes ${Object.keys(res.outcomes ?? {}).length} keys`
+    );
+  }
+  check(
+    v1.applied?.length === Object.keys(RECONFIGURATION_COST).length && v1.withheld?.length === 0 &&
+      Object.values(v1.outcomes ?? {}).every((o) => o === 'applied'),
+    'and on the FIRST configure every knob reads `applied` — there was no record, so this call ' +
+      'wrote all of it, including the optional knobs the caller left out: the record now ' +
+      'carries "no prompt", and this is the call that put it there',
+    `${v1.applied?.length} applied, ${v1.withheld?.length} withheld`
+  );
+
   check(v1.configVersion === 1 && v2.configVersion === 2 && v3.configVersion === 3,
     'each accepted configure moves it by one',
     `${v1.configVersion}, ${v2.configVersion}, ${v3.configVersion}`);
@@ -912,6 +984,30 @@ async function mutantHarness(dir, name) {
   return harness(name, Broken, BrokenReg);
 }
 
+/**
+ * THE LIVENESS CONTROL, and this section does not work without it.
+ *
+ * Mutations A, C and D all claim "…under a RUNNING agent". Each of them would
+ * ALSO pass against an unmutated daemon if the agent were not running:
+ * configuring a stopped agent's prompt legitimately succeeds, and
+ * `!expected().some(…)` is trivially true for an agent that never started. So
+ * a setup that silently failed to spawn would turn each of these into a green
+ * assertion about nothing — which is precisely the failure the whole section
+ * exists to rule out, reappearing inside it. (B is self-guarding: its claim is
+ * a refusal, which a stopped agent cannot produce.)
+ *
+ * So the precondition is asserted rather than assumed, from the census rather
+ * than from the activate response.
+ */
+function liveControl(mutation, dir, res) {
+  return check(
+    res?.success === true && res?.started === true && panesIn(dir).length === 1,
+    `${mutation} — CONTROL: the agent really is running before the mutation is exercised, ` +
+      `so the claim below is about a live agent rather than a vacuous one`,
+    `activate success ${res?.success}, started ${res?.started}, panes ${panesIn(dir).length}`
+  );
+}
+
 {
   // MUTATION A: `prompt` is reclassified as in-place — the exact shape of the
   // bug this task exists to prevent, and the one a future knob would take by
@@ -923,7 +1019,7 @@ async function mutantHarness(dir, name) {
   const p = ownedDir('s9', 'a');
   setCensus([]);
   await b.invoke({ action: 'configure_agent', path: p, ...BASE });
-  await b.invoke({ action: 'activate_agent', path: p, ...PAST_THE_GATE });
+  liveControl('MUTATION A', p, await b.invoke({ action: 'activate_agent', path: p, ...PAST_THE_GATE }));
   const res = await b.invoke({ action: 'configure_agent', path: p, ...BASE, prompt: 'rewritten' });
   check(res.success === true && b.agentRegistry.intents().get(p).record.config.prompt === 'rewritten',
     'MUTATION A — reclassifying `prompt` as in-place lets it be rewritten under a live agent, ' +
@@ -972,7 +1068,15 @@ async function mutantHarness(dir, name) {
   const p = ownedDir('s9', 'c');
   setCensus([]);
   await b.invoke({ action: 'configure_agent', path: p, ...BASE });
-  await b.invoke({ action: 'activate_agent', path: p, ...PAST_THE_GATE });
+  const up = await b.invoke({ action: 'activate_agent', path: p, ...PAST_THE_GATE });
+  liveControl('MUTATION C', p, up);
+  // AND THE RECORD SAYS SO, which is the half `liveControl` cannot see. The
+  // claim is that a `configured` row DROPS this agent out of expected(); if it
+  // were never in expected() the assertion would hold for the wrong reason.
+  check(b.agentRegistry.expected().some((r) => r.path === p),
+    'MUTATION C — CONTROL: and the mutant has it in expected() BEFORE the reconfigure, so the ' +
+      'drop below is caused by this call rather than by it never having been there',
+    JSON.stringify(b.agentRegistry.expected().map((r) => r.path)));
   const res = await b.invoke({ action: 'configure_agent', path: p, ...BASE, priority: 5 });
   check(res.success === true && !b.agentRegistry.expected().some((r) => r.path === p),
     'MUTATION C — writing a `configured` row over a RUNNING agent drops it out of expected() ' +
@@ -992,7 +1096,14 @@ async function mutantHarness(dir, name) {
   const p = ownedDir('s9', 'd');
   setCensus([]);
   await b.invoke({ action: 'configure_agent', path: p, ...BASE });
-  await b.invoke({ action: 'activate_agent', path: p, ...PAST_THE_GATE });
+  liveControl('MUTATION D', p, await b.invoke({ action: 'activate_agent', path: p, ...PAST_THE_GATE }));
+  // The record has to say `activated` too: the branch this mutation removes is
+  // gated on it, so an agent whose record said otherwise would take the
+  // unmutated path and pass this section for the wrong reason.
+  check(b.agentRegistry.intents().get(p)?.event === 'activated',
+    'MUTATION D — CONTROL: and the record says `activated`, which is what the removed branch ' +
+      'is gated on',
+    b.agentRegistry.intents().get(p)?.event);
   b.bridge.getSessionByPath = () => undefined;
   setCensus('DOWN');
   const res = await b.invoke({ action: 'configure_agent', path: p, ...BASE, prompt: 'rewritten' });
@@ -1105,6 +1216,28 @@ const waitFor = async (fn, ms, what) => {
   throw new Error(`timed out waiting for ${what}`);
 };
 
+/**
+ * THE PANES THE LIVE SHIM ACTUALLY STARTED, from the file it writes itself.
+ *
+ * Sections 1 to 9 assert "the agent never moved" from the census — a source
+ * independent of the response. This section had been comparing one
+ * `agent_status` response against another, which is the daemon agreeing with
+ * itself and the one place this file departed from its own stated method. The
+ * shim already records every spawn; this reads it.
+ *
+ * It throws rather than answering `[]` for the same reason `herdrCalls` does:
+ * a count taken from a file we could not read is not a measurement.
+ */
+function livePanesStarted() {
+  const file = path.join(liveState, 'started.json');
+  if (!fs.existsSync(file)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (e) {
+    throw new Error(`could not read the live shim's spawn record at ${file}: ${e?.message ?? e}`);
+  }
+}
+
 {
   const argv = [
     'configure', livePath,
@@ -1127,6 +1260,13 @@ const waitFor = async (fn, ms, what) => {
   check(activated.status === 0, '(setup) and activated it against a real daemon',
     activated.status === 0 ? undefined : activated.stderr?.slice(0, 400));
   const paneBefore = (await raw('agent_status', { path: livePath })).paneId;
+  // FROM THE SHIM, NOT FROM THE RESPONSE. This is the evidence the final
+  // assertion in this section compares against.
+  const spawnsBefore = livePanesStarted();
+  check(spawnsBefore.length === 1 && spawnsBefore[0].cwd === livePath,
+    '(setup) the live shim recorded exactly ONE spawn into that directory, which is the ' +
+      'independent record the surfaces below are measured against',
+    JSON.stringify(spawnsBefore));
 
   // --- surface 1: the CLI, in place ---------------------------------------
   const cliInPlace = crabcast([
@@ -1170,28 +1310,75 @@ const waitFor = async (fn, ms, what) => {
     cliMisses.length ? `missing: ${cliMisses.map(([n]) => n).join(', ')}` : `exit ${cliRefused.status}`);
 
   // --- surface 3: MCP -----------------------------------------------------
+  //
+  // A LONG-LIVED CHILD, RESOLVING PER REQUEST — the shape verify-mcp-tools
+  // already uses, and the reason is a defect this script had until round 2.
+  //
+  // It used to drive the server with `spawnSync` and an `input` string. An MCP
+  // server on stdio does not exit when its stdin closes: it waits, as it is
+  // supposed to. So every call sat until spawnSync's 120-SECOND TIMEOUT, was
+  // killed with SIGTERM, and had its stdout parsed out of the corpse — which
+  // parsed fine, because the reply had arrived in the first few milliseconds.
+  // Green assertions, correct values, and two minutes of dead wall-clock each,
+  // hidden because nothing looked at the exit status. Checking the status is
+  // what surfaced it; resolving on the reply is what fixes it.
   const mcpJs = path.join(distDir, 'mcp.js');
-  const mcpCall = (name, args) => {
-    const requests = [
-      { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'kan126', version: '0' } } },
-      { jsonrpc: '2.0', method: 'notifications/initialized' },
-      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name, arguments: args } }
-    ];
-    const res = spawnSync(process.execPath, [mcpJs], {
-      input: requests.map((r) => JSON.stringify(r)).join('\n') + '\n',
-      env: { ...liveEnv, CRABCAST_CONFIG: liveConfigPath }, encoding: 'utf8', timeout: 120_000
-    });
-    for (const line of res.stdout.split('\n')) {
+  const mcp = spawn(process.execPath, [mcpJs], {
+    env: { ...liveEnv, CRABCAST_CONFIG: liveConfigPath },
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  let mcpStderr = '';
+  let mcpExit = null;
+  mcp.stderr.on('data', (d) => { mcpStderr += d.toString(); });
+  mcp.on('exit', (code, signal) => { mcpExit = { code, signal }; });
+  const mcpPending = new Map();
+  let mcpBuffer = '';
+  mcp.stdout.on('data', (chunk) => {
+    mcpBuffer += chunk.toString();
+    let idx;
+    while ((idx = mcpBuffer.indexOf('\n')) !== -1) {
+      const line = mcpBuffer.slice(0, idx);
+      mcpBuffer = mcpBuffer.slice(idx + 1);
       if (!line.trim()) continue;
-      try {
-        const msg = JSON.parse(line);
-        if (msg.id === 2) return msg.result;
-      } catch {}
+      let msg;
+      try { msg = JSON.parse(line); } catch { continue; }
+      const waiting = msg.id !== undefined && mcpPending.get(msg.id);
+      if (waiting) {
+        mcpPending.delete(msg.id);
+        clearTimeout(waiting.timer);
+        msg.error ? waiting.reject(new Error(JSON.stringify(msg.error))) : waiting.resolve(msg.result);
+      }
     }
-    throw new Error(`no MCP reply: ${res.stdout.slice(0, 400)} ${res.stderr.slice(0, 400)}`);
+  });
+  let mcpId = 0;
+  const mcpRequest = (method, params = {}) => {
+    // The server dying is checked on every request rather than only at the end:
+    // a reply read out of a process that has already exited is a surface
+    // assertion about a surface that fell over.
+    if (mcpExit) {
+      throw new Error(
+        `the MCP server exited (${JSON.stringify(mcpExit)}) before ${method}: ` +
+          mcpStderr.slice(0, 400)
+      );
+    }
+    const id = ++mcpId;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        mcpPending.delete(id);
+        reject(new Error(`timed out waiting for ${method}: ${mcpStderr.slice(0, 400)}`));
+      }, 30_000);
+      mcpPending.set(id, { resolve, reject, timer });
+      mcp.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    });
   };
+  await mcpRequest('initialize', {
+    protocolVersion: '2024-11-05', capabilities: {},
+    clientInfo: { name: 'kan126', version: '0' }
+  });
+  mcp.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+  const mcpCall = (name, args) => mcpRequest('tools/call', { name, arguments: args });
 
-  const mcpRefused = mcpCall('crabcast_configure_agent', {
+  const mcpRefused = await mcpCall('crabcast_configure_agent', {
     path: livePath, priority: 12, launcher: BASE.launcher,
     prompt: 'a different prompt again', label: BASE.label
   });
@@ -1211,7 +1398,7 @@ const waitFor = async (fn, ms, what) => {
       'read it as ordinary text and believe the change landed',
     `isError ${mcpRefused.isError}, refused ${mcpBody.refused}`);
 
-  const mcpInPlace = mcpCall('crabcast_configure_agent', {
+  const mcpInPlace = await mcpCall('crabcast_configure_agent', {
     path: livePath, priority: 3, launcher: BASE.launcher, prompt: BASE.prompt, label: BASE.label
   });
   const mcpOk = JSON.parse(mcpInPlace.content[0].text);
@@ -1222,11 +1409,23 @@ const waitFor = async (fn, ms, what) => {
     JSON.stringify({ isError: mcpInPlace.isError, outcome: mcpOk.outcomes?.priority }));
 
   // AND THE AGENT NEVER MOVED, across every surface.
+  check(mcpExit === null,
+    'the MCP server stayed up across both calls rather than being read out of a corpse',
+    JSON.stringify(mcpExit));
+  mcp.kill();
+
   const finalStatus = await raw('agent_status', { path: livePath });
-  check(finalStatus.paneId === paneBefore && finalStatus.state === 'running',
+  const spawnsAfter = livePanesStarted();
+  check(
+    spawnsAfter.length === 1 &&
+      spawnsAfter[0].pane_id === spawnsBefore[0].pane_id &&
+      finalStatus.paneId === paneBefore && finalStatus.state === 'running',
     'across the CLI and MCP, accepted and refused, the agent stayed in ONE pane and kept ' +
-      'running',
-    `${paneBefore} -> ${finalStatus.paneId}, state ${finalStatus.state}`);
+      'running — counted from the SHIM\'S OWN spawn record rather than from a second ' +
+      'agent_status, so this is not the daemon agreeing with itself',
+    `shim spawns ${spawnsBefore.length} -> ${spawnsAfter.length} ` +
+      `(${JSON.stringify(spawnsAfter.map((x) => x.pane_id))}), ` +
+      `status ${paneBefore} -> ${finalStatus.paneId}, state ${finalStatus.state}`);
   check(finalStatus.config?.prompt === BASE.prompt,
     'and its prompt is still the one it was started with — no surface let a refused change ' +
       'through',

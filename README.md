@@ -301,7 +301,7 @@ per knob:
   prompt       REFUSED — cannot change under a running agent
 ```
 
-A call that applies half and reports a bare success is the defect this rule exists to prevent, so `applied`, `withheld` and `outcomes` are on every response rather than something to infer.
+A call that applies half and reports a bare success is the defect this rule exists to prevent, so `applied`, `withheld` and `outcomes` are on **every** successful response — including the first `configure` on a path, where `applied` is every knob and `withheld` is empty — rather than something to infer from a missing field. Same rule as `alreadyRunning` and `started` on `activate`: a field that appears only sometimes asks the caller to read meaning into an absence, and a reconciler holding desired state has no second source to check it against.
 
 **There is a third answer here too.** If a restart-only knob is asked to move, herdr cannot be reached and the record says the agent is active, the call is refused as *unverifiable*: an empty census from an unreachable herdr is silence, not evidence that nothing is running there. The in-place knobs still change, because their new value is correct whether the agent is up or down.
 

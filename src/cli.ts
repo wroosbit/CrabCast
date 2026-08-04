@@ -858,17 +858,26 @@ function renderConfigure(reader: ResponseReader, request: Record<string, unknown
   // `applied` duplicates `changed` on this path and `withheld` is empty by
   // construction; the per-knob block below says both, per knob.
   reader.seen('applied', 'withheld', 'running');
+  const reconfigured = reader.take('reconfigured');
   return lines(
-    `${reader.take('reconfigured') ? 'reconfigured' : 'configured'} ${what}`,
+    `${reconfigured ? 'reconfigured' : 'configured'} ${what}`,
     field('pane name', reader.take('paneName')),
     // WHAT MOVED, on a success. An empty list is the useful answer rather than
     // a boring one: it says the document sent was already the configuration.
+    //
+    // On a FIRST configure the daemon reports every knob — there was no record,
+    // so all of it was written — and naming all eight there would be noise
+    // rather than information, so this says what that list means instead. The
+    // per-knob block below still prints each one, and `--json` carries the
+    // array either way: the summary is shortened, never the response.
     Array.isArray(changed)
       ? field(
           'changed',
-          changed.length
-            ? `${changed.join(', ')}${appliedInPlace ? ' — IN PLACE, on the running agent' : ''}`
-            : 'nothing — this document was already the configuration'
+          !reconfigured
+            ? 'every knob — this call created the record'
+            : changed.length
+              ? `${changed.join(', ')}${appliedInPlace ? ' — IN PLACE, on the running agent' : ''}`
+              : 'nothing — this document was already the configuration'
         )
       : null,
     field('pane', reader.take('paneId')),

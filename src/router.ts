@@ -1324,9 +1324,17 @@ export class MessageRouter {
 
     // ------------------------------------------- what this call asks to move
     //
-    // Only meaningful against an existing record. A first `configure` brings
-    // an agent into existence, and there is nothing for "changed" to mean.
-    const changed = existing ? changedAttributes(existing.record.config, parsed.config) : [];
+    // ON A FIRST `configure`, EVERY KNOB MOVED. There was no record, so every
+    // one of them went from "nothing is written here" to the value this
+    // document gives it — and that is true of the OPTIONAL knobs a caller left
+    // out as well: `configure` takes one desired-state document, the document
+    // says "no prompt", and the record now carries that. Reporting the whole
+    // set is the reading that makes `applied` mean the same thing on both
+    // paths — what this call wrote — rather than a field whose meaning depends
+    // on which branch produced it.
+    const changed = existing
+      ? changedAttributes(existing.record.config, parsed.config)
+      : [...CONFIG_ATTRIBUTES];
     const restartRequired = changed.filter((n) => RECONFIGURATION_COST[n] === 'restart-required');
     const inPlace = changed.filter((n) => RECONFIGURATION_COST[n] === 'in-place');
 
@@ -1555,7 +1563,8 @@ export class MessageRouter {
       // and the structured MCP payload are the event-contract slice's; this is
       // the field that slice's table already specifies for this event, carried
       // by the call that computes it.)
-      ...(existing ? { changed, outcomes: outcomesWith(true) } : {})
+      changed,
+      outcomes: outcomesWith(true)
     });
 
     // WHAT ACTIVATION WILL WRITE INTO THE CALLER'S DIRECTORY, said now.
@@ -1584,36 +1593,43 @@ export class MessageRouter {
       // Carried on the reconfigure path so a caller can see the token move,
       // and so a refusal has a value to report unchanged.
       ...(existing ? { previousConfigVersion: existing.configVersion } : {}),
-      // PER KNOB, ON THE SUCCESS PATH TOO — not only on refusals. `success:
-      // true` with a list of what actually moved is the difference between a
-      // claim about the world and a claim about the call: a caller reading
-      // `changed: []` learns that the document it sent was already the
-      // configuration, which is exactly what a reconciler needs and what a bare
-      // success cannot say.
-      ...(existing
+      // PER KNOB, ON EVERY SUCCESS — INCLUDING THE FIRST `configure`.
+      //
+      // These three are UNCONDITIONAL, and that is the same call this daemon
+      // already made one verb over: `activate` puts `alreadyRunning` and
+      // `started` on every successful response, true or false, "so 'did this
+      // call start it' is read rather than inferred from a missing field".
+      // Gating them on `existing` would make a first configure and a
+      // reconfigure that changed nothing look identical from outside — both
+      // silent — and our consumer has no second source to fall back on.
+      // Absence is exactly the thing this slice is trying to stop them
+      // inferring from, so nothing here is signalled by it.
+      //
+      // On a first configure that means `applied` is every knob and `withheld`
+      // is empty: there was no record, so this call wrote all of it. See the
+      // note on `changed` above for why the knobs a caller left out are in that
+      // set — the record now carries "no prompt", and this call is what put it
+      // there.
+      changed,
+      applied: changed,
+      withheld: [],
+      outcomes: outcomesWith(true),
+      /**
+       * Whether the values that moved took effect on a LIVE agent (as opposed
+       * to being what the next `activate` will use). It is a fact about the
+       * world rather than about the call, so it is stated rather than left to
+       * be inferred from a status read.
+       */
+      appliedInPlace: running && changed.length > 0,
+      ...(running ? { running: true, ...(ourPaneId ? { paneId: ourPaneId } : {}) } : {}),
+      ...(running && existing && changed.length
         ? {
-            changed,
-            applied: changed,
-            withheld: [],
-            outcomes: outcomesWith(true),
-            /**
-             * Whether the values that moved took effect on a LIVE agent (as
-             * opposed to being what the next `activate` will use). It is a
-             * fact about the world rather than about the call, so it is stated
-             * rather than left to be inferred from a status read.
-             */
-            appliedInPlace: running && changed.length > 0,
-            ...(running ? { running: true, ...(ourPaneId ? { paneId: ourPaneId } : {}) } : {}),
-            ...(running && changed.length
-              ? {
-                  note:
-                    `${changed.join(', ')} changed IN PLACE on the running agent: ` +
-                    `${changed.length === 1 ? 'it is' : 'they are'} read out of the record when ` +
-                    `the decision that needs ${changed.length === 1 ? 'it' : 'them'} is made, so ` +
-                    `nothing was respawned and the conversation is untouched. The pane is the ` +
-                    `same one${ourPaneId ? ` (${ourPaneId})` : ''}.`
-                }
-              : {})
+            note:
+              `${changed.join(', ')} changed IN PLACE on the running agent: ` +
+              `${changed.length === 1 ? 'it is' : 'they are'} read out of the record when ` +
+              `the decision that needs ${changed.length === 1 ? 'it' : 'them'} is made, so ` +
+              `nothing was respawned and the conversation is untouched. The pane is the ` +
+              `same one${ourPaneId ? ` (${ourPaneId})` : ''}.`
           }
         : {}),
       willWrite: willWrite.length
