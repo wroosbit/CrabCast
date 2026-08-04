@@ -2,13 +2,22 @@
 // KAN-114 — the live half: the same delivery check against a REAL Claude Code
 // pane, read through a REAL herdr.
 //
-// WHAT FAILURE THIS WOULD CATCH: `COMPOSER_MARKERS` naming a caret that a real
-// Claude Code pane does not draw. That is the load-bearing assumption of the
-// whole mechanism — everything else in `src/delivery.ts` is arithmetic over
-// where that marker is — and it is the one assumption a shimmed pane CANNOT
-// test, because a shim renders the marker it is then checked against. If the
-// list is wrong, `verify-send-confirms-delivery.mjs` still passes every section
-// and every send in production reports the wrong verdict.
+// WHAT FAILURE THIS WOULD CATCH, and there are two:
+//
+//   1. `COMPOSER_MARKERS` naming a caret that a real Claude Code pane does not
+//      draw. That is the load-bearing assumption of the whole mechanism —
+//      everything else in `src/delivery.ts` is arithmetic over where that
+//      marker is — and it is the one assumption a shimmed pane CANNOT test,
+//      because a shim renders the marker it is then checked against. If the
+//      list is wrong, `verify-send-confirms-delivery.mjs` still passes every
+//      section and every send in production reports the wrong verdict.
+//
+//   2. CONFIRMATION THAT STOPS WORKING WHEN THE RECIPIENT IS BUSY — which is
+//      the only state `send_to_agent` exists for. A suite whose every send goes
+//      to an agent at an empty composer would keep passing while the contended
+//      case rotted, which is the shape KAN-138 collects. §1b drives all three
+//      recipient states: idle, mid-task, and blocked in a shell command. The
+//      third had never been tested anywhere.
 //
 // ---------------------------------------------------------------------------
 // WHAT IS REAL HERE, AND WHAT IS INDUCED. Read both lists.
@@ -290,66 +299,102 @@ let deliveredResult;
 }
 
 // ===========================================================================
-rule('1b. A BUSY RECIPIENT — the condition this ticket is actually about');
+rule('1b. A CONTENDED RECIPIENT — the condition this ticket is actually about');
 // ===========================================================================
 //
 // ROUND 2, ITEM 2. Every other send in both proofs goes to an agent sitting at
-// an empty composer — an agent that would have been idle anyway. But the whole
-// point of `send_to_agent` is giving NEW INSTRUCTIONS TO A STILL-RUNNING
-// AGENT, so a proof that only ever addresses an idle one has not exercised the
-// case the feature exists for.
+// an empty composer — an agent that would have been idle anyway. But
+// `send_to_agent` exists to give NEW INSTRUCTIONS TO A STILL-RUNNING AGENT, so
+// a suite whose every send addresses an idle one has not exercised the case the
+// feature is for. That is the shape KAN-138 collects: a check that stops
+// measuring under the conditions it exists for.
 //
-// It also measures the cost, which is the other half of round 2: the send's
-// first keystroke is a Ctrl+C, and this section is where that stops being an
-// abstract caveat and becomes a line of pane text.
+// THREE RECIPIENT STATES, and §1 above is the first of them:
+//
+//   idle              at an empty composer                        (§1)
+//   mid-task          generating, no tool call outstanding        (1b-i)
+//   blocked in a long shell command                               (1b-ii)
+//
+// The third is the one the epic reports hitting most in practice and it had
+// never been tested. It is also where the COST is measurable: the send's first
+// keystroke is a Ctrl+C, and here that stops being an abstract caveat and
+// becomes a line of pane text.
+//
+// The shell command is deliberately SHORT. A contended recipient is contended
+// whether it has 25 seconds of work left or 120 — a confirmed send answers in
+// about a second either way — so the fixture buys nothing by being slow.
+
+/** Wait until Claude Code's pane says it is actually working. */
+async function waitUntilBusy(what, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const t = bridge.tailAgent(AGENT_PATH, 60);
+    // "esc to interrupt" is drawn only while a turn is in flight.
+    if (t.success && typeof t.text === 'string' && /esc to interrupt/i.test(t.text)) return true;
+    if (Date.now() >= deadline) {
+      console.log(`   never became busy (${what}); last pane:`);
+      showPane('', t.text);
+      return false;
+    }
+    await sleep(1500);
+  }
+}
+
+/** One contended send, asserted the same way whatever put the agent to work. */
+async function contendedSend(label, message) {
+  const mark = invocations().length;
+  const r = await send(message);
+  showVerdict(`${label}:`, r);
+  showPane('the REAL pane the verdict was read from:', r.evidence.tail);
+  check(r.verdict === 'delivered',
+    `${label}: a send to a CONTENDED agent is confirmed DELIVERED`,
+    JSON.stringify({ ...r.evidence, tail: undefined }));
+  check(r.evidence.landedAfter > r.evidence.landedBefore,
+    `${label}: and by the same measurement — the submitted count went up on a pane that was read`);
+  check(keysSince(mark).filter((l) => l.endsWith(' C-c')).length === 1,
+    `${label}: exactly one Ctrl+C, at an agent that was NOT idle`,
+    JSON.stringify(keysSince(mark)));
+  return r;
+}
 
 let busyResult;
 {
+  // --- 1b-i: mid-task, generating -----------------------------------------
   dropEnters(0);
   setUnreadable(false);
-
-  // Put the agent to work on something that will still be running when we
-  // interrupt it. A Bash tool call is the state the review found: `sleep`
-  // running, and the interrupt terminating it.
-  await send('live 1b setup: run `sleep 90` with your Bash tool right now, nothing else');
-  let busy = false;
-  for (let i = 0; i < 30 && !busy; i++) {
-    await sleep(2000);
-    const t = bridge.tailAgent(AGENT_PATH, 60);
-    // Claude Code only offers "esc to interrupt" while it is actually working.
-    busy = t.success && typeof t.text === 'string' && /esc to interrupt/i.test(t.text);
+  await send('live 1b-i setup: count slowly from 1 to 40, one number per line, nothing else');
+  const busyGenerating = await waitUntilBusy('mid-task');
+  check(busyGenerating,
+    'PRECONDITION 1b-i: the agent is genuinely mid-task — its pane offers "esc to interrupt"');
+  if (busyGenerating) {
+    await contendedSend('1b-i mid-task', 'live 1b-i: reply with the single word MIDACK and nothing else');
   }
-  check(busy, 'PRECONDITION: the agent is genuinely BUSY — its pane offers "esc to interrupt"',
-    bridge.tailAgent(AGENT_PATH, 20).text);
 
-  const mark = invocations().length;
-  const message = 'live 1b: reply with the single word BUSYACK and nothing else';
-  const r = await send(message);
-  busyResult = r;
-  showVerdict('sent to a BUSY agent:', r);
-  showPane('the REAL pane the verdict was read from:', r.evidence.tail);
-
-  check(r.verdict === 'delivered',
-    'a send to a BUSY agent is confirmed DELIVERED — the case the feature exists for',
-    JSON.stringify({ ...r.evidence, tail: undefined }));
-  check(r.evidence.landedAfter > r.evidence.landedBefore,
-    'and by the same measurement: the submitted count went up on a pane that was read');
-  check(keysSince(mark).filter((l) => l.endsWith(' C-c')).length === 1,
-    'exactly one Ctrl+C, at an agent that was mid-tool-call', JSON.stringify(keysSince(mark)));
-
-  // THE COST, MEASURED RATHER THAN CAVEATED. The first Ctrl+C terminates the
-  // recipient's in-flight work. The MCP description used to call this call
-  // "safe for the recipient's in-flight work"; it is not, and round 2 corrected
-  // the sentence. This is the evidence the corrected sentence rests on.
+  // --- 1b-ii: blocked in a long shell command ------------------------------
   await sleep(3000);
-  const after = bridge.tailAgent(AGENT_PATH, 80);
-  const interrupted = after.success && typeof after.text === 'string' &&
-    /Interrupted|What should Claude do instead/i.test(after.text);
-  showPane('the pane after the send — what the interrupt did to the in-flight work:', after.text);
-  check(interrupted,
-    'AND THE IN-FLIGHT TOOL CALL WAS TERMINATED by the interrupt — so "safe for the recipient\'s ' +
-    'in-flight work" would have been false, which is why the MCP description no longer says it',
-    after.text?.slice(-400));
+  await send('live 1b-ii setup: run `sleep 25` with your Bash tool right now, nothing else');
+  const busyInShell = await waitUntilBusy('blocked in a shell command');
+  check(busyInShell,
+    'PRECONDITION 1b-ii: the agent is BLOCKED IN A SHELL COMMAND — the state never tested before');
+  if (busyInShell) {
+    busyResult = await contendedSend(
+      '1b-ii in-shell', 'live 1b-ii: reply with the single word SHELLACK and nothing else');
+
+    // THE COST, MEASURED RATHER THAN CAVEATED. The MCP description used to say
+    // this call is "safe for the recipient's in-flight work". It is not — the
+    // first Ctrl+C terminates the tool call — and round 2 narrowed the
+    // sentence. This is the evidence that correction rests on, taken here
+    // rather than borrowed from a reviewer's transcript.
+    await sleep(3000);
+    const after = bridge.tailAgent(AGENT_PATH, 80);
+    const interrupted = after.success && typeof after.text === 'string' &&
+      /Interrupted|What should Claude do instead/i.test(after.text);
+    showPane('the pane after the send — what the interrupt did to the in-flight work:', after.text);
+    check(interrupted,
+      'AND THE IN-FLIGHT TOOL CALL WAS TERMINATED by the interrupt — so "safe for the recipient\'s ' +
+      'in-flight work" would have been FALSE, which is why the tool description no longer says it',
+      after.text?.slice(-400));
+  }
 }
 
 // ===========================================================================

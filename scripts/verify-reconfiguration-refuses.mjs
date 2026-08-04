@@ -51,6 +51,10 @@
 //   2. THE REFUSAL             — a respawn-requiring change is refused, names
 //                                the attribute and why, and the agent is still
 //                                running with its conversation intact.
+//   2B. ITS BOUNDARY (KAN-153) — a FIRST configure over a live pane of OURS
+//                                with no record ANSWERS rather than throwing,
+//                                says the pane is ours-but-unrecorded, and the
+//                                remedy it names really resolves the state.
 //   3. PER KNOB, ATOMIC        — a call mixing the two reports each outcome
 //                                distinctly and applies NOTHING. A call that
 //                                applies half and reports a bare success is
@@ -69,7 +73,7 @@
 //                                on a refusal.
 //   8. THE PANE NEVER MOVED    — the assertion that proves the requirement:
 //                                one pane id across every section above.
-//   9. THE CHECKS CAN FAIL     — the compiled daemon is mutated four ways and
+//   9. THE CHECKS CAN FAIL     — the compiled daemon is mutated five ways and
 //                                the assertions go red.
 //  10. THE SURFACES            — the same behaviour through the real CLI and
 //                                the real MCP server against a real daemon.
@@ -562,6 +566,211 @@ let versionBeforeRefusal;
   check(status.configVersion === versionBeforeRefusal && no.configVersion === versionBeforeRefusal,
     'and the version did not move, on the record or in the refusal',
     `record v${status.configVersion}, refusal reported v${no.configVersion}`);
+}
+
+// ===========================================================================
+rule("2B. THE REFUSAL'S BOUNDARY — a FIRST configure over a live pane of OURS (KAN-153)");
+// ===========================================================================
+//
+// LETTERED RATHER THAN NUMBERED, so the sections the comments in this file
+// cite by number keep their numbers. It belongs here: this is section 2's
+// refusal seen from its edge.
+//
+// THE DEFECT. `changed` on a FIRST configure is EVERY attribute — there is no
+// record to diff against — so `restartRequired` is non-empty by construction,
+// and the refusal above used to be entered on `running` alone. Its message
+// interpolates `existing!.configVersion`: a non-null assertion on a value that
+// is `undefined` on precisely that path. It threw, and through the daemon the
+// caller's entire failure text was `Cannot read properties of undefined
+// (reading 'configVersion')`.
+//
+// THE STATE IS PRODUCED, NOT DESCRIBED, and by one of the two routes the
+// report named. An agent is really configured and really activated into a real
+// pane in the stub census; then THE REGISTRY IS LOST WHILE THE PANES SURVIVE —
+// the log file is deleted and a second harness reads the empty log, which is
+// what a daemon restart over a lost registry is. No census entry is
+// hand-built and no record is written with the field under test already in it.
+//
+// THE ANSWER IS A DECISION RATHER THAN A NULL GUARD, and it is KAN-59's on
+// this ticket. Guarding the read would have stopped the throw and left a first
+// `configure` REFUSED because a pane happens to be live — with no way out,
+// since `activate` requires `configure` first. The refusal exists so a caller
+// does not silently spend a running agent's CONVERSATION on a knob change; a
+// first configure has no prior configuration to preserve and no conversation
+// being spent, so there is nothing here for it to protect. Occupancy is
+// `activate`'s question, and `activate` already asks it.
+//
+// AND IT IS NOT ADOPTED SILENTLY. Recording the knobs and saying nothing about
+// the pane would be the same quiet in a different costume, so the response
+// says the pane is ours-but-unrecorded — and this section proves BOTH halves
+// of what that sentence claims rather than asserting the sentence exists:
+// that `activate` really would adopt the pane, so the warning is not
+// decorative; and that the remedy it names really does end with an agent
+// running the configuration this call wrote.
+
+{
+  const dir = ownedDir('s2b', 'unrecorded');
+  const LOST_PROMPT = 'KAN-153: the prompt only the lost registry knew about.';
+  const NEW_PROMPT = 'KAN-153: the prompt configured over a pane nobody had a record for.';
+  const logName = 's2b';
+  const logFile = path.join(tmp, `${logName}.jsonl`);
+
+  // --- produce the state ---------------------------------------------------
+  const first = harness(logName);
+  await first.invoke({ action: 'configure_agent', path: dir, ...BASE, prompt: LOST_PROMPT });
+  const up = await first.invoke({ action: 'activate_agent', path: dir, ...PAST_THE_GATE });
+  const pane = paneIdIn(dir);
+  check(up.success === true && up.started === true && pane !== null,
+    '(setup) an agent is really running there, in a pane the census can name',
+    `success ${up.success}, started ${up.started}, pane ${pane}`);
+
+  // THE REGISTRY IS LOST; HERDR'S PANES ARE NOT. A second harness over the
+  // deleted log is a restarted daemon that has forgotten what herdr still has.
+  fs.rmSync(logFile);
+  const h = harness(logName);
+  resetArgvLog();
+
+  check(h.agentRegistry.intents().get(dir) === undefined,
+    'THE STATE, half one: there is NO record for the path',
+    `records for ${dir}: ${h.agentRegistry.intents().has(dir)}`);
+  check(panesIn(dir).length === 1 && censusPanes().some((p) => p.name === paneNameFor(dir)),
+    'THE STATE, half two: and a live pane whose herdr NAME is paneNameFor(path) — so ' +
+      '`ourPaneIn` matches, `running` is true, and `existing` is undefined. Those are the two ' +
+      'facts that used to collide',
+    `pane named ${paneNameFor(dir)}: ${censusPanes().some((p) => p.name === paneNameFor(dir))}`);
+
+  // --- it answers ----------------------------------------------------------
+  let threw = null;
+  let res;
+  try {
+    res = await h.invoke({ action: 'configure_agent', path: dir, ...BASE, prompt: NEW_PROMPT });
+  } catch (e) {
+    threw = e;
+  }
+  // Not a bare `res` below: a throw leaves it undefined, and the assertions
+  // that follow would then fail with a TypeError of their own instead of
+  // reporting the one they are about.
+  res ??= {};
+  check(threw === null,
+    'IT ANSWERS RATHER THAN THROWING — the TypeError this ticket was filed for is gone',
+    threw ? `threw: ${threw?.message ?? threw}` : 'no exception');
+  console.log('\n   the answer, verbatim:\n' + JSON.stringify(res, null, 2).replace(/^/gm, '     '));
+
+  check(res.success === true && res.refused === undefined,
+    'AND IT IS NOT A REFUSAL EITHER: the reconfiguration refusal is scoped to a ' +
+      '*RE*configuration. A first configure has nothing for it to protect, and refusing would ' +
+      'strand the path — `activate` requires `configure` first, so the refusal would name no ' +
+      'remedy that works',
+    `success ${res.success}, refused ${res.refused}`);
+  check(res.reconfigured === false && res.configVersion === 1,
+    'and it really was a FIRST configure, which is what made `restartRequired` non-empty',
+    `reconfigured ${res.reconfigured}, version ${res.configVersion}`);
+  check(h.agentRegistry.intents().get(dir)?.record.config.prompt === NEW_PROMPT,
+    'the knobs are on the DURABLE RECORD, read off the log rather than off the response',
+    JSON.stringify(h.agentRegistry.intents().get(dir)?.record.config.prompt?.slice(0, 40)));
+
+  // --- and it is not adopted silently --------------------------------------
+  check(res.unrecordedPane?.paneName === paneNameFor(dir) && res.unrecordedPane?.paneId === pane,
+    'THE RESPONSE SAYS THE PANE IS OURS AND UNRECORDED, and names it — so the caller learns ' +
+      'the state from the answer rather than discovering it at `activate`',
+    `${res.unrecordedPane?.paneName} (${res.unrecordedPane?.paneId})`);
+  check(/ADOPTS/.test(res.unrecordedPane?.meaning ?? '') &&
+    /NOTHING WAS APPLIED TO IT/.test(res.unrecordedPane?.meaning ?? ''),
+    'and says what it means: nothing was applied to that process, and the next `activate` will ' +
+      'ADOPT the pane rather than start one');
+  check(res.appliedInPlace === false &&
+    Object.values(res.outcomes ?? {}).every((o) => o === 'applied'),
+    'AND IT DOES NOT CLAIM THE KNOBS WENT LIVE: `applied`, never `applied-in-place`. "In ' +
+      'place" is a claim about an agent this daemon is maintaining, and a live pane of OURS is ' +
+      'not the same fact as a live AGENT of ours — nothing here knows what that process was ' +
+      'started with',
+    `appliedInPlace ${res.appliedInPlace}, outcomes ${JSON.stringify(res.outcomes)}`);
+  check(res.running === true && res.paneId === pane,
+    'while still reporting the fact that something of ours IS live there — the two fields ' +
+      'answer different questions and a caller needs both',
+    `running ${res.running}, paneId ${res.paneId}`);
+  check(startsIssued() === 0 && closesIssued() === 0 && paneIdIn(dir) === pane,
+    'and the call spawned nothing and closed nothing: the pane it found is the pane it left',
+    `starts ${startsIssued()}, closes ${closesIssued()}, pane ${pane} -> ${paneIdIn(dir)}`);
+
+  // --- the warning is a fact about the world, not a decoration -------------
+  const adopted = await h.invoke({ action: 'activate_agent', path: dir, ...PAST_THE_GATE });
+  check(adopted.success === true && adopted.alreadyRunning === true &&
+    adopted.started === false && adopted.paneId === pane && startsIssued() === 0,
+    'THE WARNING IS TRUE: `activate` ADOPTS that pane — alreadyRunning, nothing started, no ' +
+      'second pane. A caller who was not told would have an agent reported healthy over a ' +
+      'configuration no process ever read',
+    `alreadyRunning ${adopted.alreadyRunning}, started ${adopted.started}, ` +
+      `pane ${adopted.paneId}, starts issued ${startsIssued()}`);
+  check(sidecarPrompt(dir) === LOST_PROMPT,
+    'and the prompt on disk is still the one the LOST record was activated with, not the one ' +
+      'just configured — which is exactly the gap the sentence names',
+    JSON.stringify(sidecarPrompt(dir)?.slice(0, 40)));
+
+  // --- the remedy actually resolves the state ------------------------------
+  const down = await h.invoke({ action: 'deactivate_agent', path: dir });
+  check(down.success === true && down.wasRunning === true && panesIn(dir).length === 0,
+    'THE REMEDY, step 1 — `deactivate` stands the unrecorded pane down: it WAS running, and ' +
+      'the census no longer holds it',
+    `success ${down.success}, wasRunning ${down.wasRunning}, panes ${panesIn(dir).length}`);
+  const restarted = await h.invoke({ action: 'activate_agent', path: dir, ...PAST_THE_GATE });
+  const newPane = paneIdIn(dir);
+  check(restarted.success === true && restarted.started === true &&
+    newPane !== null && newPane !== pane,
+    'THE REMEDY, step 2 — `activate` starts a NEW pane, this time from the record this section ' +
+      'wrote',
+    `started ${restarted.started}, pane ${pane} -> ${newPane}`);
+  check(sidecarPrompt(dir) === NEW_PROMPT,
+    'AND THE REMEDY RESOLVED THE STATE: the agent now running is running the configuration ' +
+      'this section configured. The sentence in the response is a road that leads somewhere, ' +
+      'which is the whole difference between a remedy and an apology',
+    JSON.stringify(sidecarPrompt(dir)?.slice(0, 40)));
+
+  // --- and the `!` itself, which no mutation of `dist` can reach -----------
+  //
+  // `existing!` is a TYPE-level assertion: `tsc` ERASES it, so there is nothing
+  // in the compiled output for MUTATION E to put back. What that mutation
+  // restores is the REACHABILITY that made the assertion false, which is the
+  // behavioural half. This is the other half, and it is a source property, so
+  // it is checked against the source.
+  //
+  // IT SCANS THIS REPOSITORY'S `src/router.ts`, NEVER THE `distDir` ARGUMENT,
+  // and the distinction is visible in exactly one place: a run against some
+  // other build — `node scripts/verify-… /elsewhere/dist`, which is how the
+  // pre-fix red is reproduced — reports this repo's source while every
+  // assertion above reports that build. That is the right reading of a source
+  // property, and it is written here so nobody has to infer it from a PASS
+  // sitting in a column of FAILs.
+  //
+  // WHAT IT DOES NOT COVER, stated rather than left to be assumed: it scans
+  // `handleConfigure` only, it strips comments before scanning (so the prose in
+  // this file and in that method may keep quoting the defect by name), and it
+  // matches an assertion that is immediately DEREFERENCED — `x!.y` or `x![0]`,
+  // the shape that throws. A bare `const y = x!;` would pass it. Widening the
+  // pattern to every `!` cannot be done by regex without catching `!==`, and a
+  // check that has to be muted is worse than one whose edge is written down.
+  {
+    const routerTs = fs.readFileSync(path.join(scriptDir, '..', 'src', 'router.ts'), 'utf8');
+    const start = routerTs.indexOf('private handleConfigure(');
+    const end = routerTs.indexOf('\n  private handleForget(', start);
+    check(start !== -1 && end !== -1,
+      '(setup) `handleConfigure` was located in src/router.ts, so the scan below has a body to ' +
+        'scan rather than an empty string to find nothing in',
+      `bytes ${start}..${end}`);
+    const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    const body = stripComments(routerTs.slice(start, end === -1 ? undefined : end));
+    const assertions = body.match(/\b[A-Za-z_$][\w$]*!\s*[.[]/g) ?? [];
+    check(assertions.length === 0,
+      'NO NON-NULL ASSERTION IS DEREFERENCED ANYWHERE IN `handleConfigure`. The type system was ' +
+        'telling the truth and the assertion overrode it; the fix removes it rather than ' +
+        'satisfying it, and the refusal branch is now narrowed so the compiler ENFORCES the ' +
+        'claim that it is only reachable with a record',
+      assertions.length ? `found: ${JSON.stringify(assertions)}` : 'none in the method body');
+    check(stripComments('const a = x!.y; // existing!.configVersion')
+      .match(/\b[A-Za-z_$][\w$]*!\s*[.[]/g)?.length === 1,
+      'and the detector it uses really finds one, and really ignores a comment that names the ' +
+        'defect — so the sweep above is a measurement rather than a constant');
+  }
 }
 
 // ===========================================================================
@@ -1147,6 +1356,50 @@ function liveControl(mutation, dir, res) {
       'could see, behind a `success: true`. Section 6 is what goes red',
     `success ${res.success}`);
   setCensus([]);
+}
+
+{
+  // MUTATION E: KAN-153's fix removed. The `existing &&` is taken off the
+  // refusal's guard, so the reconfiguration refusal is once again reachable on
+  // a FIRST configure — where it reads a record that is not there.
+  //
+  // WHAT THIS MUTATION CAN AND CANNOT REACH, because the honest version of
+  // this claim is narrower than "the `!` is restored": `existing!` is erased by
+  // `tsc` and is not in `dist` at all. What made it false was the branch being
+  // REACHABLE with no record, and that is compiled — so this restores the
+  // reachability and the TypeError comes back with it. The source-level ban on
+  // the assertion is checked in section 2B, against `src/router.ts`.
+  const dir = mutantDist(
+    'refusal-not-scoped', 'router.js',
+    'if (existing && restartRequired.length) {', 'if (restartRequired.length) {'
+  );
+  const p = ownedDir('s9', 'e');
+  setCensus([]);
+  const b = await mutantHarness(dir, 'm-e');
+  await b.invoke({ action: 'configure_agent', path: p, ...BASE });
+  liveControl('MUTATION E', p, await b.invoke({ action: 'activate_agent', path: p, ...PAST_THE_GATE }));
+
+  // The same state section 2B produces, against the mutant: the registry is
+  // lost and herdr's pane survives.
+  fs.rmSync(path.join(tmp, 'm-e.jsonl'));
+  const b2 = await mutantHarness(dir, 'm-e');
+  check(b2.agentRegistry.intents().get(p) === undefined && panesIn(p).length === 1,
+    'MUTATION E — CONTROL: no record and a live pane of ours, which is the state section 2B is ' +
+      'about. Without both halves the call below would take a different branch and the ' +
+      'assertion would pass for the wrong reason',
+    `record ${b2.agentRegistry.intents().has(p)}, panes ${panesIn(p).length}`);
+
+  let threw = null;
+  try {
+    await b2.invoke({ action: 'configure_agent', path: p, ...BASE, prompt: 'rewritten' });
+  } catch (e) {
+    threw = e;
+  }
+  check(threw !== null && /configVersion/.test(threw?.message ?? ''),
+    'MUTATION E — un-scoping the refusal walks a FIRST configure into a message that reads a ' +
+      "record that is not there: `Cannot read properties of undefined (reading 'configVersion')`. " +
+      "Section 2B's first assertion is what goes red",
+    threw ? threw.message : 'it answered instead of throwing');
 }
 
 // ===========================================================================
