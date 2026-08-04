@@ -387,8 +387,8 @@ check(
   live.length
     ? live.map((f) => `ci.yml:${f.line} in job '${f.job}'`).join(', ')
     : disabled.length
-      ? `the step is at ci.yml:${disabled.map((f) => f.line).join(', ci.yml:')} but will not run — ` +
-        `${disabled.flatMap((f) => f.disabled).join('; ')}. Nothing in CI executes this audit.`
+      ? `the invocation is at ci.yml:${disabled.map((f) => f.line).join(', ci.yml:')} but does not gate CI — ` +
+        `${disabled.flatMap((f) => f.disabled).join('; ')}.`
       : textAt.length
         ? `the text appears at ci.yml:${textAt.join(', ci.yml:')} but not as a step at all — ` +
           'commented out, or not a `run:` value. Nothing in CI executes this audit.'
@@ -399,7 +399,7 @@ check(
 // one: the file still reads like the audit is wired.
 check(
   disabled.length === 0,
-  'and no invocation of it is switched off while left in place',
+  'and nothing switches it off or swallows its exit status',
   disabled.length
     ? disabled.map((f) => `ci.yml:${f.line} — ${f.disabled.join('; ')}`).join(' | ')
     : ''

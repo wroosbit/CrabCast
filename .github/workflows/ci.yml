@@ -54,9 +54,11 @@ jobs:
   # other complaining.
   #
   # That guard is about EXECUTION, not text. Deleting this step, commenting it
-  # out, or switching it off with `if:` or `continue-on-error: true` each fail
-  # both checks by name. Do not disable it to iterate — the red check is the
-  # point, and a `# TODO restore` is exactly the edit nobody restores.
+  # out, hiding it behind a trailing `#`, switching it off with `if:` or
+  # `continue-on-error: true`, or swallowing its exit code (`|| true`,
+  # `set +e`, `; true`, a bare pipe, a trailing `exit 0`, backgrounding) each
+  # fail both checks by name. Do not disable it to iterate — the red check is
+  # the point, and `|| true` is exactly the edit nobody takes back off.
   #
   # It needs no build and no npm install: it reads this file and asks git what
   # is tracked, so it stays green (or usefully red) even when the build is not.

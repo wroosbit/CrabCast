@@ -495,7 +495,7 @@ check(
   registryLive.length
     ? registryLive.map((f) => `ci.yml:${f.line} in job '${f.job}'`).join(', ')
     : registryOff.length
-      ? `the step is at ci.yml:${registryOff.map((f) => f.line).join(', ci.yml:')} but will not run — ` +
+      ? `the invocation is at ci.yml:${registryOff.map((f) => f.line).join(', ci.yml:')} but does not gate CI — ` +
         `${registryOff.flatMap((f) => f.disabled).join('; ')}. A proof can now leave the CI array ` +
         'with nothing left to say so'
       : findAnywhere(ciText, registryRun).length
@@ -505,7 +505,7 @@ check(
 );
 check(
   registryOff.length === 0,
-  'and that step is not switched off while left in place',
+  'and nothing switches that step off or swallows its exit status',
   registryOff.length ? registryOff.map((f) => `ci.yml:${f.line} — ${f.disabled.join('; ')}`).join(' | ') : ''
 );
 
