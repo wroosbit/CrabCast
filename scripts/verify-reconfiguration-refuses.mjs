@@ -1225,8 +1225,18 @@ const waitFor = async (fn, ms, what) => {
  * itself and the one place this file departed from its own stated method. The
  * shim already records every spawn; this reads it.
  *
- * It throws rather than answering `[]` for the same reason `herdrCalls` does:
- * a count taken from a file we could not read is not a measurement.
+ * IT DOES NOT THROW ON A MISSING FILE, and that is the one way it differs from
+ * `herdrCalls` — which this comment previously claimed it matched, incorrectly.
+ * The shim writes this file on its FIRST `agent start`, so "not there" is a
+ * real state of the world (nothing has been started yet) rather than a failure
+ * to observe one, and answering `[]` for it is the honest reading. An
+ * UNPARSEABLE file is the read failure, and that throws.
+ *
+ * What keeps the missing-file case from being a soft spot: both call sites
+ * assert `length === 1` rather than `=== 0`, so a file that vanished after the
+ * spawn fails them rather than passing quietly. The distinction between
+ * "nothing happened" and "I could not look" is preserved by the assertions
+ * here rather than by this function refusing to answer.
  */
 function livePanesStarted() {
   const file = path.join(liveState, 'started.json');
@@ -1430,6 +1440,80 @@ function livePanesStarted() {
     'and its prompt is still the one it was started with — no surface let a refused change ' +
       'through',
     JSON.stringify(finalStatus.config?.prompt?.slice(0, 40)));
+}
+
+// ===========================================================================
+rule('11. NO TRACKED FILE CARRIES A LITERAL NUL — the guard, not the fix');
+// ===========================================================================
+//
+// THIS SECTION IS HERE BECAUSE THE FIX FOR IT WAS NOT ENOUGH.
+//
+// Round 2 of this PR's review named a literal NUL in this script and it was
+// replaced with the escape. Round 3 found that the SAME byte, introduced by the
+// SAME PR, was still sitting in `src/router.ts` — because the fix went to the
+// member the reviewer named rather than to the category. That is the seventh
+// instance of that shape in this epic, and it happened inside the fix for the
+// sixth.
+//
+// So the textual fix is not the deliverable; this is. A literal NUL makes
+// `file` report a source file as `data`, which makes plain `grep` print NOTHING
+// without `-a` — silently, with exit 1, indistinguishable from "no match". A
+// reviewer grepping `router.ts` for `alreadyRunning` got no hits and briefly
+// concluded the activate handler lived in a different file. `git grep` and
+// GitHub happen to survive it only because git samples the first 8000 bytes and
+// these landed at ~44k, which is luck rather than a property.
+//
+// It sweeps EVERY TRACKED FILE rather than the two that were wrong, because
+// enumerating the known instances is the mistake this section exists to stop
+// repeating.
+//
+// PLACEMENT IS ARGUABLE and this is the honest note about it: the property is
+// repo-wide and this script is about reconfiguration. It lives here because
+// this PR is what introduced the byte, it costs milliseconds, and a guard that
+// exists in the wrong file beats one proposed in a comment. Move it if there is
+// a better home.
+{
+  const tracked = spawnSync('git', ['ls-files', '-z'], {
+    cwd: path.join(scriptDir, '..'), encoding: 'buffer'
+  });
+  if (tracked.status !== 0) {
+    throw new Error(`could not list tracked files: ${tracked.stderr?.toString().slice(0, 200)}`);
+  }
+  const files = tracked.stdout.toString('utf8').split('\u0000').filter(Boolean);
+  check(files.length > 0,
+    '(setup) git listed the tracked files, so this sweep has something to sweep',
+    `${files.length} file(s)`);
+
+  const offenders = [];
+  for (const rel of files) {
+    const full = path.join(scriptDir, '..', rel);
+    let buf;
+    try {
+      buf = fs.readFileSync(full);
+    } catch {
+      continue; // a submodule or a path that is not a regular file
+    }
+    // Anything genuinely binary would be a false positive; this repo tracks
+    // none, and the assertion below names what it found either way, so a real
+    // binary arriving later is a legible failure rather than a confusing one.
+    const count = buf.filter((b) => b === 0).length;
+    if (count) offenders.push(`${rel} (${count})`);
+  }
+
+  check(offenders.length === 0,
+    'NO tracked file contains a literal NUL byte — so no source file in this repo can go ' +
+      'invisible to plain `grep`, and instance eight fails a check rather than a code review',
+    offenders.length ? `found in: ${offenders.join(', ')}` : `${files.length} files swept, clean`);
+
+  // AND THE SWEEP CAN FAIL. Written to a scratch file rather than a tracked one:
+  // the point is to exercise the detector, not to dirty the tree.
+  const canary = path.join(tmp, 'canary.ts');
+  fs.writeFileSync(canary, Buffer.concat([
+    Buffer.from("const x = '"), Buffer.from([0]), Buffer.from("absent';\n")
+  ]));
+  check(fs.readFileSync(canary).filter((b) => b === 0).length === 1,
+    'and the detector it uses really finds one: a file written with a literal NUL is counted',
+    'the sweep above is a measurement rather than a constant');
 }
 
 // ===========================================================================

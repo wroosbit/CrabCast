@@ -962,7 +962,7 @@ const RESTART_REASON: Record<string, string> = {
  * claim about the world in the same way a spurious success is.
  */
 function canonicalKnob(value: unknown): string {
-  if (value === undefined) return ' absent';
+  if (value === undefined) return '\u0000absent';
   const walk = (node: unknown): unknown => {
     if (Array.isArray(node)) return node.map(walk);
     if (node && typeof node === 'object') {
@@ -974,7 +974,7 @@ function canonicalKnob(value: unknown): string {
     }
     return node;
   };
-  return JSON.stringify(walk(value)) ?? ' absent';
+  return JSON.stringify(walk(value)) ?? '\u0000absent';
 }
 
 /**
