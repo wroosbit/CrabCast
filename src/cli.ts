@@ -429,19 +429,36 @@ function preemptionOffer(offer: any): string | null {
 // ------------------------------------------------------------- fleet sections
 
 /**
- * A clipped fleet list with its unclipped total.
+ * A paged fleet list with its whole-category total.
  *
  * The total is printed whether or not it exceeds the list, and when it does
  * the difference is spelled out. A list that silently stopped at the cap
  * reads as "that is all of them", which is the one conclusion a reader must
  * not draw wrongly about work that has stopped without anyone noticing —
  * which is exactly what `missingAgents` is.
+ *
+ * AND THE REMEDY IS PRINTED WHERE THE TRUNCATION IS (KAN-163). Saying "15
+ * older not shown" and stopping tells a reader what they are missing and
+ * leaves them to find out from `router.ts` that there is now a way to ask for
+ * it. The next command is printed instead, cursor and all, so the sentence
+ * that names the gap also closes it.
  */
-function categoryHeading(label: string, rows: unknown, total: unknown, gloss: string): string {
+function categoryHeading(
+  label: string,
+  rows: unknown,
+  total: unknown,
+  gloss: string,
+  page?: { category: string; nextCursor?: string | null; limit?: number }
+): string {
   const shown = Array.isArray(rows) ? rows.length : 0;
   const count = typeof total === 'number' ? total : shown;
   const clipped = count > shown ? ` — showing ${shown}, ${count - shown} older not shown` : '';
-  return `\n${label} (${count})${clipped}${count ? ` — ${gloss}` : ''}`;
+  const more =
+    page && typeof page.nextCursor === 'string'
+      ? `\n${INDENT}more: crabcast list --category ${page.category} --after ${page.nextCursor}` +
+        (page.limit && page.limit !== 25 ? ` --limit ${page.limit}` : '')
+      : '';
+  return `\n${label} (${count})${clipped}${count ? ` — ${gloss}` : ''}${more}`;
 }
 
 /** The three gate flags, printed only where they differ from the safe default. */
@@ -1010,6 +1027,12 @@ function renderList(reader: ResponseReader): string {
   const standbyTotal = reader.take('standbyTotal');
   const unstarted = reader.take<any[]>('unstartedAgents') ?? [];
   const unstartedTotal = reader.take('unstartedTotal');
+  // One entry per paged category: `returned`, `total`, `limit`, `remaining`
+  // and the `nextCursor` that reaches the rest of it. Each heading below is
+  // handed its own entry, so a truncated category prints the command that
+  // continues it rather than only the size of what it withheld.
+  const pages = reader.take<Record<string, any>>('pages') ?? {};
+  const pageOf = (category: string) => ({ category, ...(pages[category] ?? {}) });
   const provenance = reader.take('provenance');
   const capacity = reader.take('capacity');
   const priorities = reader.take('priorities');
@@ -1040,7 +1063,8 @@ function renderList(reader: ResponseReader): string {
             'foreign panes',
             foreign,
             foreignTotal,
-            'live agents this daemon did not start'
+            'live agents this daemon did not start',
+            pageOf('foreignPanes')
           ),
           ...foreign.map((p: any) =>
             lines(
@@ -1073,7 +1097,8 @@ function renderList(reader: ResponseReader): string {
         'missing agents',
         missing,
         missingTotal,
-        'recorded active, not running: their work has stopped while still looking staffed'
+        'recorded active, not running: their work has stopped while still looking staffed',
+        pageOf('missingAgents')
       ),
       ...(missing.length
         ? missing.map((m: any) =>
@@ -1091,7 +1116,8 @@ function renderList(reader: ResponseReader): string {
         'preempted agents',
         preempted,
         preemptedTotal,
-        'stood down to free capacity, still owed a decision'
+        'stood down to free capacity, still owed a decision',
+        pageOf('preemptedAgents')
       ),
       ...(preempted.length
         ? preempted.map((p: any) =>
@@ -1111,7 +1137,8 @@ function renderList(reader: ResponseReader): string {
         'standby agents',
         standby,
         standbyTotal,
-        'switched off on purpose, workspace still on disk'
+        'switched off on purpose, workspace still on disk',
+        pageOf('standbyAgents')
       ),
       ...(standby.length
         ? standby.map((s: any) =>
@@ -1135,7 +1162,8 @@ function renderList(reader: ResponseReader): string {
         unstarted,
         unstartedTotal,
         'configured and never run — activating one starts a FRESH conversation, ' +
-          'unlike standby, where it resumes'
+          'unlike standby, where it resumes',
+        pageOf('unstartedAgents')
       ),
       ...(unstarted.length
         ? unstarted.map((u: any) =>
@@ -1847,9 +1875,29 @@ export const COMMANDS: CommandSpec[] = [
     responseAction: 'list_agents_response',
     summary: 'the whole fleet: running, missing, preempted, on standby, foreign panes, plus capacity',
     positionals: [],
-    flags: [],
+    // PAGING, one category at a time (KAN-163). The clipped categories are
+    // newest-first and capped, so the rows that fall off a default read are
+    // the ones that have been waiting LONGEST — the standby agent nobody has
+    // switched back on for a week is the first thing to disappear from the
+    // list somebody would switch it back on from. `--after` takes the
+    // `nextCursor` the previous read printed under the category's own
+    // heading; keep going until no `more:` line is printed.
+    flags: [
+      { name: 'category', kind: 'string', value: '<name>',
+        help: 'page one category: missingAgents, preemptedAgents, standbyAgents, unstartedAgents, foreignPanes' },
+      { name: 'after', kind: 'string', value: '<cursor>',
+        help: 'continue that category from a cursor printed by a previous list' },
+      { name: 'limit', kind: 'number', value: '<n>',
+        help: 'rows in that category\'s page (default 25, max 200)' }
+    ],
     spawnsDaemon: false,
-    build: () => ({}),
+    build: ({ flags }) =>
+      flags.category
+        ? { pages: { [String(flags.category)]: { after: flags.after, limit: flags.limit } } }
+        // No `--category` is the ordinary fleet read: every category takes its
+        // default page. The daemon refuses an unknown category name, so a typo
+        // is answered rather than silently ignored here.
+        : {},
     render: renderList
   },
   {
