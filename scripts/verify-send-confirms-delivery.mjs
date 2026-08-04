@@ -59,7 +59,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { spawnSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -529,6 +529,68 @@ const { connectToDaemon, socketPathFor, onJsonLines, writeJsonLine } =
   await import(path.join(distDir, 'ipc.js'));
 
 const daemonPids = new Set();
+
+/**
+ * Kill the daemons this script started and take its scratch with it.
+ *
+ * REGISTERED AS A HANDLER RATHER THAN ONLY CALLED AT THE END, because a
+ * cleanup that lives on the happy path is not a cleanup. This script's ran
+ * after section 7, so ANY abnormal exit before that — a mutation whose anchor
+ * had drifted (`mutantDist` throws, deliberately), a crash in a handler, a
+ * Ctrl+C — left a real daemon running against a scratch dataDir that the
+ * process then never removed. Measured rather than reasoned about: two orphans
+ * were still up afterwards, holding sockets in `/tmp/crabcast-kan114-…`
+ * directories that no longer existed.
+ *
+ * `exit` covers the normal end and every `process.exit`; the signals cover
+ * interruption, which `exit` does NOT fire for. Idempotent, because both can
+ * run in one shutdown.
+ *
+ * AND IT DOES NOT TRUST `daemonPids`, WHICH IS THE HALF THAT WAS WRONG. The
+ * first version of this handler killed exactly the pids this script had
+ * recorded — and it still leaked, measured by
+ * `verify-proof-cleans-up-when-interrupted.mjs`, because THE DAEMON IS NOT
+ * SPAWNED BY THIS SCRIPT. The CLI spawns it on its first connect, several
+ * lines before `daemon_status` is asked for the pid, so an interrupt landing
+ * in that window finds `daemonPids` empty and kills nothing. A handler that
+ * cleans up only what it happens to have written down is the same defect as a
+ * teardown that runs only on the happy path, one level in.
+ *
+ * So the process table is asked instead: every daemon whose config path is
+ * under THIS RUN'S scratch root, which is a `mkdtemp` directory no other
+ * process can be using. That is narrow enough that this can never kill a
+ * daemon it did not cause — the rule this epic applies to panes, applied to
+ * processes.
+ */
+function daemonsForThisRun() {
+  try {
+    return execFileSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' })
+      .split('\n')
+      .filter((line) => line.includes('dist/daemon.js') && line.includes(scratchRoot))
+      .map((line) => Number(line.trim().split(/\s+/)[0]))
+      .filter((pid) => Number.isFinite(pid) && pid !== process.pid);
+  } catch {
+    return [];
+  }
+}
+
+let cleanedUp = false;
+function cleanUp() {
+  if (cleanedUp) return;
+  cleanedUp = true;
+  for (const pid of new Set([...daemonPids, ...daemonsForThisRun()])) {
+    try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+  }
+  try { fs.rmSync(scratchRoot, { recursive: true, force: true }); } catch { /* best effort */ }
+}
+process.on('exit', cleanUp);
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, () => {
+    cleanUp();
+    process.removeAllListeners(signal);
+    process.kill(process.pid, signal);
+  });
+}
 const cliJs = path.join(distDir, 'cli.js');
 const cliEnv = {
   ...process.env,
@@ -867,10 +929,7 @@ function mutantDist(name, file, from, to) {
 
 // ===========================================================================
 
-for (const pid of daemonPids) {
-  try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
-}
-try { fs.rmSync(scratchRoot, { recursive: true, force: true }); } catch { /* best effort */ }
+cleanUp();
 
 console.log(`\n${'='.repeat(78)}`);
 console.log(`${checks - failures}/${checks} checks passed.`);
