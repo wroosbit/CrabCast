@@ -510,6 +510,14 @@ function onListen() {
       log(
         `[reconcile] Done: ${result.expected} expected, ` +
         `${restored.length} restored, ` +
+        // Counted apart from `restored` because they are different events and
+        // the difference is what a human reading a boot log needs: a restored
+        // agent was started by this pass and may have lost its conversation; a
+        // reattached one never stopped and this daemon simply took its
+        // terminal back. Folding them together would claim credit for starting
+        // agents that were working the whole time.
+        `${result.outcomes.filter((o) => o.result === 'reattached').length} reattached ` +
+        `(their panes survived), ` +
         `${result.outcomes.filter((o) => o.result === 'already-running').length} already running, ` +
         `${failed.length} failed, ` +
         // Named separately from `failed` on purpose: a deferred agent was not

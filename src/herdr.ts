@@ -381,6 +381,33 @@ export type Occupancy =
  * volatile value in durable storage is the defect itself, not a detail of it;
  * every pane id this daemon reports is read live from the census that produced
  * it.
+ *
+ * ---
+ *
+ * WHAT THIS DOES NOT ANSWER, and the reason a regression got in behind it
+ * (KAN-136). There are TWO questions here and they are not the same fact:
+ *
+ *   1. **"Is this pane ours?"** — an OWNERSHIP question, about the world.
+ *      Answered here, by name, and there must be exactly one test for it.
+ *   2. **"Do we hold its terminal?"** — an ATTACHMENT question, about THIS
+ *      daemon process. Answered by {@link HerdrBridge.getSessionByPath}, and
+ *      nowhere else.
+ *
+ * A daemon restart is precisely the state where they disagree: every pane is
+ * still ours and not one of them is attached, because herdr owns the panes and
+ * the session map died with the process. Answering (2) with this function
+ * therefore reads "the fleet survived" as "the fleet needs nothing" — reconcile
+ * left every agent alone and `activate` returned no session id, so a restart
+ * left the whole fleet permanently unreachable. Two callers need BOTH answers
+ * and must ask both:
+ *
+ *   - `reconcile` — restore unless recognised AND attached;
+ *   - `handleActivate` — the `occupancy.ours` branch starts nothing, but it
+ *     still attaches when we hold no session.
+ *
+ * `list_agents` and `forget` correctly need only (1): one reports what exists,
+ * the other decides whether erasing a record would orphan something. Neither
+ * is about whether we can currently type into it.
  */
 export function ourPaneIn(
   census: HerdrCensus,
@@ -886,12 +913,34 @@ export class HerdrBridge {
       }
     }
 
+    this.attachPty(session);
+  }
+
+  /**
+   * Take this session's terminal. The last step of {@link initPty}, and the
+   * WHOLE of {@link attachSession} — which is the point of it being its own
+   * function: attaching to an agent that is already running must not be a
+   * spawn path with the spawn skipped, because every step before this one
+   * (provisioning, the prompt file, `agent start`) is about creating an agent
+   * that does not exist yet.
+   */
+  private attachPty(session: HerdrSession): void {
+    const { paneName } = session;
+
     // `--takeover` evicts whoever already holds this agent's terminal attach,
     // and the evicted client is killed outright — which is exactly how a live
     // client froze (KAN-16). The guard in spawnSession is what actually
     // prevents that, so by the time we get here nothing of ours is attached
     // and this resolves to true; it is kept as a second line of defence for
     // any future caller that reaches initPty another way.
+    //
+    // ON THE RESTART PATH IT IS LOAD-BEARING RATHER THAN DEFENSIVE. The
+    // daemon that died still had a PTY attached to this pane when it was
+    // SIGKILLed, and herdr allows one attach per terminal; without
+    // `--takeover` the fresh daemon's attach would be refused by a client
+    // that no longer exists. `liveAttachFor` asks about OUR sessions, and a
+    // daemon that just booted holds none, so this is true exactly when it
+    // needs to be.
     const takeover = !this.liveAttachFor(paneName);
     const attachArgs = ['agent', 'attach', paneName, ...(takeover ? ['--takeover'] : [])];
     console.log(
@@ -958,6 +1007,74 @@ export class HerdrBridge {
         `The agent may be running in herdr, but this activation produced no usable terminal.`;
       console.error('[HerdrBridge] Failed to spawn PTY', e);
     }
+  }
+
+  /**
+   * Take the terminal of an agent that is ALREADY RUNNING. Nothing is spawned,
+   * nothing is provisioned, and the caller must have established from the
+   * census that the pane is there and is ours before calling — this attaches
+   * to a name and would otherwise be attaching to a hope.
+   *
+   * WHY THIS IS A SEPARATE VERB FROM {@link spawnSession} (KAN-136). A daemon
+   * restart leaves every pane running and every session gone: herdr owns the
+   * panes, the session map lives in the process that died. Bringing the fleet
+   * back is therefore an ATTACH, not a start, and routing it through
+   * `spawnSession` would take an activation path whose every earlier step —
+   * `launcher.setup`, the workspace `.mcp.json`, the sidecar prompt file,
+   * `herdr agent start` — is provisioning for an agent that does not exist.
+   * Those steps are idempotent, so doing them would mostly be harmless; but
+   * "mostly harmless" is not a reason to write into a caller's directory on
+   * behalf of an agent that has been working in it for an hour, and a prompt
+   * file whose write fails would refuse an activation that needed no prompt.
+   *
+   * WITHOUT THE ATTACH THERE IS NO WAY BACK. The session is what gives this
+   * daemon a terminal to read, a terminal to type into, and — through
+   * `ptyProcess.onExit` — the immediate `agent_detached_event` that tells
+   * clients the agent died. An agent recognised but not attached is one the
+   * daemon can see and cannot reach: `list_agents` reports it `sessionless`,
+   * every client is told to re-activate by path to obtain a session id, and
+   * re-activating hands back no session id either. The only route to a live
+   * attach becomes `deactivate` → `activate`, i.e. killing the agent you were
+   * trying to reach.
+   *
+   * `launcher` decides {@link HerdrSession.expectsRuntime}, exactly as
+   * {@link initPty} does, so a `shell` agent's runtime-free pane is not later
+   * read as a dead session by the fleet census.
+   */
+  public attachSession(agentPath: string, launcher?: string): HerdrSession {
+    const paneName = paneNameFor(agentPath);
+
+    // The same guard spawnSession opens with, for the same reason: two callers
+    // can ask for this agent at once, and a second attach evicts the first.
+    const existing = this.liveAttachFor(paneName);
+    if (existing) {
+      console.log(
+        `[HerdrBridge] Reusing live session ${existing.sessionId} for ${paneName}; ` +
+        `refusing to open a second attach that would evict it`
+      );
+      return existing;
+    }
+
+    const session: HerdrSession = {
+      sessionId: `${paneName}-${Date.now()}`,
+      path: agentPath,
+      paneName,
+      createdAt: new Date(),
+      status: 'active',
+      ptyBuffer: '',
+      onDataListeners: [],
+      expectsRuntime: launcherDeliversRuntime(launcher)
+    };
+
+    console.log(
+      `[HerdrBridge] Re-attaching to the surviving agent in ${agentPath}: ` +
+      `session ${session.sessionId}, pane ${paneName}. Nothing is being started.`
+    );
+
+    this.sessions.set(session.sessionId, session);
+    this.attachPty(session);
+
+    return session;
   }
 
   public getSession(sessionId: string): HerdrSession | undefined {

@@ -93,6 +93,30 @@ jobs:
       #                                      removes one, so the pane count is a
       #                                      measurement rather than a fixture.
       #
+      # And one for restart survival, which until now had exactly ONE
+      # assertion anywhere in this suite — in the live half, which CI cannot
+      # run:
+      #
+      #   verify-restart-survival            a fresh daemon over surviving
+      #                                      panes RE-ATTACHES: the row reports
+      #                                      `sessionless: false` with a new
+      #                                      session id, `agent start` is
+      #                                      counted zero across the restart,
+      #                                      and the pane count stays 1. Run
+      #                                      for BOTH launchers, because the
+      #                                      live proof can only afford to run
+      #                                      `shell` — and `shell` is precisely
+      #                                      the launcher whose runtime-free
+      #                                      pane takes the other branch of
+      #                                      every "does an agent exist here"
+      #                                      question in this daemon (KAN-136).
+      #                                      Its stub is stateful and reports a
+      #                                      runtime behind a `claude` pane and
+      #                                      none behind a shell, which is the
+      #                                      whole of the difference between
+      #                                      them as far as this code is
+      #                                      concerned.
+      #
       # verify-daemon-provenance starts daemons but needs no herdr either: it
       # drives `daemon_status`, which touches neither panes nor the herdr
       # binary. It builds its OWN fixture trees under the system temp dir — one
@@ -136,6 +160,7 @@ jobs:
             verify-herdr-version-notice
             verify-refuses-occupied-directory
             verify-idempotent-lifecycle
+            verify-restart-survival
             verify-prompt-is-not-a-template
             verify-daemon-provenance
           )
