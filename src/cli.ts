@@ -535,7 +535,9 @@ function agentRow(a: any): string {
   return lines(
     head,
     session,
-    a.label ? `${INDENT}${INDENT}label ${a.label}` : null,
+    // The label is not printed here: it is part of the configuration, and
+    // `configBlock` prints the whole of that. Two identical lines is how a
+    // reader learns to skim past one of them.
     a.paneId ? `${INDENT}${INDENT}pane ${a.paneName} (${a.paneId})` : null,
     configBlock(a)
   );
@@ -976,9 +978,10 @@ function renderStatus(reader: ResponseReader, request: Record<string, unknown>):
     field('state', reader.take('state')),
     field('pane name', reader.take('paneName')),
     field('pane id', reader.take('paneId')),
-    field('label', reader.take('label')),
     field('configured', reader.take('configured')),
-    echo,
+    // `label` is inside the block below rather than on a line of its own: it
+    // is one of the knobs, and printing it twice teaches a reader to skim.
+    (reader.seen('label'), echo),
     // The sessionless shape is not a degraded answer, and must not read as
     // one: the agent is alive in herdr and this daemon simply does not hold
     // its session — which is every agent that outlived a daemon restart, and
