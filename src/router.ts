@@ -1526,6 +1526,32 @@ export class MessageRouter {
    * all-clear and spawns into an occupied directory precisely when it cannot
    * see it. `reachable: false` is silence, not evidence.
    *
+   * SAFE TO CALL AGAIN — A CONTRACT, NOT AN OBSERVATION. A supervisor
+   * reconciles by diffing desired state against actual and calling the verbs
+   * to close the gap, so it calls this on agents that are already exactly as
+   * asked for, constantly. That call:
+   *
+   *   - answers `success: true` with `alreadyRunning: true`, never an error;
+   *   - starts no second pane, and says `started: false`;
+   *   - never touches the capacity gate, because nothing new is being
+   *     charged for — an agent already running is already counted;
+   *   - and CONVERGES THE RECORD: if the disk says this agent was never
+   *     started while our pane is live, this call writes the activation, so
+   *     calling again is what repairs a durability failure rather than
+   *     papering over it.
+   *
+   * `alreadyRunning` and `started` are on EVERY successful response, `true`
+   * or `false`. A field that appears only when true asks the caller to read
+   * meaning into an absence, which is the same shape of guess this daemon
+   * refuses everywhere else.
+   *
+   * WHAT IDEMPOTENCE DOES NOT COVER, stated here because the two paths meet
+   * in this function and confusing them turns a safety refusal into a silent
+   * success: a LIVE FOREIGN PANE in the target directory refuses, always. It
+   * is not "already as specified" — it is somebody else's agent, and the
+   * ownership test is what separates the two. Making that refusal idempotent
+   * would mean answering "already running" about a pane we did not start.
+   *
    * ACCEPTED RESIDUAL RISK, WRITTEN DOWN RATHER THAN CLOSED: the occupancy
    * check and the spawn are not atomic. A pane appearing in the target
    * directory between them defeats the guard. CrabCast-against-CrabCast is
@@ -1600,14 +1626,51 @@ export class MessageRouter {
       // is reported rather than swallowed, because two agents in one directory
       // is the thing this whole guard exists to make visible.
       const coOccupants = occupancy.occupants.filter((o) => o.name !== paneName);
+
+      // THE RECORD IS PART OF THE POSTCONDITION, not a side effect of
+      // spawning — and this is what makes the no-op a reconciling answer
+      // rather than merely a quiet one.
+      //
+      // The state it repairs is reachable and this daemon already says so
+      // elsewhere: handleDeactivateAgent notes that "a durable write that
+      // failed after an activation leaves exactly that state over a live
+      // pane". Get there — an EIO on the registry write, a stand-down whose
+      // pane outlived the daemon that recorded it — and the record says
+      // `configured` or `deactivated` while our pane is live. Without this
+      // write, the retry a supervisor makes precisely to repair that answers
+      // `success: true, alreadyRunning: true`, repairs nothing, and reports no
+      // durability problem: the agent stays out of `expected()`, so the next
+      // boot does not restore it and the fleet reads it as never started while
+      // it works. A verb whose whole job is being safe to call again must not
+      // have a call that cannot converge.
+      //
+      // `rememberActivated` short-circuits when the disk already says exactly
+      // this, so the steady-state no-op writes nothing at all — the repair
+      // costs a row only on the call that actually needed it.
+      const recordWasBehind = intent.event !== 'activated';
+      const durable = this.rememberActivated({ path: agentPath, config });
+
       respond({
         action: 'activate_response',
         success: true,
         path: agentPath,
         paneName,
+        // Stated on every activate response, never inferred from absence: a
+        // reconciler has to be able to tell "I started this" from "it was
+        // already up" without parsing prose, and a field that only appears
+        // when true is indistinguishable from a field a daemon forgot.
         alreadyRunning: true,
+        started: false,
         paneId: occupancy.ours.paneId,
         verified: true,
+        // Present only when the disk disagreed with the world and this call
+        // settled it. Silent when there was nothing to repair.
+        ...(recordWasBehind ? { recordReconciled: true } : {}),
+        // Same meaning as on the spawn path: the agent is running and
+        // verified, but the disk does not know, so a restart will not restore
+        // it. Reported here too, or the repair could fail as silently as the
+        // damage it exists to undo.
+        ...(durable.ok ? {} : { durable: false, durabilityError: durable.error }),
         ...(coOccupants.length
           ? {
               occupiedBy: coOccupants,
@@ -1765,6 +1828,11 @@ export class MessageRouter {
       success: true,
       path: agentPath,
       paneName,
+      // The other half of the contract stated above: every successful
+      // activation says which of the two things happened. `false` here means
+      // this call is the one that started the agent.
+      alreadyRunning: false,
+      started: true,
       paneId: confirmed.paneId,
       sessionId: session.sessionId,
       status: session.status,
@@ -1814,6 +1882,14 @@ export class MessageRouter {
    * The session-addressed stand-down. Kept for the one caller that holds a
    * session id and nothing else; every human-facing path uses the
    * path-addressed form below, which is a strict superset.
+   *
+   * It answers on the same `deactivate_response` shape, so it carries
+   * `wasRunning` too. A caller cannot be expected to know which of two
+   * addressing forms produced the message in front of it, and a contract that
+   * holds for one of them is not a contract. `state` is only claimed when
+   * there is a record for the agent to be in a state ON: a session with no
+   * record behind it is stood down, but calling that "standby" would name a
+   * durable resting place that does not exist.
    */
   private handleDeactivateSession(data: any, respond: Respond) {
     if (!data.sessionId) {
@@ -1856,6 +1932,10 @@ export class MessageRouter {
       success,
       sessionId: data.sessionId,
       ...(session ? { path: session.path, paneName: session.paneName } : {}),
+      // A session we held and tore down was, by definition, running. The
+      // failure case claims neither: an unconfirmed teardown is exactly the
+      // case where we do not know.
+      ...(success ? { wasRunning: true, ...(intent ? { state: 'standby' } : {}) } : {}),
       ...(durable && !durable.ok ? { durable: false, durabilityError: durable.error } : {}),
       ...(error ? { error } : {})
     });
@@ -1876,6 +1956,19 @@ export class MessageRouter {
    *
    * A path with NO record refuses, where `forget` on the same path succeeds.
    * See {@link handleForget} for the rule that decides the asymmetry.
+   *
+   * SAFE TO CALL AGAIN — A CONTRACT, the mirror of {@link handleActivate}'s.
+   * Standing down something already down is not an error and not a failure;
+   * it is a supervisor finding the world already as it asked. The second call
+   * answers `success: true, wasRunning: false`, writes no second stand-down
+   * row (a repeated row would say a decision was taken twice) and broadcasts
+   * no second event.
+   *
+   * `wasRunning` is on EVERY successful response, and `state` distinguishes
+   * the two ways of not running rather than flattening them. That distinction
+   * is the whole reason this is not a bare success: `unstarted` is an agent
+   * with no conversation to come back to, `standby` is one with a conversation
+   * waiting, and switching them back on means different things.
    */
   public handleDeactivateAgent(data: any, respond: Respond) {
     const fail = (error: string, extra: Record<string, unknown> = {}) =>
