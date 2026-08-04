@@ -77,6 +77,22 @@ jobs:
       #                                      and an over-large one is refused
       #                                      legibly rather than truncated.
       #
+      # And one more with the idempotence contract, for the same reason —
+      # calling a verb again is what a reconciler does constantly, and every
+      # way that can break is silent:
+      #
+      #   verify-idempotent-lifecycle        `activate` three times leaves ONE
+      #                                      pane, `deactivate` twice does not
+      #                                      error, the two ways of not running
+      #                                      stay distinct — and a FOREIGN pane
+      #                                      still refuses, which is the
+      #                                      assertion that keeps a no-op from
+      #                                      swallowing T1's guard. Its stub is
+      #                                      stateful: `agent start` really adds
+      #                                      a pane and `pane close` really
+      #                                      removes one, so the pane count is a
+      #                                      measurement rather than a fixture.
+      #
       # DELIBERATELY EXCLUDED — these need a real herdr server and real
       # terminal panes, which no GitHub runner has (herdr's public
       # availability is itself an open question on this project). Running
@@ -112,6 +128,7 @@ jobs:
             verify-cli-parity
             verify-herdr-version-notice
             verify-refuses-occupied-directory
+            verify-idempotent-lifecycle
             verify-prompt-is-not-a-template
           )
           # One at a time, and one scratch $HOME each. Both halves are
