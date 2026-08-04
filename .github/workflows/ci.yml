@@ -76,6 +76,17 @@ jobs:
       #   verify-prompt-is-not-a-template    nothing interpolates the prompt,
       #                                      and an over-large one is refused
       #                                      legibly rather than truncated.
+      #   verify-callers-directory           what appears in a directory the
+      #                                      CALLER owns, and what `forget`
+      #                                      takes back out. Also a refusal
+      #                                      suite: an unparseable or
+      #                                      already-taken `.mcp.json`, a server
+      #                                      that cannot be supplied, and a
+      #                                      human's own conversation at the
+      #                                      path. Its last section MUTATES the
+      #                                      things it guards and asserts the
+      #                                      checks go red, because a check that
+      #                                      cannot fail is not a check.
       #
       # And two more, both for the same class of reason — a reconciler calls
       # these paths constantly, and every way they can break is silent:
@@ -177,6 +188,7 @@ jobs:
             verify-idempotent-lifecycle
             verify-restart-survival
             verify-prompt-is-not-a-template
+            verify-callers-directory
             verify-daemon-provenance
             verify-state-read-echoes-config
           )

@@ -252,10 +252,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 "Optional. The agent's bootstrap prompt as FINISHED TEXT — not a path and not a template. CrabCast writes these bytes verbatim into its own sidecar directory (never into your directory), points the agent at that file by absolute path, and never inspects the content: there is no placeholder syntax and no variable set, so render whatever you want the agent to read before you send it, with whatever templating you like. Refused above 131072 characters, naming the limit and your actual size — the prompt travels inline over the socket and a truncated one would be an agent acting on half its instructions.",
             },
             mcpServers: {
-              type: "array",
-              items: { type: "string" },
+              type: "object",
+              additionalProperties: {
+                oneOf: [
+                  { type: "object", description: "Your own server definition, written verbatim." },
+                  { type: "string", enum: ["builtin"], description: "A server CrabCast constructs itself." },
+                ],
+              },
               description:
-                "Optional. MCP servers to offer this agent. Naming any of them causes a .mcp.json to be written into the agent's directory at activation; omit it and nothing is written there.",
+                "Optional. The MCP servers this agent gets, keyed by the name its runtime will see. DEFINITIONS, NOT NAMES: the value is the command/args/env that spawn the server, e.g. {\"atlassian\": {\"command\": \"npx\", \"args\": [\"-y\", \"mcp-remote\", \"https://…\"], \"env\": {\"TOKEN\": \"…\"}}}. CrabCast writes each value into .mcp.json VERBATIM — it resolves nothing, renames nothing, reorders nothing, and never inspects a definition's interior. It holds no table of server names, deliberately: which servers you want depends on which of your integrations hold a live credential, and that state never crosses this boundary. The one exception is the value \"builtin\", for servers whose definition depends on facts about this daemon rather than about you; there is exactly one, \"crabcast\", and asking for a builtin CrabCast does not have is REFUSED naming what it has. SUPPLYING THIS IS THE CONSENT to a .mcp.json appearing in your directory — there is no second opt-in flag to forget, because handing over the exact contents of the file and agreeing to it being written are not two decisions. The configure response names the file and keys it will write at activation. Every requested server must be writable or the activation is REFUSED with nothing written and nothing started: a .mcp.json holding only part of what you asked for is a file whose presence looks like success.",
             },
             label: {
               type: "string",
@@ -323,7 +328,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "crabcast_forget_agent",
         description:
-          "Makes an agent stop existing: removes its record from the durable registry. REFUSES while an agent is running there, and there is deliberately no force flag — no call that is not named 'stop it' may terminate an agent as a side effect, and a force flag is that path with a label on it. Deactivate first, then forget: two calls leave two decisions in the append-only log instead of one flag nobody can audit. It also refuses when herdr cannot be reached and the record says the agent should be running, because silence is not evidence that nothing is there. On a path that was never configured it SUCCEEDS with existed: false — its postcondition is the absence of a record, and that already holds. This deletes NO directory: CrabCast does not create the directory an agent runs in and does not delete one.",
+          "Makes an agent stop existing: removes its record from the durable registry. REFUSES while an agent is running there, and there is deliberately no force flag — no call that is not named 'stop it' may terminate an agent as a side effect, and a force flag is that path with a label on it. Deactivate first, then forget: two calls leave two decisions in the append-only log instead of one flag nobody can audit. It also refuses when herdr cannot be reached and the record says the agent should be running, because silence is not evidence that nothing is there. On a path that was never configured it SUCCEEDS with existed: false — its postcondition is the absence of a record, and that already holds. It also UNDOES what CrabCast wrote outside its own data directory: the .mcp.json keys it added (deleting the file only if CrabCast created it and nothing else is left in it), the folder-trust entry in ~/.claude.json but ONLY if CrabCast added it rather than finding it already accepted, and CrabCast's own sidecar. It removes exactly what it recorded writing — a key edited since is left alone — and `removed` and `left` name both halves, the second with reasons. This deletes NO directory of yours: CrabCast does not create the directory an agent runs in and does not delete one, and nothing here removes anything recursively.",
         inputSchema: {
           type: "object",
           properties: {
@@ -410,7 +415,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // priority and launcher are NOT checked here, deliberately. The daemon
       // refuses a configure without them and its refusal names both fields and
       // says why each one has no default; a check here would be a second copy
-      // of that rule with a worse message.
+      // of that rule with a worse message. The same holds for `provision`:
+      // whether this consent is required, and for what, is the daemon's rule.
       const res = await callDaemonAPI('configure_agent', {
         path: agentPath(path), priority, launcher, prompt, mcpServers, label,
         refusable, chargeable, preemptable, gateExempt

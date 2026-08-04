@@ -2,7 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { CrabcastConfig } from './config.js';
 import { MAX_LINE_CHARS } from './ipc.js';
-import { AgentConfig, DaemonResponse } from './types.js';
+import { AgentConfig, DaemonResponse, McpServerSpec } from './types.js';
+import { removeProvisionedArtifacts } from './provisioning.js';
 import {
   HerdrBridge,
   HerdrCensus,
@@ -15,7 +16,7 @@ import {
   ourPaneIn
 } from './herdr.js';
 import { PathError, canonicalPath, canonicalizeOrNull, paneNameFor } from './identity.js';
-import { knownLaunchers, resolveLauncher } from './launchers.js';
+import { BUILTIN_MCP_SERVERS, builtinMcpServer, knownLaunchers, resolveLauncher } from './launchers.js';
 import { readFdUsage, isFdPressureHigh, PTMX_FDS_PER_PANE } from './herdr-health.js';
 import { ResumeCause } from './resume.js';
 import {
@@ -736,13 +737,127 @@ function parseAgentConfig(data: any): ConfigParse {
     prompt = data.prompt;
   }
 
-  let mcpServers: string[] | undefined;
+  // MCP SERVERS: DEFINITIONS, NOT NAMES — and validated to the point where a
+  // server the caller asked for cannot silently fail to arrive.
+  //
+  // The chain this replaces answered `success: true` for an agent with no
+  // tools: `mcpServers` was validated as "an array of strings" and nothing
+  // more, exactly one name resolved and the rest were dropped without a word,
+  // and the write early-returned on the resulting empty map so no file appeared
+  // at all. Every step was individually defensible and the composition was a
+  // guard that read as a check and was not one.
+  //
+  // So each name is now accounted for individually, here, before anything is
+  // recorded — and a name this daemon cannot supply is refused by name.
+  let mcpServers: Record<string, McpServerSpec> | undefined;
   if (data.mcpServers !== undefined) {
-    if (!Array.isArray(data.mcpServers) || data.mcpServers.some((s: any) => typeof s !== 'string')) {
-      return refuse(`Invalid mcpServers: expected an array of strings`);
+    if (
+      typeof data.mcpServers !== 'object' ||
+      data.mcpServers === null ||
+      Array.isArray(data.mcpServers)
+    ) {
+      return refuse(
+        `Invalid mcpServers: expected an object keyed by server name, e.g. ` +
+          `{"atlassian": {"command": "npx", "args": ["-y", "mcp-remote", "…"]}, "crabcast": "builtin"}. ` +
+          `Got ${Array.isArray(data.mcpServers) ? 'an array' : JSON.stringify(data.mcpServers)}. ` +
+          `IT IS DEFINITIONS RATHER THAN NAMES: the command, args and env that spawn each server, ` +
+          `written into .mcp.json verbatim. CrabCast holds no table of server names — which servers ` +
+          `you want depends on which of your integrations hold a live credential, and that never ` +
+          `crosses this boundary.`
+      );
     }
-    mcpServers = data.mcpServers as string[];
+
+    // `Object.create(null)`, NOT `{}`, AND THIS IS LOAD-BEARING.
+    //
+    // A server named `__proto__` assigned into an ordinary object literal hits
+    // Object.prototype's setter instead of creating an own property. The
+    // assignment succeeds, throws nothing, and the key is simply NOT THERE
+    // afterwards. Reproduced end to end: `configure` answered `success: true`
+    // with `willWrite: []`, the record stored `mcpServers: {}`, `activate`
+    // answered `success: true`, no `.mcp.json` was written, and `agent start`
+    // WAS issued — a caller supplied a definition, the agent came up with no
+    // tools, and nothing anywhere said why.
+    //
+    // That is precisely the defect this slice exists to close, living inside
+    // the slice that closes it. And the count guard downstream (herdr.ts)
+    // cannot catch it: the key is lost HERE, one frame upstream, so by the time
+    // the bridge compares counts the record honestly reads "nothing was asked
+    // for". The guard is not wrong; it is being lied to. Which is the argument
+    // for fixing it at every point the map is built rather than adding a
+    // special case for one name.
+    //
+    // `constructor`, `toString` and `hasOwnProperty` all round-trip through a
+    // plain literal correctly — only `__proto__` has the setter — so this is
+    // not a class of key that a reader would spot by trying the obvious ones.
+    const specs: Record<string, McpServerSpec> = Object.create(null);
+    const unknownBuiltins: string[] = [];
+    for (const [name, spec] of Object.entries(data.mcpServers as Record<string, unknown>)) {
+      if (!name.trim()) {
+        return refuse(
+          `Invalid mcpServers: a server name is empty. Each key is the name the agent's runtime ` +
+            `will see the server under.`
+        );
+      }
+      if (spec === 'builtin') {
+        // The one class of name CrabCast still resolves, so it is the one class
+        // that can fail to resolve — and it fails LOUDLY, naming what it knows.
+        if (builtinMcpServer(name) === null) {
+          unknownBuiltins.push(name);
+        } else {
+          specs[name] = 'builtin';
+        }
+        continue;
+      }
+      if (typeof spec !== 'object' || spec === null || Array.isArray(spec)) {
+        return refuse(
+          `Invalid mcpServers['${name}']: expected either a definition object — the command, args ` +
+            `and env that spawn the server — or the string "builtin" for one CrabCast constructs ` +
+            `itself (${BUILTIN_MCP_SERVERS.join(', ')}). Got ` +
+            `${Array.isArray(spec) ? 'an array' : JSON.stringify(spec)}. The definition is written ` +
+            `into .mcp.json verbatim: CrabCast does not inspect its interior, so what you send is ` +
+            `what the agent's runtime reads.`
+        );
+      }
+      specs[name] = spec as Record<string, unknown>;
+    }
+
+    if (unknownBuiltins.length) {
+      return refuse(
+        `mcpServers asks CrabCast to supply ${unknownBuiltins.map((n) => `'${n}'`).join(', ')} ` +
+          `itself ("builtin"), and it has no such server. CrabCast builds exactly ` +
+          `${BUILTIN_MCP_SERVERS.length === 1 ? 'one' : String(BUILTIN_MCP_SERVERS.length)}: ` +
+          `${BUILTIN_MCP_SERVERS.join(', ')} — the only definition that depends on facts about this ` +
+          `daemon rather than about your integrations. For anything else, send the definition: ` +
+          `{"${unknownBuiltins[0]}": {"command": "…", "args": [], "env": {}}}. NOTHING WAS ` +
+          `CONFIGURED — an agent started with fewer servers than you asked for is the failure this ` +
+          `refusal exists to prevent.`
+      );
+    }
+    mcpServers = specs;
   }
+
+  // THERE IS NO SEPARATE PROVISIONING CONSENT FLAG, and its absence is a
+  // decision rather than an omission.
+  //
+  // An earlier revision of the design required `provision: { mcpConfig: true }`
+  // beside `mcpServers`, because asking for a CAPABILITY ("the atlassian
+  // server") is a different act from agreeing to a FILE appearing in your
+  // repository. That was right about names. Definitions dissolve it: a caller
+  // supplying definitions is handing over the literal bytes of the `mcpServers`
+  // block, and there is no gap left between "here are the exact contents" and
+  // "please write them". A flag beside them would not be a second decision,
+  // only a second chance to forget one.
+  //
+  // And forgetting it would not have been loud where it mattered. A consumer
+  // cutting a whole fleet over at once, whose agents reach their issue tracker
+  // THROUGH MCP, would have needed the flag on every activation to get any
+  // tools at all — and would have discovered it agent by agent. One field
+  // cannot be half-supplied, so that failure has no path here.
+  //
+  // What the flag was buying — a caller LEARNING that CrabCast writes into
+  // their directory — is bought better below: `configure`'s response names the
+  // file and the keys it will write, before anything is written. Being told the
+  // consequence beats being asked to assert it.
 
   let label: string | undefined;
   if (data.label !== undefined) {
@@ -1091,6 +1206,17 @@ export class MessageRouter {
       configuredAt
     });
 
+    // WHAT ACTIVATION WILL WRITE INTO THE CALLER'S DIRECTORY, said now.
+    //
+    // This is what replaces the separate `provision` consent flag an earlier
+    // design revision called for. A flag asks the caller to assert that they
+    // understand a consequence; this TELLS them the consequence, at the moment
+    // they configure and before anything is written, naming the file and the
+    // exact keys. Being told beats being asked to assert — and unlike a flag it
+    // cannot be supplied and then forgotten about, because it is not something
+    // the caller supplies at all.
+    const willWrite = Object.keys(parsed.config.mcpServers ?? {});
+
     respond({
       action: 'configure_response',
       success: true,
@@ -1106,6 +1232,18 @@ export class MessageRouter {
       // Carried on the reconfigure path so a caller can see the token move,
       // and so a refusal (the next slice's) has a value to report unchanged.
       ...(existing ? { previousConfigVersion: existing.configVersion } : {}),
+      willWrite: willWrite.length
+        ? [
+            {
+              file: path.join(agentPath, '.mcp.json'),
+              keys: willWrite,
+              when: 'at activation',
+              note:
+                `Merged into your file if you have one; never replacing it. Named again in the ` +
+                `activation response, and removed by \`forget\`.`
+            }
+          ]
+        : [],
       // Advisory, never a refusal. Empty means the census answered and found
       // nothing live here.
       occupiedBy,
@@ -1244,23 +1382,36 @@ export class MessageRouter {
       return;
     }
 
+    // RESIDUE CLEANUP, BEFORE THE RECORD IS DROPPED.
+    //
+    // Never-delete-a-DIRECTORY says nothing about the FILES we wrote into one,
+    // and this is where they are taken back: exactly what CrabCast's provenance
+    // record accounts for, never a recursive delete, and never the caller's
+    // directory itself — which CrabCast cannot have created, since `configure`
+    // may not `mkdir`. See provisioning.ts for the rules; each one is a refusal
+    // rather than a behaviour.
+    //
+    // It runs BEFORE the `forgotten` row rather than after, because the
+    // provenance that says what may be removed lives in the sidecar this
+    // cleanup deletes. Doing it in the other order would be recording that the
+    // agent is gone and then discovering we can no longer say what it left.
+    const sidecar = this.deps.herdrBridge.sidecarDirFor(agentPath);
+    const residue = removeProvisionedArtifacts({ agentPath, sidecarDir: sidecar });
+
     const durable = this.surfaceRegistryOutcome(
       this.deps.agentRegistry.recordForgotten(existing.record),
       `forgot ${agentPath}`
     );
 
-    // What was removed and what was deliberately left. The sidecar holds this
-    // agent's rendered prompt and is entirely inside CrabCast's own data
-    // directory, so it is safe to delete — but residue cleanup (the sidecar,
-    // the `.mcp.json` key, the trust entry) is the next slice's, and naming
-    // what is left is how that stays visible rather than becoming a surprise.
-    const sidecar = this.deps.herdrBridge.sidecarDirFor(agentPath);
+    // 'record' first: it is the removal the caller asked for, and the artifacts
+    // are what came with it.
+    const removed = ['record', ...residue.removed];
 
     this.deps.broadcast({
       action: 'agent_forgotten_event',
       success: true,
       path: agentPath,
-      removed: ['record']
+      removed
     });
 
     respond({
@@ -1268,16 +1419,19 @@ export class MessageRouter {
       success: true,
       path: agentPath,
       existed: true,
-      removed: ['record'],
-      left: fs.existsSync(sidecar) ? [sidecar] : [],
-      ...(fs.existsSync(sidecar)
-        ? {
-            note:
-              `The record is gone. ${sidecar} still holds this agent's rendered prompt — ` +
-              `removing it is not yet implemented, and it is named here rather than left ` +
-              `for somebody to find.`
-          }
-        : {}),
+      removed,
+      // What was deliberately NOT removed, each with its reason. An empty list
+      // is the ordinary outcome and says so; a non-empty one is the honest
+      // alternative to a cleanup that quietly gave up.
+      left: residue.left,
+      note:
+        `The record is gone and so is everything CrabCast wrote outside its own data ` +
+        `directory that it could account for. ${agentPath} itself was NOT touched: CrabCast ` +
+        `never created it — \`configure\` may not \`mkdir\` — so it never deletes it, and ` +
+        `nothing here removes anything recursively.` +
+        (residue.left.length
+          ? ` ${residue.left.length} item(s) were left in place, named above with the reason.`
+          : ''),
       ...(durable.ok ? {} : { durable: false, durabilityError: durable.error })
     });
   }
@@ -2037,7 +2191,20 @@ export class MessageRouter {
 
       // `config.prompt` verbatim. There is nothing between the caller's bytes
       // and the file the agent reads.
-      session = herdrBridge.spawnSession(agentPath, config, config.prompt, resume);
+      //
+      // THE RESUME RULE'S INPUT is read from the durable record here, because
+      // the bridge cannot read it and must not guess: `everActivated` is
+      // whether CrabCast has ever run an agent at this path. False means any
+      // conversation on disk there is not ours — at a caller-owned directory,
+      // very often the human's own — and the launcher starts a new session
+      // instead of continuing it. See resume.ts.
+      session = herdrBridge.spawnSession(
+        agentPath,
+        config,
+        config.prompt,
+        resume,
+        intent.everActivated === true
+      );
 
       // Reconciliation nudges its own restores, in sequence and with the
       // stagger it needs; it passes an explicit cause, which is how the two
@@ -2124,6 +2291,18 @@ export class MessageRouter {
       ...(session.resume
         ? { resume: session.resume, resumedConversation: session.resumedConversation }
         : {}),
+      // THE RESUME RULE, reported rather than merely obeyed. `false` says in
+      // the response that this agent started a NEW session and did not
+      // continue whatever conversation the directory holds — which at a
+      // caller-owned path is the difference between an agent starting work and
+      // an agent reading a human's private session.
+      resumedExistingConversation: session.mayResume === true,
+      // EVERY ARTIFACT THIS ACTIVATION WROTE OR RELIED ON outside CrabCast's
+      // own data directory: what, where, whether it was ours, and how to undo
+      // it. Silence is what made writing into somebody's repository
+      // unacceptable; the fix is not to stop writing, it is to stop being
+      // silent. Empty for an agent that opted into nothing.
+      provisioned: session.provisioned ?? [],
       // What this activation cost somebody else. Reported to the caller as
       // well as broadcast, so a client that started an agent by preemption
       // learns whose work it interrupted from the same response.

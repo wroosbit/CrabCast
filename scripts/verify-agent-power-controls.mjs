@@ -515,7 +515,7 @@ rule('3. THE RECORD — why a stand-down has to carry the whole configuration');
   const { router, agentRegistry } = newRouter(bridge, [
     {
       path: dir,
-      config: knobs({ launcher: 'claude', mcpServers: ['crabcast'], label: 'KAN-38', prompt: 'do the thing' }),
+      config: knobs({ launcher: 'claude', mcpServers: { crabcast: 'builtin' }, label: 'KAN-38', prompt: 'do the thing' }),
       paneId: '%rec'
     }
   ]);
@@ -544,7 +544,7 @@ rule('3. THE RECORD — why a stand-down has to carry the whole configuration');
 
   verdict(
     intent.record.config.launcher === 'claude' &&
-      JSON.stringify(intent.record.config.mcpServers) === JSON.stringify(['crabcast']) &&
+      JSON.stringify(intent.record.config.mcpServers) === JSON.stringify({ crabcast: 'builtin' }) &&
       intent.record.config.prompt === 'do the thing' &&
       intent.record.paneId === '%rec' &&
       spawned.config.launcher === 'claude' &&

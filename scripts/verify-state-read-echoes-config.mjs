@@ -195,7 +195,20 @@ const KNOBS = {
   preemptable: false,
   launcher: 'shell',
   prompt: 'KAN-125: read this back to me, byte for byte.',
-  mcpServers: ['atlassian', 'butchr'],
+  // A MAP of definitions keyed by name (KAN-111), not the array of names this
+  // used to be. Both forms of the union are used on purpose: `'builtin'` is the
+  // one entry CrabCast constructs itself, and the other is a caller's own JSON
+  // that must come back byte for byte. The echo is of the SPEC rather than of
+  // the expansion — what `configure` was handed, not what provisioning makes of
+  // it — which is exactly what a caller diffing against its desired state needs.
+  mcpServers: {
+    crabcast: 'builtin',
+    'kan125-example': {
+      command: 'npx',
+      args: ['-y', 'mcp-remote', 'https://example.invalid/mcp'],
+      env: { KAN125: 'written verbatim' }
+    }
+  },
   label: 'the state read'
 };
 
@@ -220,7 +233,12 @@ function echoProblems(row, where, expected = EXPECTED_CONFIG) {
   }
   for (const [key, want] of Object.entries(expected)) {
     const got = row.config[key];
-    const same = Array.isArray(want) ? JSON.stringify(got) === JSON.stringify(want) : got === want;
+    // Structural for anything that is not a primitive: `mcpServers` is a map
+    // of the caller's own JSON now, and `===` on two equal objects is false.
+    const same =
+      want !== null && typeof want === 'object'
+        ? JSON.stringify(got) === JSON.stringify(want)
+        : got === want;
     if (!same) problems.push(`${where}: config.${key} is ${JSON.stringify(got)}, configured ${JSON.stringify(want)}`);
   }
   for (const extra of Object.keys(row.config)) {
@@ -503,17 +521,36 @@ const s3unstarted = ownedDir('s3', 'never-ran');
       'continue for one and nothing for the other'
   );
 
-  // Through the bridge, which is what actually decides. `resume` is the cause
-  // reconciliation and preemption set; `resumedConversation` is the decision.
-  const resumed = h.bridge.spawnSession(s3standby, claudeKnobs, claudeKnobs.prompt, 'daemon-restart');
-  const fresh = h.bridge.spawnSession(s3unstarted, claudeKnobs, claudeKnobs.prompt, 'daemon-restart');
-  console.log(`\n   spawnSession(${path.basename(s3standby)}).resumedConversation   = ${resumed.resumedConversation}`);
+  // Through the bridge, which is what actually decides — and fed the SAME way
+  // the router feeds it: `spawnSession`'s `ranBefore` argument is
+  // `intent.everActivated`, read from the durable record (router.ts). That
+  // wiring is KAN-111's resume rule taking this slice's field as its input, and
+  // passing it here is what makes this an assertion about the daemon rather
+  // than about a call the daemon never makes. Reading it out of the registry
+  // rather than hardcoding true/false is the point: if the field were derived
+  // wrongly, this would go red with it.
+  const intents3 = h.agentRegistry.intents();
+  const ranStandby = intents3.get(s3standby).everActivated;
+  const ranUnstarted = intents3.get(s3unstarted).everActivated;
+  const resumed = h.bridge.spawnSession(
+    s3standby, claudeKnobs, claudeKnobs.prompt, 'daemon-restart', ranStandby
+  );
+  const fresh = h.bridge.spawnSession(
+    s3unstarted, claudeKnobs, claudeKnobs.prompt, 'daemon-restart', ranUnstarted
+  );
+  console.log(`\n   everActivated from the record: standby=${ranStandby}, unstarted=${ranUnstarted}`);
+  console.log(`   spawnSession(${path.basename(s3standby)}).resumedConversation   = ${resumed.resumedConversation}`);
   console.log(`   spawnSession(${path.basename(s3unstarted)}).resumedConversation = ${fresh.resumedConversation}`);
   check(
     resumed.resumedConversation === true && fresh.resumedConversation === false,
     'and the daemon TAKES the different path: the one that ran is handed its conversation ' +
       'and nudged to carry on; the one that never ran gets the fresh-start prompt instead',
     `standby ${resumed.resumedConversation}, unstarted ${fresh.resumedConversation}`
+  );
+  check(
+    ranStandby === true && ranUnstarted === false,
+    "and the input that decided it is this slice's own `everActivated`, read off the " +
+      "durable record — the resume rule (KAN-111) and the fleet category are one fact"
   );
   h.bridge.abandonSession(resumed.sessionId, 'verify: done with this session');
   h.bridge.abandonSession(fresh.sessionId, 'verify: done with this session');
@@ -959,8 +996,8 @@ function mutantDist(name, file, from, to) {
   // is precisely the implementation section 4 exists to rule out.
   const dir = mutantDist(
     'naive-everactivated', 'agent-registry.js',
-    'everActivated: everActivated.has(entry.path),',
-    "everActivated: entry.event === 'activated',"
+    'everActivated: ran,',
+    "everActivated: event === 'activated',"
   );
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
@@ -1082,13 +1119,24 @@ const waitFor = async (fn, ms, what) => {
   throw new Error(`timed out waiting for ${what}`);
 };
 
+// The caller's own server DEFINITIONS, in a file, exactly as a caller supplies
+// them (KAN-111). `--mcp` now names only the servers CrabCast builds itself,
+// so the two halves of the union arrive through two different flags — and both
+// have to come back on the echo under one `mcpServers` map.
+const MCP_CONFIG_FILE = path.join(liveDir, 'my-servers.json');
+fs.writeFileSync(
+  MCP_CONFIG_FILE,
+  JSON.stringify({ 'kan125-example': KNOBS.mcpServers['kan125-example'] }, null, 2)
+);
+
 /** The CLI's own argv for the fixture, so the proof is reproducible by hand. */
 const CONFIGURE_ARGV = [
   'configure', livePath,
   '--priority', String(KNOBS.priority),
   '--launcher', KNOBS.launcher,
   '--prompt', KNOBS.prompt,
-  '--mcp', KNOBS.mcpServers.join(','),
+  '--mcp', 'crabcast',
+  '--mcp-config', MCP_CONFIG_FILE,
   '--label', KNOBS.label,
   // A boolean flag with no value means `true`, so the exemptions are said with
   // `=false` — which is the form the help prints.
@@ -1141,7 +1189,7 @@ const CONFIGURE_ARGV = [
     ['refusable false', /refusable false/],
     ['preemptable false', /preemptable false/],
     ['the prompt size', /prompt: \d+ characters/],
-    ['the mcp servers', /mcp servers: atlassian, butchr/],
+    ['the mcp servers, with the builtin marked', /mcp servers: crabcast \(builtin\), kan125-example/],
     ['the label', /label: the state read/],
     ['the version', /config v1/],
     ['the state', /state:\s+running/]

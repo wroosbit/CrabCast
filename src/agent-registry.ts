@@ -211,19 +211,33 @@ export interface AgentLogEntry extends AgentRecord {
    */
   wasPreempted?: boolean;
   /**
-   * Written only by compaction, exactly as {@link wasPreempted} is and for the
-   * same reason: it is a fact about the work that the surviving row cannot
-   * re-derive.
+   * Whether CrabCast has ever actually RUN an agent at this path.
    *
-   * "Has this agent ever run?" is answered by scanning the log for an
-   * `activated` event on this path. Compaction throws that history away — it
-   * emits ONE row per agent — so a `configured`-last or `deactivated`-last row
-   * that survives a compaction would answer "never" about an agent with a
-   * conversation on disk. That is not a cosmetic wrong answer: it is what
-   * decides whether the agent is reported as `unstarted` (activating it starts
-   * fresh) or as standby (activating it resumes the conversation it was
-   * stopped in), and getting it backwards makes one of those two promises
-   * false.
+   * TWO SLICES ARRIVED AT THIS FIELD INDEPENDENTLY, for two different jobs, and
+   * both reasons are kept because either one alone would justify it and a
+   * reader who knows only one would under-protect it:
+   *
+   *  - **The resume rule** (resume.ts, KAN-111). A path CrabCast has never run
+   *    in may hold a HUMAN'S Claude Code transcripts, and resuming those into
+   *    an agent pane hands somebody's private session to an agent. IT IS A
+   *    SAFETY FACT, NOT A STATISTIC.
+   *  - **The fleet category** (router.ts, KAN-125). It is what decides whether
+   *    an agent is reported as `unstarted` — activating it starts fresh — or as
+   *    standby, where every row promises that switching it on "resumes the
+   *    conversation it was stopped in". Getting it backwards makes one of those
+   *    two promises false.
+   *
+   * Derived in {@link AgentRegistry.intents} by looking for any `activated`
+   * event, and written onto rows by {@link AgentRegistry.compact} for the same
+   * reason `wasPreempted` is: compaction keeps one row per agent, so the
+   * earlier `activated` rows a `deactivated`-last or `configured`-last agent
+   * was carrying disappear, and with them the fact that it ever ran.
+   *
+   * Losing the marker to compaction would fail in the SAFE direction for the
+   * first job — an agent starting fresh instead of resuming — which is exactly
+   * why it would go unnoticed until somebody wondered where their conversation
+   * went. It fails in the LOUD direction for the second, since the agent would
+   * move between two visible categories. One field, two failure signatures.
    *
    * Absent on a row for an agent that genuinely never ran, and absent on an
    * `activated` row, where the event itself is the evidence.
@@ -274,7 +288,15 @@ export interface AgentIntent {
    * carried across compaction by {@link AgentLogEntry.everActivated}. It is the
    * whole of the difference between an agent that has never run and one that
    * has stopped: activating the first starts a fresh conversation, activating
-   * the second resumes the one it was stopped in.
+   * the second resumes the one it was stopped in — and it is the resume rule's
+   * input. See {@link AgentLogEntry.everActivated} for both jobs.
+   *
+   * REQUIRED RATHER THAN OPTIONAL, which is the one place the two slices that
+   * added this field disagreed. `boolean | undefined` would make every consumer
+   * decide what an absent value means, and the two consumers would decide
+   * differently: the resume rule wants absent to mean "do not resume" while a
+   * fleet category wants it to mean "not yet known". `intents()` always knows
+   * the answer — it has just read the whole log — so it always states it.
    */
   everActivated: boolean;
 }
@@ -741,22 +763,10 @@ export class AgentRegistry {
    */
   public intents(): Map<string, AgentIntent> {
     const intents = new Map<string, AgentIntent>();
-    // "Has this path ever been activated?" — accumulated across the whole log
-    // in the pass this reduction is already making, because `intents` keeps
-    // only the LAST event and the answer is about every event. Kept beside the
-    // map rather than inside it so a `forgotten` can clear both together: an
-    // agent that was forgotten and then configured again at the same path is a
-    // new agent whose conversation the caller may well have deleted, and
-    // carrying the old answer forward would promise it a resume.
-    const everActivated = new Set<string>();
     for (const entry of this.readLog()) {
       if (entry.event === 'forgotten') {
         intents.delete(entry.path);
-        everActivated.delete(entry.path);
         continue;
-      }
-      if (entry.event === 'activated' || entry.everActivated === true) {
-        everActivated.add(entry.path);
       }
       // `v`, `preemption`, `wasPreempted` and `everActivated` are pulled out
       // rather than left in the rest: `record` is what a later activation is
@@ -765,7 +775,19 @@ export class AgentRegistry {
       // record of an agent somebody simply switched back on. `v` is the file's
       // business, not the record's, and `everActivated` is a fact about the
       // path rather than about the configuration frozen onto it.
-      const { v, event, at, preemption, wasPreempted, everActivated: _ever, ...record } = entry;
+      const { v, event, at, preemption, wasPreempted, everActivated, ...record } = entry;
+      // ONE PASS, NO EXTRA READ. An `activated` row is self-evident; anything
+      // later carries the fact forward from the intent it is replacing, and a
+      // row written by compaction carries it explicitly. `forgotten` clears it
+      // with the rest of the agent, which is right: forgetting is the caller
+      // saying this agent no longer exists, and a path re-configured afterwards
+      // starts from no history — deliberately the safe direction, since the
+      // alternative is inheriting a claim on a conversation from an agent
+      // somebody deleted.
+      const ran =
+        event === 'activated' ||
+        everActivated === true ||
+        intents.get(entry.path)?.everActivated === true;
       intents.set(entry.path, {
         event,
         at,
@@ -774,12 +796,24 @@ export class AgentRegistry {
         // older row can be missing them. See AgentIntent.configVersion.
         configVersion: record.configVersion ?? 1,
         configuredAt: record.configuredAt ?? null,
-        everActivated: everActivated.has(entry.path),
+        // Always stated, never conditional: see AgentIntent.everActivated for
+        // why an absent value would mean two different things to its two
+        // consumers.
+        everActivated: ran,
         ...(preemption ? { preemption } : {}),
         ...(wasPreempted ? { wasPreempted: true } : {})
       });
     }
     return intents;
+  }
+
+  /**
+   * Whether CrabCast has ever run an agent at this path — THE RESUME RULE'S
+   * input, and the only question that decides whether a conversation on disk
+   * there may be continued. See resume.ts, and {@link AgentLogEntry.everActivated}.
+   */
+  public ranBefore(agentPath: string): boolean {
+    return this.intents().get(agentPath)?.everActivated === true;
   }
 
   /** The record for one path, or undefined when no agent is configured there. */
@@ -891,7 +925,17 @@ export class AgentRegistry {
     const out: AgentLogEntry[] = [];
     for (const intent of this.intents().values()) {
       if (intent.event !== 'activated') continue;
-      out.push({ v: LOG_VERSION, ...intent.record, event: 'activated', at: intent.at });
+      // `everActivated` is redundant on an `activated` row — the event itself
+      // says it — and is written anyway so every carried row states the fact
+      // the same way. A reader that had to know which events imply it is a
+      // reader that will eventually get one of them wrong.
+      out.push({
+        v: LOG_VERSION,
+        ...intent.record,
+        event: 'activated',
+        at: intent.at,
+        everActivated: true
+      });
     }
     return out;
   }
@@ -925,15 +969,20 @@ export class AgentRegistry {
     const out: AgentLogEntry[] = [];
     for (const intent of this.intents().values()) {
       if (intent.event !== 'configured') continue;
+      // A `configured`-last row is NOT always a never-run agent: reconfiguring
+      // a stopped agent writes one, and that agent has a conversation on disk.
+      // The compacted log is the only history left, so the fact travels with
+      // the row or it is lost — and it is lost in two directions at once. The
+      // resume rule would silently re-arm its protection against an agent whose
+      // conversation genuinely is its own, so it would come back with no memory
+      // and nobody would know why; and the fleet read would move it from
+      // standby into `unstartedAgents`, promising a fresh start for an agent
+      // that is about to resume. See AgentLogEntry.everActivated.
       out.push({
         v: LOG_VERSION,
         ...intent.record,
         event: 'configured',
         at: intent.at,
-        // A `configured`-last row is not always a never-run agent: reconfiguring
-        // a stopped agent writes one, and that agent has a conversation on disk.
-        // The compacted log is the only history left, so the fact travels with
-        // the row or it is lost — see AgentLogEntry.everActivated.
         ...(intent.everActivated ? { everActivated: true } : {})
       });
     }
@@ -998,14 +1047,16 @@ export class AgentRegistry {
         // taken. Dropping a debt is a decision; asserting a falsehood about
         // how work ended is not, and this is the difference.
         ...(intent.preemption || intent.wasPreempted ? { wasPreempted: true } : {}),
-        // The same argument once more, about a different fact. A stand-down
-        // ordinarily implies a prior activation, but not always — a durable
-        // write that failed after an activation leaves a `configured`-last row
-        // over a live pane, and standing THAT down records a deactivation for
-        // an agent whose log never carried an activation. Carrying the derived
-        // answer rather than re-deriving it from the compacted log is what
-        // keeps the standby row's "resumes the conversation it was stopped in"
-        // promise checkable.
+        // The same argument once more, about a different fact. Written from
+        // the intent rather than hardcoded to `true` so there is exactly one
+        // derivation of it, in `intents()` — and "all but guaranteed" is the
+        // right reading rather than "guaranteed", because a stand-down does
+        // NOT strictly imply a prior activation: a durable write that failed
+        // after an activation leaves a `configured`-last row over a live pane,
+        // and standing THAT down records a deactivation for an agent whose log
+        // never carried one. Carrying the derived answer is what keeps the
+        // standby row's "resumes the conversation it was stopped in" promise
+        // checkable in that case too.
         ...(intent.everActivated ? { everActivated: true } : {})
       });
     }

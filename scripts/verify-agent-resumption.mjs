@@ -147,7 +147,7 @@ check('a forgotten agent stops existing entirely — not merely stops being expe
 check('the whole configuration round-trips — it is the only copy there is', () => {
   const reg = new AgentRegistry(registryFile);
   const original = record('kan-3', {
-    launcher: 'claude', mcpServers: ['crabcast'], label: 'a label', prompt: 'finished text'
+    launcher: 'claude', mcpServers: { crabcast: 'builtin' }, label: 'a label', prompt: 'finished text'
   });
   reg.recordActivated(original);
   const restored = reg.expected().find((r) => r.path === dirFor('kan-3'));
@@ -388,21 +388,53 @@ check("a preempted agent is told it was a decision, not a crash", () => {
 // ---------------------------------------------------------------------------
 section('4. The launcher carries the resume framing into the pane');
 
-check('the claude launcher still tries --continue first', () => {
-  const command = AGENT_LAUNCHERS.claude.command();
+check('the claude launcher tries --continue first WHEN RESUMING IS PERMITTED', () => {
+  const command = AGENT_LAUNCHERS.claude.command({ mayResume: true });
   assert.ok(command.startsWith('claude --permission-mode bypassPermissions --continue ||'), command);
+});
+
+check('and drops --continue entirely when it is NOT — the resume rule (KAN-111)', () => {
+  // THE HAZARD THIS IS ABOUT. Claude Code keys transcripts on the working
+  // directory, and under path identity that directory is the caller's. Anyone
+  // who has ever run `claude` in their own repository has a conversation of
+  // THEIRS sitting at exactly the key an agent activated there would resume
+  // from. Suppressing only the predictor would have changed which prompt the
+  // fallback got and nothing else — the `--continue` in front of it still runs
+  // and still restores the transcript — so the rule has to reach the command
+  // line, which is here.
+  const command = AGENT_LAUNCHERS.claude.command({ mayResume: false });
+  assert.ok(!command.includes('--continue'), `--continue survived the rule: ${command}`);
+  assert.ok(!command.includes('||'), `the resume branch survived the rule: ${command}`);
+  assert.strictEqual(command, 'claude --permission-mode bypassPermissions');
+});
+
+check('anti-gravity obeys the same rule — it is about the path, not the runtime', () => {
+  // agy keeps its own per-directory session, so `agy --continue` at a
+  // caller-owned path has the same problem for the same reason. The rule binds
+  // every launcher that can continue anything.
+  assert.ok(AGENT_LAUNCHERS['anti-gravity'].command({ mayResume: true }).includes('--continue'));
+  assert.ok(!AGENT_LAUNCHERS['anti-gravity'].command({ mayResume: false }).includes('--continue'));
 });
 
 check('a degraded prompt reaches the fallback, correctly quoted', () => {
   const prompt = degradedResumePrompt('/home/someone/work', 'reboot');
-  const command = AGENT_LAUNCHERS.claude.command(prompt);
+  const command = AGENT_LAUNCHERS.claude.command({ promptCommand: prompt, mayResume: true });
   assert.ok(command.includes("'"), 'the prompt must be single-quoted for bash');
   const quoted = command.slice(command.indexOf('||') + 2);
   assert.ok(quoted.includes('NO memory'), 'the degraded framing did not reach the fallback');
 });
 
+check('and reaches the command directly when resuming is not permitted', () => {
+  const prompt = degradedResumePrompt('/home/someone/work', 'reboot');
+  const command = AGENT_LAUNCHERS.claude.command({ promptCommand: prompt, mayResume: false });
+  assert.ok(command.includes('NO memory'), `the framing was lost with the resume branch: ${command}`);
+});
+
 check('a prompt containing a single quote cannot break out of the quoting', () => {
-  const command = AGENT_LAUNCHERS.claude.command(`don't; rm -rf /`);
+  const command = AGENT_LAUNCHERS.claude.command({
+    promptCommand: `don't; rm -rf /`,
+    mayResume: true
+  });
   // Everything after the fallback's flags must be one quoted word; the escape
   // sequence for an embedded quote is close-escape-reopen.
   assert.ok(command.includes(`'don'\\''t; rm -rf /'`), command);
@@ -417,7 +449,7 @@ check('an agent configured with no prompt gets no invented instruction', () => {
   // `command(undefined)` is a real case now, not a default: `prompt` is
   // optional on `configure`, and substituting a generic instruction would be
   // this daemon inventing one nobody wrote.
-  const command = AGENT_LAUNCHERS.claude.command();
+  const command = AGENT_LAUNCHERS.claude.command({ mayResume: true });
   assert.ok(command.endsWith('bypassPermissions'), command);
   assert.ok(!command.includes("'"), `something was quoted into an empty prompt: ${command}`);
 });
@@ -427,10 +459,17 @@ check('a shell agent given a prompt still receives it', () => {
   // instruct — but a configured prompt must not simply vanish. It used to be
   // written into the agent's own cwd, where a human would trip over it; it now
   // lives in a sidecar nobody browsing that shell would find.
-  const withPrompt = AGENT_LAUNCHERS.shell.command('read /sidecar/prompt.md');
+  const withPrompt = AGENT_LAUNCHERS.shell.command({
+    promptCommand: 'read /sidecar/prompt.md',
+    mayResume: false
+  });
   assert.ok(withPrompt.includes('/sidecar/prompt.md'), withPrompt);
   assert.ok(withPrompt.includes('exec bash'), `the shell itself must still be the pane: ${withPrompt}`);
-  assert.strictEqual(AGENT_LAUNCHERS.shell.command(), 'bash');
+  assert.strictEqual(AGENT_LAUNCHERS.shell.command({ mayResume: false }), 'bash');
+  // A bare shell has no conversation either way, so the rule changes nothing
+  // for it — asserted rather than assumed, since "mayResume is ignored here"
+  // is exactly the kind of claim that rots.
+  assert.strictEqual(AGENT_LAUNCHERS.shell.command({ mayResume: true }), 'bash');
 });
 
 check('the launcher table declares who restores conversations, not the nudge', () => {
