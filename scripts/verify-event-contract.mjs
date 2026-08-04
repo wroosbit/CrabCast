@@ -1105,10 +1105,16 @@ verdict(
     // this run was seeded silently, so the only transitions reported are ones
     // this daemon actually watched happen.
     statusEvents.every((e) => typeof e.from === 'string' && e.from !== e.to),
+  // THE FULL PHRASING, NOT THE SHORTHAND. This used to end "inside the
+  // 30-second documented bound", which at a 31-second sweep printed "30.9s,
+  // inside the 30-second documented bound" — self-contradicting on its face to
+  // anyone reading the output, and honest only to someone who went and read
+  // §2. The success line is what a human sees when the check PASSES; the
+  // document is what they read only if something sends them looking.
   `the transition working → blocked was detected and published within ` +
   `${(detectionMs / 1000).toFixed(1)}s, inside the\n` +
-  '    30-second documented bound, on both paths, and no first sighting was reported as a\n' +
-  '    transition',
+  '    documented bound of 30s (the fleet sweep) plus one census read — asserted at\n' +
+  '    32.0s — on both paths, and no first sighting was reported as a transition',
   `status_changed not proven: event=${JSON.stringify(statusEvent)} ` +
   `detection=${detectionMs}ms (bound 32000ms), end-to-end=${statusLatencyMs}ms`
 );

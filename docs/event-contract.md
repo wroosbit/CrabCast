@@ -409,11 +409,14 @@ fleet. It also asserts `seq` is **contiguous** rather than merely increasing,
 which is what makes "your `seq` jumped, so you missed events" mean anything.
 
 Read that 32s figure against §2's bound, which is **30s plus one census read**
-and not a flat 30s. The script's own success line says "inside the 30-second
-documented bound", which is shorthand: at a 31-second sweep it prints 30.9s
-beside those words, and 30.9 honours the real bound while reading like a
-contradiction against the shorthand. The number it asserts is right; the
-sentence it prints is loose.
+and not a flat 30s. The script's success line says so in full — "inside the
+documented bound of 30s (the fleet sweep) plus one census read — asserted at
+32.0s" — rather than the shorthand "the 30-second documented bound" it used to
+print. That shorthand was honest only to a reader who came here: at a
+31-second sweep it printed 30.9s beside the words "30-second bound", which
+honours the real bound while contradicting itself on its face. A success
+message is what somebody reads when nothing sent them looking, so it carries
+the whole sentence.
 
 One limit of that script, stated here rather than left to be discovered: its
 guard against this document re-acquiring a unilateral convergence guarantee is
