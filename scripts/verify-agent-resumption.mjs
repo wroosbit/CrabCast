@@ -542,9 +542,45 @@ if (a === 'agent' && b === 'list') {
     name: s.name, pane_id: 'p-' + s.name.slice(-6), agent: 'claude', cwd: s.cwd, agent_status: 'working'
   })) } });
 }
+// THE PANE IS STATEFUL NOW, and that is what makes 'nudged' mean anything.
+// It used to answer a fixed string, so \`sendToAgent\` could report success
+// having typed into a pane that never changed — the check below asserted
+// \`nudged: true\` and would have gone on asserting it if the Enter were
+// dropped, because 'nudged' meant 'keystrokes dispatched'. It now means
+// 'confirmed on the pane' (KAN-114), so the pane has to be able to show the
+// difference: text typed sits after the caret, and only Enter moves it above.
+const paneFile = path.join(state, 'pane.json');
+const readPane = () => fs.existsSync(paneFile)
+  ? JSON.parse(fs.readFileSync(paneFile, 'utf8'))
+  : { transcript: 'bypass permissions on', composer: '' };
+const writePane = (p) => fs.writeFileSync(paneFile, JSON.stringify(p));
+/** What herdr would show: the transcript, then the composer after the caret. */
+const renderPane = (p) => \`\${p.transcript}\\n❯ \${p.composer}\`;
+
 if (a === 'agent' && b === 'read') {
-  // A pane already at its prompt: the readiness marker the nudge waits for.
-  out({ result: { read: { text: 'bypass permissions on\\n❯ ', truncated: false } } });
+  out({ result: { read: { text: renderPane(readPane()), truncated: false } } });
+}
+if (a === 'pane' && b === 'send-text') {
+  const p = readPane();
+  p.composer = args[3] ?? '';
+  writePane(p);
+  out({ result: {} });
+}
+if (a === 'pane' && b === 'send-keys') {
+  const p = readPane();
+  if (args[3] === 'Enter') {
+    // Submitting moves the composer into the transcript, which is the ONLY
+    // way text gets above the caret — exactly the distinction the delivery
+    // check reads. A shim that dropped this line reproduces the witnessed
+    // lost-Enter failure; section 5's own mutation does not need it, but
+    // verify-send-confirms-delivery is built on it.
+    if (p.composer) p.transcript += \`\\n❯ \${p.composer}\`;
+    p.composer = '';
+  } else if (args[3] === 'C-c') {
+    p.composer = '';
+  }
+  writePane(p);
+  out({ result: {} });
 }
 if (a === 'agent' && b === 'attach') {
   setInterval(() => {}, 60000); // hold the terminal open, as a real attach would

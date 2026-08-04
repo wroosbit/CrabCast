@@ -113,6 +113,18 @@ const EXCLUSIONS = [
     evidence: 'scripts/verify-tab-per-agent.mjs:1 live check against a real herdr, at the HerdrBridge level'
   },
   {
+    script: 'verify-send-confirms-delivery-live',
+    reason:
+      'Needs a real herdr AND a real Claude Code agent, because the fact it exists to establish ' +
+      'is what a REAL composer looks like. COMPOSER_MARKERS is the load-bearing assumption of ' +
+      'the whole delivery mechanism — everything else in delivery.ts is arithmetic over where ' +
+      'that marker is — and its CI sibling cannot test it, because a shimmed pane renders the ' +
+      'marker it is then checked against. It also measures Claude Code\'s real hard-wrapping of ' +
+      'the echo, which is why flattening exists and which no stub reproduces. It starts one ' +
+      'Claude agent and closes it; its output goes on the PR (KAN-114).',
+    evidence: 'scripts/verify-send-confirms-delivery-live.mjs:12 the marker cannot be tested by a pane this suite draws'
+  },
+  {
     script: 'verify-fleet-switch-live',
     reason:
       'Uses `herdr agent list` as the ground truth for whether an agent is running, across daemon ' +

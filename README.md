@@ -150,7 +150,19 @@ $ crabcast status /tmp/ac1-demo/notes
   created:       2026-08-04T07:53:07.483Z
 
 $ crabcast send /tmp/ac1-demo/notes cat /tmp/ac1-demo/.crabcast/agents/31e31d1b7540dabf/prompt.md
-sent to /tmp/ac1-demo/notes — the message was typed into its terminal and Enter pressed
+delivered to /tmp/ac1-demo/notes — the message was seen in its transcript as submitted output
+  read from:     2 pane read(s) over 127ms; submitted copies 0 → 1
+  keystrokes:    1 interrupt (Ctrl+C), 1 submit (Enter)
+  pane the verdict was read from:
+    Please read and follow the instructions in /tmp/ac1-demo/.crabcast/agents/31e31d1b7540dabf/prompt.md to begin.
+    brooswit@kchb-ThinkPad-X1-Carbon-5th:/tmp/ac1-demo/notes$ ^C
+    brooswit@kchb-ThinkPad-X1-Carbon-5th:/tmp/ac1-demo/notes$ cat /tmp/ac1-demo/.crabcast/agents/31e31d1b7540dabf/prompt.md
+    You are a CrabCast agent working in the notes directory.
+
+    This prompt was rendered by the CALLER and handed to CrabCast as finished
+    text. CrabCast wrote these bytes verbatim and never looked at them — a literal
+    {{KEY}} would have survived unchanged.
+    brooswit@kchb-ThinkPad-X1-Carbon-5th:/tmp/ac1-demo/notes$
 
 $ crabcast tail /tmp/ac1-demo/notes --lines 20
 pane text for /tmp/ac1-demo/notes:

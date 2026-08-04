@@ -129,13 +129,47 @@ if (a === 'agent' && b === 'start') {
 if (a === 'agent' && b === 'list') {
   out({ result: { agents: load().map((s) => ({ name: s.name, agent: 'shell', cwd: s.cwd, agent_status: 'working' })) } });
 }
+// THE PANE IS STATEFUL, because send_to_agent's answer is now read off it.
+// This shim used to return a fixed string, so a send could report success into
+// a pane that never changed — the send_to_agent section below asserted
+// \`success: true\` and would have kept asserting it with the Enter dropped,
+// which is the KAN-114 defect the check was supposed to be evidence against.
+// Typed text sits after the caret; only Enter moves it above.
+const paneFileFor = (name) => path.join(state, \`pane-\${Buffer.from(name).toString('hex')}.json\`);
+const readPane = (name) => fs.existsSync(paneFileFor(name))
+  ? JSON.parse(fs.readFileSync(paneFileFor(name), 'utf8'))
+  : { transcript: \`$ echo KAN-73 pane text for \${name}\\nKAN-73 pane text for \${name}\`, composer: '' };
+const writePane = (name, p) => fs.writeFileSync(paneFileFor(name), JSON.stringify(p));
+const renderPane = (p) => \`\${p.transcript}\\n❯ \${p.composer}\`;
+/** The pane a pane_id belongs to, since keystrokes address ids and reads address names. */
+const nameOfPane = (paneId) => load().find((s) => s.pane_id === paneId)?.name;
+
 if (a === 'agent' && b === 'read') {
   const found = load().find((s) => s.name === args[2]);
   if (!found) {
     process.stderr.write(JSON.stringify({ error: { code: 'not_found', message: \`no agent '\${args[2]}'\` } }));
     process.exit(1);
   }
-  out({ result: { read: { text: \`$ echo KAN-73 pane text for \${args[2]}\\nKAN-73 pane text for \${args[2]}\\n$\`, truncated: false } } });
+  out({ result: { read: { text: renderPane(readPane(args[2])), truncated: false } } });
+}
+if (a === 'pane' && b === 'send-text') {
+  const name = nameOfPane(args[2]);
+  if (name) { const p = readPane(name); p.composer = args[3] ?? ''; writePane(name, p); }
+  out({ result: {} });
+}
+if (a === 'pane' && b === 'send-keys') {
+  const name = nameOfPane(args[2]);
+  if (name) {
+    const p = readPane(name);
+    if (args[3] === 'Enter') {
+      if (p.composer) p.transcript += \`\\n❯ \${p.composer}\`;
+      p.composer = '';
+    } else if (args[3] === 'C-c') {
+      p.composer = '';
+    }
+    writePane(name, p);
+  }
+  out({ result: {} });
 }
 if (a === 'agent' && b === 'attach') {
   setInterval(() => {}, 60000); // hold the terminal open, as a real attach would
@@ -469,10 +503,17 @@ const sent = await clientA.callTool('crabcast_send_to_agent', {
 });
 const sentRes = parsedText(sent);
 show('crabcast_send_to_agent:', sentRes);
+// `success` alone is no longer the claim worth checking: it used to be true
+// whenever three keystrokes were dispatched. The verdict is read off the pane
+// now (KAN-114), so this asserts the word AND the evidence behind it — a
+// before/after count that went up is what separates a delivery from a send
+// that merely happened not to throw.
 verdict(
-  sent.isError !== true && sentRes?.success === true,
-  'send_to_agent delivered to the agent\'s terminal',
-  'send_to_agent did not report delivery'
+  sent.isError !== true && sentRes?.success === true &&
+    sentRes?.verdict === 'delivered' && sentRes?.delivered === true &&
+    sentRes?.evidence?.landedAfter > sentRes?.evidence?.landedBefore,
+  'send_to_agent CONFIRMED delivery by reading the agent\'s pane back',
+  'send_to_agent did not report a confirmed delivery'
 );
 
 const tailed = await clientA.callTool('crabcast_tail_agent', { path: AGENT_PATH });

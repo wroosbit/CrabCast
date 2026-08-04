@@ -12,6 +12,7 @@
 
 export * from './types.js';
 export * from './config.js';
+export * from './delivery.js';
 export * from './identity.js';
 export * from './env.js';
 export * from './ipc.js';

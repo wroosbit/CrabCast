@@ -2609,14 +2609,41 @@ export class MessageRouter {
   // ------------------------------------------------------------------ reads
 
   /**
-   * Type a message into a running agent's terminal. The delivery is
-   * asynchronous (there is a settle delay between the interrupt and the
-   * text), so every outcome — including a rejection we never expect — has to
-   * be turned back into a response; the caller is blocked on one.
+   * Type a message into a running agent's terminal AND REPORT WHETHER IT
+   * LANDED. The delivery is asynchronous — an interrupt, a settle delay, the
+   * text, a submit, and then a confirmation that watches the pane — so every
+   * outcome, including a rejection we never expect, has to be turned back into
+   * a response; the caller is blocked on one.
+   *
+   * THREE VERDICTS REACH THE CALLER, NOT TWO. `verdict` and `delivered` are on
+   * EVERY response, both outcomes, so "did this land" is read rather than
+   * inferred from a missing field — and `unverifiable` is a distinct answer
+   * from `not-delivered` for the same reason `activate` refuses as
+   * unverifiable rather than as occupied: a caller that cannot tell "it did not
+   * arrive" from "I could not see" will eventually treat one as the other, and
+   * the two license opposite actions. Resending on `not-delivered` is right;
+   * resending on `unverifiable` types a duplicate at an agent that may already
+   * be working on the first copy.
+   *
+   * `success` stays aligned with `delivered`, so the MCP `isError` mapping and
+   * every existing `success`-only caller become strictly more honest without
+   * being taught anything: a send that was merely typed no longer answers true.
+   *
+   * The bridge's evidence — the pane state the verdict was read from, the
+   * before/after counts, whether the text was seen sitting in the composer, and
+   * the Ctrl+C count — travels with it rather than being summarised away. A
+   * verdict a caller cannot audit is a verdict they have to trust, which is
+   * what the old `success: true` asked of them.
    */
   private handleSendToAgent(data: any, respond: Respond) {
     const fail = (error: string) =>
-      respond({ action: 'send_to_agent_response', success: false, error });
+      respond({
+        action: 'send_to_agent_response',
+        success: false,
+        delivered: false,
+        verdict: 'not-delivered',
+        error
+      });
 
     const address = this.addressOfRequest(data.path, true);
     if ('error' in address) {
@@ -2631,7 +2658,18 @@ export class MessageRouter {
 
     this.deps.herdrBridge.sendToAgent(address.path, message).then(
       (result) => respond({ action: 'send_to_agent_response', path: address.path, ...result }),
-      (err) => fail(err?.message ?? String(err))
+      // A rejection here is a bug in the bridge rather than a fact about the
+      // agent, and the honest reading of "our own confirmation threw" is that
+      // nothing was established either way.
+      (err) =>
+        respond({
+          action: 'send_to_agent_response',
+          path: address.path,
+          success: false,
+          delivered: false,
+          verdict: 'unverifiable',
+          error: `The send could not be completed or confirmed: ${err?.message ?? String(err)}`
+        })
     );
   }
 

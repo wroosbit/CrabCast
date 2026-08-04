@@ -1124,11 +1124,56 @@ function renderTail(reader: ResponseReader, request: Record<string, unknown>): s
   );
 }
 
+/**
+ * The outcome of a send, WHICH IS NOT THE SAME SENTENCE AS BEFORE.
+ *
+ * This used to print "the message was typed into its terminal and Enter
+ * pressed" on `success: true` — an accurate description of what the daemon did
+ * and a description of nothing at all about the agent. The daemon now answers
+ * with a verdict read off the pane, so this prints the verdict.
+ *
+ * `unverifiable` gets its own branch rather than being folded into the failure
+ * line, because a human reading "FAILED" reaches for the resend and that is the
+ * wrong move: the message may already be in front of the agent.
+ */
 function renderSend(reader: ResponseReader, request: Record<string, unknown>): string {
   const key = addressed(reader, request);
-  if (!reader.success) return lines(failure(reader, `send to ${key}`), residue(reader));
+  const verdict = reader.take<string>('verdict');
+  const delivered = reader.take<boolean>('delivered');
+  const evidence = reader.take<Record<string, any>>('evidence');
+  const interrupts = reader.take<number>('interrupts');
+  const submits = reader.take<number>('submits');
+  const retried = reader.take<boolean>('retried');
+
+  // Read off the same fields the verdict lines quote, so a delivery field the
+  // daemon grew and this CLI has not been taught still lands in the residue.
+  const detail = lines(
+    field('read from', evidence
+      ? `${evidence.checks} pane read(s) over ${evidence.waitedMs}ms` +
+        (evidence.landedBefore === null ? '' : `; submitted copies ${evidence.landedBefore} → ${evidence.landedAfter}`)
+      : null),
+    field('keystrokes', typeof interrupts === 'number'
+      ? `${interrupts} interrupt (Ctrl+C), ${submits} submit (Enter)${retried ? ' — the second was the confirm-and-retry' : ''}`
+      : null),
+    evidence?.tail
+      ? lines(`${INDENT}pane the verdict was read from:`, indent(String(evidence.tail), INDENT + INDENT))
+      : null
+  );
+
+  if (verdict === 'unverifiable') {
+    return lines(
+      `UNVERIFIABLE: send to ${key} — the message was typed, and whether it landed is UNKNOWN.`,
+      reader.take<string>('error') ?? '',
+      detail,
+      residue(reader)
+    );
+  }
+  if (!reader.success || delivered === false) {
+    return lines(failure(reader, `send to ${key} — NOT DELIVERED`), detail, residue(reader));
+  }
   return lines(
-    `sent to ${key} — the message was typed into its terminal and Enter pressed`,
+    `delivered to ${key} — the message was seen in its transcript as submitted output`,
+    detail,
     residue(reader)
   );
 }

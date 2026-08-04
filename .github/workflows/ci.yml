@@ -156,6 +156,33 @@ jobs:
       #                                      a pane and `pane close` really
       #                                      removes one, so the pane count is a
       #                                      measurement rather than a fixture.
+      # And one for the send path, whose regression is silent in the worst way
+      # available — it does not fail, it CLAIMS:
+      #
+      #   verify-send-confirms-delivery      `send_to_agent` reports whether a
+      #                                      message LANDED rather than whether
+      #                                      it was typed. Its shim's pane is
+      #                                      stateful and can LOSE AN ENTER, so
+      #                                      the witnessed failure — text left
+      #                                      sitting unsubmitted in a composer,
+      #                                      reported to its sender as success —
+      #                                      is produced rather than described.
+      #                                      Three verdicts, distinctly, and the
+      #                                      keystroke log is the evidence that
+      #                                      the retry never issues a second
+      #                                      Ctrl+C. Its last section mutates
+      #                                      the compiled daemon three ways and
+      #                                      asserts each check goes red, and
+      #                                      each mutation re-measures its own
+      #                                      precondition against the unmutated
+      #                                      build first (KAN-114).
+      #                                      WHAT IT CANNOT SEE: whether a real
+      #                                      Claude Code composer is marked the
+      #                                      way COMPOSER_MARKERS says — a shim
+      #                                      draws the marker it is checked
+      #                                      against. Its live sibling covers
+      #                                      that and says so in both headers.
+      #
       #   verify-state-read-echoes-config    every fleet category echoes the
       #                                      agent's frozen configuration, and
       #                                      `unstartedAgents` is distinct from
@@ -245,6 +272,7 @@ jobs:
             verify-callers-directory
             verify-daemon-provenance
             verify-state-read-echoes-config
+            verify-send-confirms-delivery
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,
