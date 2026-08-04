@@ -210,6 +210,80 @@ NOTHING WAS STARTED. Two agents in one directory is how work gets overwritten an
 
 **There is a third answer, and it is the one that would otherwise fail silently.** If herdr does not answer at all, the census comes back empty — which looks identical to "the directory is free". `activate` refuses that too, as *unverifiable*, and starts nothing: a check that renders its own failure as an all-clear would spawn into an occupied directory precisely when it cannot see it.
 
+### Calling a verb again is safe, and that is a contract
+
+A supervisor reconciles by diffing desired state against actual and calling the verbs to close the gap, which means calling them on things that are **already in the desired state**, constantly. So `activate` and `deactivate` are specified for that case rather than merely surviving it.
+
+```
+$ crabcast activate /tmp/kan127/probe-a --override      # call #1
+activated /tmp/kan127/probe-a
+  session:       crabcast-probe-a-67445f2bd34e946a-1785828149851 (active)
+  pane:          crabcast-probe-a-67445f2bd34e946a (w65702dcc803d94-14)
+  verified:      true
+
+$ crabcast activate /tmp/kan127/probe-a                 # call #2, no --override
+/tmp/kan127/probe-a is already running — nothing was started
+  pane:          crabcast-probe-a-67445f2bd34e946a (w65702dcc803d94-14)
+  verified:      true
+
+$ crabcast activate /tmp/kan127/probe-a                 # call #3, no --override
+/tmp/kan127/probe-a is already running — nothing was started
+  pane:          crabcast-probe-a-67445f2bd34e946a (w65702dcc803d94-14)
+  verified:      true
+
+$ crabcast activate /tmp/kan127/probe-a --json
+{
+  "action": "activate_response",
+  "success": true,
+  "path": "/tmp/kan127/probe-a",
+  "paneName": "crabcast-probe-a-67445f2bd34e946a",
+  "alreadyRunning": true,
+  "started": false,
+  "paneId": "w65702dcc803d94-14",
+  "verified": true
+}
+
+$ herdr agent list | grep -c '"cwd": "/tmp/kan127/probe-a"'
+1
+```
+
+**One pane, counted in herdr rather than assumed.** And the first call needed `--override` while the second and third did not: that machine was at capacity throughout, so a repeat activation that consulted the gate would have been refused. It does not consult it, because **an agent already running is already counted** — charging it a second slot would make a supervisor's idle poll look like a fleet twice the size.
+
+**`alreadyRunning` and `started` are on every successful activation**, `true` or `false`. A field that appears only when true asks the caller to read meaning into an absence.
+
+`deactivate` is the mirror, and it never answers a bare success:
+
+```
+$ crabcast deactivate /tmp/kan127/probe-a      # it was running
+deactivated /tmp/kan127/probe-a — now standby
+
+$ crabcast deactivate /tmp/kan127/probe-a      # and again
+/tmp/kan127/probe-a was not running — standby
+  No agent was running and its stand-down was already recorded. Nothing changed.
+  alreadyGone:   true
+[exit 0]
+
+$ crabcast deactivate /tmp/kan127/probe-b      # configured, never activated
+/tmp/kan127/probe-b was not running — unstarted
+  This agent is configured but has never been activated. Nothing was running and nothing was
+  recorded — a stand-down row would put it on the standby list, which promises that switching
+  it back on resumes the conversation it was stopped in.
+[exit 0]
+```
+
+Both are "not running", and they are **not the same answer**. `standby` has a conversation waiting; `unstarted` has none, so recording a stand-down for it would promise a caller something to come back to that does not exist. A supervisor polling "is it down" and a human who mistyped a path get different answers, which is the whole reason the distinction is in the response rather than in the prose.
+
+The second stand-down also writes **no second row** and broadcasts **no second event**: a repeated row would say a decision was taken twice.
+
+**Two things are deliberately *not* idempotent,** and both are the same rule seen twice — a verb may not report success about a world that does not exist:
+
+* A **live foreign pane** in the directory refuses every time, `--override` included. That is somebody else's agent, not this one already running; overriding is a decision about the machine's capacity, never about another agent's directory. Turning that refusal into a quiet "already running" is how two agents end up sharing a directory.
+* `deactivate` on a path that was **never configured** refuses, where `forget` on the same path succeeds. `forget`'s postcondition is the absence of a record, and that already holds; `deactivate`'s is a claim about an agent, and there is no agent to make a claim about.
+
+One case where calling again does more than nothing: if a registry write failed after an activation, the record says the agent was never started while its pane is live — and the activate response said `durable: false` at the time. Calling `activate` again **converges the record** and says `recordReconciled: true`. A verb whose contract is "safe to call again" needs a second call that can actually repair, or "safe" only means "harmless".
+
+`node scripts/verify-idempotent-lifecycle.mjs` is the proof, and it counts panes rather than counting errors that did not happen.
+
 ### When the machine is full, `activate` refuses
 
 A capacity refusal is a normal outcome, not a malfunction, and it is the same command with a different answer. This is a real one, forced with `CRABCAST_MAX_AGENTS=0` so the transcript is reproducible on any machine:
