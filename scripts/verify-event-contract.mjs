@@ -490,21 +490,95 @@ console.log(`\n   names the doc mentions: ${docNames.join(', ')}`);
 console.log(`   published but undocumented: ${undocumented.length ? undocumented.join(', ') : '(none)'}`);
 console.log(`   documented but unpublished: ${unpublished.length ? unpublished.join(', ') : '(none)'}`);
 
+/**
+ * THE UNILATERAL-GUARANTEE TRIPWIRE, and the story of why it is shaped like
+ * this is the reason to keep it.
+ *
+ * This check used to be `!/we guarantee convergence/i` — a literal search for
+ * five words nobody would ever write — and the PR that shipped it claimed the
+ * contract "cannot be edited back into a unilateral promise without a red
+ * check". Review disproved that in one move: adding a paragraph asserting the
+ * property in different words left the obligation sentence untouched and the
+ * whole suite green. The check defended against the sentence being REMOVED and
+ * did nothing about it being CONTRADICTED.
+ *
+ * The property is joint: a missed event costs slow convergence only to a
+ * subscriber that polls, and costs correctness to one that does not. Any
+ * sentence claiming CrabCast provides convergence on its own is false however
+ * it is phrased, so the check rejects the SHAPE.
+ *
+ * WHAT IT STILL WILL NOT CATCH, said plainly rather than claimed away: this is
+ * a tripwire over known phrasings, not a proof of absence. A sufficiently
+ * novel sentence asserting the same falsehood passes it. It exists to make the
+ * easy version of the mistake loud, and the only real defence is the one that
+ * caught it here — a reviewer trying to write the sentence.
+ */
+const REFUTED_REGION = /<!--\s*refuted-claim:start[\s\S]*?refuted-claim:end\s*-->/g;
+const refutedRegions = docText.match(REFUTED_REGION) ?? [];
+// The quoted-and-rejected claim is excluded from the scan — it contains the
+// forbidden shapes ON PURPOSE, which is the whole point of quoting it. Capped
+// so it cannot grow into a place to hide a live claim, and the cap is checked
+// rather than trusted.
+const refutedLength = refutedRegions.join('').length;
+const scanned = docText.replace(REFUTED_REGION, '');
+
+const UNILATERAL_CLAIMS = [
+  /never to divergence/i,
+  /always reconverges?/i,
+  /costs only time/i,
+  /no dropped (event|notification) can leave/i,
+  /independent of (your|the consumer|how)/i,
+  /(holds|true|provable) on (the|our) (daemon'?s?|crabcast'?s?) side/i,
+  /provable on our side/i,
+  /does not depend on (your|the consumer)/i,
+  /we guarantee convergence/i
+];
+const unilateral = UNILATERAL_CLAIMS.filter((re) => re.test(scanned)).map(String);
+
+console.log(`\n   refuted-claim region: ${refutedRegions.length} block(s), ${refutedLength} chars ` +
+  `(excluded from the scan; it quotes the false claim on purpose)`);
+console.log(`   unilateral-guarantee phrasings found outside it: ` +
+  `${unilateral.length ? unilateral.join(', ') : '(none)'}`);
+
+/**
+ * §4 must state which of the two payload rules each path follows.
+ *
+ * The paths are asymmetric — the MCP forwarder projects to the declared
+ * fields, `broadcast` filters nothing — so an undeclared field reaches a
+ * socket subscriber and never reaches an MCP one. A contract that does not say
+ * which is which leaves a consumer to assume whichever suits them, and the
+ * drift check is only a test-time guard, so nothing at runtime would correct
+ * the assumption.
+ */
+const fieldClause =
+  /\*\*AT LEAST\*\* the fields §1 declares/.test(docText) &&
+  /\*\*EXACTLY\*\* the fields §1 declares/.test(docText) &&
+  /a socket subscriber receiving a field §1 does not declare\s*\n?must ignore it and must not error\*\*/.test(docText);
+console.log(`   §4 states the socket/MCP payload asymmetry and the unknown-FIELD clause: ${fieldClause}`);
+
 verdict(
   EVENT_NAMES.length === 9 &&
     undocumented.length === 0 && unpublished.length === 0 &&
-    // The consumer obligation, and it is an acceptance criterion rather than
-    // prose polish: the contract must NOT be reducible to "we guarantee
-    // convergence", because that property is joint and depends on the
-    // subscriber having a timer.
+    // The positive half: the obligation must be STATED. This one was always
+    // real — it fails if the sentence is deleted.
     /does not independently poll `list` on a timer \*\*is not\s*\n?>?\s*entitled to the convergence property\*\*/.test(docText) &&
     /at-most-once/.test(docText) &&
-    !/we guarantee convergence/i.test(docText),
+    // The negative half, rebuilt: the property must not be asserted anywhere
+    // else in the document, in any of the shapes we know it takes.
+    unilateral.length === 0 &&
+    refutedRegions.length === 1 &&
+    refutedLength < 900 &&
+    // §4's asymmetry, which a consumer with no fallback would otherwise have
+    // to guess: socket payloads are a MINIMUM, MCP payloads are EXHAUSTIVE,
+    // and unknown FIELDS carry the same must-ignore clause as unknown actions.
+    fieldClause,
   'nine published events, every one of them documented and no documented name that is\n' +
-  '    not published — and the delivery section states the CONSUMER OBLIGATION rather\n' +
-  '    than a convergence guarantee CrabCast cannot make alone',
+  '    not published; the delivery section STATES the consumer obligation and asserts the\n' +
+  '    convergence property NOWHERE — checked as a shape, not as one literal string',
   `contract and document disagree: ${EVENT_NAMES.length} names, ` +
-  `undocumented=[${undocumented}], unpublished=[${unpublished}]`
+  `undocumented=[${undocumented}], unpublished=[${unpublished}], ` +
+  `unilateral claims outside the refuted region=[${unilateral.join(' ')}], ` +
+  `refuted regions=${refutedRegions.length} (${refutedLength} chars)`
 );
 
 // ======================================================== 2. all nine, live --
@@ -609,23 +683,50 @@ console.log(`   configure against a sealed registry → durable=${degradedRes.du
 // daemon's first sighting IS `blocked`, so there is nothing to report and this
 // section would fail for the right reason at the wrong time. So: let one full
 // sweep observe the fleet as it is, THEN change it.
-const bootMs = new Date(mainStatus.startedAt).getTime();
-const seedDeadline = bootMs + 33_000;
-console.log(`\n   waiting ${Math.max(0, Math.round((seedDeadline - Date.now()) / 1000))}s for the ` +
-  `first fleet sweep to observe the fleet as it is (a first sighting is not a transition)…`);
-while (Date.now() < seedDeadline) await sleep(500);
+//
+// WAITED FOR, NOT TIMED. This used to be `bootStartedAt + 33_000` — the sweep
+// interval plus slack, hardcoded — which coupled the script to a constant in
+// the daemon it is supposed to be measuring. Under a daemon whose sweep was
+// slower, the flip landed BEFORE the first sweep, the first sighting was
+// already `blocked`, and no transition was ever reported: the section failed,
+// but for the harness's reason rather than the daemon's. So the seed is now
+// OBSERVED. A throwaway agent is activated and its pane vanished immediately;
+// the `agent.lost` that follows can only come from a completed sweep, and that
+// same sweep is the one that seeded every other agent's status.
+const SEED_PROBE = owned('seed-probe');
+await call('crabcast_configure_agent', { path: SEED_PROBE, priority: 1, launcher: LAUNCHER });
+await call('crabcast_activate_agent', { path: SEED_PROBE, override: true });
+vanish(paneNameFor(SEED_PROBE));
+console.log(`\n   waiting for the first fleet sweep to complete — signalled by agent.lost for the`);
+console.log(`   throwaway probe, whose pane was vanished. That same sweep seeds every live`);
+console.log(`   agent's status, and a first sighting is not a transition.`);
+const seeded = await waitFor(
+  () => sub.events.some((e) => e.action === 'agent.lost' && e.path === SEED_PROBE),
+  90_000, 'the seeding sweep (agent.lost for the probe)');
+console.log(`   seeding sweep observed: ${seeded}`);
 
 setStatus(paneNameFor(OVERRIDDEN), 'blocked');
 vanish(LOST_PANE); // the pane disappears without the daemon being told
 const transitionAt = Date.now();
 console.log(`   flipped ${paneNameFor(OVERRIDDEN)} to 'blocked' and vanished ${LOST_PANE};`);
-console.log(`   waiting for the next 30-second fleet sweep…`);
+console.log(`   waiting for the next fleet sweep…`);
 
+// MEASURED THE MOMENT THE STATUS EVENT ARRIVES, not after both waits.
+//
+// This used to be one `Date.now()` taken after waiting for `agent.status_changed`
+// AND `agent.lost`, and then reported as the status latency. The two arrive in
+// the same sweep so the error was small, but the number was the wrong number:
+// it measured whichever arrived last and printed it beside a bound that
+// belongs to the first.
 const sawStatus = await waitFor(
   () => sub.eventsNamed('agent.status_changed').length > 0, 75_000, 'agent.status_changed');
+const statusLatencyMs = Date.now() - transitionAt;
 const sawLost = await waitFor(
-  () => sub.eventsNamed('agent.lost').length > 0, 75_000, 'agent.lost');
-const sweepLatencyMs = Date.now() - transitionAt;
+  // Scoped to the path: the seeding probe above also produced an agent.lost,
+  // and an unscoped wait would have been satisfied by it before this one fired.
+  () => sub.events.some((e) => e.action === 'agent.lost' && e.path === LOST),
+  75_000, `agent.lost for ${LOST}`);
+const lostLatencyMs = Date.now() - transitionAt;
 
 // ---- what arrived, on both paths ----
 
@@ -671,14 +772,33 @@ for (const [name, payload] of mcpByName) {
 
 // `seq` is monotonic and there are no duplicates: a subscriber's gap detection
 // is only worth anything if the numbers really increase.
+// CONTIGUOUS, not merely increasing — and the difference is load-bearing.
+//
+// Monotonicity alone passes on 2, 4, 6, 8 and prints it as though fine. But
+// the contract tells a subscriber that a `seq` advance beyond what it has seen
+// means it MISSED events, and `daemon.ts` deliberately does not sequence
+// off-contract actions precisely so that no gap is ever spent on something a
+// subscriber would not have recognised. A daemon that skipped numbers would
+// make every subscriber resync against nothing, forever.
+//
+// Contiguity of what THIS subscriber received, rather than "starts at 1": a
+// subscriber that connects late legitimately misses a prefix, and this one
+// connects before the first operation only because the script arranges it.
 const seqs = sub.events.filter((e) => typeof e.seq === 'number').map((e) => e.seq);
 const seqMonotonic = seqs.every((s, i) => i === 0 || s > seqs[i - 1]);
+const seqGaps = [];
+for (let i = 1; i < seqs.length; i++) {
+  if (seqs[i] !== seqs[i - 1] + 1) seqGaps.push(`${seqs[i - 1]}→${seqs[i]}`);
+}
+const seqContiguous = seqGaps.length === 0;
 
 const deactivations = sub.eventsNamed('agent.deactivated');
 const preempted = deactivations.find((e) => e.reason === 'preempted');
 const requested = deactivations.find((e) => e.reason === 'requested');
 
-console.log(`\n   seq: ${seqs.length} sequenced events, ${seqMonotonic ? 'strictly increasing' : 'OUT OF ORDER'} ` +
+console.log(`\n   seq: ${seqs.length} sequenced events, ` +
+  `${seqMonotonic ? 'strictly increasing' : 'OUT OF ORDER'} and ` +
+  `${seqContiguous ? 'CONTIGUOUS — no gaps' : `GAPPED at ${seqGaps.join(', ')}`} ` +
   `(${seqs.slice(0, 12).join(', ')}${seqs.length > 12 ? ', …' : ''})`);
 console.log(`   agent.deactivated: ${deactivations.length} — reasons ` +
   `${JSON.stringify(deactivations.map((e) => e.reason))}`);
@@ -700,8 +820,8 @@ console.log(`   contract drift reported by the forwarder: ` +
 
 verdict(
   missingSocket.length === 0 && missingMcp.length === 0 &&
-    payloadProblems.length === 0 && seqMonotonic &&
-    sawStatus && sawLost &&
+    payloadProblems.length === 0 && seqMonotonic && seqContiguous &&
+    seeded && sawStatus && sawLost &&
     Boolean(preempted) && Boolean(requested) &&
     // The merge: everything the retired agent_preempted_event carried is on
     // the one event, and the victim is the event's own `path`.
@@ -716,6 +836,7 @@ verdict(
   '    reported no drift in either direction between the wire and the published table',
   `socket missing [${missingSocket}], mcp missing [${missingMcp}], ` +
   `payload problems [${payloadProblems.join('; ')}], seqMonotonic=${seqMonotonic}, ` +
+  `seqGaps=[${seqGaps.join(' ')}], ` +
   `drift [${driftLines.join(' | ')}]`
 );
 
@@ -851,8 +972,23 @@ console.log(`\n   the transition was made at t+0 by rewriting the shim's status 
 console.log(`   the daemon was told nothing and had to observe it.\n`);
 show('socket:', statusEvent ?? '(NOT RECEIVED)');
 show('mcp:', statusOnMcp ?? '(NOT RECEIVED)');
-console.log(`\n   observed latency:   ${(sweepLatencyMs / 1000).toFixed(1)}s`);
+// The daemon's own stamp against the moment the world changed — detection
+// latency, with this script's 200ms polling taken out of it. Reported beside
+// the end-to-end figure so neither has to stand in for the other.
+const detectionMs = statusEvent ? new Date(statusEvent.at).getTime() - transitionAt : NaN;
+console.log(`\n   observed latency:   ${(statusLatencyMs / 1000).toFixed(1)}s end to end ` +
+  `(transition → this subscriber held the event)`);
+console.log(`   of which detection: ${(detectionMs / 1000).toFixed(1)}s ` +
+  `(transition → the daemon's own \`at\` stamp)`);
 console.log(`   documented bound:   30s (the fleet sweep) plus one census read`);
+console.log(`   asserted here:      detection < 32.0s — the bound plus 2s of census slack, so a`);
+console.log(`                       sweep that overran the documented figure fails rather than`);
+console.log(`                       printing a number larger than the bound it cites. The`);
+console.log(`                       end-to-end figure is reported, not held to that bound: it`);
+console.log(`                       includes this script's own 200ms polling, which the`);
+console.log(`                       contract does not promise anything about.`);
+console.log(`   agent.lost arrived at ${(lostLatencyMs / 1000).toFixed(1)}s — the SAME sweep,`);
+console.log(`   which is the point of folding the status watcher into it.`);
 console.log(`   additional herdr invocations for this event: 0 — it reads the census the`);
 console.log(`   missing-agent sweep was taking anyway.`);
 console.log(`\n   all status transitions observed this run:`);
@@ -863,16 +999,33 @@ verdict(
     statusEvent.paneName === paneNameFor(OVERRIDDEN) &&
     'paneId' in statusEvent &&
     Boolean(statusOnMcp) && statusOnMcp.to === 'blocked' &&
-    sweepLatencyMs < 45_000 &&
+    // 32s, not 45s. At 45s a 38-second sweep passed green while the message
+    // beside it said "within 38.0s of a 30-second documented bound" — a
+    // verdict contradicting itself out loud, and docs/event-contract.md §7
+    // claiming this script proves a bound it did not test.
+    //
+    // ASSERTED ON DETECTION, not end-to-end. The contract bounds when the
+    // daemon observes and publishes; it says nothing about how promptly a
+    // particular subscriber's event loop gets round to looking, and this
+    // script polls at 200ms. Charging the daemon for the harness's own
+    // latency would be measuring the wrong thing — and the case is tight by
+    // construction: the flip lands immediately after a sweep, so the next one
+    // is a full interval away and the figure sits just under the bound with
+    // the census slack for margin.
+    detectionMs < 32_000 &&
+    // End-to-end is reported and sanity-bounded rather than held to 32s, for
+    // the reason above.
+    statusLatencyMs < 45_000 &&
     // A first sighting is not a transition: every agent that came up during
     // this run was seeded silently, so the only transitions reported are ones
     // this daemon actually watched happen.
     statusEvents.every((e) => typeof e.from === 'string' && e.from !== e.to),
-  `the transition working → blocked was observed and published within ` +
-  `${(sweepLatencyMs / 1000).toFixed(1)}s of a\n` +
+  `the transition working → blocked was detected and published within ` +
+  `${(detectionMs / 1000).toFixed(1)}s, inside the\n` +
   '    30-second documented bound, on both paths, and no first sighting was reported as a\n' +
   '    transition',
-  `status_changed not proven: event=${JSON.stringify(statusEvent)} latency=${sweepLatencyMs}ms`
+  `status_changed not proven: event=${JSON.stringify(statusEvent)} ` +
+  `detection=${detectionMs}ms (bound 32000ms), end-to-end=${statusLatencyMs}ms`
 );
 
 // ================================================== 6. resync across a restart --

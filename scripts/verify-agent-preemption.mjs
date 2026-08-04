@@ -509,7 +509,7 @@ rule('5. PREEMPTION — capacity before and after, and the record of what went')
     `(priority ${deactivatedEvent.preemption.by.priority}), reason=${deactivatedEvent.reason}`);
   console.log(`  and there is no second broadcast: ` +
     `${events.filter((e) => e.action === 'agent.deactivated').length} agent.deactivated, ` +
-    `${events.filter((e) => e.reason === 'preempted').length} of them preempted`);
+    `${events.filter((e) => e.action === 'agent.deactivated' && e.reason === 'preempted').length} of them preempted`);
 
   // The full PreemptionRecord rides the event AND is what the durable registry
   // persists through recordDeactivated(record, preemption). Every field is
@@ -579,7 +579,7 @@ rule('6. TOP-OF-SCALE SAFETY — the highest priority cannot be touched');
   console.log(`with preempt: true → success: ${res.success}, stood down: ${res.preempted?.victim?.path ?? '(nothing)'}`);
   console.log(`  the epic supervisor still running: ${bridge.alive.includes('epic-kan-39')}`);
   console.log(`  every prior agent still running:    ${FULL.every((n) => bridge.alive.includes(n))}`);
-  console.log(`  preemption broadcast:               ${events.some((e) => e.reason === 'preempted')}`);
+  console.log(`  preemption broadcast:               ${events.some((e) => e.action === 'agent.deactivated' && e.reason === 'preempted')}`);
 
   console.log(
     '\n  Two protections, and only one of them is a rule anyone wrote. The ordering\n' +
@@ -597,7 +597,7 @@ rule('6. TOP-OF-SCALE SAFETY — the highest priority cannot be touched');
       res.success === true &&
       !res.preempted &&
       FULL.every((n) => bridge.alive.includes(n)) &&
-      !events.some((e) => e.reason === 'preempted'),
+      !events.some((e) => e.action === 'agent.deactivated' && e.reason === 'preempted'),
     'an epic agent cannot be selected at any priority, and a top-of-scale unrefusable\n' +
     '    activation on a full machine started without standing anything down.',
     'the epic activation was refused, or something was stood down for it.'
@@ -645,7 +645,7 @@ rule('7. PROTECTED VICTIMS — a low-priority unpreemptable agent is never offer
       bridge.alive.includes('watchdog-kan-90') &&
       bridge.alive.length === FULL_HOTFIX.length &&
       !/watchdog/.test(res.error ?? '') &&
-      !events.some((e) => e.reason === 'preempted'),
+      !events.some((e) => e.action === 'agent.deactivated' && e.reason === 'preempted'),
     'the unpreemptable agent is not offered, not named in the fleet list, and not\n' +
     '    killed — even with preempt: true, even though it is the only lower-priority\n' +
     '    agent running, and even though it IS charged. `preemptable` is doing the work\n' +

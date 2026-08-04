@@ -108,14 +108,23 @@ and it is stated rather than implied.
 
 This is written as an obligation you take on, not as a property CrabCast
 provides, because the true statement is joint and the daemon cannot make it
-alone. An earlier version of this argument claimed that a missed event
-"degrades to slower convergence, never to divergence — provable on our side and
-independent of your reconciler." **That was false**, and Butchr was right to
-correct it. It holds only if the consumer polls. A consumer that treats events
-as its *trigger* — reconciling on event, plus on start, plus on config change,
-which is a perfectly natural reading — has no timer at all, and for that
-consumer a dropped event is permanent divergence. Written the old way, a
-consumer could satisfy this contract in full and still diverge.
+alone. An earlier version of this argument made the opposite claim:
+
+<!-- refuted-claim:start
+     A REJECTED CLAIM, QUOTED SO IT STAYS REJECTED. `verify-event-contract.mjs`
+     strips this region before scanning the document for unilateral-guarantee
+     phrasing, and scans everything outside it. Nothing normative may live in
+     here, and the check caps its length so it cannot become a hiding place. -->
+> "A missed event degrades to slower convergence, never to divergence — that
+> property is provable on our side and does not depend on your reconciler."
+<!-- refuted-claim:end -->
+
+**That was false**, and Butchr was right to correct it. It holds only if the
+consumer polls. A consumer that treats events as its *trigger* — reconciling on
+event, plus on start, plus on config change, which is a perfectly natural
+reading — has no timer at all, and for that consumer a dropped event is
+permanent divergence. Written the old way, a consumer could satisfy this
+contract in full and still diverge.
 
 So: **an authoritative `list` sweep on a timer is a correctness requirement for
 any consumer of these events, not a nicety.**
@@ -206,13 +215,38 @@ Statuses are herdr's vocabulary: `idle`, `working`, `blocked`, `done`,
 
 ---
 
-## 4. An action you do not recognise
+## 4. Something you do not recognise — an action, or a field
 
 **On the socket:** the daemon emits only the names in §1, and **a subscriber
 receiving an unrecognised action must ignore it and must not error.** That
 clause is what makes adding an event later a non-breaking change, so it is part
 of the contract rather than advice. `broadcast` filters nothing; matching is
 yours.
+
+**The same clause covers unrecognised FIELDS, and on the socket you need it.**
+The two paths are deliberately asymmetric about payloads, and a consumer with
+no fallback must not be left to assume whichever suits them:
+
+| | what the payload contains |
+| --- | --- |
+| **socket** | **AT LEAST** the fields §1 declares. `broadcast` filters nothing, so a field this daemon happens to carry internally reaches you. |
+| **MCP** | **EXACTLY** the fields §1 declares. The forwarder projects; anything undeclared is dropped before it leaves. |
+
+So, as contract: **a socket subscriber receiving a field §1 does not declare
+must ignore it and must not error**, exactly as it must for an unrecognised
+action. Do not key behaviour off an undeclared field — it is an internal value
+that has not been designed for you, and it can change or vanish without any of
+this document changing.
+
+Why not project on the socket too, and make both paths exhaustive? Because the
+socket is this daemon's own multiplexed protocol, where `broadcast` filtering
+nothing is a property other things rely on, while an MCP notification has a
+declared payload shape and a projection is the natural place to enforce one.
+The honest consequence is that **the drift check is a test-time guard, not a
+runtime one**: `verify-event-contract.mjs` fails if a broadcast carries a field
+this document does not publish, so drift is caught in CI — but nothing at
+runtime stops an undeclared field from reaching a socket subscriber, which is
+exactly why the clause above is contract rather than advice.
 
 If this daemon ever emits an action that is not in §1, that is a defect on our
 side and it says so in `daemon.log`:
@@ -278,6 +312,10 @@ declared field the daemon did not send, and a field the daemon sent that this
 document does not publish. The first is the `undefined/undefined` defect in its
 general form. The second is an internal convention trying to ship again.
 
+This projection is what makes the MCP payload **exhaustive** where the socket's
+is a **minimum** — see §4, which states the difference as contract and tells a
+socket subscriber what it owes as a result.
+
 ---
 
 ## 6. Migrating from the old names
@@ -311,6 +349,17 @@ real stdio, a real socket subscriber, against a herdr shim. It proves the
 allowlist forwards the published events with structured payloads on both paths,
 that the retired `endsWith('_event')` filter would have dropped every one of
 them, that an off-allowlist action is dropped and logged on both sides, that
-`agent.status_changed` fires on a real transition within the documented bound,
-and that a subscriber reconnecting across a daemon restart sees a new `bootId`
-and recovers the fleet.
+`agent.status_changed` fires on a real transition within the documented bound —
+asserted at 32s, the 30s sweep plus census slack, so a sweep that overran the
+figure quoted in §2 fails rather than printing a number larger than the bound
+it cites — and that a subscriber reconnecting across a daemon restart sees a
+new `bootId` and recovers the fleet. It also asserts `seq` is **contiguous**
+rather than merely increasing, which is what makes "your `seq` jumped, so you
+missed events" mean anything.
+
+One limit of that script, stated here rather than left to be discovered: its
+guard against this document re-acquiring a unilateral convergence guarantee is
+a **tripwire over known phrasings**, not a proof of absence. It rejects the
+shapes that mistake has actually taken — and both are on file — but a
+sufficiently novel sentence asserting the same falsehood would pass it. The
+real defence is a reviewer trying to write the sentence.

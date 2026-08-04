@@ -14,11 +14,20 @@ import { EVENT_NAMES, projectEvent } from './events.js';
 
 // The daemon's MCP server: stdio to its client, and an ordinary NDJSON client
 // of the daemon's unix socket on the other side. One protocol on the socket,
-// multiplexed by an explicit rule rather than by convention — a message
-// carrying an `id` answers a pending request; anything else with an `action`
-// is a broadcast, forwarded as a structured MCP notification when the event
-// contract (src/events.ts) names it and dropped with a warning when it does
-// not.
+// multiplexed by an explicit rule rather than by convention:
+//
+//   an `id` we are waiting on   → somebody's answer; resolve the request
+//   an `id` we are NOT          → a late answer to a request that already timed
+//                                 out; discarded, and said so as such
+//   no `id`, an `action`        → a broadcast; forwarded as a structured MCP
+//                                 notification when the event contract
+//                                 (src/events.ts) names it, dropped with a
+//                                 warning when it does not
+//
+// The middle rule is not a nicety. Correlation is by `id`, so "has no id" is
+// what makes something a broadcast — and a late response routed into the
+// forwarder gets reported as a broadcast that is not on the event contract,
+// which is the wrong complaint about the wrong kind of message.
 
 const server = new Server(
   {
@@ -176,6 +185,20 @@ function daemonLink(): Promise<net.Socket> {
             clearTimeout(entry.timer);
             const { id, ...body } = msg;
             entry.resolve(body);
+          } else if (msg?.id !== undefined) {
+            // AN ANSWER NOBODY IS WAITING FOR — carrying an `id` whose request
+            // already timed out and was rejected. It is not a broadcast, and
+            // the branch below must not be allowed to treat it as one: this
+            // used to fall through to the forwarder, which dutifully reported
+            // `dropping a broadcast whose action is not on the event contract:
+            // "activate_response"`. That line names the wrong thing about the
+            // wrong kind of message, and an operator reading it would go
+            // looking for a missing event rather than for a slow daemon.
+            console.error(
+              `crabcast-mcp: late answer to a request that already timed out ` +
+              `(${JSON.stringify(msg.action)}, id ${JSON.stringify(msg.id)}); discarded. ` +
+              `The daemon answered after the 30s deadline.`
+            );
           } else if (msg?.action !== undefined) {
             forwardEvent(msg);
           }
