@@ -222,6 +222,91 @@ NOTHING WAS STARTED. Two agents in one directory is how work gets overwritten an
 
 **There is a third answer, and it is the one that would otherwise fail silently.** If herdr does not answer at all, the census comes back empty — which looks identical to "the directory is free". `activate` refuses that too, as *unverifiable*, and starts nothing: a check that renders its own failure as an all-clear would spawn into an occupied directory precisely when it cannot see it.
 
+### Changing an agent's knobs never costs it its conversation
+
+A supervisor that holds desired state will eventually find a configuration that differs from ours, and "if they differ, change them" needs an answer. **The answer is not uniform across attributes,** because the attributes are not the same kind of thing:
+
+| attribute | on a **running** agent | why |
+| --- | --- | --- |
+| `priority` | **in place** | read out of the record at the moment a capacity or preemption decision is made |
+| `refusable` / `chargeable` / `preemptable` | **in place** | census arithmetic only; nothing in the pane sees them |
+| `label` | **in place** | nothing parses it |
+| `launcher` | **refused** | it *is* the process running in the pane, resolved once at spawn |
+| `prompt` | **refused** | written into the sidecar and handed over at spawn; the agent has already read it |
+| `mcpServers` | **refused** | written into `.mcp.json`, which the runtime reads once, at boot |
+
+On a **stopped** agent every attribute changes freely and takes effect at the next `activate`.
+
+**In place means a decision changes, not that a field changes.** Here the machine is at a cap of one, and `beta` at priority 2 outranks the running `alpha` at priority 1 — so the gate offers `alpha` as a victim:
+
+```
+$ crabcast activate /tmp/kan126-live/owned/beta
+Standing down /tmp/kan126-live/owned/alpha (priority 1, unknown) would make room: this activation is priority 2, which outranks it. That is not done automatically — pass preempt: true to authorise it, and its uncommitted work is interrupted.
+
+$ crabcast configure /tmp/kan126-live/owned/alpha --priority 9 --launcher shell --prompt-file alpha-prompt.txt --label "the live agent"
+reconfigured /tmp/kan126-live/owned/alpha
+  changed:       priority — IN PLACE, on the running agent
+  pane:          w65702dcc803d94-12
+  version:       2 (was 1), frozen 2026-08-04T13:15:34.623Z
+
+per knob:
+  priority     APPLIED IN PLACE — live now, nothing was respawned
+  refusable    unchanged — the value sent is the value it already had
+  …
+  mcpServers   unchanged — the value sent is the value it already had
+
+$ crabcast activate /tmp/kan126-live/owned/beta          # the SAME call, nothing respawned
+Nothing running is below priority 2, so there is nothing this activation may stand down. Running: /tmp/kan126-live/owned/alpha (priority 9, unknown). Preemption is strictly-greater: an agent may not displace one of its own priority.
+```
+
+Same pane, same session, and the gate's arithmetic changed underneath it.
+
+**Where a respawn would be required, the API refuses and the caller decides.** It never stands an agent down to make configuration match — a reconciler that quietly discards conversation history to satisfy a config diff is the worst bug this design could have, and an honest *"cannot change X in place"* is worth more than a convenient one that costs an agent's memory:
+
+```
+$ crabcast configure /tmp/kan126-live/owned/alpha --priority 9 --launcher shell --prompt-file other-prompt.txt --label "the live agent"
+FAILED: configure /tmp/kan126-live/owned/alpha
+
+Refusing to reconfigure /tmp/kan126-live/owned/alpha: one attribute cannot change under a running agent, and standing it down to make it take effect would cost this agent its conversation.
+  prompt — the prompt is written into the agent's sidecar and handed to it at spawn. The agent running there has already read it, so rewriting it now would change the record without changing the agent.
+NOTHING WAS APPLIED. The agent is untouched and still running in pane w65702dcc803d94-12, and its configuration is still version 2.
+Remedy: deactivate(…); configure(…, …); activate(…). There is no force flag, deliberately — one would be this destroy-and-recreate with a label on it, and the decision to spend a conversation is the caller's.
+  refused:       restart-required
+  attributes:    prompt
+  applied:       nothing — configure is all-or-nothing
+  version:       2 — unchanged, because nothing was applied
+[exit 1]
+
+$ crabcast send /tmp/kan126-live/owned/alpha "echo I-SURVIVED-THE-REFUSED-RECONFIGURATION"
+$ crabcast tail /tmp/kan126-live/owned/alpha --lines 12
+pane text for /tmp/kan126-live/owned/alpha:
+I-SURVIVED-THE-REFUSED-RECONFIGURATION
+brooswit@kchb-ThinkPad-X1-Carbon-5th:/tmp/kan126-live/owned/alpha$
+```
+
+**A silent defer is not the middle ground it looks like.** Accepting the change and applying it "at next start" leaves the configuration and the world disagreeing behind a `success: true` — the same failure in a quieter costume, and it would make the config echo describe what was last *requested* rather than what the agent is *running with*. The refusal is what makes the echo honest.
+
+**And `configure` is atomic, so the response reports per knob.** A call mixing an in-place change with a respawn-requiring one is refused whole, and says which knobs were refused and which were *withheld* — in-place-capable, and not applied anyway:
+
+```
+$ crabcast configure … --priority 11 --launcher claude --prompt-file other-prompt.txt --label renamed
+NOTHING WAS APPLIED, including priority, label, which would have changed in place. `configure` takes one desired-state document: applying half of it would leave this agent half new and half old, which is a state nobody asked for and no retry converges out of.
+  attributes:    launcher, prompt
+  withheld:      priority, label
+
+per knob:
+  priority     withheld — would have applied in place; nothing was, this call is atomic
+  label        withheld — would have applied in place; nothing was, this call is atomic
+  launcher     REFUSED — cannot change under a running agent
+  prompt       REFUSED — cannot change under a running agent
+```
+
+A call that applies half and reports a bare success is the defect this rule exists to prevent, so `applied`, `withheld` and `outcomes` are on every response rather than something to infer.
+
+**There is a third answer here too.** If a restart-only knob is asked to move, herdr cannot be reached and the record says the agent is active, the call is refused as *unverifiable*: an empty census from an unreachable herdr is silence, not evidence that nothing is running there. The in-place knobs still change, because their new value is correct whether the agent is up or down.
+
+`node scripts/verify-reconfiguration-refuses.mjs` is the proof. Its refusals are asserted against evidence taken from outside the response — the pane id, herdr's own argv log, a hash of the conversation on disk — because a refusal is the easiest thing in this daemon to assert vacuously.
+
 ### Calling a verb again is safe, and that is a contract
 
 A supervisor reconciles by diffing desired state against actual and calling the verbs to close the gap, which means calling them on things that are **already in the desired state**, constantly. So `activate` and `deactivate` are specified for that case rather than merely surviving it.
@@ -344,7 +429,7 @@ A config still declaring `workspaceTypes` is **refused rather than ignored**. Dr
 `crabcast` drives the daemon from a shell, so the system is complete with no browser anywhere.
 
 ```bash
-crabcast configure <dir> --priority 1 --launcher claude   # make an agent EXIST
+crabcast configure <dir> --priority 1 --launcher claude   # make an agent EXIST, or change one
 crabcast activate <dir>          # run it  (--override, --preempt; no other options)
 crabcast list                    # the whole fleet, plus capacity
 crabcast status <dir>
@@ -358,7 +443,7 @@ crabcast daemon-status           # pid, uptime, config, registry — and WHICH B
 
 Every agent-addressing command takes exactly one operand: the directory. There is nothing to disambiguate — two agents cannot share a directory the way they could share a key — so there is no `--type` flag and no ambiguity to resolve.
 
-`configure`'s flags are `--priority` and `--launcher` (both required, neither defaulted), plus `--prompt <text>` or `--prompt-file <path>`, `--mcp a,b` and `--mcp-config <file>`, `--label`, and the gate triple `--refusable`/`--chargeable`/`--preemptable` (all default true, `--gate-exempt` is shorthand for all three false).
+`configure`'s flags are `--priority` and `--launcher` (both required, neither defaulted), plus `--prompt <text>` or `--prompt-file <path>`, `--mcp a,b` and `--mcp-config <file>`, `--label`, and the gate triple `--refusable`/`--chargeable`/`--preemptable` (all default true, `--gate-exempt` is shorthand for all three false). It is also how an agent that already exists is **changed** — per attribute, refusing rather than respawning; see [above](#changing-an-agents-knobs-never-costs-it-its-conversation).
 
 MCP servers arrive as **definitions rather than names** — the command, args and env that spawn each one — and are written into the agent's `.mcp.json` verbatim: `--mcp-config` reads them from a JSON file here and puts its *bytes* on the wire, the same hand-off `--prompt-file` makes. `--mcp` is for the one server CrabCast builds itself (`crabcast`), whose definition depends on facts about this daemon rather than about you. Supplying either **is** the consent to a `.mcp.json` appearing in your directory; there is no second flag, `configure`'s response names the file and keys it will write before anything is written, and `forget` takes them back out. Every server you asked for must be writable or the activation is refused — a `.mcp.json` holding only half of what you asked for is a file whose presence looks like success. [`docs/callers-directory.md`](docs/callers-directory.md) is the whole of what CrabCast writes into a directory you own, and how each of it comes back out.
 
