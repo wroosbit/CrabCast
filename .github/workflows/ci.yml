@@ -228,6 +228,37 @@ jobs:
       #                                      them as far as this code is
       #                                      concerned.
       #
+      # And one for the published event surface, whose every failure mode is
+      # silence on somebody else's side of a boundary:
+      #
+      #   verify-event-contract              all nine published events produced
+      #                                      by REAL operations on a real
+      #                                      daemon and received by two
+      #                                      subscribers — a raw socket client
+      #                                      and an MCP server over stdio —
+      #                                      with structured payloads asserted
+      #                                      field by field against the
+      #                                      contract, because "a notification
+      #                                      arrived" would pass over a payload
+      #                                      that is a rendered sentence. Two
+      #                                      of its six sections MUTATE the
+      #                                      compiled output and run it: the
+      #                                      retired `endsWith('_event')`
+      #                                      forwarder, which receives nothing
+      #                                      while the allowlist receives
+      #                                      everything, and a daemon that
+      #                                      broadcasts an off-contract action,
+      #                                      which must be warned about on both
+      #                                      sides and dropped rather than
+      #                                      forwarded malformed. It takes
+      #                                      about ninety seconds, most of it
+      #                                      waiting out two real 30-second
+      #                                      fleet sweeps — `agent.lost` and
+      #                                      `agent.status_changed` are
+      #                                      poll-derived and a proof that did
+      #                                      not wait would be proving
+      #                                      something else.
+      #
       # verify-daemon-provenance starts daemons but needs no herdr either: it
       # drives `daemon_status`, which touches neither panes nor the herdr
       # binary. It builds its OWN fixture trees under the system temp dir — one
@@ -277,6 +308,7 @@ jobs:
             verify-daemon-provenance
             verify-state-read-echoes-config
             verify-reconfiguration-refuses
+            verify-event-contract
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

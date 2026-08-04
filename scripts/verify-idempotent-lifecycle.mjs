@@ -349,7 +349,7 @@ console.log('\n== 1. activate called three times on the same configured path =='
   check(
     'and only the first call announced an activation — a no-op broadcasts nothing, ' +
       'because nothing in the world changed',
-    deps.events.filter((e) => e.action === 'agent_activated_event').length === 1,
+    deps.events.filter((e) => e.action === 'agent.activated').length === 1,
     JSON.stringify(deps.events.map((e) => e.action))
   );
 }
@@ -407,7 +407,7 @@ console.log('\n== 2. deactivate called twice ==');
   );
   check(
     'and no second deactivation was BROADCAST',
-    deps.events.filter((e) => e.action === 'agent_deactivated_event').length === 1,
+    deps.events.filter((e) => e.action === 'agent.deactivated').length === 1,
     JSON.stringify(deps.events.map((e) => e.action))
   );
 }

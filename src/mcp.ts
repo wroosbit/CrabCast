@@ -10,12 +10,24 @@ import * as net from 'net';
 import * as nodePath from 'path';
 import { DEFAULT_DATA_DIR, loadConfig, resolveConfigSource } from './config.js';
 import { connectToDaemon, onJsonLines, writeJsonLine } from './ipc.js';
+import { EVENT_NAMES, projectEvent } from './events.js';
 
 // The daemon's MCP server: stdio to its client, and an ordinary NDJSON client
 // of the daemon's unix socket on the other side. One protocol on the socket,
-// multiplexed by convention — a message carrying an `id` answers a pending
-// request, an `action` ending `_event` is a broadcast forwarded as an MCP
-// notification, anything else is dropped.
+// multiplexed by an explicit rule rather than by convention:
+//
+//   an `id` we are waiting on   → somebody's answer; resolve the request
+//   an `id` we are NOT          → a late answer to a request that already timed
+//                                 out; discarded, and said so as such
+//   no `id`, an `action`        → a broadcast; forwarded as a structured MCP
+//                                 notification when the event contract
+//                                 (src/events.ts) names it, dropped with a
+//                                 warning when it does not
+//
+// The middle rule is not a nicety. Correlation is by `id`, so "has no id" is
+// what makes something a broadcast — and a late response routed into the
+// forwarder gets reported as a broadcast that is not on the event contract,
+// which is the wrong complaint about the wrong kind of message.
 
 const server = new Server(
   {
@@ -73,6 +85,83 @@ try {
   spawnIfMissing = false;
 }
 
+/**
+ * THE FORWARDER. A positive allowlist and a structured payload, replacing a
+ * suffix test and a rendered sentence.
+ *
+ * What was here before failed in both halves, and only one of them was
+ * visible. The filter asked whether the action ended in `_event` — a
+ * convention masquerading as a filter, which would have dropped every event
+ * the moment the names changed, silently, on both sides. And the notification
+ * carried `[CrabCast Event] <action> - <subject>`: prose. A subscriber could
+ * read our broadcast over our shoulder and could not act on it, because there
+ * was no structured payload on this path at all.
+ *
+ * Now:
+ *
+ *   - The allowlist is `EVENT_CONTRACT`, imported rather than restated. An
+ *     action not on it is DROPPED and logged HERE, on our side of the
+ *     boundary, so an event added to the daemon without being added to the
+ *     contract is a warning naming it rather than a subscriber that quietly
+ *     stops hearing about something.
+ *   - The payload is the event, projected onto exactly the fields the contract
+ *     publishes for it. That closes the `undefined/undefined` defect as a side
+ *     effect rather than by special-casing: the contract knows which events
+ *     carry `path` and which carry `what`, so nothing renders a field an event
+ *     never had.
+ *   - Drift is warned about in BOTH directions — a declared field the daemon
+ *     did not send, and a field the daemon sent that nobody published. Either
+ *     one means the document and the wire have come apart, and the whole point
+ *     of this file is that they cannot do that quietly.
+ *
+ * The notification stays `notifications/message` because that is the transport
+ * an MCP client already subscribes to; what changed is that `data` is the
+ * event object rather than a sentence about it. `logger` names the stream so a
+ * client can route these apart from anything else this server logs.
+ */
+function forwardEvent(msg: any) {
+  const projected = projectEvent(msg);
+
+  if (!projected) {
+    // Dropped, and said out loud. This is the branch a future event lands in
+    // when somebody adds a broadcast and forgets the contract — the daemon
+    // warns on its side too, and this is the same fact from the subscriber's
+    // side of the boundary.
+    console.error(
+      `crabcast-mcp: dropping a broadcast whose action is not on the event contract: ` +
+      `${JSON.stringify(msg?.action)}. Nothing was forwarded to the MCP client. ` +
+      `Published events: ${EVENT_NAMES.join(', ')}.`
+    );
+    return;
+  }
+
+  if (projected.missing.length) {
+    console.error(
+      `crabcast-mcp: ${msg.action} arrived without contract field(s) ` +
+      `${projected.missing.join(', ')}; forwarded without them. This is the defect that ` +
+      `used to render "undefined" at a subscriber — fix the emitting site or the contract.`
+    );
+  }
+  if (projected.undeclared.length) {
+    console.error(
+      `crabcast-mcp: ${msg.action} carried undeclared field(s) ` +
+      `${projected.undeclared.join(', ')}; NOT forwarded. A field on the wire that is not ` +
+      `in docs/event-contract.md is an internal convention, which is what this contract ` +
+      `replaced — declare it in src/events.ts or stop sending it.`
+    );
+  }
+
+  server.notification({
+    method: "notifications/message",
+    params: {
+      level: "info",
+      logger: "crabcast.events",
+      // The event itself. A rendered string here is the defect, not the format.
+      data: projected.payload
+    }
+  }).catch(() => {});
+}
+
 // Persistent connection to the CrabCast daemon's Unix socket. Requests carry
 // an id the daemon echoes back; broadcast events arrive without one and are
 // forwarded as MCP logging notifications.
@@ -96,26 +185,22 @@ function daemonLink(): Promise<net.Socket> {
             clearTimeout(entry.timer);
             const { id, ...body } = msg;
             entry.resolve(body);
-          } else if (typeof msg?.action === 'string' && msg.action.endsWith('_event')) {
-            // The subject, in whatever vocabulary the event actually uses.
-            // This line used to be `${msg.type}/${msg.key}`, which rendered
-            // `undefined/undefined` for the three events that never carried a
-            // type or key — and would now do so for every one of them, since
-            // agents are addressed by path. A forwarder that reliably prints
-            // "undefined" is worse than one that says it has nothing to say.
-            //
-            // Still a format string rather than the structured payload: the
-            // typed event contract, its allowlist and the payload-carrying
-            // notification are the event-contract slice's, and building half
-            // of them here would be the second copy that disagrees.
-            const subject = msg.path ?? msg.what ?? '(no subject)';
-            server.notification({
-              method: "notifications/message",
-              params: {
-                level: "info",
-                data: `[CrabCast Event] ${msg.action} - ${subject}`
-              }
-            }).catch(() => {});
+          } else if (msg?.id !== undefined) {
+            // AN ANSWER NOBODY IS WAITING FOR — carrying an `id` whose request
+            // already timed out and was rejected. It is not a broadcast, and
+            // the branch below must not be allowed to treat it as one: this
+            // used to fall through to the forwarder, which dutifully reported
+            // `dropping a broadcast whose action is not on the event contract:
+            // "activate_response"`. That line names the wrong thing about the
+            // wrong kind of message, and an operator reading it would go
+            // looking for a missing event rather than for a slow daemon.
+            console.error(
+              `crabcast-mcp: late answer to a request that already timed out ` +
+              `(${JSON.stringify(msg.action)}, id ${JSON.stringify(msg.id)}); discarded. ` +
+              `The daemon answered after the 30s deadline.`
+            );
+          } else if (msg?.action !== undefined) {
+            forwardEvent(msg);
           }
         });
 

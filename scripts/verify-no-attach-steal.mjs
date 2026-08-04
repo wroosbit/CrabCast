@@ -40,7 +40,7 @@ const bridge = new HerdrBridge(dataDir);
 const ended = [];
 bridge.setSessionEndedListener((e) => {
   ended.push(e);
-  console.log(`  [event] agent_detached_event sessionId=${e.sessionId} reason=${e.reason} exitCode=${e.exitCode}`);
+  console.log(`  [event] agent.detached sessionId=${e.sessionId} reason=${e.reason} exitCode=${e.exitCode}`);
 });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

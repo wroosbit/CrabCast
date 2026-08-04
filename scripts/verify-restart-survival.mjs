@@ -423,7 +423,7 @@ for (const launcher of ['shell', 'claude']) {
   check(
     `[${launcher}] the re-attach was ANNOUNCED, so a client that could not reach the agent ` +
       `learns that it can`,
-    events2.filter((e) => e.action === 'agent_activated_event' && e.path === dir).length === 1,
+    events2.filter((e) => e.action === 'agent.activated' && e.path === dir).length === 1,
     JSON.stringify(events2.map((e) => e.action))
   );
 

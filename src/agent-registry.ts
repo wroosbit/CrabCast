@@ -337,7 +337,7 @@ export interface RecordOutcome {
  * differently, because the two failures are not the same failure:
  *
  * - {@link AgentRegistry.record} returns `ok: false`, which the router turns
- *   into `durable: false` on the response and a `registry_degraded_event`. A
+ *   into `durable: false` on the response and a `registry.degraded` event. A
  *   lifecycle event happened and the disk does not know it: somebody has to
  *   act on that, so somebody is told.
  * - {@link AgentRegistry.compact} returns `ok: false` and is logged. Nothing
