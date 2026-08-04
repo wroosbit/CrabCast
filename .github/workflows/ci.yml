@@ -58,8 +58,17 @@ jobs:
   # trailing `#`; switching it off with `if:` or `continue-on-error: true`;
   # swallowing its exit code (`|| true`, `set +e`, `; true`, a bare pipe, a
   # trailing `exit 0`, backgrounding); and MENTIONING it rather than running
-  # it (`echo "node scripts/…"`, `bash -c '…'`, or behind a wrapper such as
-  # `timeout`) — the invocation has to begin a command the shell runs.
+  # it — quoted (`echo "node scripts/…"`), handed to another command
+  # (`bash -c '…'`), or behind a wrapper such as `timeout`. The invocation
+  # has to BEGIN A COMMAND ON ITS OWN LINE.
+  #
+  # What that does NOT cover: anything gating the line from ELSEWHERE in a
+  # `run:` block. A multi-line `if … then / node scripts/… / fi`, a heredoc
+  # body, an uncalled function, or `echo $(node scripts/…)` are all green
+  # with the audit never running. The checks reason per line, not per block —
+  # KAN-148 tracks the fix. Do not read the list above as "everything is
+  # caught".
+  #
   # Do not disable it to iterate — the red check is the point, and `|| true`
   # is exactly the edit nobody takes back off.
   #

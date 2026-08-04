@@ -43,13 +43,25 @@
 //
 // commandStarts is what makes that sentence true, and it is asserted now.
 //
+// Round 4 then did it a FOURTH time, in the sentence correcting the third:
+// it observed that the one-line `if node x.mjs; then …; fi` is caught (true,
+// via the `;` operator) and generalised to "conditionals are caught" (false —
+// the multi-line form every block scalar actually uses is green). The
+// correction inherited the defect it was correcting.
+//
 // The lesson, and it is the same one this suite keeps relearning one level
 // up: THE SENTENCE DESCRIBING WHAT A GUARD COVERS IS ITSELF A CLAIM, and it
-// needs the same standard of proof as the guard. Three times in this one
+// needs the same standard of proof as the guard. Four times in this one
 // change the code fixed a member and the prose asserted the category. The
-// habit that catches all three: WHEN YOU WRITE "SO X CAN NO LONGER HAPPEN,"
+// habit that catches all four: WHEN YOU WRITE "SO X CAN NO LONGER HAPPEN,"
 // GO AND MAKE X HAPPEN. If it still can, the sentence describes your intent
 // rather than your code. Write the assertion first, then the sentence.
+//
+// And the reason it is worth a fifth pass over prose that changes no
+// behaviour: A GUARD THAT DOCUMENTS A PROTECTION IT DOES NOT HAVE IS WORSE
+// THAN ONE THAT STAYS QUIET. Silence makes a reader check; a false assurance
+// makes them not bother, and the construct they would then ship is the exact
+// one the sentence exonerated.
 //
 // So this answers the question the regex only appeared to: is that command run
 // by a step that will actually execute, and will its failure fail the build? A
@@ -75,16 +87,44 @@
 //      trigger would be the weaker of the two controls, and duplicating a
 //      control that already works is how the weaker one comes to be trusted.
 //
-//   3. Shapes of exit-code laundering beyond the list in shellDisablers — a
+//   3. ANYTHING THAT GATES THE INVOCATION FROM ANOTHER LINE. This reads each
+//      line of a `run:` block on its own, plus the block's last line. It has
+//      no model of block structure, so every one of these is green while the
+//      audit never runs (verified, not supposed — KAN-148):
+//
+//        - run: |                     - run: |
+//            if [ "$SKIP" != 1 ]; then    cat <<EOF
+//              node scripts/…             node scripts/…
+//            fi                           EOF
+//
+//      A function body that is never called is green the same way. The
+//      one-line `if node x.mjs; then …; fi` IS caught, via the `;` operator —
+//      but that is the form nobody writes in a block, and round 4's
+//      correction generalised from it to "conditionals are caught", which is
+//      false. This entry is the third correction of that same mistake and was
+//      introduced as the fix to the second; see the header note above.
+//
+//      Command substitution is in the same gap and inverts safely-wrong:
+//      `echo $(node x.mjs)` is green, while `echo "$(node x.mjs)"` is caught —
+//      the quotes suppress the `(` that would otherwise open a command
+//      position. The sloppier form is the one that gets through.
+//
+//      Also here: shapes of exit-code laundering beyond shellDisablers — a
 //      `trap` that exits 0, or a wrapper SCRIPT whose own exit code is 0
-//      whatever it ran. (`if node x.mjs; then …; fi` is NOT in this gap: it
-//      is caught, via the `;` operator. That example was an under-claim and
-//      is corrected here.) A wrapper on the command line — `timeout 60 node
-//      x.mjs`, `bash -c '…'` — is not in this gap either: the invocation is
-//      not at command position, so it reads as absent and fails closed.
+//      whatever it ran. A wrapper on the COMMAND LINE (`timeout 60 node
+//      x.mjs`, `bash -c '…'`) is NOT in this gap: it is not at command
+//      position, so it reads as absent and fails closed.
+//
+//      One known FALSE ALARM, in the safe direction: `FOO=1 node x.mjs` and
+//      `env FOO=1 node x.mjs` read as not-live though they genuinely run, so
+//      they fail closed. `time` is admitted as a leading keyword and `env` is
+//      not — an inconsistency rather than a hole. This repo uses neither
+//      shape. Folded into KAN-148.
+//
 //      What IS asserted is enumerated in shellDisablers and commandStarts and
 //      demonstrated by mutation on the PR. Nothing here claims the set is
-//      exhaustive.
+//      exhaustive, and per-block shell reasoning — the one fix that closes
+//      this whole class — is deliberately NOT attempted here.
 //
 // This is not a YAML parser and does not want to be. It reads the two levels
 // of structure these checks depend on and is honest about a shape it does not
@@ -377,7 +417,12 @@ function shellDisablers(runLines, at, after) {
  *
  * Each result is `{ line, job, position, disabled }`.
  *
- *   position 'command'  — the needle begins a command the shell will run.
+ *   position 'command'  — the needle begins a command ON ITS OWN LINE. NOT
+ *                         "a command the shell will run": this reasons per
+ *                         line, so it cannot see that the line sits in a
+ *                         conditional body, a heredoc, or an uncalled
+ *                         function, none of which run. See boundary 3 and
+ *                         KAN-148.
  *   position 'argument' — it appears only as an argument or inside quotes:
  *                         `echo "node x.mjs"`, `bash -c '…'`, `timeout 60
  *                         node x.mjs`. Mentioned, not executed.
