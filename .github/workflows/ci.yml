@@ -307,17 +307,23 @@ jobs:
       #                                      field by field against the
       #                                      contract, because "a notification
       #                                      arrived" would pass over a payload
-      #                                      that is a rendered sentence. Two
-      #                                      of its six sections MUTATE the
+      #                                      that is a rendered sentence. Three
+      #                                      of its seven sections MUTATE the
       #                                      compiled output and run it: the
       #                                      retired `endsWith('_event')`
       #                                      forwarder, which receives nothing
       #                                      while the allowlist receives
-      #                                      everything, and a daemon that
+      #                                      everything; a daemon that
       #                                      broadcasts an off-contract action,
       #                                      which must be warned about on both
       #                                      sides and dropped rather than
-      #                                      forwarded malformed. It takes
+      #                                      forwarded malformed; and — since
+      #                                      KAN-164 — a daemon with undeclared
+      #                                      fields injected at one emission
+      #                                      site at TWO depths, against which
+      #                                      the pre-fix depth-1 projector is
+      #                                      rebuilt and shown to miss the
+      #                                      deeper one. It takes
       #                                      about ninety seconds, most of it
       #                                      waiting out two real 30-second
       #                                      fleet sweeps — `agent.lost` and

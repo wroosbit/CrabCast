@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import type { AgentConfig } from './types.js';
 
 /**
  * THE EVENT CONTRACT — the one place the published event surface is written
@@ -65,6 +66,224 @@ export const EVENT_NAMES = [
 
 export type CrabcastEventName = (typeof EVENT_NAMES)[number];
 
+// ------------------------------------------------- the declared interiors --
+
+/**
+ * `[A] extends [B] and [B] extends [A]` — the two-way test, as a type.
+ *
+ * Written as `true`/`false` rather than as a tuple of `never`s because `never`
+ * is assignable to everything, so the obvious spelling of this check passes
+ * whatever you feed it. The assertions below read `const _x: Exact<A, B> = true`
+ * and go red on the assignment when the two sides disagree.
+ */
+export type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+/**
+ * HOW DEEP THE PROJECTION GOES, AND WHERE IT STOPS.
+ *
+ * The forwarder used to project one level: `payload[field] = msg[field]` copied
+ * a nested object by reference, entire, and `Object.keys(msg)` enumerated the
+ * top level only. §4 of the document said "anything undeclared is dropped
+ * before it leaves" without qualification, and that sentence was true at depth
+ * 1 — the interior of `config`, `outcomes`, `preemption`, `capacity`,
+ * `changed[]` and `removed[]` travelled unprojected and, worse, unreported: a
+ * field added inside `config` reached an MCP subscriber AND did not appear in
+ * `undeclared`, so the drift warning that exists to catch exactly that stayed
+ * silent (KAN-164).
+ *
+ * The fix restores the sentence rather than shrinking it: the composites are
+ * declared here, field by field, and {@link projectEvent} walks them. Adding a
+ * knob inside `config` without declaring it is now the same event as adding a
+ * field at the top level — dropped from the MCP payload, named in `undeclared`,
+ * and warned about on our side.
+ *
+ * **A DECLARED FIELD WITH NO SHAPE IS A SCALAR, and that default is the loud
+ * one.** If a declared field grows an interior nobody wrote down here, its keys
+ * are reported as drift and the field does not go out — rather than the field
+ * travelling whole and the interior going unexamined, which is the defect this
+ * type exists to close. Forgetting is red, not quiet.
+ */
+export type FieldShape =
+  /**
+   * A leaf. `null`, a string, a number, a boolean — anything with no interior
+   * for the contract to have an opinion about. An OBJECT arriving here is
+   * drift: see the note above.
+   */
+  | { readonly kind: 'scalar' }
+  /**
+   * Declared, and travels whole ON PURPOSE — a region whose interior is not
+   * ours to declare.
+   *
+   * `why` is a REQUIRED field of the type so that a second hole cannot be
+   * opened without its author writing down a reason a reviewer can argue with;
+   * an unexplained one is indistinguishable from the depth-1 bug being
+   * reintroduced a field at a time. It is prose for a reader of this file.
+   * §4 of `docs/event-contract.md` states the same reason for a reader of the
+   * document, and NOTHING CHECKS THAT THE TWO AGREE — adding a `verbatim`
+   * shape means editing both.
+   */
+  | { readonly kind: 'verbatim'; readonly why: string }
+  /** An object whose keys are known. Anything else it carries is drift. */
+  | {
+      readonly kind: 'object';
+      readonly fields: Readonly<Record<string, FieldShape>>;
+      /** Keys the emitting site legitimately omits. Everything else is `missing`. */
+      readonly optional?: readonly string[];
+    }
+  /** Every element projected through one shape. */
+  | { readonly kind: 'array'; readonly of: FieldShape };
+
+const SCALAR: FieldShape = { kind: 'scalar' };
+const SCALARS: FieldShape = { kind: 'array', of: SCALAR };
+
+/**
+ * `config` — {@link AgentConfig}, every knob.
+ *
+ * TOTAL OVER THE TYPE, which is the whole reason this is a mapped type rather
+ * than an object literal: a knob added to `AgentConfig` without a line here
+ * does not compile. That is the same guard `RECONFIGURATION_COST` puts on
+ * reconfiguration behaviour, applied to publication — and it is the guard that
+ * matters most, because `config`'s interior is what a consumer diffs to detect
+ * configuration drift. None of `priority`, `refusable`, `chargeable`,
+ * `preemptable`, `launcher`, `prompt`, `mcpServers` or `label` was a declared
+ * field of anything before this; they travelled inside a declared field,
+ * unexamined.
+ */
+const CONFIG_FIELDS: { [K in keyof Required<AgentConfig>]: FieldShape } = {
+  priority: SCALAR,
+  refusable: SCALAR,
+  chargeable: SCALAR,
+  preemptable: SCALAR,
+  launcher: SCALAR,
+  prompt: SCALAR,
+  /**
+   * THE ONE DELIBERATE HOLE IN THE RECURSION, and §4 names it rather than
+   * leaving a consumer to discover it.
+   *
+   * Both halves of this map are the caller's: the keys are server names out of
+   * their vocabulary, and the values are definitions CrabCast writes into
+   * `.mcp.json` VERBATIM and — by the promise on `McpServerSpec` in
+   * `src/types.ts` — never
+   * reads, validates, resolves or reorders. There is nothing here for this
+   * contract to declare, and declaring it would be this daemon claiming to know
+   * a shape it has promised not to look at.
+   *
+   * So it travels whole, which makes the exception observable: the depth proof
+   * adds a key inside `config.mcpServers` and asserts it ARRIVES, beside the
+   * field it adds inside `config` and asserts is dropped.
+   */
+  mcpServers: {
+    kind: 'verbatim',
+    why:
+      "the caller's own server definitions, written into .mcp.json verbatim and never read " +
+      'by this daemon — neither the names they chose nor the JSON under them is ours to declare'
+  },
+  label: SCALAR
+};
+
+/** Which knobs `configure` may leave out. Absent ones are not `missing`. */
+const OPTIONAL_CONFIG_KEYS = ['prompt', 'mcpServers', 'label'] as const;
+
+/** The optional keys of {@link AgentConfig}, derived rather than restated. */
+type OptionalConfigKeys = {
+  [K in keyof AgentConfig]-?: Record<string, never> extends Pick<AgentConfig, K> ? K : never;
+}[keyof AgentConfig];
+
+// A knob that becomes optional (or stops being) without this list moving would
+// otherwise be reported `missing` on every event, or never reported at all.
+const _optionalConfigKeysAreExact: Exact<
+  OptionalConfigKeys,
+  (typeof OPTIONAL_CONFIG_KEYS)[number]
+> = true;
+
+const CONFIG_SHAPE: FieldShape = {
+  kind: 'object',
+  fields: CONFIG_FIELDS,
+  optional: OPTIONAL_CONFIG_KEYS
+};
+
+/**
+ * `outcomes` — every knob, with what the `configure` call did to it.
+ *
+ * The same key set as `config` and total over it for the same reason, but with
+ * NOTHING optional: the emitting site loops over every attribute, so a knob
+ * absent here is a knob the loop did not reach.
+ */
+const OUTCOMES_SHAPE: FieldShape = {
+  kind: 'object',
+  fields: Object.fromEntries(
+    Object.keys(CONFIG_FIELDS).map((knob) => [knob, SCALAR])
+  ) as { [K in keyof Required<AgentConfig>]: FieldShape }
+};
+
+/**
+ * `capacity` — the capacity report, flat and all scalars.
+ *
+ * Exported because the object it describes is built by `capacityDto` in
+ * `router.ts`, and `router.ts` asserts at COMPILE time that its keys and these
+ * are the same set, in both directions. That assertion lives there rather than
+ * here because this file must not import the router — the router imports this
+ * one — and because the check belongs next to the thing that would drift.
+ */
+export const CAPACITY_FIELDS = {
+  cap: SCALAR,
+  running: SCALAR,
+  exemptAgents: SCALAR,
+  headroom: SCALAR,
+  atCapacity: SCALAR,
+  capBoundBy: SCALAR,
+  headroomBoundBy: SCALAR,
+  reason: SCALAR,
+  cores: SCALAR,
+  load1: SCALAR,
+  totalMb: SCALAR,
+  availableMb: SCALAR,
+  agentMemoryMb: SCALAR,
+  agentCores: SCALAR,
+  agentMemorySource: SCALAR,
+  agentCoresSource: SCALAR,
+  measuredAt: SCALAR,
+  measuredWindowSeconds: SCALAR,
+  measuredAgentTrees: SCALAR,
+  capByCpu: SCALAR,
+  capByMemory: SCALAR,
+  headroomByCap: SCALAR,
+  headroomByLoad: SCALAR,
+  headroomByMemory: SCALAR,
+  summary: SCALAR
+} satisfies Record<string, FieldShape>;
+
+const CAPACITY_SHAPE: FieldShape = { kind: 'object', fields: CAPACITY_FIELDS };
+
+/** `preemption.by` — who took the slot. Asserted against `router.ts` too. */
+export const PREEMPTION_BY_FIELDS = {
+  path: SCALAR,
+  paneName: SCALAR,
+  priority: SCALAR
+} satisfies Record<string, FieldShape>;
+
+/**
+ * `preemption` — everything the retired `agent_preempted_event` carried.
+ *
+ * `capacity` is optional here and required nowhere else: the block is built by
+ * `deactivationCause`, which spreads the capacity report in only when the gate
+ * that made the decision handed one over.
+ */
+export const PREEMPTION_FIELDS = {
+  at: SCALAR,
+  by: { kind: 'object', fields: PREEMPTION_BY_FIELDS },
+  priority: SCALAR,
+  herdrStatus: SCALAR,
+  derivation: SCALAR,
+  capacity: CAPACITY_SHAPE
+} satisfies Record<string, FieldShape>;
+
+const PREEMPTION_SHAPE: FieldShape = {
+  kind: 'object',
+  fields: PREEMPTION_FIELDS,
+  optional: ['capacity']
+};
+
 /** What the contract says about one event. */
 export interface EventSpec {
   /** The pre-rename action name, or null for an event that is new here. */
@@ -83,6 +302,14 @@ export interface EventSpec {
   required: readonly string[];
   /** Payload fields that may be absent, with the condition that decides it. */
   optional: readonly string[];
+  /**
+   * The interior of any declared field that HAS one. See {@link FieldShape}.
+   *
+   * A field named in `required` or `optional` and absent from here is a
+   * SCALAR — so a composite that grows without a line here has its interior
+   * reported as drift rather than passed through unexamined (KAN-164).
+   */
+  shapes?: Readonly<Record<string, FieldShape>>;
   /** The field naming this event's subject, for one-line human logs. */
   subject: string;
 }
@@ -112,6 +339,10 @@ export const EVENT_CONTRACT: Record<CrabcastEventName, EventSpec> = {
     // required rather than optional.
     required: ['path', 'config', 'configVersion', 'configuredAt', 'changed', 'outcomes'],
     optional: [],
+    // THREE of this event's six fields are composite, which is why the depth
+    // proof is written against this one: `config`'s interior is what a
+    // consumer diffs to detect configuration drift.
+    shapes: { config: CONFIG_SHAPE, changed: SCALARS, outcomes: OUTCOMES_SHAPE },
     subject: 'path'
   },
   'agent.activated': {
@@ -137,6 +368,7 @@ export const EVENT_CONTRACT: Record<CrabcastEventName, EventSpec> = {
     // two events describing one thing and left a subscriber to correlate them.
     // Everything it carried is on `preemption` below.
     optional: ['paneName', 'sessionId', 'preemption'],
+    shapes: { preemption: PREEMPTION_SHAPE },
     subject: 'path'
   },
   'agent.forgotten': {
@@ -144,6 +376,7 @@ export const EVENT_CONTRACT: Record<CrabcastEventName, EventSpec> = {
     fires: '`forget` was accepted: the record is gone, and so is the residue it names',
     required: ['path', 'removed'],
     optional: [],
+    shapes: { removed: SCALARS },
     subject: 'path'
   },
   'agent.status_changed': {
@@ -188,6 +421,10 @@ export const EVENT_CONTRACT: Record<CrabcastEventName, EventSpec> = {
       'reason'
     ],
     optional: [],
+    // The same `config` interior as `agent.configured`, and reached the same
+    // way — this payload is the `MissingAgent` row spread whole, so the echo's
+    // shape is this event's shape by construction.
+    shapes: { config: CONFIG_SHAPE },
     subject: 'path'
   },
   'agent.detached': {
@@ -204,6 +441,7 @@ export const EVENT_CONTRACT: Record<CrabcastEventName, EventSpec> = {
     // is the machine, and `what` names the activation that overrode it.
     required: ['what', 'capacity'],
     optional: [],
+    shapes: { capacity: CAPACITY_SHAPE },
     subject: 'what'
   },
   'registry.degraded': {
@@ -314,10 +552,119 @@ export const events = new EventStream();
 export interface ProjectedEvent {
   /** The published payload: envelope plus exactly the declared fields. */
   payload: Record<string, unknown>;
-  /** Declared fields the broadcast did not carry. */
+  /**
+   * Declared fields the broadcast did not carry.
+   *
+   * Dotted where the field is inside a composite — `config.launcher` — for the
+   * same reason `undeclared` is: at depth, the field name alone does not say
+   * which of the two `priority`s (the knob, or the preempted agent's) is meant.
+   */
   missing: string[];
-  /** Fields the broadcast carried that the contract does not publish. */
+  /**
+   * Fields the broadcast carried that the contract does not publish, at ANY
+   * depth: `activatedBy` at the top level, `config.telemetry` one down,
+   * `preemption.by.host` two, `changed[0].name` through an array.
+   */
   undeclared: string[];
+}
+
+/** Where the walk currently is, for a legible drift report. See {@link projectValue}. */
+type Drift = { missing: string[]; undeclared: string[] };
+
+/**
+ * Project ONE value through ONE declared shape, recursively.
+ *
+ * Returns what may be published and appends anything it had to leave behind to
+ * `drift`, named by its full path. The two go together on purpose: a field that
+ * is dropped and NOT reported is the defect this function exists to close — an
+ * MCP subscriber quietly losing something is what the contract's whole drift
+ * apparatus is for, and it was blind below the top level until KAN-164.
+ *
+ * `null` passes every shape untouched. `config: null` on `agent.lost` is an
+ * ANSWER — "there is no record here" — rather than a composite with an interior
+ * to examine, and inventing drift under it would report a shape that is not
+ * there.
+ *
+ * A projected composite is a NEW object rather than the one the daemon built,
+ * so its keys come out in declaration order rather than the emitting site's.
+ * Said because it is a real difference and not because it is a promise: JSON
+ * object key order is not observable to anything that reads the payload back,
+ * and this contract does not offer one. The declarations are nevertheless
+ * written in the producing code's order, so the wire looks the way it did.
+ */
+function projectValue(value: unknown, shape: FieldShape, at: string, drift: Drift): unknown {
+  if (value === null) return null;
+
+  switch (shape.kind) {
+    case 'verbatim':
+      return value;
+
+    case 'array': {
+      if (!Array.isArray(value)) {
+        // Declared an array, arrived as something else. Report whatever
+        // interior it has rather than passing an unexamined object through
+        // under an array's name.
+        reportInterior(value, at, drift);
+        return undefined;
+      }
+      return value.map((element, i) => projectValue(element, shape.of, `${at}[${i}]`, drift));
+    }
+
+    case 'object': {
+      if (typeof value !== 'object' || Array.isArray(value)) {
+        reportInterior(value, at, drift);
+        return undefined;
+      }
+      const source = value as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      const optional = new Set(shape.optional ?? []);
+      for (const [key, sub] of Object.entries(shape.fields)) {
+        const where = `${at}.${key}`;
+        if (source[key] === undefined) {
+          if (!optional.has(key)) drift.missing.push(where);
+          continue;
+        }
+        const projected = projectValue(source[key], sub, where, drift);
+        if (projected !== undefined) out[key] = projected;
+      }
+      for (const key of Object.keys(source)) {
+        if (!(key in shape.fields)) drift.undeclared.push(`${at}.${key}`);
+      }
+      return out;
+    }
+
+    case 'scalar':
+      // A LEAF THAT ARRIVED WITH AN INTERIOR. The contract says this field has
+      // no shape, so there is no declaration under which any of its keys could
+      // be published — and the safe reading of "undeclared" is the one that
+      // reports and drops rather than the one that passes it through, which is
+      // exactly the depth-1 behaviour being retired here.
+      if (typeof value === 'object') {
+        reportInterior(value, at, drift);
+        return undefined;
+      }
+      return value;
+  }
+}
+
+/** Name every key under an undeclared interior, so the warning says what was dropped. */
+function reportInterior(value: unknown, at: string, drift: Drift): void {
+  if (Array.isArray(value)) {
+    // An EMPTY array reports itself, because reporting nothing for it would
+    // drop a field silently — the one outcome this whole apparatus exists to
+    // make impossible.
+    if (value.length === 0) drift.undeclared.push(`${at}[]`);
+    value.forEach((element, i) => reportInterior(element, `${at}[${i}]`, drift));
+    return;
+  }
+  if (value !== null && typeof value === 'object') {
+    const keys = Object.keys(value as object);
+    // An empty object is still an interior where the contract declared none.
+    if (keys.length === 0) drift.undeclared.push(`${at}{}`);
+    for (const key of keys) drift.undeclared.push(`${at}.${key}`);
+    return;
+  }
+  drift.undeclared.push(at);
 }
 
 /**
@@ -338,6 +685,14 @@ export interface ProjectedEvent {
  *                  rather than leaked, because a field that appears on the
  *                  wire without being written down is exactly the internal
  *                  convention this slice exists to stop shipping.
+ *
+ * BOTH LISTS RUN TO THE BOTTOM OF EVERY COMPOSITE (KAN-164). They used to run
+ * one level: a declared field's value was copied by reference, entire, so a
+ * field added inside `config` was published AND absent from `undeclared` —
+ * delivered to a subscriber, unexamined, by the mechanism whose whole job was
+ * to catch it. `spec.shapes` declares the interiors and {@link projectValue}
+ * walks them, so the two lists name paths (`config.telemetry`) where the field
+ * is not at the top level.
  */
 export function projectEvent(msg: any): ProjectedEvent | null {
   const action = msg?.action;
@@ -352,12 +707,27 @@ export function projectEvent(msg: any): ProjectedEvent | null {
   };
 
   const missing: string[] = [];
+  // Kept apart from `missing`/`undeclared` until the top-level pass is done, so
+  // the shallow findings still come first in both lists: the top-level drift
+  // report is the one that has caught real defects (`activatedBy` arriving on
+  // `agent.lost`), and burying it under a nested path would be trading the
+  // depth that works for the one that did not.
+  const nested: Drift = { missing: [], undeclared: [] };
+  /** A declared field with no interior written down is a scalar. See {@link FieldShape}. */
+  const shapeOf = (field: string): FieldShape => spec.shapes?.[field] ?? SCALAR;
+
   for (const field of spec.required) {
-    if (msg[field] === undefined) missing.push(field);
-    else payload[field] = msg[field];
+    if (msg[field] === undefined) {
+      missing.push(field);
+      continue;
+    }
+    const projected = projectValue(msg[field], shapeOf(field), field, nested);
+    if (projected !== undefined) payload[field] = projected;
   }
   for (const field of spec.optional) {
-    if (msg[field] !== undefined) payload[field] = msg[field];
+    if (msg[field] === undefined) continue;
+    const projected = projectValue(msg[field], shapeOf(field), field, nested);
+    if (projected !== undefined) payload[field] = projected;
   }
 
   const declared = new Set<string>([
@@ -373,7 +743,11 @@ export function projectEvent(msg: any): ProjectedEvent | null {
   ]);
   const undeclared = Object.keys(msg).filter((k) => !declared.has(k));
 
-  return { payload, missing, undeclared };
+  return {
+    payload,
+    missing: [...missing, ...nested.missing],
+    undeclared: [...undeclared, ...nested.undeclared]
+  };
 }
 
 /** A one-line human summary, for a log where the whole payload would not fit. */

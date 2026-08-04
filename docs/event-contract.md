@@ -281,14 +281,54 @@ no fallback must not be left to assume whichever suits them:
 
 | | what the payload contains |
 | --- | --- |
-| **socket** | **AT LEAST** the fields §1 declares. `broadcast` filters nothing, so a field this daemon happens to carry internally reaches you. |
-| **MCP** | **EXACTLY** the fields §1 declares. The forwarder projects; anything undeclared is dropped before it leaves. |
+| **socket** | **AT LEAST** the fields §1 declares. `broadcast` filters nothing, so a field this daemon happens to carry internally reaches you — at any depth, including inside a composite. |
+| **MCP** | **EXACTLY** the fields §1 declares, **at every depth**. The forwarder projects recursively; anything undeclared is dropped before it leaves, whether it is a field of the event or a field inside `config`, `outcomes`, `preemption`, `capacity`, `changed[]` or `removed[]`. **One region is exempt and named below: the values of `config.mcpServers`.** |
 
 So, as contract: **a socket subscriber receiving a field §1 does not declare
 must ignore it and must not error**, exactly as it must for an unrecognised
 action. Do not key behaviour off an undeclared field — it is an internal value
 that has not been designed for you, and it can change or vanish without any of
 this document changing.
+
+### How deep "undeclared" goes, and the one place it stops
+
+**This paragraph used to be one unqualified sentence, and it was true only at
+depth 1** — the forwarder copied a declared field's *value* wholesale, so the
+interior of every composite travelled unprojected *and* unreported. A field
+added inside `config` reached an MCP subscriber and did not appear in the drift
+warning that exists to catch exactly that (KAN-164). The claim was broader than
+the mechanism under it.
+
+The mechanism was widened rather than the sentence narrowed, because `config`'s
+interior is what a consumer diffs to detect configuration drift and shrinking
+the guarantee there would have been shrinking the useful half. So `src/events.ts`
+now declares the interior of every composite field — every knob of `config`, the
+same key set for `outcomes`, `preemption` and its nested `by` and `capacity`
+blocks, the full capacity report, and the element type of `changed[]` and
+`removed[]` — and the projection walks all of it. Concretely, on the MCP path:
+
+* a field added **inside a composite** is dropped and reported by its path
+  (`config.telemetryToken`), exactly as a top-level one is reported by its name;
+* a declared field that grows an interior nobody wrote down is **also** dropped
+  and reported, rather than silently reacquiring the old pass-through — the
+  default for a declared field is "no interior", and forgetting is loud;
+* `config` and `capacity` are held to their producing code **at compile time**,
+  in both directions, so a knob added to `AgentConfig` or a field added to the
+  capacity report fails the build rather than the wire.
+
+**The exemption, stated rather than left to be found: the `config.mcpServers`
+map travels whole — both the server names and the definitions under them.**
+They are the caller's own bytes, written into `.mcp.json` verbatim, and CrabCast
+promises never to read, validate, resolve or reorder them; there is nothing
+there for this contract to declare, and declaring it would be this daemon
+claiming to know a shape it has promised not to look at. So an undeclared key
+inside `config.mcpServers` **is delivered**. That is the whole of the exception:
+one field, for that reason. `verify-event-contract.mjs` §7 asserts it arrives,
+beside the field it asserts is dropped, so the hole is observable rather than
+only described.
+
+Nothing changed on the socket. `broadcast` still filters nothing at any depth,
+which is why the must-ignore clause above is contract rather than advice.
 
 Why not project on the socket too, and make both paths exhaustive? Because the
 socket is this daemon's own multiplexed protocol, where `broadcast` filtering
@@ -362,7 +402,9 @@ declares:
 The projection is enforced in both directions and drift is logged either way: a
 declared field the daemon did not send, and a field the daemon sent that this
 document does not publish. The first is the `undefined/undefined` defect in its
-general form. The second is an internal convention trying to ship again.
+general form. The second is an internal convention trying to ship again. **Both
+run to the bottom of every composite** and name what they found by its path —
+`config.launcher`, `preemption.by.host` — with the single exemption §4 states.
 
 This projection is what makes the MCP payload **exhaustive** where the socket's
 is a **minimum** — see §4, which states the difference as contract and tells a
@@ -407,6 +449,22 @@ overran the bound in §2 fails rather than passing — and that a subscriber
 reconnecting across a daemon restart sees a new `bootId` and recovers the
 fleet. It also asserts `seq` is **contiguous** rather than merely increasing,
 which is what makes "your `seq` jumped, so you missed events" mean anything.
+
+Its §7 is the depth half of §4. It injects two undeclared fields at one real
+emission site — one at the top level, one inside `config` — and rebuilds the
+pre-fix depth-1 projector beside the current one, pointed at the same daemon:
+the current forwarder drops and names both, the old one catches only the
+shallow field, and the socket subscriber receives both because its payload is a
+minimum. The `config.mcpServers` exemption is asserted the other way, as an
+arrival.
+
+**What §7 does not test, because it supplies its own input.** It proves an
+undeclared field arriving at depth *is* caught; it does not prove none exists
+today. That second claim is §2's, asserted over all nine events produced by
+real operations on an unmutated build, where the drift report must be empty —
+and §2 now reads the recursive projector, so a composite that really has grown
+an undeclared field turns §2 red with §7 untouched. Two claims, two sections,
+and neither stands in for the other.
 
 Read that 32s figure against §2's bound, which is **30s plus one census read**
 and not a flat 30s. The script's success line says so in full — "inside the

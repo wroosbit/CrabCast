@@ -2,7 +2,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { CrabcastConfig } from './config.js';
 import { MAX_LINE_CHARS } from './ipc.js';
-import { EventFrame, events } from './events.js';
+import {
+  CAPACITY_FIELDS,
+  EventFrame,
+  Exact,
+  PREEMPTION_BY_FIELDS,
+  PREEMPTION_FIELDS,
+  events
+} from './events.js';
 import { AgentConfig, DaemonResponse, McpServerSpec } from './types.js';
 import { removeProvisionedArtifacts } from './provisioning.js';
 import {
@@ -380,6 +387,26 @@ function capacityDto(c: Capacity) {
     summary: summarizeCapacity(c)
   };
 }
+
+/**
+ * THIS DTO IS PUBLISHED ON AN EVENT, so the event contract has to know its
+ * shape — and finding out one field at a time on the wire is what KAN-164 was.
+ *
+ * `capacity.overridden` carries this object whole, and so does
+ * `agent.deactivated`'s `preemption` block. The MCP forwarder projects
+ * recursively now, which means a field added above without a line in
+ * {@link CAPACITY_FIELDS} would be DROPPED from the notification and reported
+ * as drift at runtime — correct, and a slow way to find out. Asserted in BOTH
+ * directions, so a declaration whose field was deleted is equally red.
+ *
+ * It lives here rather than in `events.ts` because `events.ts` must not import
+ * the router — the router imports it — and because a check reads best beside
+ * the thing that would drift.
+ */
+const _capacityDtoMatchesTheContract: Exact<
+  keyof ReturnType<typeof capacityDto>,
+  keyof typeof CAPACITY_FIELDS
+> = true;
 
 /**
  * A flag that decides whether an agent gets destroyed, checked as a flag.
@@ -1379,6 +1406,30 @@ function deactivationCause(data: any, preemption?: PreemptionRecord) {
     }
   };
 }
+
+/**
+ * The same compile-time binding {@link CAPACITY_FIELDS} gets, for the block
+ * this helper builds — both levels of it.
+ *
+ * `preemption` is the deepest composite on the published surface: an object,
+ * carrying an object (`by`), carrying the capacity report. Every level is
+ * projected now, so every level needs a declaration that cannot drift away
+ * from the site that fills it.
+ */
+type PreemptionBlock = Extract<
+  ReturnType<typeof deactivationCause>,
+  { preemption: unknown }
+>['preemption'];
+
+const _preemptionBlockMatchesTheContract: Exact<
+  keyof PreemptionBlock,
+  keyof typeof PREEMPTION_FIELDS
+> = true;
+
+const _preemptionByMatchesTheContract: Exact<
+  keyof PreemptionBlock['by'],
+  keyof typeof PREEMPTION_BY_FIELDS
+> = true;
 
 export class MessageRouter {
   private activePtyListeners = new Map<string, () => void>();
