@@ -1132,8 +1132,14 @@ function mutantDist(name, file, from, to) {
   // and covers both the spawn path and the converge path at once.
   const dir = mutantDist(
     'record-loses-provenance', 'router.js',
-    'rememberActivated(record) {\n        const current',
-    'rememberActivated(record) {\n        record = { path: record.path, config: record.config };\n        const current'
+    // RE-ANCHORED FOR KAN-113, which gave this method a `caller` argument — it
+    // is now also where the supervisor of record is decided, because both
+    // activate paths reach the log through it. The old anchor stopped matching
+    // and this script REFUSED TO RUN rather than skipping the section, which is
+    // the guard doing its job for the second time; the fix is to follow the
+    // signature, not to loosen the match.
+    'rememberActivated(record, caller) {\n        const current',
+    'rememberActivated(record, caller) {\n        record = { path: record.path, config: record.config };\n        const current'
   );
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
@@ -1194,8 +1200,12 @@ function mutantDist(name, file, from, to) {
   // half of section 7 passed for its entire life.
   const dir = mutantDist(
     'everactivated-follows-liveness', 'router.js',
-    'everActivated: intent.everActivated\n    };',
-    'everActivated: intent.everActivated || globalThis.__kan125_live === true\n    };'
+    // The trailing `};` anchored this to the LAST field of the echo, and
+    // KAN-113 added `activatedBy` after it. Anchored on the field's own line
+    // instead — which is what this mutation was always about — so the next
+    // slice to extend the echo does not move it again.
+    'everActivated: intent.everActivated,',
+    'everActivated: intent.everActivated || globalThis.__kan125_live === true,'
   );
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));

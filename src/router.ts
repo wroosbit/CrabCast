@@ -91,6 +91,29 @@ interface ConfigEcho {
    * agent rather than about the list it happens to be in.
    */
   everActivated: boolean;
+  /**
+   * The supervisor of record — the canonical path of the agent that activated
+   * this one — or `null` when nobody did.
+   *
+   * ON THIS BLOCK RATHER THAN ON ANY ONE CATEGORY, and that placement is the
+   * whole defence. The failure this field exists to prevent is a category that
+   * silently omits it: a consumer reading `agents` would see parentage, build
+   * an org chart, and find `preemptedAgents` answering nothing about the agent
+   * whose supervisor it most needs to tell. Every category spreads
+   * {@link configEcho} rather than assembling its own block, so a new list gets
+   * this by construction, and a list that forgot has a field MISSING rather
+   * than a plausible-looking row. That is a stronger claim than a test, because
+   * it holds for categories nobody has written yet.
+   *
+   * `null` is emitted, never omitted, for the reason `config` is: over JSON an
+   * absent key reads as "not answered", and this is answered. A human-initiated
+   * activation has no supervisor, and that is a fact, not a gap.
+   *
+   * DURABLE, not observed — see {@link STATE_READ_PROVENANCE}. It comes off the
+   * append-only record and nothing about the live census can change it, which
+   * is what makes it survive a daemon restart.
+   */
+  activatedBy: string | null;
 }
 
 /**
@@ -157,7 +180,7 @@ const STATE_READ_PROVENANCE = {
    * echoing anything.
    */
   durable: [
-    'path', 'config', 'configVersion', 'configuredAt', 'everActivated', 'configured',
+    'path', 'config', 'configVersion', 'configuredAt', 'everActivated', 'activatedBy', 'configured',
     'label', 'refusable', 'chargeable', 'preemptable', 'launcher', 'priority',
     'since', 'at', 'wasPreempted', 'by', 'derivation', 'herdrStatusWhenPreempted',
     'occupiedAgent'
@@ -883,6 +906,93 @@ function parseAgentConfig(data: any): ConfigParse {
 }
 
 /**
+ * Which agent made this request, when an agent made it at all.
+ *
+ * THE CHANNEL IS THE ONE ARTIFACT THIS DAEMON OWNS. An agent reaches CrabCast
+ * through the `crabcast` MCP server, whose definition is the single entry a
+ * caller may NOT write for themselves (see `builtinMcpServer`): it is built
+ * per-agent, at activation, by the daemon, and written into that agent's own
+ * `.mcp.json`. So the daemon bakes the agent's canonical path into that
+ * definition's environment, the server it spawns puts it on every request, and
+ * an agent's identity is therefore something this daemon ISSUED rather than
+ * something a caller asserted. Nothing has to be trusted that was not already
+ * trusted — the same file already decides which daemon that agent can talk to.
+ *
+ * THE FAILURE THIS IS SHAPED AROUND IS THE CUSTOMER'S OWN, and it is worth
+ * naming because it is invisible: they shipped this field correctly typed,
+ * correctly stored, correctly reported — and the caller's identity never
+ * reached the daemon, so every agent came back with `activatedBy: null`. A
+ * present, well-typed, always-empty field, which took a follow-up release to
+ * make real. That is why the seam is only half the work and why the proof for
+ * this slice starts from a real multi-level chain rather than from the empty
+ * case: an implementation that records a parent for NOBODY passes every
+ * negative assertion in this file.
+ *
+ * `null` for anything that is not a resolvable absolute directory, including
+ * the ordinary case of a human at a shell. {@link canonicalizeOrNull} is the
+ * same canonicalization every address goes through, so a supervisor identified
+ * through a symlink is the same agent as one identified through its target.
+ */
+function callerIdentity(data: any): string | null {
+  return canonicalizeOrNull(data?.agentPath);
+}
+
+/**
+ * The parent to write onto a record, from two sources IN A STATED ORDER.
+ *
+ * The two are not interchangeable and collapsing them into one expression is
+ * how this field starts inventing things:
+ *
+ *  1. **Derivation** — an identified caller. The ONLY source that may produce a
+ *     parent that was not there before, and it may do so only from an identity
+ *     this daemon issued (see {@link callerIdentity}). A caller with no
+ *     identity derives NOTHING; it does not derive a plausible default, and it
+ *     does not derive "the last one we saw".
+ *  2. **Carry-forward** — what the record already says. Every verb after
+ *     `configure` re-records the whole agent, so without this a stand-down, a
+ *     converging `activate` or a reconfigure by a human would write a fresh row
+ *     with no parent on it and silently orphan a live agent. That is the same
+ *     trap re-recording sprang on an earlier slice of this story, one field
+ *     over.
+ *
+ * It is deliberately NOT `caller ?? current` written inline, because the
+ * self-parentage rule sits between the two and the two branches have to be
+ * separable to be read.
+ *
+ * SELF-PARENTAGE IS REFUSED. An agent that activates itself is nobody's child:
+ * recording it would have a supervisor sending itself bulletins about itself,
+ * and any consumer walking the chain to find a root would walk in a circle.
+ * Refusing it falls through to carry-forward rather than to `null`, which is
+ * the difference between "that claim is not one I will record" and "you are now
+ * an orphan" — a converging `activate` that an agent issues against ITSELF is
+ * an ordinary reconciling call, and it must not cost the agent its parent.
+ *
+ * WHAT THERE IS NO SOURCE FOR, on purpose: the wire. No caller may pass an
+ * `activatedBy` of its own choosing on `configure` or `activate`. Parentage is
+ * observed by this daemon or it is absent, so there is no path by which a
+ * supervisor can be named for an agent that nothing actually activated.
+ */
+function parentFor(options: {
+  /** The agent being recorded. */
+  target: string;
+  /** Who is asking, if this daemon issued them an identity. */
+  caller: string | null;
+  /** What the record already says, if there is a record. */
+  current: string | null | undefined;
+}): string | null {
+  const { target, caller, current } = options;
+  if (caller !== null && caller !== target) return caller;
+  if (caller !== null && caller === target) {
+    console.error(
+      `[MessageRouter] Ignoring a self-parentage claim from ${caller}: an agent that ` +
+        `activates itself is nobody's child, so its supervisor of record is left as it was ` +
+        `(${current ?? 'none'}) rather than becoming itself.`
+    );
+  }
+  return current ?? null;
+}
+
+/**
  * The durable half of a state read, from the intent that holds it.
  *
  * ONE FUNCTION, EVERY CATEGORY. The failure this task exists to prevent is a
@@ -922,7 +1032,14 @@ function configEcho(intent: AgentIntent | undefined): ConfigEcho {
   // activate paths build this block AFTER the record is written, so what they
   // echo is a record that genuinely carries the activation. See handleActivate.
   if (!intent) {
-    return { config: null, configVersion: null, configuredAt: null, everActivated: false };
+    // `activatedBy: null` here says "no record, so no parent" — the same
+    // sentence `config: null` says about the configuration. It is NOT an
+    // assertion that some agent out there has no supervisor; a row with no
+    // record is not an agent at all.
+    return {
+      config: null, configVersion: null, configuredAt: null, everActivated: false,
+      activatedBy: null
+    };
   }
   return {
     // The frozen object itself, not a rebuild of it. A field-by-field copy here
@@ -932,7 +1049,14 @@ function configEcho(intent: AgentIntent | undefined): ConfigEcho {
     config: intent.record.config,
     configVersion: intent.configVersion,
     configuredAt: intent.configuredAt,
-    everActivated: intent.everActivated
+    everActivated: intent.everActivated,
+    // Straight off the record, with no `??` behind it. The registry normalizes
+    // both edges of the log (see `toActivatedBy`), so this is already `string |
+    // null` — and a defensive `?? null` here would be a SECOND normalization,
+    // in the one place that would then hide a first one that had stopped
+    // working. An always-null parent is precisely this task's named failure
+    // mode; it must be visible here rather than smoothed over.
+    activatedBy: intent.record.activatedBy
   };
 }
 
@@ -1204,7 +1328,21 @@ export class MessageRouter {
       path: agentPath,
       config: parsed.config,
       configVersion: (existing?.configVersion ?? 0) + 1,
-      configuredAt
+      configuredAt,
+      // WRITTEN HERE, AT THE MOMENT THE AGENT COMES INTO EXISTENCE, and not
+      // inferred later from anything. `configure` is where a supervisor first
+      // says an agent should exist, so it is where "whose agent is this"
+      // genuinely has an answer — reconstructing it afterwards would mean
+      // guessing from timing or from who happened to call next.
+      //
+      // A reconfigure by a HUMAN must not orphan an agent its supervisor
+      // created, which is what `parentFor`'s carry-forward branch is for: this
+      // call re-records the whole agent, and the parent travels with it.
+      activatedBy: parentFor({
+        target: agentPath,
+        caller: callerIdentity(data),
+        current: existing?.record.activatedBy
+      })
     };
 
     const durable = this.surfaceRegistryOutcome(
@@ -1687,18 +1825,38 @@ export class MessageRouter {
    * already-activated agent whose config has not changed genuinely changes
    * nothing, and appending would be a restatement.
    */
-  private rememberActivated(record: AgentRecord): RecordOutcome {
+  private rememberActivated(record: AgentRecord, caller: string | null): RecordOutcome {
     const current = this.deps.agentRegistry.intents().get(record.path);
+    // THE ONE PLACE AN ACTIVATION DECIDES PARENTAGE. Both activate paths — the
+    // one that spawns and the converging one that finds the agent already
+    // running — reach the log through here, so the rule is stated once instead
+    // of at each call site, where the second one would eventually be written
+    // differently from the first.
+    const activatedBy = parentFor({
+      target: record.path,
+      caller,
+      current: record.activatedBy
+    });
+    const toWrite: AgentRecord =
+      activatedBy === record.activatedBy ? record : { ...record, activatedBy };
+
     if (
       current?.event === 'activated' &&
-      JSON.stringify(current.record.config) === JSON.stringify(record.config)
+      JSON.stringify(current.record.config) === JSON.stringify(toWrite.config) &&
+      // PART OF "EXACTLY THIS", and leaving it out would have been a quiet
+      // defect: a supervisor activating an agent that is already up would be
+      // told yes, write nothing, and the agent would keep the parent it had —
+      // so the ONE call that establishes a new supervisor of record is exactly
+      // the call this short-circuit would swallow. A no-op is only a no-op when
+      // nothing about the record has changed.
+      current.record.activatedBy === toWrite.activatedBy
     ) {
       // The disk already knows exactly this — a skipped restatement is durable.
       return { ok: true };
     }
     return this.surfaceRegistryOutcome(
-      this.deps.agentRegistry.recordActivated(record),
-      `activated ${record.path}`
+      this.deps.agentRegistry.recordActivated(toWrite),
+      `activated ${toWrite.path}`
     );
   }
 
@@ -1741,6 +1899,12 @@ export class MessageRouter {
    * switched back on would have no priority, no launcher and no gate flags,
    * which is not a degraded activation — it is an agent that cannot be
    * activated at all.
+   *
+   * The supervisor of record travels with it, and takes no `caller` argument
+   * for the same reason: stopping an agent is not activating it, so a stand-down
+   * has no business MINTING parentage. It carries what the record already says,
+   * which is what keeps a preempted or switched-off agent findable by the
+   * supervisor that will be asked to decide whether to re-staff it.
    */
   private rememberDeactivated(
     record: AgentRecord,
@@ -2005,7 +2169,7 @@ export class MessageRouter {
       // REPAIRING the record would silently reset the compare-and-set token a
       // reconciler diffs on, on an agent that had been configured seven times.
       // A converging write that loses a field is not a repair.
-      const durable = this.rememberActivated(intent.record);
+      const durable = this.rememberActivated(intent.record, callerIdentity(data));
 
       // THE SECOND QUESTION, ASKED SEPARATELY (KAN-136). `occupancy.ours`
       // answers "is this pane ours"; it says nothing about whether THIS daemon
@@ -2259,7 +2423,7 @@ export class MessageRouter {
     // activation would then write a row whose version had silently reset,
     // which is exactly the compare-and-set-goes-backwards failure the field
     // exists to avoid.
-    const durable = this.rememberActivated(intent.record);
+    const durable = this.rememberActivated(intent.record, callerIdentity(data));
 
     this.deps.broadcast({
       action: 'agent_activated_event',

@@ -540,6 +540,20 @@ function configBlock(row: any, pad = INDENT + INDENT): string | null {
           ? 'RESUMES the conversation it was stopped in (this path has a recorded activation)'
           : 'starts FRESH — no activation recorded at this path'}`
       : null,
+    // The supervisor of record. Printed for `null` as well, and the wording is
+    // the point: "none" is a statement about this agent, not about this CLI's
+    // knowledge. An agent a human started genuinely has no supervisor, and a
+    // renderer that skipped the line would make that indistinguishable from a
+    // version of this CLI that had not been taught about the field.
+    //
+    // `undefined` — the daemon did not answer it at all — still prints nothing,
+    // for the reason the line above does: absence is not `null`, and inventing
+    // an answer for a field nobody sent is the failure this block exists for.
+    row.activatedBy !== undefined
+      ? `${pad}activated by: ${row.activatedBy === null
+          ? 'none — no supervisor of record (nothing identified activated it)'
+          : row.activatedBy}`
+      : null,
     ...unknown.map((key) => `${pad}${key}: ${compact(config[key])}`)
   );
 }
@@ -554,7 +568,7 @@ function configBlock(row: any, pad = INDENT + INDENT): string | null {
  */
 function configBlockSeen(reader: ResponseReader, pad?: string): string | null {
   const block = configBlock(reader.res, pad);
-  reader.seen('config', 'configVersion', 'configuredAt', 'everActivated');
+  reader.seen('config', 'configVersion', 'configuredAt', 'everActivated', 'activatedBy');
   return block;
 }
 

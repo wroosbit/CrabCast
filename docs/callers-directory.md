@@ -101,6 +101,28 @@ entry bakes in `CRABCAST_CONFIG` so a server spawned inside a workspace addresse
 the daemon that provisioned it. You could not write it correctly, so CrabCast
 does. Asking for a builtin it does not have is **refused**, naming what it has.
 
+That entry also carries **`CRABCAST_AGENT_PATH`: the agent's own canonical
+path**, and it is worth knowing what that is for. It is how an agent identifies
+itself when it calls CrabCast, which is the whole input to `activatedBy` — the
+supervisor of record. When an agent configures or activates another agent, the
+daemon records *which* agent did it, so a fleet has an org chart rather than a
+flat list.
+
+It is here rather than in the pane's environment on purpose. This file is the
+one artifact that is both **specific to one agent** and **outside that agent's
+power to write**, so an identity placed in it is one CrabCast *issued*, not one a
+caller *asserted* — and there is no `activatedBy` parameter on any verb, so
+parentage cannot be claimed, only observed. A pane environment variable would be
+inherited by every process the agent ever spawns, which is a different and much
+looser thing.
+
+Two consequences, stated because neither is obvious:
+
+- An agent configured **without** the `crabcast` builtin is never identified —
+  but it also has no way to reach the daemon, so it cannot activate anything.
+- The **CLI is never identified**. A human at a shell has no supervisor of
+  record, and `activatedBy: null` says so explicitly rather than by omission.
+
 ```bash
 crabcast configure /home/you/code/thing \
   --priority 5 --launcher claude \
@@ -287,3 +309,11 @@ from a response.
 
 It also proves it can **fail**: the last section mutates the things it guards and
 asserts the checks go red, because a check that cannot fail is not a check.
+
+`scripts/verify-activated-by.mjs` covers the `CRABCAST_AGENT_PATH` half, and it
+is deliberately arranged so that it cannot pass without the identity genuinely
+arriving: it reads the `.mcp.json` the daemon wrote, spawns the real MCP server
+with the environment **out of that file**, and lets two agents build a
+three-level chain. Nothing in that section types an identity in — because a
+proof that supplies its own input has not tested that the input arrives, which
+is precisely how this feature shipped broken elsewhere.

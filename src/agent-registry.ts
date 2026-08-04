@@ -143,6 +143,75 @@ export interface AgentRecord {
    * else.
    */
   configuredAt?: string;
+  /**
+   * The supervisor of record: the canonical path of the agent that activated
+   * this one. `null` when nobody did.
+   *
+   * WHY A PATH AND NOT A PAIR. The customer's own field is
+   * `{type, key} | null`, and it was read from their source rather than from
+   * their ticket before this was written. There is nothing to adopt literally:
+   * `{type, key}` IS the addressing model this daemon deleted, and re-importing
+   * it as a parent reference would put the vocabulary back one field at a time.
+   * An agent is a directory, so the agent that activated one is a directory
+   * too, and a path is already a complete address. Mapping ours onto theirs is
+   * a translation at their boundary, which is where they said it belongs.
+   *
+   * REQUIRED, AND `null` RATHER THAN ABSENT. Over JSON a missing key reads as
+   * "not answered", which is a different claim from "this agent has no
+   * parent" — and a human-initiated activation genuinely has no supervisor,
+   * which is a fact worth stating rather than leaving to be inferred from a
+   * gap. Both write and read normalize (see {@link AgentRegistry.record} and
+   * {@link AgentRegistry.readLog}), so every row that leaves this file in
+   * either direction carries the field explicitly. Required on the type rather
+   * than optional so the compiler — not a test somebody remembers to write —
+   * is what catches a construction site that does not decide.
+   *
+   * NOT A POLICY, JUST A RECORD. Nothing here notifies a parent, ranks by it,
+   * cascades through it or refuses anything because of it. Acting on parentage
+   * belongs to the consumer that asked for it.
+   */
+  activatedBy: string | null;
+}
+
+/**
+ * A parent reference, or `null` — a coercer at the boundary rather than a cast.
+ *
+ * Runs on both edges of the log: every row written goes through it and every
+ * row read comes back through it, so a value that is not a usable parent
+ * becomes NO PARENT rather than a half-parent that later reads as one.
+ *
+ * WHAT IT REFUSES, AND WHY EACH IS `null` RATHER THAN A REFUSAL TO BOOT. A
+ * malformed `configVersion` refuses the boot (see {@link hasValidProvenance})
+ * because a mistyped version travels into a caller's compare-and-set as though
+ * it were a version, and there is no value in its own domain that means "no
+ * version". This field is the opposite on both counts:
+ *
+ *  - `null` is a legitimate, frequent value here — most agents have no
+ *    supervisor — so coercing to it produces a record the API could have
+ *    produced, which is exactly the test the boot refusal applies.
+ *  - A WRONG parent is worse than no parent. It would name some other agent as
+ *    answerable for this one, and the consumer's whole reason for asking is to
+ *    notify a supervisor and draw an org chart from it.
+ *
+ * And it is per-row rather than fleet-wide: one hand-edited parent must not be
+ * able to stop a daemon from starting, because every other agent in that log is
+ * fine.
+ *
+ * WHAT THIS SILENTLY LOSES, said rather than left to be discovered: a
+ * hand-edited row whose `activatedBy` is a relative path or a non-string comes
+ * back as "no parent" with nothing said. That is a deliberate trade against the
+ * two points above, and the case it protects is the one that matters — a
+ * garbled parent never becomes a confident wrong answer.
+ *
+ * Absolute is required for the same reason {@link canonicalPath} requires it of
+ * every address: a relative path resolved here would be resolved against a
+ * daemon cwd that belongs to whichever client first spawned it.
+ */
+export function toActivatedBy(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || !path.isAbsolute(trimmed)) return null;
+  return trimmed;
 }
 
 /**
@@ -670,6 +739,13 @@ export class AgentRegistry {
     const entry: AgentLogEntry = {
       v: LOG_VERSION,
       ...record,
+      // AFTER the spread, so this wins: every row leaves this function with an
+      // explicit `activatedBy`, `null` when there is none. The type already
+      // requires it of a TypeScript caller; this is what makes the property
+      // hold for the JSON that reaches the disk regardless of who built the
+      // record, and it is the write-side half of the coercer. See
+      // {@link toActivatedBy}.
+      activatedBy: toActivatedBy(record.activatedBy),
       event,
       at: new Date().toISOString(),
       ...(preemption ? { preemption } : {})
@@ -754,7 +830,20 @@ export class AgentRegistry {
         continue;
       }
 
-      if (isUsableEntry(parsed)) entries.push(parsed);
+      // NORMALIZED ON THE WAY OUT, so no consumer downstream of this function
+      // has to know that a row written before this field existed carries no
+      // parent, or that a hand-edited one might carry nonsense. Every entry
+      // leaves here with `activatedBy` present and either a usable absolute
+      // path or `null` — which is what lets the record type require it rather
+      // than making every reader decide what an absent value means.
+      //
+      // The read-side half of the coercer; {@link record} is the write-side
+      // one. Both, because the log outlives any one daemon: rows in it were
+      // written by versions of this file that did not have the field, and rows
+      // in it will be read by versions that have moved on.
+      if (isUsableEntry(parsed)) {
+        entries.push({ ...parsed, activatedBy: toActivatedBy(parsed.activatedBy) });
+      }
     }
 
     return entries;
@@ -784,6 +873,15 @@ export class AgentRegistry {
       // record of an agent somebody simply switched back on. `v` is the file's
       // business, not the record's, and `everActivated` is a fact about the
       // path rather than about the configuration frozen onto it.
+      //
+      // `activatedBy` is deliberately NOT in that list and stays in `record`:
+      // it is part of who the agent IS, not of the event that happened to it.
+      // Pulling it out here is the single edit that would silently orphan a
+      // whole fleet — the record a later activation is rebuilt from would stop
+      // carrying a parent, every carried row would drop it at the next
+      // compaction, and the field would go on being emitted as `null`
+      // everywhere, looking exactly like a fleet nobody supervises.
+      // `verify-activated-by.mjs` §7 is what turns that edit red.
       const { v, event, at, preemption, wasPreempted, everActivated, ...record } = entry;
       // ONE PASS, NO EXTRA READ. An `activated` row is self-evident; anything
       // later carries the fact forward from the intent it is replacing, and a
@@ -968,6 +1066,17 @@ export class AgentRegistry {
    *
    *   **Compaction's preserve set is an allowlist. Every new terminal event
    *   state must be added to it explicitly, or it is silently dropped.**
+   *
+   * THE RULE IS ABOUT ROWS; THERE IS A SECOND ONE ABOUT FIELDS. All three
+   * preserve sets carry the record with `...intent.record`, so a field ADDED to
+   * {@link AgentRecord} survives compaction with no edit here — which is how
+   * `config` survives, and how `activatedBy` does. What that spread cannot
+   * defend against is a field being pulled OUT of the record upstream, in
+   * {@link AgentRegistry.intents}; there is a note there saying so. Neither is
+   * a claim to take on trust: `verify-activated-by.mjs` §5 drives a real log
+   * past the 500-record threshold and reads the parent back out of the
+   * rewritten file, because "it rides on the spread" is a sentence and the log
+   * on disk is the fact.
    *
    * Unbounded on purpose, unlike {@link standbyToPreserve}: a standby row is a
    * control offering a way back to work that still exists, and an old one is

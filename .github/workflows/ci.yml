@@ -156,6 +156,20 @@ jobs:
       #                                      a pane and `pane close` really
       #                                      removes one, so the pane count is a
       #                                      measurement rather than a fixture.
+      #   verify-activated-by                the supervisor of record: who
+      #                                      activated whom. In CI because its
+      #                                      first section is the only thing in
+      #                                      this suite that proves an agent's
+      #                                      IDENTITY REACHES THE DAEMON — it
+      #                                      reads the `.mcp.json` the daemon
+      #                                      wrote, spawns the real MCP server
+      #                                      with the environment out of that
+      #                                      file, and lets it build a
+      #                                      three-level chain. The defect it
+      #                                      exists for is a field that is
+      #                                      present, correctly typed and always
+      #                                      null, which every other assertion
+      #                                      about it passes.
       #   verify-state-read-echoes-config    every fleet category echoes the
       #                                      agent's frozen configuration, and
       #                                      `unstartedAgents` is distinct from
@@ -245,6 +259,7 @@ jobs:
             verify-callers-directory
             verify-daemon-provenance
             verify-state-read-echoes-config
+            verify-activated-by
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

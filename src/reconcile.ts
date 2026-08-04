@@ -19,6 +19,18 @@ import { delay, monotonicNow, nudgeResumedAgent } from './nudge.js';
  * daemon-side operation that clients merely *call*; a client never owned the
  * lifecycle, it triggered it. So restoration goes through the very same
  * `handleActivate` a CLI or MCP call uses, with nobody connected at all.
+ *
+ * AND SO PARENTAGE IS RESTORED RATHER THAN RE-DERIVED. `activatedBy` is on the
+ * durable record, and the record is what these calls carry forward — so an
+ * agent comes back after a power cut still knowing which supervisor put it
+ * there, without anything here having to remember it. Note what this pass
+ * deliberately does NOT do: it passes no caller identity, so `parentFor` takes
+ * its carry-forward branch and nothing is minted. That matters, because a
+ * restoration is the one activation with no supervisor behind it — the machine
+ * came back, nobody decided anything — and a boot that stamped a fresh parent
+ * on every agent would rewrite the fleet's org chart to say the daemon is
+ * everyone's supervisor. The two sources being separable is what makes that
+ * distinction expressible; see `parentFor` in router.ts.
  */
 
 /** How long to keep waiting for herdr's server before giving up on it. */

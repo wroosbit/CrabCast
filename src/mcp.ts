@@ -172,10 +172,26 @@ async function callDaemonAPI(action: string, data: any = {}): Promise<any> {
       action,
       ...data,
       id,
-      // Which agent is calling, when this server was spawned inside one. Dead
-      // weight today — the router reads it nowhere — and carried because it is
-      // the seam the supervisor-of-record slice plugs into. One field now,
-      // because an agent has one address.
+      // WHICH AGENT IS CALLING, and it is live now: the router derives
+      // `activatedBy` from it, so an agent that configures or activates another
+      // agent is recorded as its supervisor of record.
+      //
+      // This was carried as dead weight when the seam was cut, on the reasoning
+      // that the field would be needed later. Being carried is not the same as
+      // being CONNECTED, and the gap between the two is where the customer's
+      // own version of this feature spent a release: the field was on the wire,
+      // correctly typed, and nothing ever set it, so every agent came back with
+      // no parent and the whole feature was invisible while looking finished.
+      // What closes it is the other end — `builtinMcpServer` bakes
+      // CRABCAST_AGENT_PATH into the definition of the server this process IS,
+      // per agent, at activation. Neither half proves the other: a check that
+      // this line sends the variable says nothing about whether anything sets
+      // it, which is why `verify-activated-by.mjs` §1 builds a real chain
+      // end-to-end rather than asserting on either end alone.
+      //
+      // Absent when this server was not spawned inside an agent — a human's own
+      // MCP client, a hand-run server — and absent is the honest answer there:
+      // the daemon records no parent rather than inventing a plausible one.
       agentPath: process.env.CRABCAST_AGENT_PATH || undefined
     });
     // writeJsonLine refuses (returns false) on a destroyed socket. That is

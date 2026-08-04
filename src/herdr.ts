@@ -830,7 +830,12 @@ export class HerdrBridge {
       for (const name of requestedNames) {
         const spec = requested[name];
         if (spec === 'builtin') {
-          const builtin = builtinMcpServer(name, this.configPath);
+          // `session.path` is what makes the identity per-agent: this file is
+          // being written into that agent's own directory, so the daemon knows
+          // exactly whose it is at the moment it writes it. See
+          // `builtinMcpServer` — this argument is the whole supply of caller
+          // identity in this system, and it is issued here.
+          const builtin = builtinMcpServer(name, this.configPath, session.path);
           if (builtin === null) unsupplied.push(name);
           else definitions[name] = builtin;
           continue;
