@@ -873,6 +873,7 @@ function renderConfigure(reader: ResponseReader, request: Record<string, unknown
   // construction; the per-knob block below says both, per knob.
   reader.seen('applied', 'withheld', 'running');
   const reconfigured = reader.take('reconfigured');
+  const supervisor = reader.take<string | null>('activatedBy');
   return lines(
     `${reconfigured ? 'reconfigured' : 'configured'} ${what}`,
     field('pane name', reader.take('paneName')),
@@ -903,6 +904,17 @@ function renderConfigure(reader: ResponseReader, request: Record<string, unknown
         ? null
         : `${version}${previous !== undefined ? ` (was ${previous})` : ''}` +
           `, frozen ${reader.take('configuredAt') ?? '(not reported)'}`
+    ),
+    // The supervisor of record, on the call that may have minted it. `configure`
+    // on a new path is one of exactly two calls that establish parentage, so a
+    // caller learns what was recorded about its own call without a second read
+    // — and a human running this by hand sees "none", which is the truthful
+    // answer for a human-created agent rather than a missing line.
+    field(
+      'activated by',
+      supervisor === undefined
+        ? null
+        : (supervisor ?? 'none — no supervisor of record (you created it)')
     ),
     field('priority', config.priority),
     field('launcher', config.launcher),

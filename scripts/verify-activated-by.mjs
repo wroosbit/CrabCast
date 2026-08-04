@@ -46,7 +46,9 @@
 //   1. THE CHANNEL IS REAL — a real daemon, the real `.mcp.json` the daemon
 //      wrote, two real MCP servers, and a three-level chain built by agents
 //      identifying themselves rather than by this script asserting they did
-//   2. the chain survives a real daemon restart, through socket, CLI and MCP
+//   2. the chain survives a real daemon restart, through socket, CLI and MCP —
+//      including a COLD boot with the panes gone, where restoration respawns
+//      and could therefore stamp a parent, and does not
 //   3. every fleet category carries a REAL parent — each state produced, each
 //      asserted non-empty, and each value checked rather than merely present
 //   4. no identity records NO parent; a malformed claim becomes no parent
@@ -56,7 +58,8 @@
 //   6. parentage survives compaction past the 500-record threshold
 //   7. the durable record and the response agree when the write fails
 //   8. THE CHECKS CAN FAIL — the compiled daemon is mutated and they go red,
-//      with each mutation's own preconditions asserted first
+//      with each mutation's own preconditions asserted first. Mutation G is
+//      the one §2b exists for: a reconcile that stamps itself onto the fleet
 //
 // Usage:
 //   npm run build
@@ -78,6 +81,7 @@ const { loadConfig } = await import(path.join(distDir, 'config.js'));
 const { paneNameFor } = await import(path.join(distDir, 'identity.js'));
 const { connectToDaemon, onJsonLines, writeJsonLine, socketPathFor } =
   await import(path.join(distDir, 'ipc.js'));
+const { reconcileAgents } = await import(path.join(distDir, 'reconcile.js'));
 
 // --------------------------------------------------------------- the harness
 
@@ -619,7 +623,18 @@ function harness(logName, RouterCtor = MessageRouter, RegistryCtor = AgentRegist
       });
       router.handle(request);
     });
-  return { agentRegistry, bridge, events, invoke };
+  // A persistent router, for callers that are not a single request —
+  // `reconcileAgents` takes a router and drives it itself. Built from the same
+  // deps as `invoke`'s, so it is the real thing rather than a stand-in.
+  const router = new RouterCtor({
+    config,
+    herdrBridge: bridge,
+    daemonStartedAt: new Date(),
+    agentRegistry,
+    send: () => {},
+    broadcast: (msg) => events.push(msg)
+  });
+  return { agentRegistry, bridge, events, invoke, router };
 }
 
 // The three gate flags are spelled out rather than left to `configure`'s
@@ -631,6 +646,83 @@ function harness(logName, RouterCtor = MessageRouter, RegistryCtor = AgentRegist
 const KNOBS = {
   priority: 5, launcher: 'shell', refusable: true, chargeable: true, preemptable: true
 };
+
+// ===========================================================================
+rule('2b. a COLD boot restores parentage and does not stamp its own');
+// ===========================================================================
+//
+// §2 killed a daemon while the panes SURVIVED, so restoration re-attached and
+// never reached the spawn path — the only path that mints. That leaves the
+// sentence "reconcile passes no caller identity, so a boot does not stamp
+// itself as everyone's supervisor" true of the code and asserted by nothing: a
+// reviewer mutated reconcile to stamp a parent and every check still passed.
+//
+// A real cold boot — machine back, panes gone — does reach the mint. So this
+// drives the REAL `reconcileAgents` over an empty census, which respawns each
+// agent through the same `handleActivate` a client calls, and asserts the
+// supervisors are the ones the log already held.
+
+{
+  const h = harness('s2b');
+  const chief = ownedDir('s2b', 'chief');
+  const deputy = ownedDir('s2b', 'deputy');
+  const worker = ownedDir('s2b', 'worker');
+
+  // A two-level chain in the durable log, exactly as an outage would leave it:
+  // every agent's last event is `activated`, and nothing is running.
+  const rec = (p, parent) => ({
+    path: p, config: { ...KNOBS }, configVersion: 1,
+    configuredAt: new Date().toISOString(), activatedBy: parent
+  });
+  for (const [dir, parent] of [[chief, null], [deputy, chief], [worker, deputy]]) {
+    h.agentRegistry.recordConfigured(rec(dir, parent));
+    h.agentRegistry.recordActivated(rec(dir, parent));
+  }
+  setCensus([]);
+
+  const before = Object.fromEntries(
+    [...h.agentRegistry.intents()].map(([p, i]) => [path.basename(p), i.record.activatedBy])
+  );
+  given(
+    before.deputy === chief && before.worker === deputy && before.chief === null,
+    'GIVEN: the log holds a two-level chain and NOTHING is running — the state a power cut ' +
+      'leaves, and the only one where restoration actually respawns',
+    JSON.stringify(before)
+  );
+
+  const result = await reconcileAgents({
+    registry: h.agentRegistry,
+    herdrBridge: h.bridge,
+    router: h.router,
+    cause: 'daemon-restart',
+    log: () => {}
+  });
+  const restored = result.outcomes.filter((o) => o.result === 'restored').length;
+  given(
+    restored === 3,
+    'GIVEN: reconcile RESTORED all three — it respawned them rather than re-attaching, so it ' +
+      'went through the mint site. A re-attach would not have, and this section would be ' +
+      'asserting over a path it never took',
+    result.outcomes.map((o) => `${path.basename(o.path)}:${o.result}`).join(' ')
+  );
+
+  const after = Object.fromEntries(
+    [...h.agentRegistry.intents()].map(([p, i]) => [path.basename(p), i.record.activatedBy])
+  );
+  show('the chain after a cold boot:', after);
+  check(
+    JSON.stringify(after) === JSON.stringify(before),
+    'a cold boot restores every supervisor unchanged and stamps NOTHING — the daemon that ' +
+      'brought the fleet back does not become its parent, and the root stays a root',
+    `${JSON.stringify(before)} → ${JSON.stringify(after)}`
+  );
+  check(
+    after.chief === null,
+    'and the human-started root is still null rather than acquiring the boot as a supervisor',
+    `chief: ${JSON.stringify(after.chief)}`
+  );
+  setCensus([]);
+}
 
 // ===========================================================================
 rule('3. every fleet category carries a REAL parent — each state produced');
@@ -727,6 +819,50 @@ const cat = {
       `activatedBy: ${JSON.stringify(row.activatedBy)}`
     );
   }
+
+  // THE SWEEP: every array in the response, not only the six this script names.
+  //
+  // The type system holds `FleetCategories` to `ConfigEcho[]`, so a DECLARED
+  // category that drops the echo fails the build. It cannot hold a category
+  // added straight into the `respond({…})` call — TypeScript has no exact
+  // object type for the payload — and that residue was found by a reviewer
+  // adding exactly such a category and watching `tsc` exit 0.
+  //
+  // So this walks the actual response and applies the rule that matters: any
+  // row carrying a `config` echo is a census row, and a census row must carry
+  // `activatedBy`. Written against the response's own shape rather than a list
+  // of key names, because a list of key names is the thing that goes stale when
+  // somebody adds the seventh category.
+  const swept = [];
+  const missingParent = [];
+  for (const [key, value] of Object.entries(listed)) {
+    if (!Array.isArray(value)) continue;
+    for (const row of value) {
+      if (!row || typeof row !== 'object') continue;
+      // `config` is what marks a row as echoing the durable record. A row
+      // without it is not a census row at all (`priorities` is the live
+      // example: a projection for the capacity decision, carrying no echo —
+      // not `config`, not `configVersion`, not `everActivated` — so it is not
+      // a category that silently omits parentage, it is not a category).
+      if (!('config' in row)) continue;
+      swept.push(key);
+      if (!('activatedBy' in row)) missingParent.push(`${key}[] row ${row.path ?? '(no path)'}`);
+    }
+  }
+  given(
+    swept.length > 0,
+    'THE SWEEP has rows to sweep — an empty response would pass the next check ' +
+      'while proving nothing',
+    `${swept.length} echo-carrying row(s) across ${new Set(swept).size} key(s): ` +
+      `${[...new Set(swept)].join(', ')}`
+  );
+  check(
+    missingParent.length === 0,
+    'EVERY array of echo-carrying rows in the real response carries `activatedBy` — this is ' +
+      'the half the compiler cannot hold, since a category added straight to the respond() ' +
+      'call bypasses `FleetCategories` entirely',
+    missingParent.join('; ')
+  );
 
   // `agent_status` is the other read of the same question, and two derivations
   // of one fact can disagree. It answers through the same `configEcho`, and
@@ -1447,6 +1583,77 @@ function mutantDist(name, file, ...edits) {
       'reproduced in this codebase, where a reconciler that polls `activate` would become the ' +
       'supervisor of record for the whole fleet. §5 goes red',
     `A is ${path.basename(A)}, B is ${path.basename(B)}, the mutant says ${JSON.stringify(converged.activatedBy)}`
+  );
+  setCensus([]);
+}
+
+{
+  // MUTATION G — RECONCILE STAMPS ITSELF. The guarantee §2b exists for is that
+  // a boot restores parentage rather than minting it, and until this mutation
+  // existed that guarantee was true of the code and asserted by NOTHING: a
+  // reviewer made reconcile stamp a parent and every check in this file still
+  // passed, because §2's restart left the panes alive and restoration took the
+  // converging path, which cannot mint.
+  //
+  // §2b closed that by emptying the census so restoration respawns. This is
+  // what proves §2b is load-bearing rather than decorative.
+  //
+  // The stamp is a REAL directory, because the caller coercer canonicalizes and
+  // a path that does not resolve would become `null` — which is the correct
+  // answer and would make the mutant behave like the real thing for the wrong
+  // reason. That is the vacuous pass this whole section exists to rule out.
+  const stampDir = ownedDir('s8g', 'the-boot-daemon');
+  const dir = mutantDist(
+    'reconcile-stamps-itself', 'reconcile.js',
+    ['override: true\n            }, (msg) => {',
+     `override: true,\n                agentPath: ${JSON.stringify(stampDir)}\n            }, (msg) => {`]
+  );
+  const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
+  const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
+  const { reconcileAgents: brokenReconcile } = await import(path.join(dir, 'reconcile.js'));
+
+  const h = harness('s8g', Broken, BrokenReg);
+  const chief = ownedDir('s8g', 'chief');
+  const worker = ownedDir('s8g', 'worker');
+  const rec = (p, parent) => ({
+    path: p, config: { ...KNOBS }, configVersion: 1,
+    configuredAt: new Date().toISOString(), activatedBy: parent
+  });
+  for (const [d, parent] of [[chief, null], [worker, chief]]) {
+    h.agentRegistry.recordConfigured(rec(d, parent));
+    h.agentRegistry.recordActivated(rec(d, parent));
+  }
+  setCensus([]);
+  const before = Object.fromEntries(
+    [...h.agentRegistry.intents()].map(([p, i]) => [path.basename(p), i.record.activatedBy])
+  );
+  given(
+    before.worker === chief && before.chief === null,
+    'PRECONDITION: the mutant starts from a real chain with a null root — the thing a boot ' +
+      'could overwrite',
+    JSON.stringify(before)
+  );
+
+  const result = await brokenReconcile({
+    registry: h.agentRegistry, herdrBridge: h.bridge, router: h.router,
+    cause: 'daemon-restart', log: () => {}
+  });
+  given(
+    result.outcomes.filter((o) => o.result === 'restored').length === 2,
+    'PRECONDITION: and the mutant genuinely RESPAWNED them, so it reached the mint site at all',
+    result.outcomes.map((o) => `${path.basename(o.path)}:${o.result}`).join(' ')
+  );
+
+  const after = Object.fromEntries(
+    [...h.agentRegistry.intents()].map(([p, i]) => [path.basename(p), i.record.activatedBy])
+  );
+  show('the mutant fleet after its cold boot:', after);
+  check(
+    after.chief === stampDir && after.worker === stampDir,
+    'the mutant stamps the booting daemon onto EVERY restored agent — the root acquires a ' +
+      'supervisor it never had and the real chain is overwritten wholesale. §2b goes red, and ' +
+      'before §2b existed nothing in this file did',
+    `${JSON.stringify(before)} → ${JSON.stringify(after)} (stamp is ${path.basename(stampDir)})`
   );
   setCensus([]);
 }

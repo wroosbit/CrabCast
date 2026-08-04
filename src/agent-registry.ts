@@ -898,7 +898,7 @@ export class AgentRegistry {
       // carrying a parent, every carried row would drop it at the next
       // compaction, and the field would go on being emitted as `null`
       // everywhere, looking exactly like a fleet nobody supervises.
-      // `verify-activated-by.mjs` §7 is what turns that edit red.
+      // `verify-activated-by.mjs` §8 is what turns that edit red.
       const { v, event, at, preemption, wasPreempted, everActivated, ...record } = entry;
       // ONE PASS, NO EXTRA READ. An `activated` row is self-evident; anything
       // later carries the fact forward from the intent it is replacing, and a
@@ -1090,7 +1090,7 @@ export class AgentRegistry {
    * `config` survives, and how `activatedBy` does. What that spread cannot
    * defend against is a field being pulled OUT of the record upstream, in
    * {@link AgentRegistry.intents}; there is a note there saying so. Neither is
-   * a claim to take on trust: `verify-activated-by.mjs` §5 drives a real log
+   * a claim to take on trust: `verify-activated-by.mjs` §6 drives a real log
    * past the 500-record threshold and reads the parent back out of the
    * rewritten file, because "it rides on the spread" is a sentence and the log
    * on disk is the fact.

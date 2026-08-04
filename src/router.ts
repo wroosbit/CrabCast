@@ -95,15 +95,29 @@ interface ConfigEcho {
    * The supervisor of record — the canonical path of the agent that activated
    * this one — or `null` when nobody did.
    *
-   * ON THIS BLOCK RATHER THAN ON ANY ONE CATEGORY, and that placement is the
-   * whole defence. The failure this field exists to prevent is a category that
+   * ON THIS BLOCK RATHER THAN ON ANY ONE CATEGORY, and that placement is most
+   * of the defence. The failure this field exists to prevent is a category that
    * silently omits it: a consumer reading `agents` would see parentage, build
    * an org chart, and find `preemptedAgents` answering nothing about the agent
    * whose supervisor it most needs to tell. Every category spreads
-   * {@link configEcho} rather than assembling its own block, so a new list gets
-   * this by construction, and a list that forgot has a field MISSING rather
-   * than a plausible-looking row. That is a stronger claim than a test, because
-   * it holds for categories nobody has written yet.
+   * {@link configEcho} rather than assembling its own block, so a category that
+   * forgot has a field MISSING rather than a plausible-looking row.
+   *
+   * THIS COMMENT USED TO CLAIM MORE THAN THE CODE DID, and the correction is
+   * worth keeping because the overclaim is the easier thing to write. It said
+   * the property "holds for categories nobody has written yet". It did not: a
+   * new row interface that simply does not extend `ConfigEcho` compiled clean
+   * and shipped in the response, which was demonstrated rather than argued.
+   * What existed was a convention every author had happened to keep.
+   *
+   * What holds now, exactly: {@link FleetCategories} names every row-carrying
+   * category and {@link FleetCategoriesCarryTheEcho} makes each one
+   * `ConfigEcho[]` at COMPILE time, so a declared category that drops the echo
+   * fails the build. A category added straight into the response object,
+   * bypassing that interface, is NOT a build error — TypeScript has no exact
+   * type for the payload — and is caught by proof instead:
+   * `verify-activated-by.mjs` §3 sweeps every array in a real response. See
+   * {@link FleetCategories} for why both, and for what neither covers.
    *
    * `null` is emitted, never omitted, for the reason `config` is: over JSON an
    * absent key reads as "not answered", and this is answered. A human-initiated
@@ -488,6 +502,81 @@ interface UnstartedAgent extends ConfigEcho {
   since: string;
   reason: string;
 }
+
+/**
+ * A preempted agent as `list_agents` reports it. Named rather than inferred so
+ * it can be a member of {@link FleetCategories} — the totality claim below has
+ * to be able to say its name.
+ */
+interface PreemptedAgentDto extends ConfigEcho {
+  path: string;
+  paneName: string;
+  label: string | null;
+  at: string;
+  priority: number;
+  /**
+   * `string`, not {@link HerdrAgentStatus}, and that is the record's own type
+   * rather than a widening: a preemption annotation stores whatever herdr said
+   * at the moment the slot was taken (`PreemptionRecord.herdrStatus`), and a
+   * status this daemon's union does not know about is still what happened.
+   */
+  herdrStatusWhenPreempted: string;
+  by: { path: string; paneName: string; priority: number };
+  reason: string;
+  derivation: string;
+}
+
+/**
+ * Every row-carrying category of `list_agents_response`, in one place, so the
+ * claim "each of them echoes the durable record" can be CHECKED rather than
+ * asserted.
+ *
+ * WHY THIS EXISTS, WHICH IS A CORRECTION. The comment on {@link ConfigEcho}
+ * used to say that a category "cannot" silently omit the echo, "including
+ * categories nobody has written yet". That was FALSE, and it was demonstrated
+ * false rather than argued: a new row interface that simply does not extend
+ * `ConfigEcho`, published under a new key in the response, compiles clean.
+ * Every category extending `ConfigEcho` was a convention its authors had each
+ * kept, not a rule the compiler held — which is the difference between a
+ * mechanism and a habit, and the sentence claimed the first while the code did
+ * the second.
+ *
+ * WHAT IS ENFORCED HERE. {@link FleetCategoriesCarryTheEcho} makes every member
+ * of this interface `ConfigEcho[]` at compile time, and `handleListAgents`
+ * builds a value of this type and spreads it. So a member whose row type stops
+ * extending `ConfigEcho` fails the BUILD, exactly the way adding a knob to
+ * `AgentConfig` fails T4's `RECONFIGURATION_COST`.
+ *
+ * WHAT IS STILL NOT ENFORCED, said here rather than left to be found again:
+ * TypeScript has no exact-object type for the response, so a future category
+ * added straight into the `respond({…})` call — bypassing this interface — is
+ * not a build error. That residue is covered by a PROOF instead:
+ * `verify-activated-by.mjs` §3 sweeps every array of objects in a real
+ * `list_agents_response` and fails on any row that carries a `config` echo
+ * without an `activatedBy`. Between the two, a new category is caught by the
+ * compiler if it opts in and by the proof if it does not — and neither claims
+ * to be the other.
+ */
+interface FleetCategories {
+  agents: ListedAgent[];
+  unbackedPanes: UnbackedPane[];
+  missingAgents: MissingAgent[];
+  preemptedAgents: PreemptedAgentDto[];
+  standbyAgents: StandbyAgent[];
+  unstartedAgents: UnstartedAgent[];
+}
+
+/**
+ * The totality claim itself: every member of {@link FleetCategories} is an
+ * array of rows carrying the durable echo.
+ *
+ * A type alias rather than a runtime check, and its only job is to fail the
+ * build. `FleetCategories` is constrained here rather than at each interface,
+ * so the requirement lives in ONE place a reader can find instead of six an
+ * author has to remember.
+ */
+type CarriesEcho<T extends Record<keyof T, ConfigEcho[]>> = T;
+type FleetCategoriesCarryTheEcho = CarriesEcho<FleetCategories>;
 
 /**
  * How many agents each of `list_agents`' categories will carry. The registry
@@ -1749,6 +1838,19 @@ export class MessageRouter {
       // compare-and-set it can perform and one it has to poll for.
       configVersion: record.configVersion,
       configuredAt,
+      // THE SUPERVISOR OF RECORD, ANSWERED BY THE OTHER VERB THAT MINTS IT.
+      //
+      // `configure` on a new path is one of exactly two calls that may
+      // establish parentage, so a caller that has just created an agent would
+      // otherwise have to read it back to learn what was recorded about its own
+      // call — and "read rather than infer" is this codebase's house rule for
+      // precisely that shape (`mcp.ts`: both fields on EVERY successful
+      // response, so it is read rather than inferred from a missing field).
+      //
+      // From `record`, so it is what was WRITTEN rather than what was asked
+      // for: a reconfigure carries the existing supervisor forward, and this
+      // says so rather than echoing the caller back at itself.
+      activatedBy: record.activatedBy,
       reconfigured: Boolean(existing),
       // Carried on the reconfigure path so a caller can see the token move,
       // and so a refusal has a value to report unchanged.
@@ -3526,20 +3628,35 @@ export class MessageRouter {
     // CPU and memory headroom, for the same reason and in the same place.
     const capacity = this.capacityOf(agents);
 
+    // THE CATEGORIES, AS ONE TYPED VALUE. Spread into the response rather than
+    // listed inline, so `FleetCategories` is what the payload's row-carrying
+    // keys are built from — and `FleetCategoriesCarryTheEcho` then holds every
+    // one of them to `ConfigEcho[]` at compile time. Adding a category to this
+    // object without adding it to the interface is a build error; adding one
+    // straight to `respond` below is not, and §3 of verify-activated-by.mjs is
+    // what covers that. Both are stated on `FleetCategories`.
+    const categories: FleetCategories = {
+      agents,
+      unbackedPanes,
+      missingAgents: missing.rows,
+      preemptedAgents: preempted.rows,
+      standbyAgents: standby,
+      unstartedAgents: unstarted
+    };
+
     respond({
       action: 'list_agents_response',
       success: true,
-      agents,
-      unbackedPanes,
+      ...categories,
       // Live panes that are not ours. The rows whose `occupies` is non-null
       // are the ones that will refuse an activation, so a reader can see the
       // refusal coming rather than meeting it.
       foreignPanes: foreign.rows,
       foreignPanesTotal: foreign.total,
-      // Always present, even when empty: a caller that has to distinguish "no
-      // agents are missing" from "this daemon does not track that" cannot do it
-      // from an absent field. Empty array means the fleet is whole.
-      missingAgents: missing.rows,
+      // `missingAgents` is in `categories` above. Always present, even when
+      // empty: a caller that has to distinguish "no agents are missing" from
+      // "this daemon does not track that" cannot do it from an absent field.
+      // Empty array means the fleet is whole.
       missingTotal: missing.total,
       // Work that was taken off the machine to make room for something more
       // important, and has not been put back. It is a queue of decisions still
@@ -3547,10 +3664,9 @@ export class MessageRouter {
       // re-activated it leaves the list. Nothing here restarts them,
       // deliberately — a preemption queue that restarts its own entries is a
       // scheduler, and preemption must never be automatic.
-      preemptedAgents: preempted.rows,
       preemptedTotal: preempted.total,
-      // Where a fleet client's On button gets its candidates.
-      standbyAgents: standby,
+      // `standbyAgents` is in `categories` above — where a fleet client's On
+      // button gets its candidates.
       standbyTotal,
       // Agents that exist and have NEVER run — the fifth answer to "not
       // running", and the one that used to belong to no list at all. Kept
@@ -3558,7 +3674,6 @@ export class MessageRouter {
       // a standby agent on resumes the conversation it was stopped in, and
       // these have no conversation to resume. Always present, even when empty,
       // for the same reason `missingAgents` is.
-      unstartedAgents: unstarted,
       unstartedTotal,
       // Which fields above are durable, which were observed just now, and
       // which this daemon computed. See MessageRouter.provenance.
@@ -3645,7 +3760,10 @@ export class MessageRouter {
    * anything — the record and reality disagree, and reality is the one a
    * supervisor acts on.
    */
-  private preemptedAgents(agents: ListedAgent[], sharedIntents?: Map<string, AgentIntent>) {
+  private preemptedAgents(
+    agents: ListedAgent[],
+    sharedIntents?: Map<string, AgentIntent>
+  ): PreemptedAgentDto[] {
     const alive = new Set(agents.map((a) => a.path));
     // The intent map rather than the derived list alone, so the echo below
     // comes from `configEcho` like every other category's. A second place that
