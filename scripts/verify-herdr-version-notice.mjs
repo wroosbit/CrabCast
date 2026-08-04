@@ -189,26 +189,19 @@ function fixture(name, herdrVersion) {
   const dataDir = path.join(dir, 'data');
   const state = path.join(dir, 'shim-state');
   fs.mkdirSync(state, { recursive: true });
-  fs.mkdirSync(path.join(dir, 'prompts'), { recursive: true });
-  fs.writeFileSync(path.join(dir, 'prompts', 'shell.md'), 'KAN-102 proof workspace {{KEY}}.\n');
   const configPath = path.join(dir, 'crabcast.config.json');
-  fs.writeFileSync(configPath, JSON.stringify({
-    dataDir,
-    workspaceTypes: [{
-      name: 'shell',
-      priority: 1,
-      promptFile: 'prompts/shell.md',
-      defaultLauncher: 'shell',
-      mcpServers: [],
-      gateExempt: false
-    }]
-  }, null, 2));
+  // A dataDir and nothing else — there is no type table left to declare.
+  fs.writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
+  const agentDir = path.join(dir, 'owned', 'demo');
+  fs.mkdirSync(agentDir, { recursive: true });
   return {
     name,
     herdrVersion,
     configPath,
     dataDir,
     state,
+    /** The directory this fixture's one agent runs in. Its whole address. */
+    agentPath: fs.realpathSync(agentDir),
     logPath: path.join(dataDir, 'daemon.log'),
     env: {
       ...process.env,
@@ -344,7 +337,14 @@ check(/older than/.test(old), 'below 0.6 is unchanged: older than the supported 
 rule('2. 0.8.0 LIVE — the notice reaches a person, and the activation PROCEEDS');
 
 const eightFx = fixture('untested', 'herdr 0.8.0');
-const eightArgs = ['activate', 'shell', 'demo'];
+// `configure` is mandatory now, so the activation this section is about needs
+// a record first. It is a separate call and its own daemon round trip, which
+// is also the first response of the connection — the notice rides that one.
+crabcast(eightFx, ['configure', eightFx.agentPath, '--priority', '1', '--launcher', 'shell']);
+// `--override`: the capacity gate reads the real machine, and this script is
+// about a version notice. An activation refused because the runner was busy
+// would be a red check about the machine rather than about the notice.
+const eightArgs = ['activate', eightFx.agentPath, '--override'];
 const eightRun = crabcast(eightFx, eightArgs);
 await trackDaemon(eightFx);
 
@@ -399,7 +399,11 @@ check(
 rule('3. 0.6.4 LIVE — the supported release produces NO notice anywhere');
 
 const goodFx = fixture('verified', 'herdr 0.6.4');
-const goodArgs = ['activate', 'shell', 'demo'];
+crabcast(goodFx, ['configure', goodFx.agentPath, '--priority', '1', '--launcher', 'shell']);
+// `--override`: the capacity gate reads the real machine, and this script is
+// about a version notice. An activation refused because the runner was busy
+// would be a red check about the machine rather than about the notice.
+const goodArgs = ['activate', goodFx.agentPath, '--override'];
 const goodRun = crabcast(goodFx, goodArgs);
 await trackDaemon(goodFx);
 
@@ -430,7 +434,11 @@ check(!/WARNING: herdr 0\.6\.4/.test(goodLog), 'and said nothing about it — a 
 rule('4. 0.7.5 LIVE — the specific, evidenced claim still arrives');
 
 const sevenFx = fixture('redesign', 'herdr 0.7.5');
-const sevenArgs = ['activate', 'shell', 'demo'];
+crabcast(sevenFx, ['configure', sevenFx.agentPath, '--priority', '1', '--launcher', 'shell']);
+// `--override`: the capacity gate reads the real machine, and this script is
+// about a version notice. An activation refused because the runner was busy
+// would be a red check about the machine rather than about the notice.
+const sevenArgs = ['activate', sevenFx.agentPath, '--override'];
 const sevenRun = crabcast(sevenFx, sevenArgs);
 await trackDaemon(sevenFx);
 

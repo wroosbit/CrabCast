@@ -4,7 +4,7 @@
 // What is proven, in sections:
 //
 //   1. handshake  — the server comes up over stdio as `crabcast-mcp`
-//   2. tool list  — exactly the eight crabcast_* tools, no staleness tool, no
+//   2. tool list  — exactly the nine crabcast_* tools, no staleness tool, no
 //                   butchr residue, descriptions free of ticket-product
 //                   vocabulary while keeping the behavioural guidance
 //                   (missing = silently stopped; preempted = decision owed)
@@ -69,9 +69,7 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = process.argv[2] ?? path.join(scriptDir, '..', 'dist');
 const mcpJs = path.join(distDir, 'mcp.js');
 
-const TYPE = 'shell';
-const KEY = 'kan73-mcp-demo';
-const AGENT_NAME = `crabcast-${TYPE}-${KEY}`;
+const LAUNCHER = 'shell';
 
 // ------------------------------------------------------------- the scratch --
 
@@ -159,14 +157,19 @@ fs.chmodSync(path.join(shimDir, 'herdr'), 0o755);
 
 const dataDir = path.join(scratch, 'data');
 const configPath = path.join(scratch, 'crabcast.config.json');
-fs.mkdirSync(path.join(scratch, 'prompts'), { recursive: true });
-fs.writeFileSync(path.join(scratch, 'prompts', 'shell.md'), 'KAN-73 proof workspace {{KEY}}.\n');
-fs.writeFileSync(configPath, JSON.stringify({
-  dataDir,
-  workspaceTypes: [
-    { name: TYPE, priority: 1, promptFile: 'prompts/shell.md', defaultLauncher: 'shell' }
-  ]
-}, null, 2));
+// A dataDir and nothing else — there is no type table left to declare.
+fs.writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
+
+const { paneNameFor } = await import(path.join(distDir, 'identity.js'));
+
+/** A directory the caller owns. Every address in this script is one. */
+function owned(name) {
+  const dir = path.join(scratch, 'owned', name);
+  fs.mkdirSync(dir, { recursive: true });
+  return fs.realpathSync(dir);
+}
+const AGENT_PATH = owned('kan73-mcp-demo');
+const AGENT_NAME = paneNameFor(AGENT_PATH);
 
 // The environment every child gets: scratch HOME, shim-first system-only
 // PATH, deterministic shell for the daemon's login-shell PATH probe.
@@ -317,17 +320,23 @@ verdict(
 
 // --------------------------------------------------------- 2. the tool list --
 
-rule('2. the tool list — eight crabcast_* tools, rewritten descriptions');
+rule('2. the tool list — nine crabcast_* tools, rewritten descriptions');
 
+// Eight became nine: `crabcast_reset_agent` is REMOVED (CrabCast no longer
+// creates the directory an agent runs in, so it may not delete one either),
+// and `crabcast_configure_agent` and `crabcast_forget_agent` are added — the
+// two halves `reset` was conflating, split into making an agent exist and
+// making it stop existing.
 const EXPECTED_TOOLS = [
   'crabcast_capacity',
+  'crabcast_configure_agent',
   'crabcast_activate_agent',
   'crabcast_deactivate_agent',
+  'crabcast_forget_agent',
   'crabcast_send_to_agent',
   'crabcast_tail_agent',
   'crabcast_agent_status',
-  'crabcast_list_agents',
-  'crabcast_reset_agent'
+  'crabcast_list_agents'
 ];
 
 const { tools } = await clientA.request('tools/list');
@@ -339,8 +348,14 @@ for (const t of tools) {
 const names = tools.map((t) => t.name).sort();
 verdict(
   JSON.stringify(names) === JSON.stringify([...EXPECTED_TOOLS].sort()),
-  'exactly the eight crabcast_* tools, and no staleness tool',
-  `tool names differ from the expected eight: ${JSON.stringify(names)}`
+  'exactly the nine crabcast_* tools, and no staleness tool',
+  `tool names differ from the expected nine: ${JSON.stringify(names)}`
+);
+verdict(
+  !names.includes('crabcast_reset_agent'),
+  'crabcast_reset_agent is GONE rather than redefined — a caller still using it gets a\n' +
+  '    method-not-found by name, which is how callers are made to notice',
+  'the removed reset tool is still advertised'
 );
 
 // No product residue anywhere in the advertised surface: not the extraction
@@ -401,9 +416,36 @@ await clientB.initialize();
 // `override: true`: the capacity gate measures the real machine, and whether
 // this box is busy is not what is being proved here — the override path is
 // real and recorded, and the gate itself is proven by verify-agent-capacity.
+// `configure` is mandatory: `activate` takes no attributes, so priority and
+// launcher arrive here or nowhere.
+const configured = await clientA.callTool('crabcast_configure_agent', {
+  path: AGENT_PATH,
+  priority: 1,
+  launcher: LAUNCHER
+});
+const configuredRes = parsedText(configured);
+show('crabcast_configure_agent:', configuredRes);
+verdict(
+  configured.isError !== true && configuredRes?.success === true &&
+    Array.isArray(configuredRes?.occupiedBy),
+  'the agent exists, and configure reported the (empty) occupancy of its directory\n' +
+  '    rather than refusing on it',
+  'configure did not make the agent exist'
+);
+
+// And activate really does refuse a path nobody configured, naming what is
+// missing — the other half of "configure is mandatory".
+const unconfigured = await clientA.callTool('crabcast_activate_agent', {
+  path: owned('kan73-never-configured'), override: true
+});
+verdict(
+  unconfigured.isError === true && /No agent is configured/.test(parsedText(unconfigured)?.error ?? ''),
+  'and activate on a never-configured path is refused, naming what is missing',
+  'activate started an agent nobody configured'
+);
+
 const activated = await clientA.callTool('crabcast_activate_agent', {
-  type: TYPE,
-  key: KEY,
+  path: AGENT_PATH,
   override: true
 });
 const activatedRes = parsedText(activated);
@@ -417,13 +459,13 @@ verdict(
 const listed = parsedText(await clientA.callTool('crabcast_list_agents'));
 show('crabcast_list_agents (agents only):', listed?.agents);
 verdict(
-  Array.isArray(listed?.agents) && listed.agents.some((a) => a.type === TYPE && a.key === KEY),
-  `list_agents shows ${TYPE}/${KEY}`,
+  Array.isArray(listed?.agents) && listed.agents.some((a) => a.path === AGENT_PATH),
+  `list_agents shows ${AGENT_PATH}`,
   'the activated agent is not in the list'
 );
 
 const sent = await clientA.callTool('crabcast_send_to_agent', {
-  key: KEY, type: TYPE, message: 'echo KAN-73 send round trip'
+  path: AGENT_PATH, message: 'echo KAN-73 send round trip'
 });
 const sentRes = parsedText(sent);
 show('crabcast_send_to_agent:', sentRes);
@@ -433,7 +475,7 @@ verdict(
   'send_to_agent did not report delivery'
 );
 
-const tailed = await clientA.callTool('crabcast_tail_agent', { key: KEY, type: TYPE });
+const tailed = await clientA.callTool('crabcast_tail_agent', { path: AGENT_PATH });
 const tailedRes = parsedText(tailed);
 show('crabcast_tail_agent:', tailedRes);
 verdict(
@@ -443,24 +485,26 @@ verdict(
   'tail_agent did not return pane text'
 );
 
-const status = parsedText(await clientA.callTool('crabcast_agent_status', { key: KEY, type: TYPE }));
+const status = parsedText(await clientA.callTool('crabcast_agent_status', { path: AGENT_PATH }));
 show('crabcast_agent_status:', status);
 verdict(
   status?.success === true && status?.sessionless === false &&
-    status?.type === TYPE && status?.key === KEY,
-  'agent_status reports the live session by address',
+    status?.path === AGENT_PATH && status?.configured === true,
+  'agent_status reports the live session by path alone',
   'agent_status did not report the session'
 );
 
-const deactivated = await clientA.callTool('crabcast_deactivate_agent', { key: KEY });
+const deactivated = await clientA.callTool('crabcast_deactivate_agent', { path: AGENT_PATH });
 const deactivatedRes = parsedText(deactivated);
 show('crabcast_deactivate_agent:', deactivatedRes);
 const listedAfter = parsedText(await clientA.callTool('crabcast_list_agents'));
 verdict(
   deactivated.isError !== true && deactivatedRes?.success === true &&
+    deactivatedRes?.wasRunning === true && deactivatedRes?.state === 'standby' &&
     Array.isArray(listedAfter?.agents) &&
-    !listedAfter.agents.some((a) => a.type === TYPE && a.key === KEY),
-  'the deactivation succeeded and the agent is gone from the list',
+    !listedAfter.agents.some((a) => a.path === AGENT_PATH),
+  'the deactivation succeeded, said which kind of "down" it produced, and the agent is\n' +
+  '    gone from the list',
   'the agent did not stand down cleanly'
 );
 
@@ -480,54 +524,70 @@ const eventNotes = clientB.notifications.filter((n) => n.method === 'notificatio
 show('client B notifications:', eventNotes.map((n) => n.params?.data));
 
 const activationNote = eventNotes.find((n) =>
-  String(n.params?.data ?? '').includes(`agent_activated_event - ${TYPE}/${KEY}`));
+  String(n.params?.data ?? '').includes(`agent_activated_event - ${AGENT_PATH}`));
 verdict(
   activationNote !== undefined,
   'client B — which made no request — received the agent_activated_event notification',
   'no activation event reached the second client'
 );
 
-// ----------------------------------------------------------------- 5. reset --
+// ---------------------------------------------------------------- 5. forget --
 
-rule('5. reset_agent — the workspace is deleted, and a reset of nothing is flagged');
+rule('5. forget_agent — the record goes, the caller\'s directory does not');
 
-const RESET_KEY = 'kan73-reset-demo';
-// override for the same reason as section 2's activation: the live gate is
+const FORGET_PATH = owned('kan73-forget-demo');
+// override for the same reason as section 3's activation: the live gate is
 // not what this section proves.
-const resetActivate = parsedText(
-  await clientA.callTool('crabcast_activate_agent', { type: TYPE, key: RESET_KEY, override: true }));
-const resetWorkDir = resetActivate?.workDir;
-console.log(`   activated ${TYPE}/${RESET_KEY} to reset (workDir ${resetWorkDir})`);
-console.log(`   workspace exists before reset: ${fs.existsSync(resetWorkDir ?? '')}`);
+await clientA.callTool('crabcast_configure_agent', {
+  path: FORGET_PATH, priority: 1, launcher: LAUNCHER
+});
+const forgetActivate = parsedText(
+  await clientA.callTool('crabcast_activate_agent', { path: FORGET_PATH, override: true }));
+console.log(`   activated ${FORGET_PATH}`);
 
-const reset = await clientA.callTool('crabcast_reset_agent', { type: TYPE, key: RESET_KEY });
-const resetRes = parsedText(reset);
-show('crabcast_reset_agent:', resetRes);
-const resetListed = parsedText(await clientA.callTool('crabcast_list_agents'));
-console.log(`   workspace exists after reset: ${fs.existsSync(resetWorkDir ?? '')}`);
-
+// While it runs, forget REFUSES — and there is deliberately no force flag.
+const forgetWhileRunning = await clientA.callTool('crabcast_forget_agent', { path: FORGET_PATH });
+show('forget while it runs:', parsedText(forgetWhileRunning));
 verdict(
-  resetActivate?.success === true && typeof resetWorkDir === 'string' &&
-    reset.isError !== true && resetRes?.success === true && resetRes?.agentClosed === true &&
-    !fs.existsSync(resetWorkDir) &&
-    !resetListed?.agents?.some((a) => a.type === TYPE && a.key === RESET_KEY),
-  'reset stood the agent down and its workspace directory is gone',
-  'reset did not remove both the agent and its workspace'
+  forgetWhileRunning.isError === true &&
+    parsedText(forgetWhileRunning)?.refused === 'running',
+  'forget refuses while the agent is running — no verb that is not named "stop it" may\n' +
+  '    terminate an agent as a side effect',
+  'forget destroyed the record of a running agent'
 );
 
-const resetGhost = await clientA.callTool('crabcast_reset_agent', { type: TYPE, key: 'kan73-never-existed' });
-show('reset of nothing:', { isError: resetGhost.isError, response: parsedText(resetGhost) });
+await clientA.callTool('crabcast_deactivate_agent', { path: FORGET_PATH });
+const forgotten = await clientA.callTool('crabcast_forget_agent', { path: FORGET_PATH });
+const forgottenRes = parsedText(forgotten);
+show('crabcast_forget_agent:', forgottenRes);
+const forgetListed = parsedText(await clientA.callTool('crabcast_list_agents'));
+console.log(`   the caller's directory still exists after forget: ${fs.existsSync(FORGET_PATH)}`);
+
 verdict(
-  resetGhost.isError === true && parsedText(resetGhost)?.success === false,
-  'a failed reset is flagged isError (the mapping this port adds deliberately)',
-  'a failed reset arrived as ordinary text'
+  forgetActivate?.success === true &&
+    forgotten.isError !== true && forgottenRes?.success === true &&
+    forgottenRes?.existed === true &&
+    fs.existsSync(FORGET_PATH) &&
+    !forgetListed?.standbyAgents?.some((a) => a.path === FORGET_PATH),
+  'forget removed the record and NOTHING else — the caller\'s directory is untouched,\n' +
+  '    which is the whole difference from the `reset` it replaced',
+  'forget did not remove exactly the record'
+);
+
+const forgetGhost = await clientA.callTool('crabcast_forget_agent', { path: owned('kan73-never-existed') });
+show('forget of nothing:', { isError: forgetGhost.isError, response: parsedText(forgetGhost) });
+verdict(
+  forgetGhost.isError !== true && parsedText(forgetGhost)?.existed === false,
+  'and forgetting a path that never held an agent SUCCEEDS with existed: false — its\n' +
+  '    postcondition is the absence of a record, and that already held',
+  'forget refused a postcondition that already held'
 );
 
 // ------------------------------------------------------ 6. isError mappings --
 
 rule('6. failures arrive flagged — isError mappings');
 
-const ghost = await clientA.callTool('crabcast_deactivate_agent', { key: 'kan73-no-such-agent' });
+const ghost = await clientA.callTool('crabcast_deactivate_agent', { path: owned('kan73-no-such-agent') });
 show('deactivate of nothing:', { isError: ghost.isError, response: parsedText(ghost) });
 verdict(
   ghost.isError === true && parsedText(ghost)?.success === false,
@@ -640,8 +700,7 @@ await overClient.initialize();
 await sleep(500);
 
 const oversized = await overClient.callTool('crabcast_send_to_agent', {
-  key: KEY,
-  type: TYPE,
+  path: AGENT_PATH,
   message: 'A'.repeat(OVERSIZE)
 });
 const oversizedText = oversized?.content?.find((c) => c.type === 'text')?.text ?? '';

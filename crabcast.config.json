@@ -1,12 +1,1 @@
-{
-  "workspaceTypes": [
-    {
-      "name": "shell",
-      "priority": 1,
-      "promptFile": "prompts/shell.md",
-      "defaultLauncher": "shell",
-      "mcpServers": [],
-      "gateExempt": false
-    }
-  ]
-}
+{}

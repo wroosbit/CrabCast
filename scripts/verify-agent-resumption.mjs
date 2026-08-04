@@ -8,8 +8,14 @@
 // depends on — that the registry survives an unclean death, that a torn tail
 // does not destroy it, that intent is honoured rather than history, that the
 // resume framing differs correctly between a restorable and an unrestorable
-// conversation, and (section 5) that reconciliation delivers that framing
-// end-to-end through the real activation path.
+// conversation, (section 5) that reconciliation delivers that framing
+// end-to-end through the real activation path, and (section 8) what a
+// mid-restore herdr blip does to the agents it lands on.
+//
+// Section 8 is KAN-124's carried item 1, answered here rather than in another
+// design round: `activate` can now refuse as unverifiable, and this loop
+// restores N agents over N x 3 seconds, so a herdr that stalls for ten of them
+// hits some agents and not others.
 //
 // Usage:
 //   npm run build
@@ -42,6 +48,7 @@ const {
   RESUME_ENV
 } = await import(path.join(dist, 'resume.js'));
 const { AGENT_LAUNCHERS, PROMPT_FILENAME } = await import(path.join(dist, 'launchers.js'));
+const { paneNameFor, canonicalizeOrNull } = await import(path.join(dist, 'identity.js'));
 
 let failures = 0;
 let checks = 0;
@@ -77,13 +84,24 @@ function section(title) {
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crabcast-kan21-work-'));
 const registryFile = path.join(tmp, 'agents.jsonl');
-const record = (key, extra = {}) => ({
-  agentName: `crabcast-task-${key}`,
-  type: 'task',
-  key,
-  workDir: path.join(tmp, 'workspaces', 'task', key),
-  ...extra
+
+/** The knobs a caller freezes onto an agent; `configure` requires the first two. */
+const knobs = (over = {}) => ({
+  priority: 1, refusable: true, chargeable: true, preemptable: true,
+  launcher: 'claude', ...over
 });
+
+/** A directory a caller owns. Every address in this file is one. */
+const dirFor = (name) => {
+  const dir = path.join(tmp, 'owned', name);
+  fs.mkdirSync(dir, { recursive: true });
+  return fs.realpathSync(dir);
+};
+
+// A durable record is a path plus its configuration. Under the type model most
+// of it could be looked up again from config; it cannot now, so the row IS the
+// agent — which is why section 1 checks the whole thing round-trips.
+const record = (name, over = {}) => ({ path: dirFor(name), config: knobs(over) });
 
 // ---------------------------------------------------------------------------
 section('1. The registry records intent, not history');
@@ -91,57 +109,70 @@ section('1. The registry records intent, not history');
 check('an activated agent is expected', () => {
   const reg = new AgentRegistry(registryFile);
   reg.recordActivated(record('kan-1'));
-  assert.deepStrictEqual(
-    reg.expected().map((r) => r.agentName),
-    ['crabcast-task-kan-1']
-  );
+  assert.deepStrictEqual(reg.expected().map((r) => r.path), [dirFor('kan-1')]);
+});
+
+check('a configured agent EXISTS but is not expected — nobody asked for it to run', () => {
+  // The event the compaction preserve set had to learn about. It is the whole
+  // reason `configure` is a separate verb: an agent can exist without running.
+  const reg = new AgentRegistry(registryFile);
+  reg.recordConfigured(record('kan-1b'));
+  assert.ok(reg.intents().has(dirFor('kan-1b')), 'the agent does not exist');
+  assert.ok(!reg.expected().some((r) => r.path === dirFor('kan-1b')),
+    'a configured-never-activated agent must not be restored at boot');
 });
 
 check('a deactivated agent is NOT expected — a stand-down stays down', () => {
   const reg = new AgentRegistry(registryFile);
   reg.recordActivated(record('kan-2'));
   reg.recordDeactivated(record('kan-2'));
-  const expected = reg.expected().map((r) => r.agentName);
-  assert.ok(!expected.includes('crabcast-task-kan-2'), `still expected: ${expected.join(', ')}`);
+  const expected = reg.expected().map((r) => r.path);
+  assert.ok(!expected.includes(dirFor('kan-2')), `still expected: ${expected.join(', ')}`);
 });
 
 check('re-activating after a deactivate brings it back', () => {
   const reg = new AgentRegistry(registryFile);
   reg.recordActivated(record('kan-2'));
-  assert.ok(reg.expected().some((r) => r.agentName === 'crabcast-task-kan-2'));
+  assert.ok(reg.expected().some((r) => r.path === dirFor('kan-2')));
 });
 
-check('the full activation argument list round-trips', () => {
+check('a forgotten agent stops existing entirely — not merely stops being expected', () => {
+  const reg = new AgentRegistry(registryFile);
+  reg.recordActivated(record('kan-2c'));
+  reg.recordForgotten(record('kan-2c'));
+  assert.ok(!reg.intents().has(dirFor('kan-2c')), 'the record survived a forget');
+  assert.ok(!reg.expected().some((r) => r.path === dirFor('kan-2c')));
+});
+
+check('the whole configuration round-trips — it is the only copy there is', () => {
   const reg = new AgentRegistry(registryFile);
   const original = record('kan-3', {
-    url: 'https://example.invalid/kan-3',
-    defaultAgent: 'claude',
-    mcpServers: ['crabcast']
+    launcher: 'claude', mcpServers: ['crabcast'], label: 'a label', prompt: 'finished text'
   });
   reg.recordActivated(original);
-  const restored = reg.expected().find((r) => r.agentName === 'crabcast-task-kan-3');
+  const restored = reg.expected().find((r) => r.path === dirFor('kan-3'));
   assert.deepStrictEqual(restored, original);
 });
 
 check('a preemption annotation makes the stand-down a debt, and re-activation clears it', () => {
   const reg = new AgentRegistry(registryFile);
+  const boss = dirFor('kan-59-boss');
   reg.recordActivated(record('kan-4'));
   reg.recordDeactivated(record('kan-4'), {
-    byAgentName: 'crabcast-epic-kan-59',
-    byType: 'epic',
-    byKey: 'kan-59',
+    byPath: boss,
+    byPaneName: paneNameFor(boss),
     byPriority: 10,
     priority: 1,
     herdrStatus: 'working',
     derivation: 'cap 2, running 2 — the slot had to come from somewhere'
   });
   assert.strictEqual(reg.preempted().length, 1, 'the preemption is owed');
-  assert.ok(reg.preemptionFor('crabcast-task-kan-4'), 'preemptionFor sees the debt');
-  assert.ok(!reg.expected().some((r) => r.agentName === 'crabcast-task-kan-4'),
+  assert.ok(reg.preemptionFor(dirFor('kan-4')), 'preemptionFor sees the debt');
+  assert.ok(!reg.expected().some((r) => r.path === dirFor('kan-4')),
     'a preempted agent must NOT be expected — a reboot must not overturn the decision');
   reg.recordActivated(record('kan-4'));
   assert.strictEqual(reg.preempted().length, 0, 'the list empties itself on re-activation');
-  assert.strictEqual(reg.preemptionFor('crabcast-task-kan-4'), undefined);
+  assert.strictEqual(reg.preemptionFor(dirFor('kan-4')), undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -149,10 +180,18 @@ section('2. The on-disk format survives an unclean shutdown');
 
 check('every record is fsync-durable and readable by a fresh reader', () => {
   const fresh = new AgentRegistry(registryFile);
-  const names = fresh.expected().map((r) => r.agentName).sort();
-  assert.deepStrictEqual(names, [
-    'crabcast-task-kan-1', 'crabcast-task-kan-2', 'crabcast-task-kan-3', 'crabcast-task-kan-4'
-  ]);
+  const paths = fresh.expected().map((r) => r.path).sort();
+  assert.deepStrictEqual(paths, ['kan-1', 'kan-2', 'kan-3', 'kan-4'].map(dirFor).sort());
+});
+
+check('and every row carries the on-disk version marker, per row rather than per file', () => {
+  // Per-row rather than a header, and the reasoning is on-disk-format rather
+  // than aesthetic: appends are O_APPEND so there is nowhere to put a header,
+  // concatenating two logs must not let one file's version claim the other's
+  // rows, and compaction rewrites rows rather than files.
+  const rows = new AgentRegistry(registryFile).readLog();
+  assert.ok(rows.length > 0);
+  assert.ok(rows.every((r) => r.v === 1), 'a row is missing its version marker');
 });
 
 check('a torn final line loses only the record that was in flight', () => {
@@ -168,10 +207,10 @@ check('a torn final line loses only the record that was in flight', () => {
   const half = lines[lines.length - 1].slice(0, Math.floor(lines[lines.length - 1].length / 2));
   fs.writeFileSync(torn, lines.slice(0, -1).join('\n') + '\n' + half);
 
-  const names = new AgentRegistry(torn).expected().map((r) => r.agentName).sort();
+  const paths = new AgentRegistry(torn).expected().map((r) => r.path).sort();
   assert.deepStrictEqual(
-    names,
-    ['crabcast-task-kan-10', 'crabcast-task-kan-11'],
+    paths,
+    [dirFor('kan-10'), dirFor('kan-11')].sort(),
     'the two complete records before the tear must survive intact'
   );
 });
@@ -185,10 +224,10 @@ check('a torn DEACTIVATE leaves the agent expected — it fails safe, not silent
   const lines = fs.readFileSync(torn, 'utf8').split('\n').filter(Boolean);
   fs.writeFileSync(torn, lines[0] + '\n' + lines[1].slice(0, 20));
 
-  const names = new AgentRegistry(torn).expected().map((r) => r.agentName);
+  const paths = new AgentRegistry(torn).expected().map((r) => r.path);
   assert.deepStrictEqual(
-    names,
-    ['crabcast-task-kan-20'],
+    paths,
+    [dirFor('kan-20')],
     'losing a stand-down must leave the agent visible as expected, never vanish it'
   );
 });
@@ -201,8 +240,8 @@ check('garbage in the middle of the log does not discard the records around it',
   fs.writeFileSync(messy, body + '{ not json at all\n');
   const reg2 = new AgentRegistry(messy);
   reg2.recordActivated(record('kan-31'));
-  const names = new AgentRegistry(messy).expected().map((r) => r.agentName).sort();
-  assert.deepStrictEqual(names, ['crabcast-task-kan-30', 'crabcast-task-kan-31']);
+  const paths = new AgentRegistry(messy).expected().map((r) => r.path).sort();
+  assert.deepStrictEqual(paths, [dirFor('kan-30'), dirFor('kan-31')].sort());
 });
 
 check('a missing registry file is an empty fleet, not an error', () => {
@@ -222,8 +261,8 @@ check('compaction preserves intent and drops the history', () => {
   const after = fs.readFileSync(busy, 'utf8').split('\n').filter(Boolean).length;
   assert.ok(after < before, `compaction did not shrink the log (${before} → ${after})`);
   assert.deepStrictEqual(
-    new AgentRegistry(busy).expected().map((r) => r.agentName),
-    ['crabcast-task-kan-41']
+    new AgentRegistry(busy).expected().map((r) => r.path),
+    [dirFor('kan-41')]
   );
 });
 
@@ -234,8 +273,9 @@ check('SIGKILL mid-life leaves every acknowledged record on disk', () => {
   const script = `
     import { AgentRegistry } from ${JSON.stringify(path.join(dist, 'agent-registry.js'))};
     const reg = new AgentRegistry(${JSON.stringify(killed)});
+    const config = { priority: 1, refusable: true, chargeable: true, preemptable: true, launcher: 'claude' };
     for (let i = 0; i < 5; i++) {
-      reg.recordActivated({ agentName: 'crabcast-task-kan-5' + i, type: 'task', key: 'kan-5' + i, workDir: '/tmp/w' + i });
+      reg.recordActivated({ path: '/tmp/kan21-killed-' + i, config });
     }
     import * as fs from 'fs';
     fs.writeFileSync(${JSON.stringify(path.join(tmp, 'killer.ready'))}, 'ok');
@@ -265,11 +305,8 @@ check('SIGKILL mid-life leaves every acknowledged record on disk', () => {
 
   assert.ok(fs.existsSync(marker), 'child never reported its writes');
 
-  const names = new AgentRegistry(killed).expected().map((r) => r.agentName).sort();
-  assert.deepStrictEqual(names, [
-    'crabcast-task-kan-50', 'crabcast-task-kan-51', 'crabcast-task-kan-52',
-    'crabcast-task-kan-53', 'crabcast-task-kan-54'
-  ]);
+  const paths = new AgentRegistry(killed).expected().map((r) => r.path).sort();
+  assert.deepStrictEqual(paths, [0, 1, 2, 3, 4].map((i) => '/tmp/kan21-killed-' + i));
 });
 
 // ---------------------------------------------------------------------------
@@ -317,22 +354,33 @@ check("the transcript path matches Claude Code's own mangling", () => {
 });
 
 check('the degraded prompt tells the agent it lost its memory and points at its work', () => {
-  const prompt = degradedResumePrompt('task', 'KAN-21');
-  for (const phrase of ['NO memory', 'KAN-21', PROMPT_FILENAME, 'not restart the task']) {
+  // Addressed by the directory it is, and pointed at its bootstrap prompt by
+  // ABSOLUTE path — that file lives in CrabCast's sidecar now, so a bare
+  // filename would name nothing from the agent's cwd.
+  const sidecarPrompt = `/data/agents/abc12345/${PROMPT_FILENAME}`;
+  const prompt = degradedResumePrompt('/home/someone/work', 'reboot', sidecarPrompt);
+  for (const phrase of ['NO memory', '/home/someone/work', sidecarPrompt, 'not restart the task']) {
     assert.ok(prompt.includes(phrase), `degraded prompt is missing ${JSON.stringify(phrase)}`);
   }
 });
 
+check('an agent configured without a prompt is not pointed at a file that does not exist', () => {
+  // `prompt` is optional, so the degraded framing must not invent one.
+  const prompt = degradedResumePrompt('/home/someone/work', 'reboot');
+  assert.ok(prompt.includes('NO memory'));
+  assert.ok(!prompt.includes(PROMPT_FILENAME), `it named a prompt file anyway: ${prompt}`);
+});
+
 check('the nudge frames the interruption and forbids starting over', () => {
-  const nudge = resumeNudge('task', 'KAN-21');
-  for (const phrase of ['interrupted mid-work', 'KAN-21', 'Do not start over']) {
+  const nudge = resumeNudge('/home/someone/work');
+  for (const phrase of ['interrupted mid-work', '/home/someone/work', 'Do not start over']) {
     assert.ok(nudge.includes(phrase), `nudge is missing ${JSON.stringify(phrase)}`);
   }
   assert.ok(!nudge.includes('\n'), 'the nudge is typed into a TUI and must be one line');
 });
 
 check("a preempted agent is told it was a decision, not a crash", () => {
-  const nudge = resumeNudge('task', 'KAN-21', 'preempted');
+  const nudge = resumeNudge('/home/someone/work', 'preempted');
   assert.ok(/deliberately stood down/.test(nudge), nudge);
   assert.ok(!/restarted/.test(nudge), 'a preemption resume must not claim a machine crash');
 });
@@ -346,7 +394,7 @@ check('the claude launcher still tries --continue first', () => {
 });
 
 check('a degraded prompt reaches the fallback, correctly quoted', () => {
-  const prompt = degradedResumePrompt('task', 'KAN-21');
+  const prompt = degradedResumePrompt('/home/someone/work', 'reboot');
   const command = AGENT_LAUNCHERS.claude.command(prompt);
   assert.ok(command.includes("'"), 'the prompt must be single-quoted for bash');
   const quoted = command.slice(command.indexOf('||') + 2);
@@ -363,6 +411,26 @@ check('a prompt containing a single quote cannot break out of the quoting', () =
 check('the resume modal thresholds are raised past any real conversation', () => {
   assert.ok(Number(RESUME_ENV.CLAUDE_CODE_RESUME_THRESHOLD_MINUTES) > 70 * 1000);
   assert.ok(Number(RESUME_ENV.CLAUDE_CODE_RESUME_TOKEN_THRESHOLD) > 100_000 * 1000);
+});
+
+check('an agent configured with no prompt gets no invented instruction', () => {
+  // `command(undefined)` is a real case now, not a default: `prompt` is
+  // optional on `configure`, and substituting a generic instruction would be
+  // this daemon inventing one nobody wrote.
+  const command = AGENT_LAUNCHERS.claude.command();
+  assert.ok(command.endsWith('bypassPermissions'), command);
+  assert.ok(!command.includes("'"), `something was quoted into an empty prompt: ${command}`);
+});
+
+check('a shell agent given a prompt still receives it', () => {
+  // `shell` delivers a bare prompt with no runtime, so there is nothing to
+  // instruct — but a configured prompt must not simply vanish. It used to be
+  // written into the agent's own cwd, where a human would trip over it; it now
+  // lives in a sidecar nobody browsing that shell would find.
+  const withPrompt = AGENT_LAUNCHERS.shell.command('read /sidecar/prompt.md');
+  assert.ok(withPrompt.includes('/sidecar/prompt.md'), withPrompt);
+  assert.ok(withPrompt.includes('exec bash'), `the shell itself must still be the pane: ${withPrompt}`);
+  assert.strictEqual(AGENT_LAUNCHERS.shell.command(), 'bash');
 });
 
 check('the launcher table declares who restores conversations, not the nudge', () => {
@@ -425,7 +493,15 @@ if (a === 'agent' && b === 'start') {
   out({ result: { agent: { name: args[2], pane_id: '9' } } });
 }
 if (a === 'agent' && b === 'list') {
-  out({ result: { agents: started.map((s) => ({ name: s.name, agent: 'claude', cwd: s.cwd, agent_status: 'working' })) } });
+  // A DOWN marker makes herdr unreachable without taking it off PATH, which
+  // is a different failure. Section 8 uses it to blip mid-restore.
+  if (fs.existsSync(path.join(state, 'herdr-down'))) {
+    process.stderr.write('herdr: could not connect to the herdr server');
+    process.exit(1);
+  }
+  out({ result: { agents: started.map((s) => ({
+    name: s.name, pane_id: 'p-' + s.name.slice(-6), agent: 'claude', cwd: s.cwd, agent_status: 'working'
+  })) } });
 }
 if (a === 'agent' && b === 'read') {
   // A pane already at its prompt: the readiness marker the nudge waits for.
@@ -454,30 +530,18 @@ const invocations = () => {
 
 const dataDir = path.join(scratch, 'data');
 const configPath = path.join(scratch, 'crabcast.config.json');
-fs.mkdirSync(path.join(scratch, 'prompts'), { recursive: true });
-fs.writeFileSync(path.join(scratch, 'prompts', 'task.md'), 'KAN-72 proof workspace {{KEY}}.\n');
-fs.writeFileSync(configPath, JSON.stringify({
-  dataDir,
-  workspaceTypes: [
-    { name: 'task', priority: 1, promptFile: 'prompts/task.md', defaultLauncher: 'claude' }
-  ]
-}, null, 2));
+fs.writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
 
-const { HerdrBridge, workspaceDirFor } = await import(path.join(dist, 'herdr.js'));
+const { HerdrBridge } = await import(path.join(dist, 'herdr.js'));
 const { MessageRouter } = await import(path.join(dist, 'router.js'));
-const { WorkspaceRegistry } = await import(path.join(dist, 'registry.js'));
-const { PromptLoader } = await import(path.join(dist, 'prompt.js'));
 const { loadConfig } = await import(path.join(dist, 'config.js'));
 const { reconcileAgents } = await import(path.join(dist, 'reconcile.js'));
 
 const config = loadConfig(configPath);
 const bridge = new HerdrBridge(config.dataDir);
-const workspaceTypes = new WorkspaceRegistry(config.workspaceTypes);
 const reconcileRegistry = new AgentRegistry(path.join(dataDir, 'agents.jsonl'));
 const router = new MessageRouter({
-  registry: workspaceTypes,
   config,
-  promptLoader: new PromptLoader(config.baseDir),
   herdrBridge: bridge,
   daemonStartedAt: new Date(),
   agentRegistry: reconcileRegistry,
@@ -485,23 +549,20 @@ const router = new MessageRouter({
   broadcast: () => {}
 });
 
+/** A directory the caller owns, for section 5 onwards. */
+const ownedDir = (name) => {
+  const dir = path.join(scratch, 'owned', name);
+  fs.mkdirSync(dir, { recursive: true });
+  return fs.realpathSync(dir);
+};
+
 // Two agents the registry expects: one whose workspace has a restorable
 // conversation, one with genuinely no history. Exactly the daemon-died-
 // under-the-fleet state, minus the reboot.
-const HIST_KEY = 'res-hist';
-const FRESH_KEY = 'res-fresh';
-const histDir = workspaceDirFor(config.dataDir, 'task', HIST_KEY);
-const freshDir = workspaceDirFor(config.dataDir, 'task', FRESH_KEY);
-fs.mkdirSync(histDir, { recursive: true });
-fs.mkdirSync(freshDir, { recursive: true });
-reconcileRegistry.recordActivated({
-  agentName: `crabcast-task-${HIST_KEY}`, type: 'task', key: HIST_KEY,
-  workDir: histDir, defaultAgent: 'claude'
-});
-reconcileRegistry.recordActivated({
-  agentName: `crabcast-task-${FRESH_KEY}`, type: 'task', key: FRESH_KEY,
-  workDir: freshDir, defaultAgent: 'claude'
-});
+const histDir = ownedDir('res-hist');
+const freshDir = ownedDir('res-fresh');
+reconcileRegistry.recordActivated({ path: histDir, config: knobs() });
+reconcileRegistry.recordActivated({ path: freshDir, config: knobs() });
 
 // A third, for KAN-88 finding B8: a non-claude launcher in a workspace that
 // has a *Claude* transcript on disk. `hasRestorableConversation` reads Claude
@@ -509,13 +570,8 @@ reconcileRegistry.recordActivated({
 // unconditionally answered a question about the wrong program — this agent was
 // framed as having its memory back and the nudge machinery was told to wait
 // for a prompt it would never recognise, while agy had in fact started fresh.
-const AGY_KEY = 'res-agy';
-const agyDir = workspaceDirFor(config.dataDir, 'task', AGY_KEY);
-fs.mkdirSync(agyDir, { recursive: true });
-reconcileRegistry.recordActivated({
-  agentName: `crabcast-task-${AGY_KEY}`, type: 'task', key: AGY_KEY,
-  workDir: agyDir, defaultAgent: 'anti-gravity'
-});
+const agyDir = ownedDir('res-agy');
+reconcileRegistry.recordActivated({ path: agyDir, config: knobs({ launcher: 'anti-gravity' }) });
 
 // The conversations that survived, where Claude Code would have left them —
 // including in the agy agent's workspace, which is the trap.
@@ -531,7 +587,6 @@ const result = await reconcileAgents({
   registry: reconcileRegistry,
   herdrBridge: bridge,
   router,
-  workspaceTypes,
   cause: 'reboot',
   log: (...args) => reconcileLog.push(args.join(' '))
 });
@@ -540,23 +595,23 @@ for (const line of reconcileLog) console.log(`    ${line}`);
 const starts = invocations().filter((argv) => argv[0] === 'agent' && argv[1] === 'start');
 const startFor = (name) => starts.find((argv) => argv[2] === name);
 const paneCommandOf = (argv) => argv[argv.length - 1];
-const outcomeFor = (key) => result.outcomes.find((o) => o.key === key);
+const outcomeFor = (dir) => result.outcomes.find((o) => o.path === dir);
 
 await checkAsync('every expected agent was restored through the real activation path', async () => {
   assert.strictEqual(result.expected, 3);
-  assert.strictEqual(outcomeFor(HIST_KEY)?.result, 'restored');
-  assert.strictEqual(outcomeFor(FRESH_KEY)?.result, 'restored');
-  assert.strictEqual(outcomeFor(AGY_KEY)?.result, 'restored');
+  assert.strictEqual(outcomeFor(histDir)?.result, 'restored');
+  assert.strictEqual(outcomeFor(freshDir)?.result, 'restored');
+  assert.strictEqual(outcomeFor(agyDir)?.result, 'restored');
 });
 
 await checkAsync('a restored conversation resumes and gets the interrupted-work nudge typed at it', async () => {
-  const outcome = outcomeFor(HIST_KEY);
+  const outcome = outcomeFor(histDir);
   assert.strictEqual(outcome.resumedConversation, true, JSON.stringify(outcome));
   assert.strictEqual(outcome.nudged, true, `not nudged: ${JSON.stringify(outcome)}`);
 
   // The pane command tried --continue with the ordinary fallback — NOT the
   // degraded framing; this agent has its memory.
-  const command = paneCommandOf(startFor(`crabcast-task-${HIST_KEY}`));
+  const command = paneCommandOf(startFor(paneNameFor(histDir)));
   assert.ok(command.includes('--continue'), command);
   assert.ok(!command.includes('NO memory'), 'a restorable conversation must not get the degraded prompt');
 
@@ -565,15 +620,15 @@ await checkAsync('a restored conversation resumes and gets the interrupted-work 
   const sent = invocations().find((argv) => argv[0] === 'pane' && argv[1] === 'send-text');
   assert.ok(sent, 'no pane send-text was ever issued');
   assert.ok(sent[3].includes('interrupted mid-work'), sent[3]);
-  assert.ok(sent[3].includes(HIST_KEY), sent[3]);
+  assert.ok(sent[3].includes(histDir), sent[3]);
 });
 
 await checkAsync('a workspace with no history starts with the degraded-resume prompt as its argv prompt', async () => {
-  const outcome = outcomeFor(FRESH_KEY);
+  const outcome = outcomeFor(freshDir);
   assert.strictEqual(outcome.resumedConversation, false, JSON.stringify(outcome));
   assert.ok(outcome.nudged === undefined, 'the degraded branch needs no nudge — it is already working');
 
-  const command = paneCommandOf(startFor(`crabcast-task-${FRESH_KEY}`));
+  const command = paneCommandOf(startFor(paneNameFor(freshDir)));
   assert.ok(command.includes('NO memory'), `degraded framing missing from: ${command}`);
   assert.ok(command.includes('restarted with NO memory') || command.includes('NO memory'), command);
 
@@ -585,7 +640,7 @@ await checkAsync('a workspace with no history starts with the degraded-resume pr
 await checkAsync(
   'KAN-88 B8: a non-claude launcher is not framed by Claude\'s transcript directory',
   async () => {
-    const outcome = outcomeFor(AGY_KEY);
+    const outcome = outcomeFor(agyDir);
 
     // The trap is live: Claude's transcript directory for this workspace does
     // hold a conversation, so the old unconditional probe would have said yes.
@@ -604,7 +659,7 @@ await checkAsync(
 
     // So it starts already working, with the degraded framing on its command
     // line, and nothing waits on a prompt marker it would never print.
-    const command = paneCommandOf(startFor(`crabcast-task-${AGY_KEY}`));
+    const command = paneCommandOf(startFor(paneNameFor(agyDir)));
     assert.ok(command.startsWith('agy '), `not the agy launcher: ${command}`);
     assert.ok(command.includes('NO memory'), `degraded framing missing from: ${command}`);
     assert.ok(outcome.nudged === undefined, `it was nudged anyway: ${JSON.stringify(outcome)}`);
@@ -628,18 +683,16 @@ section('6. A session is not proof that an agent is alive');
 // healthy is the silent loss the registry exists to remove.
 
 /** A router wired to a herdr that says exactly what a test wants it to say. */
-function routerWith({ sessions, herdr, reachable = true, registry }) {
+function routerWith({ sessions, herdr, reachable = true, registry, onAbandon }) {
   const herdrBridge = {
     listActiveSessions: () => sessions,
     listHerdrAgentsChecked: () => ({ reachable, agents: herdr }),
     listHerdrAgents: () => herdr,
     listHerdrStatuses: () => new Map(herdr.map((a) => [a.name, a.herdrStatus])),
-    abandonSession: () => {}
+    abandonSession: (sessionId, error) => onAbandon?.(sessionId, error)
   };
   return new MessageRouter({
-    registry: workspaceTypes,
     config,
-    promptLoader: new PromptLoader(config.baseDir),
     herdrBridge,
     daemonStartedAt: new Date(),
     agentRegistry: registry,
@@ -648,28 +701,31 @@ function routerWith({ sessions, herdr, reachable = true, registry }) {
   });
 }
 
-const session = (key, expectsRuntime = true) => ({
-  sessionId: `task-${key}-1`,
-  type: 'task',
-  key,
-  url: null,
+const session = (name, expectsRuntime = true) => ({
+  sessionId: `${name}-1`,
+  path: dirFor(name),
+  paneName: paneNameFor(dirFor(name)),
   createdAt: new Date(0),
   status: 'active',
-  workDir: path.join(tmp, 'workspaces', 'task', key),
   expectsRuntime
 });
 
-const herdrAgent = (key, agentRuntime = 'claude') => ({
-  name: `crabcast-task-${key}`,
+// The census entry for one of our agents. `canonicalWorkDir` is what the
+// registry join compares against — the real bridge computes it once, here it
+// is supplied, and it is the only field the join reads.
+const herdrAgent = (name, agentRuntime = 'claude') => ({
+  name: paneNameFor(dirFor(name)),
+  paneId: `p-${name}`,
   agentRuntime,
-  workDir: path.join(tmp, 'workspaces', 'task', key),
+  workDir: dirFor(name),
+  canonicalWorkDir: canonicalizeOrNull(dirFor(name)),
   herdrStatus: 'working'
 });
 
-function registryExpecting(...keys) {
-  const file = path.join(tmp, `reg-${keys.join('-')}-${Math.random()}.jsonl`);
+function registryExpecting(...names) {
+  const file = path.join(tmp, `reg-${names.join('-')}-${Math.random()}.jsonl`);
   const reg = new AgentRegistry(file);
-  for (const key of keys) reg.recordActivated(record(key));
+  for (const name of names) reg.recordActivated(record(name));
   return reg;
 }
 
@@ -681,7 +737,7 @@ check('an agent herdr no longer has is missing, even while its session lingers',
   }).findMissingAgents();
 
   assert.strictEqual(missing.length, 1, `expected 1 missing, got ${JSON.stringify(missing)}`);
-  assert.strictEqual(missing[0].agentName, 'crabcast-task-kan-21');
+  assert.strictEqual(missing[0].path, dirFor('kan-21'));
 });
 
 check('the reason says it started and died, not that it never existed', () => {
@@ -701,24 +757,12 @@ check('the census releases the stale session instead of leaving the corpse activ
   // after a full confirm-timeout poll. Detection now releases the session.
   const stale = session('kan-21');
   let released = null;
-  const herdrBridge = {
-    listActiveSessions: () => [stale],
-    listHerdrAgentsChecked: () => ({ reachable: true, agents: [] }),
-    listHerdrAgents: () => [],
-    listHerdrStatuses: () => new Map(),
-    abandonSession: (sessionId, error) => { released = { sessionId, error }; }
-  };
-  const r = new MessageRouter({
-    registry: workspaceTypes,
-    config,
-    promptLoader: new PromptLoader(config.baseDir),
-    herdrBridge,
-    daemonStartedAt: new Date(),
-    agentRegistry: registryExpecting('kan-21'),
-    send: () => {},
-    broadcast: () => {}
-  });
-  r.findMissingAgents();
+  routerWith({
+    sessions: [stale],
+    herdr: [],
+    registry: registryExpecting('kan-21'),
+    onAbandon: (sessionId, error) => { released = { sessionId, error }; }
+  }).findMissingAgents();
   assert.ok(released, 'the stale session was not released');
   assert.strictEqual(released.sessionId, stale.sessionId);
 });
@@ -733,26 +777,14 @@ check('a session inside the runtime-confirm window is not condemned by an empty 
   // game for the verdict.
   const fresh = { ...session('kan-21'), createdAt: new Date() };
   let released = null;
-  const herdrBridge = {
-    listActiveSessions: () => [fresh],
-    // herdr answered: the pane exists, nothing runs in it yet — a booting
-    // agent, indistinguishable on this evidence from a dead one.
-    listHerdrAgentsChecked: () => ({ reachable: true, agents: [herdrAgent('kan-21', null)] }),
-    listHerdrAgents: () => [herdrAgent('kan-21', null)],
-    listHerdrStatuses: () => new Map(),
-    abandonSession: (sessionId, error) => { released = { sessionId, error }; }
-  };
-  const r = new MessageRouter({
-    registry: workspaceTypes,
-    config,
-    promptLoader: new PromptLoader(config.baseDir),
-    herdrBridge,
-    daemonStartedAt: new Date(),
-    agentRegistry: registryExpecting('kan-21'),
-    send: () => {},
-    broadcast: () => {}
-  });
-  const missing = r.findMissingAgents();
+  // herdr answered: the pane exists, nothing runs in it yet — a booting agent,
+  // indistinguishable on this evidence from a dead one.
+  const missing = routerWith({
+    sessions: [fresh],
+    herdr: [herdrAgent('kan-21', null)],
+    registry: registryExpecting('kan-21'),
+    onAbandon: (sessionId, error) => { released = { sessionId, error }; }
+  }).findMissingAgents();
   assert.strictEqual(released, null, `the in-flight session was abandoned: ${JSON.stringify(released)}`);
   assert.deepStrictEqual(missing, [], 'a booting agent must not be reported missing');
 });
@@ -769,12 +801,12 @@ check('a pane whose agent runtime has exited is missing too', () => {
   assert.strictEqual(missing.length, 1, JSON.stringify(missing));
 });
 
-check('a shell workspace with no runtime is working as asked, not missing', () => {
+check('a shell agent with no runtime is working as asked, not missing', () => {
   // The one case where an empty pane is the product rather than the failure.
   // Reporting it would be a false alarm about something doing its job.
   const file = path.join(tmp, 'reg-shell.jsonl');
   const reg = new AgentRegistry(file);
-  reg.recordActivated(record('kan-21', { defaultAgent: 'shell' }));
+  reg.recordActivated(record('kan-21', { launcher: 'shell' }));
 
   const missing = routerWith({
     sessions: [session('kan-21', false)],
@@ -782,7 +814,7 @@ check('a shell workspace with no runtime is working as asked, not missing', () =
     registry: reg
   }).findMissingAgents();
 
-  assert.deepStrictEqual(missing, [], 'a shell workspace must not be reported dead');
+  assert.deepStrictEqual(missing, [], 'a shell agent must not be reported dead');
 });
 
 check('a healthy agent is not reported missing', () => {
@@ -813,11 +845,211 @@ check('a deliberately stood-down agent is not reported missing', () => {
   const file = path.join(tmp, 'reg-standdown.jsonl');
   const reg = new AgentRegistry(file);
   reg.recordActivated(record('kan-21'));
-  reg.recordDeactivated({ agentName: 'crabcast-task-kan-21', type: 'task', key: 'kan-21', workDir: '' });
+  reg.recordDeactivated(record('kan-21'));
 
   const missing = routerWith({ sessions: [], herdr: [], registry: reg }).findMissingAgents();
   assert.deepStrictEqual(missing, [], 'a stand-down must stay down, not become an alarm');
 });
+
+
+// ---------------------------------------------------------------------------
+section('8. A mid-restore herdr blip is deferred, never a loss and never a skip');
+
+// KAN-124's carried item 1, answered here rather than in another design round.
+//
+// `activate` can now refuse as UNVERIFIABLE: herdr did not answer the
+// occupancy census, so it will not spawn into a directory it cannot see. That
+// is right at the activation layer, and it raises a question one layer up —
+// reconcile restores N agents over N x 3 seconds, so a herdr that stalls for
+// ten of those seconds hits some of them and not others.
+//
+// All three of the obvious answers are wrong:
+//
+//   * marked FAILED  — a transient refusal becomes a permanent verdict in the
+//                      line a human reads at boot, and "failed" next to a
+//                      perfectly restorable agent is how somebody concludes it
+//                      is gone
+//   * silently SKIPPED — the fleet comes back short and the summary says
+//                      nothing. That is the KAN-21 shape exactly
+//   * retried FOREVER — a herdr that is genuinely down keeps boot hanging, and
+//                      boot is the one place a daemon must not hang
+//
+// So: deferred, retried once, and NOTHING IS WRITTEN. The agent's last event
+// is still `activated`, so it stays in expected() — a transient refusal cannot
+// become a permanent "this agent is gone", because the only thing that could
+// say so is a durable row and none is appended. What is still deferred after
+// the retry is named in the summary AND picked up by the missing-agent sweep.
+
+{
+  const blipScratch = path.join(scratchRoot, 'blip');
+  const blipData = path.join(blipScratch, 'data');
+  const blipConfigPath = path.join(blipScratch, 'crabcast.config.json');
+  fs.mkdirSync(blipScratch, { recursive: true });
+  fs.writeFileSync(blipConfigPath, JSON.stringify({ dataDir: blipData }, null, 2));
+  const blipConfig = loadConfig(blipConfigPath);
+
+  const blipDir = path.join(blipScratch, 'owned');
+  fs.mkdirSync(blipDir, { recursive: true });
+  const one = fs.realpathSync(blipDir);
+
+  const blipRegistry = new AgentRegistry(path.join(blipData, 'agents.jsonl'));
+  blipRegistry.recordActivated({ path: one, config: knobs() });
+  const logBefore = blipRegistry.readLog().length;
+
+  // The blip that does not clear. herdr answers the OUTER readiness probe —
+  // reconcile waits for that before deciding anything — and then stops
+  // answering the census, which is exactly "it was up when the pass started".
+  let startsIssued = 0;
+  let readyProbes = 0;
+  const downBridge = {
+    herdrReachable: () => ++readyProbes === 1,
+    listHerdrAgentsChecked: () => ({ reachable: false, agents: [] }),
+    listHerdrAgents: () => [],
+    listHerdrStatuses: () => new Map(),
+    listActiveSessions: () => [],
+    getSessionByPath: () => undefined,
+    abandonSession: () => {},
+    occupancyOf: (census) => (census.reachable ? { reachable: true, occupants: [], ours: false } : { reachable: false }),
+    spawnSession: () => { startsIssued++; throw new Error('nothing may be spawned on an unverifiable census'); }
+  };
+  const blipRouter = new MessageRouter({
+    config: blipConfig,
+    herdrBridge: downBridge,
+    daemonStartedAt: new Date(),
+    agentRegistry: blipRegistry,
+    send: () => {},
+    broadcast: () => {}
+  });
+
+  const blipLog = [];
+  const blipResult = await reconcileAgents({
+    registry: blipRegistry,
+    herdrBridge: downBridge,
+    router: blipRouter,
+    cause: 'reboot',
+    log: (...args) => blipLog.push(args.join(' '))
+  });
+  for (const line of blipLog) console.log(`    ${line}`);
+
+  const outcome = blipResult.outcomes[0];
+
+  check('the refusal is DEFERRED, not failed', () => {
+    assert.strictEqual(outcome?.result, 'deferred', JSON.stringify(blipResult.outcomes));
+  });
+
+  check('and nothing was started — the occupancy guard held all the way down', () => {
+    assert.strictEqual(startsIssued, 0, 'a spawn was attempted on an unverifiable census');
+  });
+
+  check('NOTHING was written to the registry — a transient refusal cannot become a loss', () => {
+    assert.strictEqual(
+      blipRegistry.readLog().length, logBefore,
+      'reconcile appended a row for an agent it never decided anything about'
+    );
+    assert.strictEqual(blipRegistry.intents().get(one)?.event, 'activated');
+  });
+
+  check('so it is STILL EXPECTED, and one call away from coming back', () => {
+    assert.deepStrictEqual(blipRegistry.expected().map((r) => r.path), [one]);
+  });
+
+  check('and it is not a silent skip: the missing-agent sweep reports it', () => {
+    // The second channel. `list_agents` reports it on every poll and the 30s
+    // sweep broadcasts it — so a deferred agent is visible in two independent
+    // places until somebody acts, which is the difference between "deferred"
+    // and "quietly dropped".
+    const missing = new MessageRouter({
+      config: blipConfig,
+      herdrBridge: {
+        ...downBridge,
+        listHerdrAgentsChecked: () => ({ reachable: true, agents: [] }),
+        listHerdrAgents: () => []
+      },
+      daemonStartedAt: new Date(),
+      agentRegistry: blipRegistry,
+      send: () => {}, broadcast: () => {}
+    }).findMissingAgents();
+    assert.strictEqual(missing.length, 1, JSON.stringify(missing));
+    assert.strictEqual(missing[0].path, one);
+  });
+
+  check('the reconcile log names the deferred agents rather than counting them away', () => {
+    const joined = blipLog.join('\n');
+    assert.ok(/[Dd]eferring/.test(joined), joined);
+    assert.ok(joined.includes(one), `the deferred agent is not named: ${joined}`);
+    assert.ok(
+      /left expected and unrestored|NOT marked lost/.test(joined),
+      `the log does not say what state they were left in: ${joined}`
+    );
+  });
+
+  // And the other half: a blip that CLEARS costs one extra pass, not an agent.
+  {
+    const clearScratch = path.join(scratchRoot, 'blip-clears');
+    const clearData = path.join(clearScratch, 'data');
+    fs.mkdirSync(clearScratch, { recursive: true });
+    const clearConfigPath = path.join(clearScratch, 'crabcast.config.json');
+    fs.writeFileSync(clearConfigPath, JSON.stringify({ dataDir: clearData }, null, 2));
+    const clearConfig = loadConfig(clearConfigPath);
+    const clearDir = path.join(clearScratch, 'owned');
+    fs.mkdirSync(clearDir, { recursive: true });
+    const target = fs.realpathSync(clearDir);
+
+    const clearRegistry = new AgentRegistry(path.join(clearData, 'agents.jsonl'));
+    clearRegistry.recordActivated({ path: target, config: knobs() });
+
+    // Down until reconcile announces the retry, then up. Flipped from the log
+    // callback rather than counted, so the fixture cannot drift out of step
+    // with how many census reads the restore path happens to take.
+    let censusDown = true;
+    const spawned = [];
+    const flakyBridge = {
+      herdrReachable: () => true,
+      listHerdrAgentsChecked: () => (censusDown
+        ? { reachable: false, agents: [] }
+        : { reachable: true, agents: [] }),
+      listHerdrAgents: () => [],
+      listHerdrStatuses: () => new Map(),
+      listActiveSessions: () => [],
+      getSessionByPath: () => undefined,
+      abandonSession: () => {},
+      occupancyOf: (census) => (census.reachable
+        ? { reachable: true, occupants: [], ours: false }
+        : { reachable: false }),
+      spawnSession: (p) => {
+        spawned.push(p);
+        return {
+          sessionId: 'stub', path: p, paneName: paneNameFor(p),
+          createdAt: new Date(), status: 'active', ptyBuffer: '', onDataListeners: []
+        };
+      },
+      confirmAgentPresent: async () => ({ present: true, paneId: '%1', waitedMs: 0, checks: 1 })
+    };
+
+    const clearRouter = new MessageRouter({
+      config: clearConfig, herdrBridge: flakyBridge, daemonStartedAt: new Date(),
+      agentRegistry: clearRegistry, send: () => {}, broadcast: () => {}
+    });
+    const clearLog = [];
+    const clearResult = await reconcileAgents({
+      registry: clearRegistry, herdrBridge: flakyBridge, router: clearRouter,
+      cause: 'reboot',
+      log: (...a) => {
+        const line = a.join(' ');
+        clearLog.push(line);
+        if (/retrying them once/.test(line)) censusDown = false;
+      }
+    });
+
+    check('a blip that CLEARS costs one extra pass rather than an agent', () => {
+      assert.strictEqual(clearResult.outcomes[0]?.result, 'restored',
+        JSON.stringify(clearResult.outcomes));
+      assert.deepStrictEqual(spawned, [target]);
+      assert.ok(clearLog.join('\n').includes('retrying them once'),
+        'the retry was never announced');
+    });
+  }
+}
 
 // ---------------------------------------------------------------------------
 section('7. Waiting budgets survive a suspend');

@@ -2,7 +2,7 @@
 // Live proof for the capacity model (KAN-71, ported from the extraction
 // source's KAN-34/36/41/44/56/57/60 lineage): the concurrent-agent cap is
 // derived from the hardware, travels between machines, refuses legibly, moves
-// with load, honours per-type gateExempt from config, and can be overridden
+// with load, honours the per-agent gate triple, and can be overridden
 // on purpose.
 //
 // Sixteen sections:
@@ -21,13 +21,14 @@
 //  12. degrade       — the instrument breaks; capacity answers from the seed
 //  13. precedence    — env overrides beat the measurement beats the seed,
 //                      and a zero agent COST is rejected where a zero cap is honoured
-//  14. gateExempt gate — exempt types activate at zero headroom, no override
+//  14. the gate triple — `refusable: false` activates at zero headroom, with no
+//                     override asked for and none recorded
 //  15. refusal headline — the headline names the constraint that bound
 //  16. cores floor  — an idle fleet's measurement cannot round the CPU
 //                      dimension to a zero divisor
 //
 // Sections 5 through 7, 9 and 14 drive the real MessageRouter — handleCapacity
-// and handleActivateByKey, the same calls an MCP caller makes — so what they
+// and handleActivate, the same calls an MCP caller makes — so what they
 // print is what a caller actually receives, not a reconstruction. herdr is
 // stubbed rather than run: this proves the capacity gate, and the gate
 // refuses *before* herdr is ever asked to spawn anything.
@@ -66,7 +67,7 @@ const { dampCost, sampleFromMeasurement, ALPHA_UP, ALPHA_DOWN, MIN_MEASURED_CORE
   await import(path.join(distDir, 'agent-cost-damping.js'));
 const { MessageRouter } = await import(path.join(distDir, 'router.js'));
 const { AgentRegistry } = await import(path.join(distDir, 'agent-registry.js'));
-const { WorkspaceRegistry } = await import(path.join(distDir, 'registry.js'));
+const { paneNameFor, canonicalizeOrNull } = await import(path.join(distDir, 'identity.js'));
 
 const rule = (title) => console.log(`\n${'='.repeat(78)}\n${title}\n${'='.repeat(78)}`);
 
@@ -217,64 +218,119 @@ console.log(
 );
 
 // --------------------------------------------- 5, 6, 7, 9 & 14: the real path --
-// The workspace types as crabcast.config.json would declare them: two
-// gate-exempt supervising types above a charged worker type. This is the
-// generalization under proof — the exemption is the config flag, not a
-// hardcoded set of names.
-const registry = new WorkspaceRegistry([
-  { name: 'epic',  priority: 3, promptFile: 'prompts/shell.md', defaultLauncher: 'shell', mcpServers: [], gateExempt: true },
-  { name: 'story', priority: 2, promptFile: 'prompts/shell.md', defaultLauncher: 'shell', mcpServers: [], gateExempt: true },
-  { name: 'task',  priority: 1, promptFile: 'prompts/shell.md', defaultLauncher: 'shell', mcpServers: [], gateExempt: false }
-]);
+//
+// WHAT REPLACED THE TYPE TABLE. The exemption used to be one `gateExempt`
+// boolean on a workspace type in crabcast.config.json, and every agent of that
+// type inherited all three of the decisions it was conflating: never refused,
+// never charged, never a preemption victim. It is now three separate knobs on
+// each agent's own record — so a caller can have an agent that costs a slot but
+// can never be taken, or one that is free but still refusable, neither of which
+// the single flag could express.
+//
+// The fleet below is the same shape as before: two supervising agents that are
+// exempt from all three, above a charged worker.
+const dirs = {};
+function agentDir(name) {
+  if (!dirs[name]) {
+    const dir = path.join(scratch, 'owned', name);
+    fs.mkdirSync(dir, { recursive: true });
+    dirs[name] = fs.realpathSync(dir);
+  }
+  return dirs[name];
+}
 
-// A herdr that reports exactly the agents we tell it to, and a prompt loader
-// that answers enough for the router to reach the gate.
-function stubBridge(runningAgentNames) {
-  const agents = runningAgentNames.map((name) => ({
-    name,
+const EXEMPT = { refusable: false, chargeable: false, preemptable: false };
+const CHARGED = { refusable: true, chargeable: true, preemptable: true };
+
+/** The knobs an agent at `name` is configured with, for the seeded registry. */
+const knobsFor = (name, priority, gate) => ({
+  priority, launcher: 'shell', ...gate
+});
+
+// A herdr that reports exactly the agents we tell it to.
+function stubBridge(running) {
+  const agents = running.map(({ name }) => ({
+    name: paneNameFor(agentDir(name)),
+    paneId: `p-${name}`,
     agentRuntime: 'claude',
-    workDir: '/tmp',
+    workDir: agentDir(name),
+    canonicalWorkDir: canonicalizeOrNull(agentDir(name)),
     herdrStatus: 'working'
   }));
   return {
     listHerdrAgentsChecked: () => ({ reachable: true, agents }),
     listHerdrAgents: () => agents,
+    listHerdrStatuses: () => new Map(agents.map((a) => [a.name, a.herdrStatus])),
     listActiveSessions: () => [],
-    getSessionByKey: () => undefined,
-    getSessionByAddress: () => undefined,
+    getSessionByPath: () => undefined,
+    abandonSession: () => {},
+    // PERMANENTLY OPEN, and that is correct for a capacity proof — but it
+    // means every section in this file is BLIND TO THE OCCUPANCY GUARD. These
+    // sections prove what the gate does once an activation reaches it; they
+    // prove nothing about whether it should have. `activate` checks occupancy
+    // BEFORE the gate, so a refusal there would never reach the arithmetic
+    // under test here. The guard has its own proof, with all five outcomes
+    // and a mutation-tested unreachable-herdr case, in
+    // verify-refuses-occupied-directory.mjs — do not read this file as
+    // coverage of it.
+    occupancyOf: () => ({ reachable: true, occupants: [], ours: null }),
     spawnSession: () => {
       throw new Error('spawnSession must not be reached when capacity refuses');
     }
   };
 }
 
-const stubPrompts = { loadAndRender: () => '# prompt' };
-const stubConfig = { configPath: '/tmp/crabcast.config.json', dataDir: '/tmp' };
+const stubConfig = { configPath: path.join(scratch, 'crabcast.config.json'), baseDir: scratch, dataDir: scratch };
 
-function makeRouter(runningAgentNames, onRespond, onBroadcast) {
+/**
+ * A registry that already holds every running agent's configuration, because
+ * that is where priority and the gate flags live now — the census alone can no
+ * longer say what an agent is worth.
+ */
+function seedRegistry(running, extra = []) {
+  const reg = new AgentRegistry(path.join(scratch, `agents-${++registryFile}.jsonl`));
+  for (const { name, priority, gate } of [...running, ...extra]) {
+    reg.recordActivated({ path: agentDir(name), config: knobsFor(name, priority, gate) });
+  }
+  return reg;
+}
+
+function makeRouter(running, onRespond, onBroadcast, registryOverride) {
   return new MessageRouter({
-    registry,
     config: stubConfig,
-    promptLoader: stubPrompts,
-    herdrBridge: stubBridge(runningAgentNames),
+    herdrBridge: stubBridge(running),
     daemonStartedAt: new Date(),
-    agentRegistry: new AgentRegistry(path.join(scratch, `agents-${++registryFile}.jsonl`)),
+    agentRegistry: registryOverride ?? seedRegistry(running),
     send: onRespond,
     broadcast: onBroadcast ?? onRespond
   });
 }
 
-async function activate(runningAgentNames, args) {
+/**
+ * configure-then-activate through the real router. `incoming` describes the
+ * agent being started; `running` is the fleet already up.
+ */
+async function activate(running, incoming) {
   const events = [];
   let response;
   let reachedSpawn = false;
+  const reg = seedRegistry(running);
+  const dir = agentDir(incoming.name);
+  reg.recordConfigured({
+    path: dir,
+    config: knobsFor(incoming.name, incoming.priority, incoming.gate)
+  });
   const router = makeRouter(
-    runningAgentNames,
+    running,
     (msg) => { response = msg; },
-    (msg) => { events.push(msg); }
+    (msg) => { events.push(msg); },
+    reg
   );
   try {
-    await router.handleActivateByKey(args, (msg) => { response = msg; });
+    await router.handleActivate(
+      { path: dir, override: incoming.override, preempt: incoming.preempt },
+      (msg) => { response = msg; }
+    );
   } catch (e) {
     // The stub throws from spawnSession, which is how we know the gate let the
     // call through rather than answering it.
@@ -287,11 +343,16 @@ async function activate(runningAgentNames, args) {
 // ----------------------------------------------------------- 5. census --
 rule('5. THE CENSUS — one epic, one story, one task through the capacity action');
 
-// A supervising fleet: two gate-exempt agents and one charged worker. The
-// names are what agentNameFor would build, so the router recovers each type
-// from the name alone — the same path a real sessionless census takes.
-const MIXED_FLEET = ['crabcast-epic-kan-40', 'crabcast-story-kan-41', 'crabcast-task-kan-50'];
-console.log(`running: ${MIXED_FLEET.join(', ')}\n`);
+// A supervising fleet: two exempt agents and one charged worker. The census
+// carries pane names and cwds; what each agent is WORTH comes from its own
+// record, joined on the canonical cwd — the same path a real sessionless
+// census takes after a daemon restart.
+const MIXED_FLEET = [
+  { name: 'epic-kan-40', priority: 3, gate: EXEMPT },
+  { name: 'story-kan-41', priority: 2, gate: EXEMPT },
+  { name: 'task-kan-50', priority: 1, gate: CHARGED }
+];
+console.log(`running: ${MIXED_FLEET.map((a) => agentDir(a.name)).join(', ')}\n`);
 
 let censusResponse;
 makeRouter(MIXED_FLEET, (msg) => { censusResponse = msg; }).handle({ action: 'capacity' });
@@ -312,18 +373,20 @@ console.log(
 // and a story agent, which are running on any real fleet and must not consume
 // a slot.
 const running = [
-  'crabcast-epic-kan-40',
-  'crabcast-story-kan-41',
-  ...Array.from({ length: here.cap }, (_, i) => `crabcast-task-kan-${i + 1}`)
+  { name: 'epic-kan-40', priority: 3, gate: EXEMPT },
+  { name: 'story-kan-41', priority: 2, gate: EXEMPT },
+  ...Array.from({ length: here.cap }, (_, i) => ({
+    name: `task-kan-${i + 1}`, priority: 1, gate: CHARGED
+  }))
 ];
 
 rule(
   `6. REFUSAL — two exempt agents plus ${here.cap} charged agent(s) against a cap of ${here.cap}, ` +
   'asking for one more'
 );
-console.log(`running: ${running.join(', ')}\n`);
+console.log(`running: ${running.length} agent(s), ${running.filter((a) => a.gate.chargeable).length} charged\n`);
 
-const refused = await activate(running, { type: 'task', key: 'KAN-99' });
+const refused = await activate(running, { name: 'task-kan-99', priority: 1, gate: CHARGED });
 console.log('what the caller receives:\n');
 console.log(JSON.stringify(refused.response, null, 2));
 console.log(
@@ -344,11 +407,11 @@ rule('7. RE-ATTACH — the same call, for an agent that is already running');
 // herdr pane does not), so this is the path every client takes after a
 // daemon restart. Refusing it would strand the caller away from work already
 // in flight, and would do so exactly when the machine is busiest.
-const reattach = await activate(running, { type: 'task', key: 'KAN-1' });
+const reattach = await activate(running, { name: 'task-kan-1', priority: 1, gate: CHARGED });
 // The gate letting it through means the stub's spawnSession throws, so there
 // is no response at all — reaching the attach path IS the result here.
 console.log(
-  'asking to activate task/KAN-1, which is already running as crabcast-task-kan-1:\n\n' +
+  `asking to activate ${agentDir('task-kan-1')}, which is already running:\n\n` +
   `  refused: ${reattach.response?.success === false}` +
   (reattach.response?.reason ? ` (${reattach.response.reason})` : '') + '\n' +
   `  reached the spawn/attach path: ${reattach.reachedSpawn}\n`
@@ -382,7 +445,7 @@ console.log(
 // --------------------------------------------------------- 9. override --
 rule('9. OVERRIDE — the same call, deliberately');
 
-const overridden = await activate(running, { type: 'task', key: 'KAN-99', override: true });
+const overridden = await activate(running, { name: 'task-kan-99', priority: 1, gate: CHARGED, override: true });
 console.log('the gate now allows it, and records that it did:\n');
 console.log(JSON.stringify(overridden.events, null, 2));
 console.log(
@@ -580,14 +643,19 @@ for (const [name, value] of Object.entries(savedEnv)) {
   else process.env[name] = value;
 }
 
-// ------------------------------------------------ 14. gateExempt gate --
-rule('14. GATEEXEMPT GATE — exempt types activate at zero headroom, no override');
+// ------------------------------------------------ 14. the gate triple --
+rule('14. THE GATE TRIPLE — `refusable: false` activates at zero headroom, no override');
 
-// The model has never charged gate-exempt types (sections 3 and 5), but a
-// gate that still refused them whenever headroom hit 0 would be arguing with
+// The model has never charged an unchargeable agent (sections 3 and 5), but a
+// gate that still refused one whenever headroom hit 0 would be arguing with
 // its own arithmetic — and desktop baseline load alone can pin headroomByLoad
 // at 0 indefinitely, so always-on supervising agents could never start or
 // auto-restore without a human pressing "Start anyway".
+//
+// This is the first of the three decisions the old `gateExempt` boolean was
+// carrying, now asked as its own question: `refusable` decides whether the
+// gate may refuse, `chargeable` whether the agent occupies a slot (section 5),
+// and `preemptable` whether anything may take it (verify-agent-preemption).
 //
 // Zero headroom is forced the same way an operator could force it: a per-agent
 // core cost so large that the load term answers 0 on any machine this script
@@ -605,25 +673,35 @@ console.log(
 
 // Nothing is running at all — an empty machine whose load average alone says
 // no.
-const epicAtZero = await activate([], { type: 'epic', key: 'KAN-40' });
-const storyAtZero = await activate([], { type: 'story', key: 'KAN-41' });
-const taskAtZero = await activate([], { type: 'task', key: 'KAN-99' });
+const epicAtZero = await activate([], { name: 'epic-kan-40', priority: 3, gate: EXEMPT });
+const storyAtZero = await activate([], { name: 'story-kan-41', priority: 2, gate: EXEMPT });
+const taskAtZero = await activate([], { name: 'task-kan-99', priority: 1, gate: CHARGED });
+// And the flag that actually decides it, on its own: an agent that is CHARGED
+// but not refusable. The old boolean could not express this, and it is the
+// combination that shows the exemption tested here is `refusable` alone rather
+// than a side effect of being uncounted.
+const chargedUnrefusable = await activate([], {
+  name: 'watchdog', priority: 1, gate: { refusable: false, chargeable: true, preemptable: false }
+});
 
 const overrideEvents = [...epicAtZero.events, ...storyAtZero.events]
   .filter((e) => e.action === 'capacity_override_event');
 
 console.log(
-  `  epic/KAN-40  (gateExempt, no override) → refused: ${epicAtZero.response?.success === false}, ` +
+  `  epic-kan-40   (not refusable, no override) → refused: ${epicAtZero.response?.success === false}, ` +
   `reached spawn: ${epicAtZero.reachedSpawn}\n` +
-  `  story/KAN-41 (gateExempt, no override) → refused: ${storyAtZero.response?.success === false}, ` +
+  `  story-kan-41  (not refusable, no override) → refused: ${storyAtZero.response?.success === false}, ` +
   `reached spawn: ${storyAtZero.reachedSpawn}\n` +
-  `  task/KAN-99  (charged,    no override) → refused: ${taskAtZero.response?.success === false}` +
+  `  watchdog      (not refusable but CHARGED) → refused: ${chargedUnrefusable.response?.success === false}, ` +
+  `reached spawn: ${chargedUnrefusable.reachedSpawn}\n` +
+  `  task-kan-99   (refusable,     no override) → refused: ${taskAtZero.response?.success === false}` +
   (taskAtZero.response?.reason ? ` (${taskAtZero.response.reason})` : '') + '\n' +
-  `  capacity_override_event broadcast for the exempt types: ${overrideEvents.length}\n`
+  `  capacity_override_event broadcast for the unrefusable agents: ${overrideEvents.length}\n`
 );
 
 const exemptPassed =
-  epicAtZero.reachedSpawn && storyAtZero.reachedSpawn && overrideEvents.length === 0;
+  epicAtZero.reachedSpawn && storyAtZero.reachedSpawn &&
+  chargedUnrefusable.reachedSpawn && overrideEvents.length === 0;
 const taskStillRefused =
   taskAtZero.response?.success === false &&
   taskAtZero.response?.refusedBy === 'capacity' &&
@@ -631,19 +709,18 @@ const taskStillRefused =
 
 console.log(
   flag(exemptPassed)
-    ? '  → both gateExempt types pass the gate with no override asked for and none\n' +
-      '    recorded. Their cost was reserved by the model from the start —\n' +
-      '    never counted in running, never charged a slot — so a refusal here\n' +
-      '    would be the gate arguing with its own arithmetic. The flag comes\n' +
-      '    from the type config alone: no type name is special-cased anywhere.'
-    : '  → A GATEEXEMPT TYPE WAS REFUSED OR AN OVERRIDE WAS RECORDED — CHECK THIS.'
+    ? '  → every `refusable: false` agent passes the gate with no override asked for\n' +
+      '    and none recorded — including the CHARGED one, which is the combination\n' +
+      '    the old single boolean could not express. The flag comes from the agent\'s\n' +
+      '    own record: no name and no type is special-cased anywhere.'
+    : '  → AN UNREFUSABLE AGENT WAS REFUSED OR AN OVERRIDE WAS RECORDED — CHECK THIS.'
 );
 console.log(
   flag(taskStillRefused)
-    ? '  → the charged type is still refused, load-bound, with the same legible\n' +
-      '    reason as before: the exemption is exactly as wide as the gateExempt\n' +
-      '    flag and no wider.'
-    : '  → THE CHARGED TYPE WAS NOT REFUSED LOAD-BOUND — CHECK THIS.'
+    ? '  → the refusable agent is still refused, load-bound, with the same legible\n' +
+      '    reason as before: the exemption is exactly as wide as `refusable` and\n' +
+      '    no wider.'
+    : '  → THE REFUSABLE AGENT WAS NOT REFUSED LOAD-BOUND — CHECK THIS.'
 );
 
 if (savedCores === undefined) delete process.env.CRABCAST_AGENT_CORES;
@@ -665,7 +742,7 @@ rule('15. REFUSAL HEADLINE — the headline names the constraint that bound');
   const saved = process.env.CRABCAST_AGENT_CORES;
   process.env.CRABCAST_AGENT_CORES = '1000';
 
-  const loadBound = await activate([], { type: 'task', key: 'KAN-99' });
+  const loadBound = await activate([], { name: 'task-headline', priority: 1, gate: CHARGED });
   const error = String(loadBound.response?.error ?? '');
   const headline = error.split('\n')[0];
   const summary = String(loadBound.response?.capacity?.summary ?? '');

@@ -7,6 +7,7 @@ import {
   McpError
 } from "@modelcontextprotocol/sdk/types.js";
 import * as net from 'net';
+import * as nodePath from 'path';
 import { DEFAULT_DATA_DIR, loadConfig, resolveConfigSource } from './config.js';
 import { connectToDaemon, onJsonLines, writeJsonLine } from './ipc.js';
 
@@ -96,11 +97,23 @@ function daemonLink(): Promise<net.Socket> {
             const { id, ...body } = msg;
             entry.resolve(body);
           } else if (typeof msg?.action === 'string' && msg.action.endsWith('_event')) {
+            // The subject, in whatever vocabulary the event actually uses.
+            // This line used to be `${msg.type}/${msg.key}`, which rendered
+            // `undefined/undefined` for the three events that never carried a
+            // type or key — and would now do so for every one of them, since
+            // agents are addressed by path. A forwarder that reliably prints
+            // "undefined" is worse than one that says it has nothing to say.
+            //
+            // Still a format string rather than the structured payload: the
+            // typed event contract, its allowlist and the payload-carrying
+            // notification are the event-contract slice's, and building half
+            // of them here would be the second copy that disagrees.
+            const subject = msg.path ?? msg.what ?? '(no subject)';
             server.notification({
               method: "notifications/message",
               params: {
                 level: "info",
-                data: `[CrabCast Event] ${msg.action} - ${msg.type}/${msg.key}`
+                data: `[CrabCast Event] ${msg.action} - ${subject}`
               }
             }).catch(() => {});
           }
@@ -159,13 +172,11 @@ async function callDaemonAPI(action: string, data: any = {}): Promise<any> {
       action,
       ...data,
       id,
-      // Workspace identity, when this server was spawned inside an agent
-      // workspace. Dead weight today — the router reads neither field — and
-      // kept as the extraction source had it rather than grown into a
-      // feature here. Follow-up candidate: either the router starts using
-      // them (e.g. attributing requests to the calling agent) or they go.
-      workspaceType: process.env.CRABCAST_WORKSPACE_TYPE || undefined,
-      workspaceKey: process.env.CRABCAST_WORKSPACE_KEY || undefined
+      // Which agent is calling, when this server was spawned inside one. Dead
+      // weight today — the router reads it nowhere — and carried because it is
+      // the seam the supervisor-of-record slice plugs into. One field now,
+      // because an agent has one address.
+      agentPath: process.env.CRABCAST_AGENT_PATH || undefined
     });
     // writeJsonLine refuses (returns false) on a destroyed socket. That is
     // the close-then-write race: the memoised socket died after daemonLink
@@ -180,13 +191,37 @@ async function callDaemonAPI(action: string, data: any = {}): Promise<any> {
   });
 }
 
+const PATH_PROPERTY = {
+  type: "string",
+  description:
+    "The directory the agent runs in — its whole address. Absolute, or relative to THIS " +
+    "MCP server's working directory, which is resolved here before the request is sent — " +
+    "the daemon refuses a relative path, because it runs detached and its own working " +
+    "directory belongs to whichever client first spawned it. The result is canonicalized " +
+    "(symlinks resolved) daemon-side, so a symlink and its target are the same agent. It " +
+    "must already exist: CrabCast never creates a directory.",
+} as const;
+
+/**
+ * A path operand, resolved against this server's working directory.
+ *
+ * The description above used to promise this and nothing did it: the string
+ * went to the daemon unchanged and `path.resolve` ran THERE, against a cwd
+ * inherited from whichever client first spawned the daemon. Two projects could
+ * send `./svc` and reach the same directory, and which one depended on where
+ * the daemon was started.
+ */
+function agentPath(value: unknown): unknown {
+  return typeof value === 'string' && value.trim() ? nodePath.resolve(value.trim()) : value;
+}
+
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
         name: "crabcast_capacity",
         description:
-          "Reports how many concurrent agents this machine can carry and how many more can be started right now. The cap is derived from the machine's own cores and memory, so it differs between machines; headroom additionally accounts for the current load average, so a fleet that is compiling reports less room than the same fleet idle. Ask this before activating, not after the machine is on its knees. ALSO REPORTS priorities: each running agent's worth is its workspace type's priority number from the daemon's config, which is what an activation at capacity would have to strictly outrank before it could stand any of them down.",
+          "Reports how many concurrent agents this machine can carry and how many more can be started right now. The cap is derived from the machine's own cores and memory, so it differs between machines; headroom additionally accounts for the current load average, so a fleet that is compiling reports less room than the same fleet idle. Ask this before activating, not after the machine is on its knees. ALSO REPORTS priorities: each running agent's worth is the priority frozen onto its record by crabcast_configure_agent, which is what an activation at capacity would have to strictly outrank before it could stand any of them down.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -194,54 +229,107 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
-        name: "crabcast_activate_agent",
+        name: "crabcast_configure_agent",
         description:
-          "Activates an agent for a specific workspace type and key. The type must be one the daemon's config declares; the key names which workspace of that type. Refused when the machine is already at capacity — see crabcast_capacity — unless override or preempt is set. A refusal names what is running and what each one is worth; when this activation outranks one of them, the refusal also carries a `preemption` block naming the agent that could be stood down to make room.",
+          "Makes an agent exist. An agent IS a directory plus the knobs you freeze onto it here — there are no workspace types to inherit from, so priority and launcher arrive in this call or nowhere, and activation refuses a path that was never configured. The directory must already exist; this never creates one, so a mistyped path is refused rather than scattered through your tree. It does NOT refuse an occupied directory: it succeeds and returns `occupiedBy` naming any live pane already in there, so you learn about the occupant now rather than when activation refuses. The intended day-one sequence when adopting directories that already have agents in them is: configure the fleet, stand your own panes down, then activate.",
         inputSchema: {
           type: "object",
           properties: {
+            path: PATH_PROPERTY,
+            priority: {
+              type: "number",
+              description:
+                "Required. What this agent outranks when the machine is full. There is no default: a silently-floored priority would be preemptable by everything and nobody would find out until its work was destroyed. Preemption is strictly-greater, so equal priorities never displace each other.",
+            },
+            launcher: {
+              type: "string",
+              description:
+                "Required. The runtime to run in the pane (e.g. 'claude'). Must name a launcher the daemon knows; there is no fallback, because an omitted launcher used to mean 'shell' and staffed work with a bare prompt that answered success and executed messages as shell commands.",
+            },
+            prompt: {
+              type: "string",
+              description:
+                "Optional. The agent's bootstrap prompt as FINISHED TEXT — not a path and not a template. CrabCast writes these bytes verbatim into its own sidecar directory (never into your directory), points the agent at that file by absolute path, and never inspects the content: there is no placeholder syntax and no variable set, so render whatever you want the agent to read before you send it, with whatever templating you like. Refused above 131072 characters, naming the limit and your actual size — the prompt travels inline over the socket and a truncated one would be an agent acting on half its instructions.",
+            },
+            mcpServers: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "Optional. MCP servers to offer this agent. Naming any of them causes a .mcp.json to be written into the agent's directory at activation; omit it and nothing is written there.",
+            },
+            label: {
+              type: "string",
+              description:
+                "Optional. Display text. Never parsed, never an address, duplicates are fine — no read or address in this API takes a label, so there is no way to look an agent up by one.",
+            },
+            refusable: {
+              type: "boolean",
+              description:
+                "Optional, default true. Whether the capacity gate may refuse this agent's activation. False means never refused — its cost is carried by whoever set the flag.",
+            },
+            chargeable: {
+              type: "boolean",
+              description:
+                "Optional, default true. Whether this agent occupies a charged slot in the capacity count. False means it is reported as exempt and never charged.",
+            },
+            preemptable: {
+              type: "boolean",
+              description:
+                "Optional, default true. Whether this agent may be stood down to make room for higher-priority work. chargeable: false with preemptable: true is refused as incoherent — standing down an uncharged agent frees no slot, so the preempt would admit a newcomer over the cap on a false premise.",
+            },
+            gateExempt: {
+              type: "boolean",
+              description:
+                "Optional. Shorthand for refusable, chargeable and preemptable all false. Passing it alongside any of those three is refused rather than resolved: which one won would be a silent decision about whether this agent can be refused, charged or stood down.",
+            },
+          },
+          required: ["path", "priority", "launcher"],
+        },
+      },
+      {
+        name: "crabcast_activate_agent",
+        description:
+          "Starts an agent that crabcast_configure_agent has already made exist. It takes NO attributes: everything the agent is comes from its record, so there is nothing here that could disagree with what it already is. Refused when the path was never configured, naming what is missing. Refused when the machine is at capacity — see crabcast_capacity — unless override or preempt is set; that refusal names what is running and what each one is worth, and carries a `preemption` block when this activation outranks one of them. REFUSED, ALWAYS, when a live pane that is not ours is already in that directory: the refusal names each one's pane_id, name and agent_status, and nothing is started. Refused as unverifiable when herdr does not answer at all, because an empty census from an unreachable herdr is silence rather than evidence that the directory is free. Activating an agent that is already running is not an error: it answers alreadyRunning with the pane it is in, and starts no second pane.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: PATH_PROPERTY,
             override: {
               type: "boolean",
               description:
-                "Optional. Start the agent even when the machine is at capacity. The refusal it bypasses is recorded with the load and memory figures at the time. Use it deliberately, not reflexively: the cap exists because a human noticed the desktop had become unusable.",
+                "Optional. Start the agent even when the machine is at capacity. The refusal it bypasses is recorded with the load and memory figures at the time. Use it deliberately, not reflexively: the cap exists because a human noticed the desktop had become unusable. It does NOT override the occupied-directory refusal, which is about somebody else's agent rather than about the machine.",
             },
             preempt: {
               type: "boolean",
               description:
-                "Optional, and destructive. Make room by standing down the lowest-priority agent this activation STRICTLY outranks, rather than over-committing the machine as override does. Priority is a per-type number from the daemon's config; only strictly greater preempts — equal never does, so an agent can never displace another of its own type, and nothing can displace the highest-priority type. The victim's uncommitted work is interrupted; it is recorded as preempted, reported by crabcast_list_agents until it is put back, and resumes its conversation when re-activated. Read the `preemption` block on the refusal first — it names exactly who would be stopped and what they are doing — and do not pass this without having decided that this work matters more than theirs.",
-            },
-            type: {
-              type: "string",
-              description: "The workspace type — one of the types declared in the daemon's config (e.g. 'shell')",
-            },
-            key: {
-              type: "string",
-              description: "The workspace key naming which workspace of that type (e.g. 'demo-1')",
-            },
-            url: {
-              type: "string",
-              description: "Optional. A page URL this agent is bound to, shown wherever the agent is listed. Omit it if unknown — the agent is then shown without a link rather than with a fabricated one.",
-            },
-            defaultAgent: {
-              type: "string",
-              description: "Optional. The agent runtime to launch (e.g. 'claude'). Must name a launcher the daemon knows; omitted, the workspace type's configured default is used.",
+                "Optional, and destructive. Make room by standing down the lowest-priority agent this activation STRICTLY outranks, rather than over-committing the machine as override does. Only strictly greater preempts — equal never does, so nothing can displace an agent of its own priority and nothing can displace the highest. The victim's uncommitted work is interrupted; it is recorded as preempted, reported by crabcast_list_agents until it is put back, and resumes its conversation when re-activated. Read the `preemption` block on the refusal first — it names exactly who would be stopped and what they are doing — and do not pass this without having decided that this work matters more than theirs.",
             },
           },
-          required: ["type", "key"],
+          required: ["path"],
         },
       },
       {
         name: "crabcast_deactivate_agent",
-        description: "Deactivates an active agent by its workspace key",
+        description:
+          "Stops the agent running in a directory. The record survives, so the agent still exists and can be activated again — use crabcast_forget_agent to remove it entirely. Never answers a bare success: `wasRunning` and `state` distinguish an agent this call stopped from one that was already down ('standby') and from one that was configured but never started ('unstarted'), because a caller polling for 'is it down' and a caller who mistyped a path deserve different answers. Refuses a path that was never configured: reporting a stand-down for a path that never held an agent would be success about a world that does not exist.",
         inputSchema: {
           type: "object",
           properties: {
-            key: {
-              type: "string",
-              description: "The workspace key (e.g., 'demo-1')",
-            },
+            path: PATH_PROPERTY,
           },
-          required: ["key"],
+          required: ["path"],
+        },
+      },
+      {
+        name: "crabcast_forget_agent",
+        description:
+          "Makes an agent stop existing: removes its record from the durable registry. REFUSES while an agent is running there, and there is deliberately no force flag — no call that is not named 'stop it' may terminate an agent as a side effect, and a force flag is that path with a label on it. Deactivate first, then forget: two calls leave two decisions in the append-only log instead of one flag nobody can audit. It also refuses when herdr cannot be reached and the record says the agent should be running, because silence is not evidence that nothing is there. On a path that was never configured it SUCCEEDS with existed: false — its postcondition is the absence of a record, and that already holds. This deletes NO directory: CrabCast does not create the directory an agent runs in and does not delete one.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: PATH_PROPERTY,
+          },
+          required: ["path"],
         },
       },
       {
@@ -251,21 +339,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {
-            key: {
-              type: "string",
-              description: "The workspace key of the agent to message (e.g., 'demo-1')",
-            },
-            type: {
-              type: "string",
-              description:
-                "Optional. The workspace type (e.g., 'shell'). Addresses the agent exactly; omit to resolve the key against herdr's agent list.",
-            },
+            path: PATH_PROPERTY,
             message: {
               type: "string",
               description: "The message to type into the agent's terminal",
             },
           },
-          required: ["key", "message"],
+          required: ["path", "message"],
         },
       },
       {
@@ -275,69 +355,35 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {
-            key: {
-              type: "string",
-              description: "The workspace key of the agent to read (e.g., 'demo-1')",
-            },
-            type: {
-              type: "string",
-              description:
-                "Optional. The workspace type (e.g., 'shell'). Addresses the agent exactly; omit to resolve the key against herdr's agent list.",
-            },
+            path: PATH_PROPERTY,
             lines: {
               type: "number",
               description: "Optional. How many trailing lines to return (default 40, max 200)",
             },
           },
-          required: ["key"],
+          required: ["path"],
         },
       },
       {
         name: "crabcast_agent_status",
         description:
-          "Reports an agent's full state: session id, workspace type and key, url, creation time, session status, working directory, and herdr's own view of what the agent is doing. If the daemon has restarted and lost its session, the herdr-only fields are still returned with sessionless: true.",
+          "Reports an agent's state: session id, pane name and pane id, creation time, session status, and herdr's own view of what the agent is doing. If the daemon has restarted and lost its session, the herdr-only fields are still returned with sessionless: true. `configured` says whether this daemon holds a record for that directory, which is how 'this agent is configured and not running' is told apart from 'you mistyped a path'.",
         inputSchema: {
           type: "object",
           properties: {
-            key: {
-              type: "string",
-              description: "The workspace key of the agent to inspect (e.g., 'demo-1')",
-            },
-            type: {
-              type: "string",
-              description:
-                "Optional. The workspace type (e.g., 'shell'). Addresses the agent exactly; omit to resolve the key against herdr's agent list.",
-            },
+            path: PATH_PROPERTY,
           },
-          required: ["key"],
+          required: ["path"],
         },
       },
       {
         name: "crabcast_list_agents",
         description:
-          "Lists every running agent, from herdr's view of what exists rather than the daemon's session map — so agents that outlived a daemon restart are still listed. Each entry carries sessionless: true when the daemon is not attached to it, in which case the session-only fields (sessionId, url, createdAt, status) are null. Panes named like agents but with no agent behind them are reported separately under unbackedPanes and are not counted as agents. ALSO CHECK missingAgents: agents recorded as active that are not running at all — their work has silently stopped while still looking staffed, so treat a non-empty missingAgents as work that needs re-activating or deliberately standing down. ALSO CHECK preemptedAgents: agents stood down to free capacity for higher-priority work, listed until somebody puts them back. Their work was interrupted rather than finished, so whoever supervises each one owes it a decision: re-activate it (which resumes the conversation it was stopped in) or stand it down for good. standbyAgents is NOT a problem to fix: agents somebody switched off on purpose whose workspace is still on disk, listed so they can be started again (crabcast_activate_agent with their type and key, and their recorded defaultAgent so they come back as what they were). All three of those lists are newest-first and clipped at 25; missingTotal, preemptedTotal and standbyTotal are the unclipped counts, so a total larger than its list means there are older entries this response did not carry.",
+          "Lists every running agent, from herdr's view of what exists joined against the durable registry rather than the daemon's session map — so agents that outlived a daemon restart are still listed. Each entry carries sessionless: true when the daemon is not attached to it, in which case the session-only fields (sessionId, createdAt, status) are null. ALSO CHECK missingAgents: agents recorded as active that are not running at all — their work has silently stopped while still looking staffed, so treat a non-empty missingAgents as work that needs re-activating or deliberately standing down. ALSO CHECK preemptedAgents: agents stood down to free capacity for higher-priority work, listed until somebody puts them back. Their work was interrupted rather than finished, so whoever supervises each one owes it a decision: re-activate it (which resumes the conversation it was stopped in) or stand it down for good. standbyAgents is NOT a problem to fix: agents somebody switched off on purpose whose directory is still there, listed so they can be started again with crabcast_activate_agent. foreignPanes are live panes this daemon did not start; a row whose `occupies` is set is sitting in a directory you have configured, and activating that agent WILL be refused until it is gone. unbackedPanes are our own panes with nothing running behind them. All the clipped lists are newest-first and capped at 25 with an unclipped total alongside, so a total larger than its list means there are older entries this response did not carry.",
         inputSchema: {
           type: "object",
           properties: {},
           required: [],
-        },
-      },
-      {
-        name: "crabcast_reset_agent",
-        description: "Deactivates an agent and securely deletes its workspace directory",
-        inputSchema: {
-          type: "object",
-          properties: {
-            type: {
-              type: "string",
-              description: "The workspace type (e.g., 'shell')",
-            },
-            key: {
-              type: "string",
-              description: "The workspace key (e.g., 'demo-1')",
-            },
-          },
-          required: ["type", "key"],
         },
       },
     ],
@@ -356,25 +402,46 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    if (name === "crabcast_activate_agent") {
-      const { type, key, url, defaultAgent, override, preempt } = args as any;
-      if (!type || !key) throw new Error("Missing required arguments");
+    if (name === "crabcast_configure_agent") {
+      const { path, priority, launcher, prompt, mcpServers, label,
+              refusable, chargeable, preemptable, gateExempt } = args as any;
+      if (!path) throw new Error("Missing required argument: path");
 
-      const res = await callDaemonAPI('activate_by_key', { type, key, url, defaultAgent, override, preempt });
+      // priority and launcher are NOT checked here, deliberately. The daemon
+      // refuses a configure without them and its refusal names both fields and
+      // says why each one has no default; a check here would be a second copy
+      // of that rule with a worse message.
+      const res = await callDaemonAPI('configure_agent', {
+        path: agentPath(path), priority, launcher, prompt, mcpServers, label,
+        refusable, chargeable, preemptable, gateExempt
+      });
       return {
         content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
-        // The sibling tools already flag their failures this way. Without it a
-        // failed activation arrives as ordinary text, which is exactly how a
-        // caller ends up believing an agent exists that does not.
+        isError: res?.success === false,
+      };
+    }
+
+    if (name === "crabcast_activate_agent") {
+      const { path, override, preempt } = args as any;
+      if (!path) throw new Error("Missing required argument: path");
+
+      const res = await callDaemonAPI('activate_agent', {
+        path: agentPath(path), override, preempt });
+      return {
+        content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+        // Without it a failed activation arrives as ordinary text, which is
+        // exactly how a caller ends up believing an agent exists that does not
+        // — and, since the occupied-directory refusal lands here too, how one
+        // ends up believing it started an agent that was refused.
         isError: res?.success === false,
       };
     }
 
     if (name === "crabcast_deactivate_agent") {
-      const { key } = args as any;
-      if (!key) throw new Error("Missing key argument");
+      const { path } = args as any;
+      if (!path) throw new Error("Missing required argument: path");
 
-      const res = await callDaemonAPI('deactivate_by_key', { key });
+      const res = await callDaemonAPI('deactivate_agent', { path: agentPath(path) });
       return {
         content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
         // The extraction source left this one tool without the mapping. The
@@ -385,11 +452,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    if (name === "crabcast_send_to_agent") {
-      const { key, type, message } = args as any;
-      if (!key || !message) throw new Error("Missing required arguments: key, message");
+    if (name === "crabcast_forget_agent") {
+      const { path } = args as any;
+      if (!path) throw new Error("Missing required argument: path");
 
-      const res = await callDaemonAPI('send_to_agent', { key, type, message });
+      const res = await callDaemonAPI('forget_agent', { path: agentPath(path) });
+      return {
+        content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+        // A refused forget — the agent is still running, or herdr could not
+        // say — must not read as a record that is gone.
+        isError: res?.success === false,
+      };
+    }
+
+    if (name === "crabcast_send_to_agent") {
+      const { path, message } = args as any;
+      if (!path || !message) throw new Error("Missing required arguments: path, message");
+
+      const res = await callDaemonAPI('send_to_agent', {
+        path: agentPath(path), message });
       return {
         content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
         isError: res?.success === false,
@@ -397,10 +478,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === "crabcast_tail_agent") {
-      const { key, type, lines } = args as any;
-      if (!key) throw new Error("Missing required argument: key");
+      const { path, lines } = args as any;
+      if (!path) throw new Error("Missing required argument: path");
 
-      const res = await callDaemonAPI('tail_agent', { key, type, lines });
+      const res = await callDaemonAPI('tail_agent', {
+        path: agentPath(path), lines });
       return {
         content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
         isError: res?.success === false,
@@ -408,10 +490,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === "crabcast_agent_status") {
-      const { key, type } = args as any;
-      if (!key) throw new Error("Missing required argument: key");
+      const { path } = args as any;
+      if (!path) throw new Error("Missing required argument: path");
 
-      const res = await callDaemonAPI('agent_status', { key, type });
+      const res = await callDaemonAPI('agent_status', { path: agentPath(path) });
       return {
         content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
         isError: res?.success === false,
@@ -430,27 +512,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // work also looks staffed with nothing behind it — so it flags the
         // same way. The difference is that somebody chose this one, which
         // makes it a decision owed rather than a loss to investigate.
-        //
-        // (Both fields arrive with the durable-registry slice; until then
-        // they are simply absent and this mapping is inert.)
         isError:
           res?.success === false ||
           (Array.isArray(res?.missingAgents) && res.missingAgents.length > 0) ||
           (Array.isArray(res?.preemptedAgents) && res.preemptedAgents.length > 0),
-      };
-    }
-
-    if (name === "crabcast_reset_agent") {
-      const { type, key } = args as any;
-      if (!type || !key) throw new Error("Missing required arguments: type, key");
-
-      const res = await callDaemonAPI('reset_by_key', { type, key });
-      return {
-        content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
-        // See crabcast_deactivate_agent: a reset that failed — the workspace
-        // refused deletion, the agent would not close — must not read as a
-        // clean slate.
-        isError: res?.success === false,
       };
     }
 
@@ -464,8 +529,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // code, and downgrading it to `isError: true` with the text "Error:
     // Unknown tool: x" told the client "your call ran and failed" when the
     // truth was "there is no such method here" — the one answer a client can
-    // act on by re-listing the tools. The SDK serialises McpError into a
-    // JSON-RPC error with its code, so rethrowing is all that is needed.
+    // act on by re-listing the tools. `crabcast_reset_agent` is now exactly
+    // that case: the verb is removed rather than redefined, so a caller still
+    // using it gets a method-not-found by name instead of quietly getting
+    // something else. The SDK serialises McpError into a JSON-RPC error with
+    // its code, so rethrowing is all that is needed.
     if (error instanceof McpError) throw error;
     return {
       content: [{ type: "text", text: `Error: ${error.message}` }],

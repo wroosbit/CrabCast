@@ -15,6 +15,7 @@
 // exists) imports the built command table. Exits non-zero on any failure so a
 // reviewer can re-run it against the PR head.
 
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,7 +48,7 @@ const EXCLUSIONS = [
       'Terminal attach. CrabCast is a management layer and never embeds a terminal — a ' +
       'settled product boundary, not a deferral (KAN-59 decision 4, KAN-92 constraint 6). ' +
       '`tail` is how the CLI reads a pane; it does not stream one.',
-    evidence: 'src/router.ts:2052 handlePtyInit registers a data listener that streams pty_output frames'
+    evidence: 'src/router.ts:2416 handlePtyInit registers a data listener that streams pty_output frames'
   },
   {
     action: 'pty_input',
@@ -55,32 +56,34 @@ const EXCLUSIONS = [
       'Terminal attach, write half. Same boundary as pty_init: keystrokes into a live PTY are ' +
       'an embedded terminal by another name. The CLI steers agents with `send`, which the daemon ' +
       'delivers as a whole message, not as a keystroke stream.',
-    evidence: 'src/router.ts:2091 handlePtyInput writes raw data to a PTY by session id'
+    evidence: 'src/router.ts:2455 handlePtyInput writes raw data to a PTY by session id'
   },
   {
     action: 'pty_resize',
     reason:
       'Terminal attach, geometry half. Only meaningful to a client that is drawing the PTY, ' +
       'which by the boundary above CrabCast never is.',
-    evidence: 'src/router.ts:2108 handlePtyResize sets cols/rows on a PTY by session id'
+    evidence: 'src/router.ts:2472 handlePtyResize sets cols/rows on a PTY by session id'
   },
   {
     action: 'deactivate',
     reason:
-      'Session-addressed stand-down. Addressing in this system is <type>/<key>; a sessionId is ' +
-      'transport-internal — it is minted by the daemon that holds the attach and dies with it. ' +
-      'The by-key form is the human-facing one and is a strict superset: it resolves through the ' +
-      'session map when there is one, falls back to herdr when there is not, and still records the ' +
-      'stand-down for an agent that has already died. The session form can address none of those. ' +
-      'Concretely, every agent that outlived a daemon restart is reported with sessionId: null, so ' +
-      'a `crabcast deactivate --session <id>` would be unusable in precisely the case a human most ' +
-      'often needs it. The one caller in the tree is a verify script tearing down a session it just ' +
-      'created; the MCP server — the only other client of this socket — uses deactivate_by_key.',
+      'Session-addressed stand-down. Addressing in this system is the canonical path of the ' +
+      'directory an agent runs in; a sessionId is transport-internal — it is minted by the daemon ' +
+      'that holds the attach and dies with it. The path-addressed form is the human-facing one and ' +
+      'is a strict superset: it resolves through the session map when there is one, falls back to ' +
+      "herdr's pane when there is not, and still records the stand-down for an agent that has " +
+      'already died. The session form can address none of those. Concretely, every agent that ' +
+      'outlived a daemon restart is reported with sessionId: null, so a ' +
+      '`crabcast deactivate --session <id>` would be unusable in precisely the case a human most ' +
+      'often needs it. It also cannot answer the state question the path form does — unstarted vs ' +
+      'standby — because a configured-but-never-run agent has no session to name. The MCP server, ' +
+      'the only other client of this socket, uses deactivate_agent.',
     evidence:
-      'src/router.ts:1136-1181 handleDeactivate requires data.sessionId and looks up the session map only; ' +
-      'src/router.ts:1183-1299 handleDeactivateByKey resolves by address, falls back to closeAgentByKey ' +
-      'and to the registry for a dead agent; src/router.ts:1999 sessionless rows carry sessionId: null; ' +
-      'src/mcp.ts:373 crabcast_deactivate_agent calls deactivate_by_key'
+      'src/router.ts:1582 handleDeactivateSession requires data.sessionId and looks up the session ' +
+      'map only; src/router.ts:1644 handleDeactivateAgent resolves by canonical path, falls back to ' +
+      'closeAgentByPath and to the registry for a dead agent; src/router.ts:2228 sessionless rows ' +
+      'carry sessionId: null; src/mcp.ts:423 crabcast_deactivate_agent calls deactivate_agent'
   }
 ];
 
@@ -378,6 +381,75 @@ for (const c of COMMANDS ?? []) {
       `'crabcast ${c.name}' records reply label '${c.responseAction}', which router.ts sends`
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// 5. The source tree holds nothing the compiler cannot see.
+//
+// This section exists because a stale copy of `src/router.ts` shipped in a
+// commit under the name `src/.ts` — a file whose entire name is the extension
+// — and all three required checks went green over it.
+//
+// Nothing here was careless twice: `tsconfig.json` has `"include": ["src"]`,
+// and TypeScript's wildcard expansion SKIPS dot-prefixed files. So the file
+// was never compiled, never imported, and never rendered by `ls`. What it did
+// do is answer every future grep, code search and reader with a 2,586-line
+// near-copy of this daemon's largest file, 23 lines out of date on the
+// ownership test — which is how it was found.
+//
+// The lesson is the one this suite keeps relearning: a check that cannot fail
+// is not a check. The compiler's blindness here is deliberate and correct for
+// its own job, so the audit belongs somewhere that looks at the tree rather
+// than at the build — and this script is already the one that reads `src/`
+// mechanically and starts nothing.
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 5. Nothing in src/ is invisible to the compiler ===\n');
+
+const gitFiles = execFileSync('git', ['ls-files', 'src', 'scripts'], {
+  cwd: repoRoot,
+  encoding: 'utf8'
+}).split('\n').filter(Boolean);
+
+const invisible = gitFiles.filter((f) => path.basename(f).startsWith('.'));
+const wrongExt = gitFiles.filter((f) => {
+  const b = path.basename(f);
+  if (b.startsWith('.')) return false;              // reported above
+  if (f.startsWith('src/')) return !b.endsWith('.ts');
+  return !b.endsWith('.mjs');
+});
+
+console.log(`  tracked under src/ and scripts/: ${gitFiles.length} file(s)`);
+check(
+  invisible.length === 0,
+  'no tracked file under src/ or scripts/ has a dot-prefixed name',
+  invisible.length
+    ? `INVISIBLE TO tsc AND TO \`ls\`: ${invisible.join(', ')} — a wildcard include skips ` +
+      `these, so nothing compiles or lints them`
+    : ''
+);
+check(
+  wrongExt.length === 0,
+  'every tracked file has the extension its directory expects (src/*.ts, scripts/*.mjs)',
+  wrongExt.length ? wrongExt.join(', ') : ''
+);
+
+// And the compiler really does see every source file, rather than this being
+// an argument about wildcards: compare what git tracks against what tsc emits.
+const distDir = path.join(repoRoot, 'dist');
+if (fs.existsSync(distDir)) {
+  const emitted = new Set(
+    fs.readdirSync(distDir).filter((f) => f.endsWith('.js')).map((f) => f.slice(0, -3))
+  );
+  const unemitted = gitFiles
+    .filter((f) => f.startsWith('src/') && f.endsWith('.ts'))
+    .map((f) => path.basename(f, '.ts'))
+    .filter((name) => !emitted.has(name));
+  check(
+    unemitted.length === 0,
+    'and every tracked src/*.ts was actually emitted to dist/ — measured, not assumed',
+    unemitted.length ? `never compiled: ${unemitted.join(', ')}` : `${emitted.size} module(s)`
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@
 // distDir defaults to ../dist.
 
 import { execFileSync, spawn } from 'child_process';
-import { mkdtempSync, mkdirSync, rmSync, readdirSync, readFileSync } from 'fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, readdirSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -81,7 +81,22 @@ function report(label, session) {
 // reporting, not launcher provisioning, and `shell` touches nothing outside
 // the scratch (a claude launcher would write folder trust into the real
 // ~/.claude.json).
-const AS_SHELL = 'shell';
+const AS_SHELL = {
+  priority: 1, refusable: true, chargeable: true, preemptable: true, launcher: 'shell'
+};
+
+/**
+ * A directory for one of this script's scratch agents.
+ *
+ * It has to be created here, because an agent is its directory and CrabCast
+ * creates none: `spawnSession` runs the pane in a path the caller supplies and
+ * `configure` refuses one that is not there.
+ */
+function agentDir(name) {
+  const dir = path.join(stateDir, 'owned', name);
+  mkdirSync(dir, { recursive: true });
+  return realpathSync(dir);
+}
 
 // ---------------------------------------------------------------- geometry --
 console.log('\n== failure mode 1: collapsed pane geometry (the real KAN-24 outage) ==');
@@ -93,7 +108,7 @@ tinyClient = spawn('script', ['-q', '-c', 'herdr agent attach anchor --takeover'
   { stdio: 'ignore', env: process.env });
 await sleep(3000);
 
-const geometrySession = bridge.spawnSession('k24proof', 'geometry', undefined, '', AS_SHELL);
+const geometrySession = bridge.spawnSession(agentDir('geometry'), AS_SHELL);
 await sleep(500);
 report('geometry', geometrySession);
 
@@ -113,7 +128,7 @@ try {
 console.log(`   limit now: ${readFileSync(`/proc/${server.pid}/limits`, 'utf8')
   .split('\n').find(l => l.startsWith('Max open files')).trim()}`);
 
-const fdSession = bridge.spawnSession('k24proof', 'fdlimit', undefined, '', AS_SHELL);
+const fdSession = bridge.spawnSession(agentDir('fdlimit'), AS_SHELL);
 await sleep(500);
 report('fdlimit', fdSession);
 

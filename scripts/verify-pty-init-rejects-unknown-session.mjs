@@ -65,18 +65,15 @@ const herdrState = path.join(scratch, 'herdr-state');
 mkdirSync(fakeHome, { recursive: true });
 mkdirSync(herdrState, { recursive: true });
 
-// The daemon under test loads a real config: one `task` type running the
-// `shell` launcher, dataDir inside the scratch.
+// The daemon under test loads a real config: a dataDir inside the scratch and
+// nothing else, because there is no type table left to declare.
 const dataDir = path.join(fakeHome, '.local', 'share', 'crabcast');
 const configPath = path.join(fakeHome, 'crabcast.config.json');
-mkdirSync(path.join(fakeHome, 'prompts'), { recursive: true });
-writeFileSync(path.join(fakeHome, 'prompts', 'task.md'), 'KAN-25 proof workspace {{KEY}}.\n');
-writeFileSync(configPath, JSON.stringify({
-  dataDir,
-  workspaceTypes: [
-    { name: 'task', priority: 1, promptFile: 'prompts/task.md', defaultLauncher: 'shell' }
-  ]
-}, null, 2));
+writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
+
+/** The directory this proof's one agent is. CrabCast creates none of its own. */
+const AGENT_DIR = path.join(fakeHome, 'owned', 'kan-25-verify');
+mkdirSync(AGENT_DIR, { recursive: true });
 
 const isolatedEnv = {
   HOME: fakeHome,
@@ -96,7 +93,12 @@ process.on('exit', () => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
-const workspacesRoot = path.join(dataDir, 'workspaces');
+// What a refused PTY request must not have created. `<dataDir>/workspaces` is
+// gone with the type model — CrabCast allocates no directory at all now — so
+// the two places a phantom could appear are the SIDECAR root, which is the
+// only tree this daemon writes into, and the caller's own directory, which it
+// must never write into.
+const sidecarRoot = path.join(dataDir, 'agents');
 const socketPath = path.join(dataDir, 'crabcast.sock');
 
 // --- a private herdr, so a spawn cannot reach the live server -----------------
@@ -204,19 +206,22 @@ const census = async () => {
   return { agents, unbackedPanes };
 };
 
-const workspaceTree = () => {
-  if (!existsSync(workspacesRoot)) return [];
+/**
+ * Every directory this daemon has created for an agent, plus the contents of
+ * the caller's own directory.
+ *
+ * This replaced a walk of `<dataDir>/workspaces`, which this PR deleted from
+ * the product — so it returned `[]` unconditionally and the assertion built on
+ * it could not fail. Deleting the tree was right; leaving the check pointed at
+ * it was not.
+ */
+const agentTree = () => {
   const out = [];
-  for (const type of readdirSync(workspacesRoot)) {
-    const typeDir = path.join(workspacesRoot, type);
-    let keys = [];
-    try {
-      keys = readdirSync(typeDir);
-    } catch {
-      keys = [];
-    }
-    for (const key of keys) out.push(`${type}/${key}`);
-    if (keys.length === 0) out.push(`${type}/`);
+  if (existsSync(sidecarRoot)) {
+    for (const hash of readdirSync(sidecarRoot)) out.push(`sidecar/${hash}`);
+  }
+  if (existsSync(AGENT_DIR)) {
+    for (const entry of readdirSync(AGENT_DIR)) out.push(`caller-dir/${entry}`);
   }
   return out.sort();
 };
@@ -232,10 +237,10 @@ const FABRICATED = 'task-kan-25-1753900000000';
 // --- 1. before ---------------------------------------------------------------
 banner('1. before — what this daemon has (list_agents)');
 const before = await census();
-const beforeWorkspaces = workspaceTree();
+const beforeWorkspaces = agentTree();
 const beforeHerdr = herdrAgentNames();
 console.log(JSON.stringify(before, null, 2));
-console.log(`\nworkspaces under ${workspacesRoot}: ${JSON.stringify(beforeWorkspaces)}`);
+console.log(`\nagent directories (sidecars + the caller's own): ${JSON.stringify(beforeWorkspaces)}`);
 console.log(`herdr agents on the private server: ${JSON.stringify(beforeHerdr)}`);
 
 // --- 2. the rejection --------------------------------------------------------
@@ -266,10 +271,10 @@ record(
 // --- 3. no session created, none attached to ---------------------------------
 banner('3. after — nothing was created, nothing was attached to');
 const after = await census();
-const afterWorkspaces = workspaceTree();
+const afterWorkspaces = agentTree();
 const afterHerdr = herdrAgentNames();
 console.log(JSON.stringify(after, null, 2));
-console.log(`\nworkspaces under ${workspacesRoot}: ${JSON.stringify(afterWorkspaces)}`);
+console.log(`\nagent directories (sidecars + the caller's own): ${JSON.stringify(afterWorkspaces)}`);
 console.log(`herdr agents on the private server: ${JSON.stringify(afterHerdr)}`);
 
 record(
@@ -278,13 +283,19 @@ record(
   JSON.stringify(after) === JSON.stringify(before) ? undefined : 'census differs — see above'
 );
 record(
-  'no default/workspace directory was created',
-  !afterWorkspaces.some((w) => w.startsWith('default/')),
-  afterWorkspaces.some((w) => w.startsWith('default/')) ? 'a phantom workspace appeared' : undefined
+  'the refused request created no directory anywhere — not a sidecar, and nothing in ' +
+    "the caller's own directory",
+  JSON.stringify(afterWorkspaces) === JSON.stringify(beforeWorkspaces),
+  JSON.stringify(afterWorkspaces) === JSON.stringify(beforeWorkspaces)
+    ? undefined
+    : `appeared: ${JSON.stringify(afterWorkspaces.filter((w) => !beforeWorkspaces.includes(w)))}`
 );
 record(
   'no phantom agent appeared on herdr',
   JSON.stringify(afterHerdr) === JSON.stringify(beforeHerdr),
+  // The sibling claim used to say "directory evidence only" when herdr was
+  // unavailable — which was untrue while the directory check was vacuous. It
+  // is true again now, so it can be said again.
   herdrAvailable ? undefined : '(herdr unavailable; directory evidence only)'
 );
 
@@ -311,13 +322,9 @@ if (!herdrAvailable) {
   // with it: the capacity gate measures the real machine, and whether this
   // box is busy is not what is being proved. The override is recorded with
   // the figures at the time, as it is for anyone.
-  const activated = await call('activate_by_key', {
-    type: 'task',
-    key: 'KAN-25-VERIFY',
-    defaultAgent: 'shell',
-    override: true
-  });
-  console.log('activate_by_key →', JSON.stringify({ ...activated, id: undefined }, null, 2));
+  await call('configure_agent', { path: AGENT_DIR, priority: 1, launcher: 'shell' });
+  const activated = await call('activate_agent', { path: AGENT_DIR, override: true });
+  console.log('activate_agent →', JSON.stringify({ ...activated, id: undefined }, null, 2));
 
   if (!activated.success) {
     record('a real session could be started', false, activated.error);
@@ -384,7 +391,7 @@ if (!herdrAvailable) {
     // session's data listener on every call — ~60 registrations to answer a
     // question that changes nothing.
     const paneText = async () => {
-      const tailed = await call('tail_agent', { key: 'KAN-25-VERIFY', type: 'task', lines: 200 });
+      const tailed = await call('tail_agent', { path: AGENT_DIR, lines: 200 });
       return typeof tailed.text === 'string' ? tailed.text : '';
     };
 

@@ -29,7 +29,7 @@
 //                         dies, its same-key neighbour survives
 //
 // Sections 3 through 6 drive the real MessageRouter and the real
-// WorkspaceRegistry — handleActivateByKey and handleDeactivateByKey, the same
+// durable registry — handleActivate and handleDeactivateAgent, the same
 // calls an MCP caller makes — so what they print is what a caller actually
 // receives. herdr is stubbed: this proves the gate, the ordering and the
 // record, and none of those reach herdr for anything but a census and a pane
@@ -54,7 +54,7 @@ let registryFile = 0;
 
 const { compareVictims, outranks, selectVictim } = await import(path.join(distDir, 'priority.js'));
 const { AgentRegistry } = await import(path.join(distDir, 'agent-registry.js'));
-const { WorkspaceRegistry } = await import(path.join(distDir, 'registry.js'));
+const { paneNameFor, canonicalizeOrNull } = await import(path.join(distDir, 'identity.js'));
 const { MessageRouter } = await import(path.join(distDir, 'router.js'));
 const { readCapacity, summarizeCapacity } = await import(path.join(distDir, 'capacity.js'));
 
@@ -72,17 +72,26 @@ const verdict = (ok, yes, no) => {
 // that outranks `task` without being gate-exempt, and the type this proof
 // drives preemption with (an exempt activation is never refused, so it never
 // has anything to preempt for — section 6 proves that half directly).
-// `watchdog` is a LOW-priority gate-exempt type — legitimate config, because
-// `gateExempt` and `priority` are independent fields — and the shape section
-// 7 exists for: an agent that outranks nothing and must still never be
-// offered as a victim, because standing it down frees no charged slot.
-const registry = new WorkspaceRegistry([
-  { name: 'epic',     priority: 3, promptFile: 'prompts/shell.md', defaultLauncher: 'shell', mcpServers: [], gateExempt: true },
-  { name: 'story',    priority: 2, promptFile: 'prompts/shell.md', defaultLauncher: 'shell', mcpServers: [], gateExempt: true },
-  { name: 'hotfix',   priority: 2, promptFile: 'prompts/shell.md', defaultLauncher: 'shell', mcpServers: [], gateExempt: false },
-  { name: 'task',     priority: 1, promptFile: 'prompts/shell.md', defaultLauncher: 'shell', mcpServers: [], gateExempt: false },
-  { name: 'watchdog', priority: 1, promptFile: 'prompts/shell.md', defaultLauncher: 'shell', mcpServers: [], gateExempt: true }
-]);
+// `watchdog` is a LOW-priority agent that is CHARGED but never preemptable —
+// legitimate, because the three gate decisions are independent knobs now — and
+// the shape section 7 exists for: an agent that outranks nothing and must
+// still never be offered as a victim.
+//
+// The old single `gateExempt` boolean could not say this. It meant all three
+// at once, so "protected from preemption" came bundled with "never counted",
+// and the only way to have an uncharged agent was to make it unrefusable too.
+const EXEMPT = { refusable: false, chargeable: false, preemptable: false };
+const CHARGED = { refusable: true, chargeable: true, preemptable: true };
+/** Charged and refusable, but nothing may take its slot. */
+const PROTECTED = { refusable: true, chargeable: true, preemptable: false };
+
+const KNOBS = {
+  epic: { priority: 3, gate: EXEMPT },
+  story: { priority: 2, gate: EXEMPT },
+  hotfix: { priority: 2, gate: CHARGED },
+  task: { priority: 1, gate: CHARGED },
+  watchdog: { priority: 1, gate: PROTECTED }
+};
 
 // A charged agent plus however many more this machine's own derivation says
 // it can carry. Filling to the derived cap rather than to a number this
@@ -90,6 +99,24 @@ const registry = new WorkspaceRegistry([
 const HERE = readCapacity(0, 1);
 
 // ------------------------------------------------------------- the harness --
+
+const owned = path.join(scratch, 'owned');
+const dirs = new Map();
+/** A directory a caller owns, one per agent. The address, and the whole of it. */
+function agentDir(name) {
+  if (!dirs.has(name)) {
+    const dir = path.join(owned, name);
+    fs.mkdirSync(dir, { recursive: true });
+    dirs.set(name, fs.realpathSync(dir));
+  }
+  return dirs.get(name);
+}
+/** `epic-kan-39` -> the knobs its leading token names. */
+const knobsFor = (name) => {
+  const kind = name.split('-')[0];
+  const { priority, gate } = KNOBS[kind] ?? KNOBS.task;
+  return { priority, launcher: 'shell', ...gate };
+};
 
 /**
  * A herdr that reports exactly the agents it is told to, and forgets one when
@@ -106,73 +133,89 @@ function stubHerdr(running, { statuses = {} } = {}) {
     listHerdrAgentsChecked: () => ({
       reachable: true,
       agents: alive.map((name) => ({
-        name,
+        name: paneNameFor(agentDir(name)),
+        paneId: `p-${name}`,
         agentRuntime: 'claude',
-        workDir: `/tmp/${name}`,
+        workDir: agentDir(name),
+        canonicalWorkDir: canonicalizeOrNull(agentDir(name)),
         herdrStatus: statuses[name] ?? 'working'
       }))
     }),
     listHerdrAgents: () => bridge.listHerdrAgentsChecked().agents,
     // The post-spawn existence check (KAN-23), answered from the same list the
     // census is built from — which is the rule the real one follows.
-    confirmAgentPresent: async (agentName) =>
-      alive.includes(agentName)
-        ? { present: true, waitedMs: 0, checks: 1 }
+    confirmAgentPresent: async (paneName) => {
+      const found = alive.find((n) => paneNameFor(agentDir(n)) === paneName);
+      return found
+        ? { present: true, paneId: `p-${found}`, waitedMs: 0, checks: 1 }
         : { present: false, reason: 'absent', waitedMs: 0, checks: 1,
-            error: `stub herdr has no agent '${agentName}'` },
+            error: `stub herdr has no agent '${paneName}'` };
+    },
     abandonSession: () => {},
     listHerdrStatuses: () => new Map(bridge.listHerdrAgents().map((a) => [a.name, a.herdrStatus])),
     listActiveSessions: () => [],
-    getSessionByKey: () => undefined,
-    getSessionByAddress: () => undefined,
+    getSessionByPath: () => undefined,
     terminateSession: () => ({ success: true }),
-    // The real bridge's rule: a caller that knows the type names the agent
-    // exactly; a bare key falls back to the suffix match. Section 8 is what
-    // holds this stub to the exact-address half.
-    closeAgentByKey: (key, type) => {
-      const i = type
-        ? alive.indexOf(`crabcast-${type}-${key.toLowerCase()}`)
-        : alive.findIndex((n) => n.endsWith(`-${key.toLowerCase()}`));
-      if (i === -1) return { success: false, error: `No agent found for key '${key}'` };
-      const [agentName] = alive.splice(i, 1);
-      return { success: true, agentName };
+    occupancyOf: (census, agentPath) => ({
+      reachable: true,
+      // The honest reading of this stub's own census: whatever it says is live
+      // in that directory, and ours when the pane bearing this path's derived
+      // name is among them. Same shape as the real one, which is what makes
+      // the "already running" branch reachable below.
+      //
+      // Like verify-agent-capacity's, this stub is not coverage of the
+      // occupancy guard — verify-refuses-occupied-directory.mjs is.
+      occupants: census.agents.filter((a) => a.canonicalWorkDir === agentPath),
+      ours: census.agents.find((a) => a.name === paneNameFor(agentPath)) ?? null
+    }),
+    closeAgentByPath: (agentPath) => {
+      const i = alive.findIndex((n) => agentDir(n) === agentPath);
+      const paneName = paneNameFor(agentPath);
+      if (i === -1) return { success: false, paneName, error: `No agent at '${agentPath}'` };
+      alive.splice(i, 1);
+      return { success: true, paneName };
     },
-    spawnSession: (type, key, url, prompt, defaultAgent) => {
-      const session = {
-        sessionId: `${type}-${key.toLowerCase()}-stub`,
-        type,
-        key,
-        url,
+    spawnSession: (agentPath, agentConfig) => {
+      const name = [...dirs].find(([, dir]) => dir === agentPath)?.[0] ?? path.basename(agentPath);
+      spawns.push({ path: agentPath, config: agentConfig });
+      alive.push(name);
+      return {
+        sessionId: `${paneNameFor(agentPath)}-stub`,
+        path: agentPath,
+        paneName: paneNameFor(agentPath),
         createdAt: new Date(),
         status: 'active',
-        workDir: `/tmp/workspaces/${type}/${key.toLowerCase()}`,
         ptyBuffer: '',
+        onDataListeners: [],
         expectsRuntime: false
       };
-      spawns.push({ type, key, defaultAgent });
-      alive.push(`crabcast-${type}-${key.toLowerCase()}`);
-      return session;
     }
   };
   return bridge;
 }
 
-const stubPrompts = { loadAndRender: () => '# prompt' };
-const stubConfig = { configPath: '/tmp/crabcast.config.json', dataDir: '/tmp' };
+const stubConfig = { configPath: path.join(scratch, 'crabcast.config.json'), baseDir: scratch, dataDir: scratch };
 
-function newRouter(bridge) {
+function newRouter(bridge, extraConfigured = []) {
   const events = [];
+  const agentRegistry = new AgentRegistry(path.join(scratch, `agents-${++registryFile}.jsonl`));
+  // Every running agent needs a record: priority and the gate flags live there
+  // now, so the census alone can no longer say what an agent is worth.
+  for (const name of bridge.alive) {
+    agentRegistry.recordActivated({ path: agentDir(name), config: knobsFor(name) });
+  }
+  for (const name of extraConfigured) {
+    agentRegistry.recordConfigured({ path: agentDir(name), config: knobsFor(name) });
+  }
   const router = new MessageRouter({
-    registry,
     config: stubConfig,
-    promptLoader: stubPrompts,
     herdrBridge: bridge,
     daemonStartedAt: new Date(),
-    agentRegistry: new AgentRegistry(path.join(scratch, `agents-${++registryFile}.jsonl`)),
+    agentRegistry,
     send: () => {},
     broadcast: (msg) => events.push(msg)
   });
-  return { router, events };
+  return { router, events, agentRegistry };
 }
 
 /**
@@ -180,17 +223,14 @@ function newRouter(bridge) {
  * is currently reporting.
  */
 function fleetNow(bridge) {
-  return bridge.listHerdrAgents().map((a) => {
-    const [, type, ...rest] = a.name.split('-');
-    return {
-      agentName: a.name,
-      type,
-      key: rest.join('-'),
-      priority: registry.priorityFor(type),
-      herdrStatus: a.herdrStatus,
-      activatedAt: null
-    };
-  });
+  return bridge.alive.map((name) => ({
+    path: agentDir(name),
+    paneName: paneNameFor(agentDir(name)),
+    priority: knobsFor(name).priority,
+    herdrStatus: bridge.listHerdrAgentsChecked().agents
+      .find((a) => a.canonicalWorkDir === agentDir(name))?.herdrStatus ?? 'working',
+    activatedAt: null
+  }));
 }
 
 /**
@@ -202,9 +242,9 @@ function fleetNow(bridge) {
 function capacityOfFleet(bridge) {
   let fleet = 0;
   let exempt = 0;
-  for (const c of fleetNow(bridge)) {
-    if (registry.get(c.type)?.gateExempt) exempt++;
-    else fleet++;
+  for (const name of bridge.alive) {
+    if (knobsFor(name).chargeable) fleet++;
+    else exempt++;
   }
   return readCapacity(fleet, exempt);
 }
@@ -230,9 +270,14 @@ async function quiet(fn) {
   }
 }
 
-const call = async (router, data) => {
+/** configure-then-activate, addressed by the directory the agent is. */
+const call = async (harness, name, extra = {}) => {
   let response;
-  await router.handleActivateByKey(data, (msg) => { response = msg; });
+  const dir = agentDir(name);
+  if (!harness.agentRegistry.intents().has(dir)) {
+    harness.agentRegistry.recordConfigured({ path: dir, config: knobsFor(name) });
+  }
+  await harness.router.handleActivate({ path: dir, ...extra }, (msg) => { response = msg; });
   return response;
 };
 
@@ -240,31 +285,61 @@ const call = async (router, data) => {
 rule('1. THE SCALE — where priority comes from');
 
 console.log(
-  'Priority is a property of the WORKSPACE TYPE, declared in crabcast.config.json\n' +
-  '(required — the loader refuses a type without one). The type is already\n' +
-  'resolved before activation, so no external lookup sits on the activation path,\n' +
-  'and every caller — CLI or MCP — gets the same answer by the same route.\n'
+  'Priority is a property of the AGENT, frozen onto its record by `configure`\n' +
+  '(required — there is no default, because a silently-floored priority is\n' +
+  'preemptable by everything and nobody finds out until the work is destroyed).\n' +
+  'It used to come from the workspace type; types are deleted, so there is nothing\n' +
+  'left to look it up in and the value lives with every other per-agent knob.\n' +
+  '\nAND THERE IS NO FLOOR ANY MORE. `priorityFor` used to give an unresolvable\n' +
+  'type the lowest declared priority, so a resolution failure landed where it\n' +
+  'could not kill another agent\'s work. Nothing resolves now: an agent with no\n' +
+  'record cannot be activated at all, so the failure that fallback contained has\n' +
+  'no way to occur.\n'
 );
-console.log('  type      priority   gateExempt');
-for (const type of ['epic', 'story', 'hotfix', 'task', 'watchdog']) {
-  const c = registry.get(type);
-  console.log(`  ${type.padEnd(9)} ${String(c.priority).padStart(4)}       ${c.gateExempt}`);
+// READ BACK THROUGH THE REAL REGISTRY, not out of this script's own object.
+//
+// An earlier revision printed `knobsFor(...)` and asserted on it — a script
+// literal compared against itself, with no `dist/` code in the loop at all,
+// under a verdict whose text said "read back". It passed and asserted nothing.
+// The version before the re-key called `registry.priorityFor()` on production
+// code; this restores that property by putting the knobs through the durable
+// registry and reading what comes out.
+const scaleReg = new AgentRegistry(path.join(scratch, `agents-scale.jsonl`));
+for (const kind of ['epic', 'story', 'hotfix', 'task', 'watchdog']) {
+  scaleReg.recordConfigured({ path: agentDir(`${kind}-scale`), config: knobsFor(`${kind}-scale`) });
 }
-console.log(
-  `  ${'(unknown)'.padEnd(9)} ${String(registry.priorityFor('nonesuch')).padStart(4)}       ` +
-  `falls to the floor — the lowest declared priority — so it can preempt nothing`
-);
+const readBack = (kind) => scaleReg.intents().get(agentDir(`${kind}-scale`))?.record.config;
+
+console.log('  agent      priority   refusable  chargeable  preemptable   (from the registry)');
+for (const kind of ['epic', 'story', 'hotfix', 'task', 'watchdog']) {
+  const k = readBack(kind);
+  console.log(
+    `  ${kind.padEnd(10)} ${String(k?.priority).padStart(4)}       ` +
+    `${String(k?.refusable).padEnd(10)} ${String(k?.chargeable).padEnd(11)} ${k?.preemptable}`
+  );
+}
 
 const scaleOk =
-  registry.priorityFor('epic') === 3 &&
-  registry.priorityFor('story') === 2 &&
-  registry.priorityFor('hotfix') === 2 &&
-  registry.priorityFor('task') === 1 &&
-  registry.priorityFor('nonesuch') === 1;
+  readBack('epic')?.priority === 3 &&
+  readBack('story')?.priority === 2 &&
+  readBack('hotfix')?.priority === 2 &&
+  readBack('task')?.priority === 1 &&
+  readBack('watchdog')?.preemptable === false &&
+  readBack('watchdog')?.chargeable === true;
+// And the floor is gone rather than merely unused: an unconfigured path has no
+// priority to fall back to, which is what `priorityFor`'s floor used to
+// supply. The registry answers "nothing" instead of "the lowest declared".
+const unconfigured = scaleReg.intents().get(agentDir('never-configured'));
+console.log(`  ${'(unknown)'.padEnd(10)} ${unconfigured === undefined ? 'no record at all — there is no floor to fall to' : 'HAS A RECORD, which is wrong'}`);
+
 verdict(
-  scaleOk,
-  'the scale is the config, read back: epic 3 > {story, hotfix} 2 > task 1, unknown → floor.',
-  'the scale is not what the config declared.'
+  scaleOk && unconfigured === undefined,
+  'the scale is what each agent was configured with, read back OUT OF THE DURABLE\n' +
+  '    REGISTRY: epic 3 > {story, hotfix} 2 > task 1 — and `watchdog` is CHARGED yet\n' +
+  '    unpreemptable, which the single gateExempt boolean could not express. An\n' +
+  '    unconfigured path has no record and therefore no priority: the floor is gone\n' +
+  '    rather than unreached.',
+  'the scale is not what the registry holds.'
 );
 
 console.log(
@@ -277,17 +352,20 @@ console.log(
 // ------------------------------------------------------------ 2. ordering --
 rule('2. ORDERING — which agent is chosen, and why that one');
 
+const candidate = (name, priority, herdrStatus, activatedAt) => ({
+  path: agentDir(name), paneName: paneNameFor(agentDir(name)), priority, herdrStatus, activatedAt
+});
 const fleet = [
-  { agentName: 'crabcast-epic-kan-39',  type: 'epic',  key: 'KAN-39', priority: 3, herdrStatus: 'working', activatedAt: '2026-08-01T09:00:00Z' },
-  { agentName: 'crabcast-story-kan-50', type: 'story', key: 'KAN-50', priority: 2, herdrStatus: 'idle',    activatedAt: '2026-08-01T10:00:00Z' },
-  { agentName: 'crabcast-task-kan-10',  type: 'task',  key: 'KAN-10', priority: 1, herdrStatus: 'working', activatedAt: '2026-08-01T11:00:00Z' },
-  { agentName: 'crabcast-task-kan-11',  type: 'task',  key: 'KAN-11', priority: 1, herdrStatus: 'idle',    activatedAt: '2026-08-01T12:00:00Z' },
-  { agentName: 'crabcast-task-kan-12',  type: 'task',  key: 'KAN-12', priority: 1, herdrStatus: 'idle',    activatedAt: '2026-08-01T08:00:00Z' }
+  candidate('epic-kan-39', 3, 'working', '2026-08-01T09:00:00Z'),
+  candidate('story-kan-50', 2, 'idle', '2026-08-01T10:00:00Z'),
+  candidate('task-kan-10', 1, 'working', '2026-08-01T11:00:00Z'),
+  candidate('task-kan-11', 1, 'idle', '2026-08-01T12:00:00Z'),
+  candidate('task-kan-12', 1, 'idle', '2026-08-01T08:00:00Z')
 ];
 
 console.log('victim order (best victim first), over a fleet of five:\n');
 for (const c of [...fleet].sort(compareVictims)) {
-  console.log(`  ${String(c.priority)}  ${c.herdrStatus.padEnd(8)} ${c.activatedAt}  ${c.agentName}`);
+  console.log(`  ${String(c.priority)}  ${c.herdrStatus.padEnd(8)} ${c.activatedAt}  ${c.path}`);
 }
 console.log(
   '\n  Lowest priority first; among equals, whatever has least in flight. There is no\n' +
@@ -300,12 +378,12 @@ console.log(
 
 for (const incoming of [1, 2, 3]) {
   const v = selectVictim(fleet, incoming);
-  console.log(`  an activation at priority ${incoming} would take: ${v ? v.agentName : '(nothing — it outranks nothing)'}`);
+  console.log(`  an activation at priority ${incoming} would take: ${v ? v.path : '(nothing — it outranks nothing)'}`);
 }
 const orderOk =
   selectVictim(fleet, 1) === null &&
-  selectVictim(fleet, 2)?.agentName === 'crabcast-task-kan-12' &&
-  selectVictim(fleet, 3)?.agentName === 'crabcast-task-kan-12';
+  selectVictim(fleet, 2)?.path === agentDir('task-kan-12') &&
+  selectVictim(fleet, 3)?.path === agentDir('task-kan-12');
 verdict(
   orderOk,
   'priority 1 takes nothing; 2 and 3 both take the oldest idle task agent, not the working one.',
@@ -316,24 +394,24 @@ verdict(
 rule('3. REFUSAL — a task agent at capacity, on a machine full of task agents');
 
 // Filled to the machine's own derived cap, plus an epic supervisor, which is
-// gate-exempt and does not occupy one of those slots.
+// unchargeable and does not occupy one of those slots.
 const FULL = [
-  'crabcast-epic-kan-39',
-  ...Array.from({ length: HERE.cap }, (_, i) => `crabcast-task-kan-${10 + i}`)
+  'epic-kan-39',
+  ...Array.from({ length: HERE.cap }, (_, i) => `task-kan-${10 + i}`)
 ];
 
 {
-  const bridge = stubHerdr(FULL, { statuses: { 'crabcast-task-kan-10': 'idle' } });
-  const { router } = newRouter(bridge);
-  const res = await quiet(() => call(router, { type: 'task', key: 'KAN-99' }));
+  const bridge = stubHerdr(FULL, { statuses: { 'task-kan-10': 'idle' } });
+  const harness = newRouter(bridge);
+  const res = await quiet(() => call(harness, 'task-kan-99'));
 
-  console.log(`running: ${FULL.join(', ')}\n`);
+  console.log(`running: ${FULL.map(agentDir).join(', ')}\n`);
   console.log(res.error);
   console.log(`\n  capacity: ${summarizeCapacity({ ...HERE, running: HERE.cap })}`);
   console.log(`  refusedBy: ${res.refusedBy}   priority of the refused activation: ${res.priority}`);
   console.log(`  preemption offered: ${res.preemption ? 'yes' : 'no'}`);
 
-  const namesFleet = /priority 1/.test(res.error) && /task\/kan-1\d \(priority 1/i.test(res.error);
+  const namesFleet = /priority 1/.test(res.error) && /task-kan-1\d \(priority 1/i.test(res.error);
   const strictlyGreater = /strictly-greater/.test(res.error);
   verdict(
     res.success === false && !res.preemption && namesFleet && strictlyGreater,
@@ -346,9 +424,9 @@ const FULL = [
 
   // And preempt: true changes nothing at equal priority — consent to preempt
   // is not the same as anything being preemptable. Nothing may die.
-  const forced = await quiet(() => call(router, { type: 'task', key: 'KAN-99', preempt: true }));
+  const forced = await quiet(() => call(harness, 'task-kan-99', { preempt: true }));
   console.log(`\n  the same call again with preempt: true → success: ${forced.success}, ` +
-    `preempted: ${forced.preempted ? forced.preempted.victim.agentName : '(nothing)'}`);
+    `preempted: ${forced.preempted ? forced.preempted.victim.path : '(nothing)'}`);
   console.log(`  agents alive before and after: ${FULL.length}/${bridge.alive.length}`);
   verdict(
     forced.success === false && !forced.preempted && bridge.alive.length === FULL.length &&
@@ -364,21 +442,21 @@ const FULL = [
 rule('4. CONSENT — what is shown BEFORE anything is killed');
 
 {
-  const bridge = stubHerdr(FULL, { statuses: { 'crabcast-task-kan-10': 'idle' } });
-  const { router } = newRouter(bridge);
-  // A story activation would sail through the gate — gateExempt types are
-  // never refused, so they are never offered a victim. The consent flow is
-  // reached by a priority-2 *charged* type, which is what `hotfix` is.
-  const res = await quiet(() => call(router, { type: 'hotfix', key: 'KAN-50' }));
+  const bridge = stubHerdr(FULL, { statuses: { 'task-kan-10': 'idle' } });
+  const harness = newRouter(bridge);
+  // A story activation would sail through the gate — an unrefusable agent is
+  // never refused, so it is never offered a victim. The consent flow is
+  // reached by a priority-2 *refusable* agent, which is what `hotfix` is.
+  const res = await quiet(() => call(harness, 'hotfix-kan-50'));
 
   console.log('a priority-2 charged activation arrives while the machine is full.\n');
   console.log('what the caller receives:\n');
-  console.log(JSON.stringify({ success: res.success, type: res.type, key: res.key, priority: res.priority, preemption: res.preemption }, null, 2));
+  console.log(JSON.stringify({ success: res.success, path: res.path, priority: res.priority, preemption: res.preemption }, null, 2));
 
   const nothingDied = bridge.alive.length === FULL.length;
   verdict(
     res.success === false && res.preemption && nothingDied &&
-      res.preemption.agentName === 'crabcast-task-kan-10' &&
+      res.preemption.path === agentDir('task-kan-10') &&
       res.preemption.herdrStatus === 'idle' &&
       res.preemption.incomingPriority === 2,
     `nothing was killed. The activation was REFUSED and the caller was handed the name\n` +
@@ -393,20 +471,21 @@ rule('4. CONSENT — what is shown BEFORE anything is killed');
 rule('5. PREEMPTION — capacity before and after, and the record of what went');
 
 {
-  const bridge = stubHerdr(FULL, { statuses: { 'crabcast-task-kan-10': 'idle' } });
-  const { router, events } = newRouter(bridge);
+  const bridge = stubHerdr(FULL, { statuses: { 'task-kan-10': 'idle' } });
+  const harness = newRouter(bridge);
+  const { events } = harness;
 
   const before = capacityOfFleet(bridge);
   console.log(`BEFORE  ${summarizeCapacity(before)}`);
   console.log(`        at capacity: ${before.atCapacity}`);
   console.log(`        running, in the order they would be taken:`);
   for (const c of [...fleetNow(bridge)].sort(compareVictims)) {
-    console.log(`          ${c.priority}  ${c.herdrStatus.padEnd(8)} ${c.agentName}`);
+    console.log(`          ${c.priority}  ${c.herdrStatus.padEnd(8)} ${c.path}`);
   }
 
-  const res = await call(router, { type: 'hotfix', key: 'KAN-50', preempt: true });
+  const res = await call(harness, 'hotfix-kan-50', { preempt: true });
 
-  console.log(`\nactivate hotfix/KAN-50 (priority 2) with preempt: true\n`);
+  console.log(`\nactivate the priority-2 hotfix agent with preempt: true\n`);
   console.log('what was preempted, and why (on the activate response):\n');
   console.log(JSON.stringify(res.preempted, null, 2).split('\n').slice(0, 12).join('\n'));
 
@@ -417,180 +496,201 @@ rule('5. PREEMPTION — capacity before and after, and the record of what went')
   const preemptedEvent = events.find((e) => e.action === 'agent_preempted_event');
   const deactivatedEvent = events.find((e) => e.action === 'agent_deactivated_event');
   console.log(`\nbroadcast to every connected client:\n`);
-  console.log(`  ${preemptedEvent.action}: ${preemptedEvent.victim.type}/${preemptedEvent.victim.key} ` +
+  console.log(`  ${preemptedEvent.action}: ${preemptedEvent.victim.path} ` +
     `(priority ${preemptedEvent.victim.priority}, ${preemptedEvent.victim.herdrStatus}) ` +
-    `stood down for ${preemptedEvent.by.type}/${preemptedEvent.by.key} (priority ${preemptedEvent.by.priority})`);
-  console.log(`  ${deactivatedEvent.action}: ${deactivatedEvent.type}/${deactivatedEvent.key} preempted=${deactivatedEvent.preempted}`);
+    `stood down for ${preemptedEvent.by.path} (priority ${preemptedEvent.by.priority})`);
+  console.log(`  ${deactivatedEvent.action}: ${deactivatedEvent.path} preempted=${deactivatedEvent.preempted}`);
 
-  // The full PreemptionRecord rides the event. Until the durable registry
-  // (T4 of KAN-68) lands, this payload is the record's only carrier — it is
-  // the exact shape T4's recordDeactivated(record, preemption) persists, so
-  // every field is pinned here.
+  // The full PreemptionRecord rides the event AND is what the durable registry
+  // persists through recordDeactivated(record, preemption). Every field is
+  // pinned here because it is also what a client renders.
   const record = preemptedEvent.record;
-  console.log(`\nthe PreemptionRecord on the event — the seam the durable registry (T4) plugs into:\n`);
+  console.log(`\nthe PreemptionRecord on the event, and in the durable log:\n`);
   console.log(JSON.stringify(record, null, 2).split('\n').map((l) => '  ' + l).slice(0, 10).join('\n'));
   const recordOk =
     record &&
-    record.byAgentName === 'crabcast-hotfix-kan-50' &&
-    record.byType === 'hotfix' &&
-    record.byKey === 'KAN-50' &&
+    record.byPath === agentDir('hotfix-kan-50') &&
+    record.byPaneName === paneNameFor(agentDir('hotfix-kan-50')) &&
     record.byPriority === 2 &&
     record.priority === 1 &&
     record.herdrStatus === 'idle' &&
     /cap:/.test(record.derivation);
 
+  // And it really reached the disk: the victim's last event is a stand-down
+  // carrying the annotation, which is what keeps the debt reported.
+  const owed = harness.agentRegistry.preempted();
+  console.log(`\n  the durable log now owes: ${JSON.stringify(owed.map((o) => o.path))}`);
+
   const startedIt = res.success === true && res.verified === true;
-  const tookTheIdleOne = res.preempted?.victim?.key?.toUpperCase() === 'KAN-10';
-  const gone = !bridge.alive.includes('crabcast-task-kan-10');
-  const started = bridge.alive.includes('crabcast-hotfix-kan-50');
+  const tookTheIdleOne = res.preempted?.victim?.path === agentDir('task-kan-10');
+  const gone = !bridge.alive.includes('task-kan-10');
+  const started = bridge.alive.includes('hotfix-kan-50');
   verdict(
-    startedIt && tookTheIdleOne && gone && started && recordOk,
+    startedIt && tookTheIdleOne && gone && started && recordOk &&
+      owed.length === 1 && owed[0].path === agentDir('task-kan-10'),
     'the low-priority agent was stood down and the higher-priority one started. The\n' +
     '    victim chosen was the idle one, not either of the working ones, and the whole\n' +
     '    decision — who, for whom, both priorities, what the victim was doing, and the\n' +
-    '    capacity arithmetic that forced it — is on the wire and in the activate\n' +
-    '    response, in the exact record shape the durable registry will persist.',
-    `preemption did not do what it claimed: started=${startedIt} victim=${res.preempted?.victim?.key} gone=${gone} new=${started} recordOk=${recordOk}`
+    '    capacity arithmetic that forced it — is on the wire, in the activate response,\n' +
+    '    and durably recorded as a debt the fleet list keeps reporting.',
+    `preemption did not do what it claimed: started=${startedIt} victim=${res.preempted?.victim?.path} gone=${gone} new=${started} recordOk=${recordOk}`
   );
 }
 
-// ------------------------------------------------- 6. gateExempt safety --
-rule('6. GATEEXEMPT SAFETY — the top of the scale cannot be touched');
+// ------------------------------------------------- 6. top-of-scale safety --
+rule('6. TOP-OF-SCALE SAFETY — the highest priority cannot be touched');
 
 {
   // A fleet where an epic supervisor is the ONLY thing running, and an
   // activation at the very top of the scale asking for room.
   const epicOnly = [{ ...fleet[0] }];
   const topOfScale = selectVictim(epicOnly, 3);
-  console.log(`fleet: crabcast-epic-kan-39 (priority 3)`);
+  console.log(`fleet: ${agentDir('epic-kan-39')} (priority 3)`);
   console.log(`an activation at the highest declared priority (3) would take: ${topOfScale ?? '(nothing)'}\n`);
 
-  // And through the real router, on a full machine. A gateExempt activation
+  // And through the real router, on a full machine. An unrefusable activation
   // never consults the rationing half of the gate at all: the epic agent
   // starts alongside the full fleet, preempt: true notwithstanding, and
   // nothing is stood down for it — its cost was never charged, so there is
   // no slot to free.
-  const bridge = stubHerdr(FULL, { statuses: { 'crabcast-task-kan-10': 'idle' } });
-  const { router, events } = newRouter(bridge);
-  const res = await quiet(() => call(router, { type: 'epic', key: 'KAN-77', preempt: true }));
+  const bridge = stubHerdr(FULL, { statuses: { 'task-kan-10': 'idle' } });
+  const harness = newRouter(bridge);
+  const { events } = harness;
+  const res = await quiet(() => call(harness, 'epic-kan-77', { preempt: true }));
 
-  console.log(`on a full machine including crabcast-epic-kan-39, a priority-3 epic activation`);
-  console.log(`with preempt: true → success: ${res.success}, stood down: ${res.preempted?.victim?.agentName ?? '(nothing)'}`);
-  console.log(`  crabcast-epic-kan-39 still running: ${bridge.alive.includes('crabcast-epic-kan-39')}`);
+  console.log(`on a full machine including the epic supervisor, a priority-3 epic activation`);
+  console.log(`with preempt: true → success: ${res.success}, stood down: ${res.preempted?.victim?.path ?? '(nothing)'}`);
+  console.log(`  the epic supervisor still running: ${bridge.alive.includes('epic-kan-39')}`);
   console.log(`  every prior agent still running:    ${FULL.every((n) => bridge.alive.includes(n))}`);
   console.log(`  agent_preempted_event broadcast:    ${events.some((e) => e.action === 'agent_preempted_event')}`);
 
   console.log(
     '\n  Two protections, and only one of them is a rule anyone wrote. The ordering\n' +
-    '  half: the epic type is the top of the declared scale and the comparison is\n' +
-    '  strictly-greater, so no activation at any priority can select an epic agent\n' +
-    '  as victim — a fact about the ordering, not a special case. The gate half:\n' +
-    '  a gateExempt activation is never refused and never preempts, because the\n' +
+    '  half: the epic agents are the top of the scale their caller declared and the\n' +
+    '  comparison is strictly-greater, so no activation at any priority can select\n' +
+    '  one as victim — a fact about the ordering, not a special case. The gate half:\n' +
+    '  an unrefusable activation is never refused and never preempts, because the\n' +
     '  capacity model never charged it a slot — standing something down would free\n' +
     '  room it does not take.'
   );
 
   verdict(
     topOfScale === null &&
-      bridge.alive.includes('crabcast-epic-kan-39') &&
+      bridge.alive.includes('epic-kan-39') &&
       res.success === true &&
       !res.preempted &&
       FULL.every((n) => bridge.alive.includes(n)) &&
       !events.some((e) => e.action === 'agent_preempted_event'),
-    'an epic agent cannot be selected at any priority, and a top-of-scale gateExempt\n' +
+    'an epic agent cannot be selected at any priority, and a top-of-scale unrefusable\n' +
     '    activation on a full machine started without standing anything down.',
     'the epic activation was refused, or something was stood down for it.'
   );
 }
 
 // ------------------------------------------------- 7. exempt victims --
-rule('7. EXEMPT VICTIMS — a low-priority gateExempt agent is never offered, never killed');
+rule('7. PROTECTED VICTIMS — a low-priority unpreemptable agent is never offered, never killed');
 
 {
   // The machine is full of priority-2 charged agents, and the ONLY thing any
   // priority-2 activation would outrank is the priority-1 watchdog — which is
-  // gateExempt. It was never counted in `running`, so standing it down frees
-  // no charged slot: offering it would let the preempt path admit the
-  // newcomer over the cap on a false premise. In the extraction source the
-  // exempt set was the top of the scale and the ordering protected it; here
-  // the fields are independent, and only the candidate exclusion protects it.
+  // `preemptable: false`.
+  //
+  // AND IT IS ALSO CHARGED, which the old single boolean could not say. Under
+  // `gateExempt` this protection came bundled with never being counted, so
+  // "do not take this one" and "this one is free" were the same statement.
+  // Splitting them means the watchdog occupies a real slot AND is still never
+  // a victim — and the exclusion has to be doing the work on its own, because
+  // there is no longer an uncharged-ness to hide behind.
   const FULL_HOTFIX = [
-    'crabcast-watchdog-kan-90',
-    ...Array.from({ length: HERE.cap }, (_, i) => `crabcast-hotfix-kan-${10 + i}`)
+    'watchdog-kan-90',
+    ...Array.from({ length: HERE.cap - 1 }, (_, i) => `hotfix-kan-${10 + i}`)
   ];
-  const bridge = stubHerdr(FULL_HOTFIX, { statuses: { 'crabcast-watchdog-kan-90': 'idle' } });
-  const { router, events } = newRouter(bridge);
+  const bridge = stubHerdr(FULL_HOTFIX, { statuses: { 'watchdog-kan-90': 'idle' } });
+  const harness = newRouter(bridge);
+  const { events } = harness;
 
-  console.log(`running: ${FULL_HOTFIX.join(', ')}`);
-  console.log(`the watchdog is idle — the "best victim" by every rule except the one under proof\n`);
+  console.log(`running: ${FULL_HOTFIX.map(agentDir).join(', ')}`);
+  console.log(`the watchdog is idle and CHARGED — the "best victim" by every rule except the`);
+  console.log(`one under proof\n`);
 
-  const res = await quiet(() => call(router, { type: 'hotfix', key: 'KAN-99', preempt: true }));
+  const res = await quiet(() => call(harness, 'hotfix-kan-99', { preempt: true }));
 
-  console.log(`activate hotfix/KAN-99 (priority 2) with preempt: true →`);
+  console.log(`activate a priority-2 hotfix agent with preempt: true →`);
   console.log(`  success: ${res.success}, preemption offered: ${'preemption' in res}, ` +
-    `stood down: ${res.preempted?.victim?.agentName ?? '(nothing)'}`);
-  console.log(`  crabcast-watchdog-kan-90 still running: ${bridge.alive.includes('crabcast-watchdog-kan-90')}`);
+    `stood down: ${res.preempted?.victim?.path ?? '(nothing)'}`);
+  console.log(`  the watchdog still running: ${bridge.alive.includes('watchdog-kan-90')}`);
   console.log(`  refusal names the watchdog: ${/watchdog/.test(res.error ?? '')}`);
 
   verdict(
     res.success === false &&
       !res.preemption &&
       !res.preempted &&
-      bridge.alive.includes('crabcast-watchdog-kan-90') &&
+      bridge.alive.includes('watchdog-kan-90') &&
       bridge.alive.length === FULL_HOTFIX.length &&
       !/watchdog/.test(res.error ?? '') &&
       !events.some((e) => e.action === 'agent_preempted_event'),
-    'the exempt agent is not offered, not named in the fleet list, and not killed —\n' +
-    '    even with preempt: true and even though it is the only lower-priority agent\n' +
-    '    running. Standing down an uncharged agent frees no charged slot, so it is\n' +
-    '    never a valid victim.',
+    'the unpreemptable agent is not offered, not named in the fleet list, and not\n' +
+    '    killed — even with preempt: true, even though it is the only lower-priority\n' +
+    '    agent running, and even though it IS charged. `preemptable` is doing the work\n' +
+    '    on its own.',
     `the watchdog was offered or killed: offered=${Boolean(res.preemption)} ` +
-    `alive=${bridge.alive.includes('crabcast-watchdog-kan-90')}`
+    `alive=${bridge.alive.includes('watchdog-kan-90')}`
   );
 }
 
 // ------------------------------------------------- 8. victim address --
-rule('8. VICTIM ADDRESS — two types share a key; the stand-down takes the named one');
+rule('8. VICTIM ADDRESS — the stand-down takes the agent the refusal named');
 
 {
-  // task/SHARED (idle — the best victim) and hotfix/SHARED are both live.
-  // The gate selects task/SHARED and stands it down by FULL ADDRESS; a
-  // key-only stand-down here could tear down hotfix/SHARED instead — killing
-  // an agent the refusal never named, the same wrong-victim hazard class the
-  // activate path documents.
+  // WHAT THIS STILL PROVES, AND WHAT IT NO LONGER CAN.
+  //
+  // Under the old model these were task/SHARED and hotfix/SHARED — one key,
+  // told apart only by a type flag the caller had to remember — and the
+  // hazard was real: a stand-down that fell back to a suffix match could tear
+  // down the neighbour, killing an agent the refusal never named.
+  //
+  // That hazard is designed away rather than defended against, so this section
+  // can no longer discriminate the way it did: there is no resolver left to
+  // pick wrongly. It is kept because the PROPERTY still has to hold — the
+  // agent named in the refusal is the agent that dies — and the fixture uses
+  // two different directory names because two identical ones would suggest the
+  // old collision is still expressible. It is not.
   const SHARED_FLEET = [
-    'crabcast-task-shared',
-    'crabcast-hotfix-shared',
-    ...Array.from({ length: HERE.cap }, (_, i) => `crabcast-task-kan-${10 + i}`)
+    'task-shared',
+    'hotfix-shared',
+    ...Array.from({ length: HERE.cap - 1 }, (_, i) => `task-kan-${10 + i}`)
   ];
-  const bridge = stubHerdr(SHARED_FLEET, { statuses: { 'crabcast-task-shared': 'idle' } });
-  const { router, events } = newRouter(bridge);
+  const bridge = stubHerdr(SHARED_FLEET, { statuses: { 'task-shared': 'idle' } });
+  const harness = newRouter(bridge);
+  const { events } = harness;
 
-  console.log(`running: ${SHARED_FLEET.join(', ')}\n`);
+  console.log(`running:`);
+  for (const n of SHARED_FLEET) console.log(`  ${agentDir(n)}  (pane ${paneNameFor(agentDir(n))})`);
+  console.log(`\nthe two "shared" agents have different pane names, derived from their paths\n`);
 
-  const res = await quiet(() => call(router, { type: 'hotfix', key: 'KAN-99', preempt: true }));
+  const res = await quiet(() => call(harness, 'hotfix-kan-99', { preempt: true }));
 
   const preemptedEvent = events.find((e) => e.action === 'agent_preempted_event');
   const deactivatedEvent = events.find((e) => e.action === 'agent_deactivated_event');
-  console.log(`activate hotfix/KAN-99 (priority 2) with preempt: true →`);
-  console.log(`  success: ${res.success}, stood down: ${res.preempted?.victim?.agentName}`);
-  console.log(`  broadcast victim: ${preemptedEvent?.victim?.agentName}`);
-  console.log(`  deactivated event address: ${deactivatedEvent?.type}/${deactivatedEvent?.key}`);
-  console.log(`  crabcast-task-shared gone:      ${!bridge.alive.includes('crabcast-task-shared')}`);
-  console.log(`  crabcast-hotfix-shared survives: ${bridge.alive.includes('crabcast-hotfix-shared')}`);
+  console.log(`activate a priority-2 hotfix agent with preempt: true →`);
+  console.log(`  success: ${res.success}, stood down: ${res.preempted?.victim?.path}`);
+  console.log(`  broadcast victim: ${preemptedEvent?.victim?.path}`);
+  console.log(`  deactivated event address: ${deactivatedEvent?.path}`);
+  console.log(`  task-shared gone:        ${!bridge.alive.includes('task-shared')}`);
+  console.log(`  hotfix-shared survives:  ${bridge.alive.includes('hotfix-shared')}`);
 
   verdict(
     res.success === true &&
-      res.preempted?.victim?.agentName === 'crabcast-task-shared' &&
-      preemptedEvent?.victim?.agentName === 'crabcast-task-shared' &&
-      deactivatedEvent?.type === 'task' &&
-      !bridge.alive.includes('crabcast-task-shared') &&
-      bridge.alive.includes('crabcast-hotfix-shared'),
+      res.preempted?.victim?.path === agentDir('task-shared') &&
+      preemptedEvent?.victim?.path === agentDir('task-shared') &&
+      deactivatedEvent?.path === agentDir('task-shared') &&
+      !bridge.alive.includes('task-shared') &&
+      bridge.alive.includes('hotfix-shared'),
     'the agent the refusal would have named is the agent that died: the stand-down\n' +
-    '    resolved task/shared by full address, its same-key hotfix neighbour survived,\n' +
-    '    and every broadcast names the right victim.',
-    `wrong victim: stood down ${res.preempted?.victim?.agentName ?? deactivatedEvent?.key ?? '(nothing)'}, ` +
-    `hotfix-shared alive=${bridge.alive.includes('crabcast-hotfix-shared')}`
+    '    resolved it by path, its same-basename neighbour survived, and every broadcast\n' +
+    '    names the right victim. There is no suffix match left to get this wrong.',
+    `wrong victim: stood down ${res.preempted?.victim?.path ?? deactivatedEvent?.path ?? '(nothing)'}, ` +
+    `hotfix-shared alive=${bridge.alive.includes('hotfix-shared')}`
   );
 }
 

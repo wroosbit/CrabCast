@@ -11,31 +11,36 @@ import { HerdrAgentStatus } from './herdr.js';
  *
  * WHERE PRIORITY COMES FROM
  *
- * The workspace *type*, not the work item behind it. Every type declares a
- * `priority` in crabcast.config.json (required — the loader refuses a type
- * without one), and that is the whole scale: what a priority number means is
- * decided by whoever wrote the config, by ordering the types against each
- * other. The alternative — reading urgency off the tracker item an agent is
- * working — was proposed in the extraction source and rejected, for reasons
- * worth keeping because the alternative will be suggested again:
+ * The agent's own record, frozen onto it by `configure`. It used to come from
+ * the agent's workspace *type*; types are deleted, so there is nothing left to
+ * look it up in and the value lives where every other per-agent knob now
+ * lives. What a priority number means is still decided by whoever calls
+ * `configure`, by ordering their agents against each other.
  *
- *   - No lookup. The type is resolved before activation — the registry hands
- *     back its config — so priority is already in hand at the moment it is
- *     needed. Asking an external tracker would put a network call on the
- *     activation path for a question the daemon has already answered.
- *   - Every caller works. A CLI toggle cannot supply a tracker priority and
- *     an agent activating over MCP can; a property of the type is available
- *     to both, identically, so there is no path that degrades.
- *   - Top-of-scale safety is not a rule. Whatever type the config puts at the
- *     top of the scale, nothing outranks it by construction rather than by an
- *     exception anyone has to remember to code — it is what the ordering
- *     already says. See {@link outranks}.
+ * The alternative — reading urgency off the tracker item an agent is working —
+ * was proposed in the extraction source and rejected, and the reasons survive
+ * the re-key unchanged because the alternative will be suggested again:
+ *
+ *   - No lookup. Priority is on the record the activation already read, so it
+ *     is in hand at the moment it is needed. Asking an external tracker would
+ *     put a network call on the activation path for a question already
+ *     answered.
+ *   - Every caller works. A CLI toggle cannot supply a tracker priority and an
+ *     agent activating over MCP can; a value on the record is available to
+ *     both, identically, so there is no path that degrades.
+ *   - Top-of-scale safety is not a rule. Whatever sits at the top of a
+ *     caller's scale, nothing outranks it by construction rather than by an
+ *     exception anyone has to remember to code. See {@link outranks}.
  *
  * There are no named priority constants here, deliberately: the extraction
- * source's PRIORITY_EPIC/STORY/TASK were its config, expressed as code, and
- * in CrabCast that configuration lives where the types do. The floor for an
- * unregistered type — preemptable by everything, able to preempt nothing —
- * is applied in exactly one place, WorkspaceRegistry.priorityFor.
+ * source's PRIORITY_EPIC/STORY/TASK were its config, expressed as code.
+ *
+ * AND THERE IS NO FLOOR ANY MORE. `WorkspaceRegistry.priorityFor` used to give
+ * an unregistered type the lowest declared priority, so that a resolution
+ * failure landed somewhere it could not kill another agent's work. Nothing
+ * resolves now: `priority` is a required `configure` parameter carried on the
+ * record, and an agent with no record cannot be activated at all — so the
+ * failure that fallback existed to contain has no way to occur.
  */
 
 /**
@@ -84,17 +89,17 @@ const STATUS_COST: Record<HerdrAgentStatus, number> = {
 
 /** One agent considered as something that could be stood down. */
 export interface PreemptionCandidate {
-  agentName: string;
-  /** Null only for an agent whose name this daemon could not parse. */
-  type: string | null;
-  key: string;
+  /** The canonical directory this agent is. */
+  path: string;
+  /** The opaque herdr token for that path, for log lines and events. */
+  paneName: string;
   priority: number;
   /** herdr's own view of what it is doing, right now. */
   herdrStatus: HerdrAgentStatus;
   /**
-   * When this daemon saw it activated (the session's creation time; the
-   * durable registry's record once that slice lands). Null when there is no
-   * record — every agent that outlived a daemon restart.
+   * When the registry recorded it activated, falling back to the session's
+   * creation time. Null when neither knows — absent data stays absent rather
+   * than being invented for the victim ordering.
    */
   activatedAt: string | null;
 }
@@ -104,17 +109,14 @@ export interface PreemptionCandidate {
  * the slot, what both were worth, and the capacity arithmetic that made the
  * slot necessary.
  *
- * Built by the capacity gate's preempt path and carried on the
- * `agent_preempted_event` broadcast and the deactivate payload. Durable
- * persistence of this record — and the `preemptedAgents` reporting and
- * resumption built on it — is the registry slice's (T4 of KAN-68); its
- * `recordDeactivated(record, preemption)` is the seam this shape plugs into.
+ * Built by the capacity gate's preempt path, carried on the
+ * `agent_preempted_event` broadcast and the deactivate payload, and persisted
+ * by `AgentRegistry.recordDeactivated(record, preemption)`.
  */
 export interface PreemptionRecord {
-  /** The agent that took this one's slot. */
-  byAgentName: string;
-  byType: string;
-  byKey: string;
+  /** The agent that took this one's slot, by the directory it is. */
+  byPath: string;
+  byPaneName: string;
   byPriority: number;
   /** What the preempted agent was worth, so the comparison is legible later. */
   priority: number;
@@ -147,7 +149,7 @@ export function compareVictims(a: PreemptionCandidate, b: PreemptionCandidate): 
     return a.activatedAt < b.activatedAt ? -1 : 1;
   }
 
-  return a.agentName < b.agentName ? -1 : a.agentName > b.agentName ? 1 : 0;
+  return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
 }
 
 /**
@@ -167,12 +169,12 @@ export function selectVictim(
   return [...eligible].sort(compareVictims)[0];
 }
 
-/** `task/KAN-99`, or just the key when the type could not be parsed. */
+/** The whole address, which is now just the path. */
 export function addressOf(candidate: PreemptionCandidate): string {
-  return candidate.type ? `${candidate.type}/${candidate.key}` : candidate.key;
+  return candidate.path;
 }
 
-/** `task/KAN-99 (priority 1, idle)` — one candidate, for prose. */
+/** `/home/me/work (priority 1, idle)` — one candidate, for prose. */
 export function describeCandidate(candidate: PreemptionCandidate): string {
   return `${addressOf(candidate)} (priority ${candidate.priority}, ${candidate.herdrStatus})`;
 }

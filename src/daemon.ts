@@ -7,9 +7,7 @@ import { finishMeasurement, startMeasurement, MeasurementStart } from './agent-c
 import { dampCost, sampleFromMeasurement, MIN_MEASURED_CORES } from './agent-cost-damping.js';
 import { AgentCost, MEASURED_AGENT_COST, setMeasuredAgentCost } from './capacity.js';
 import { ConfigError, CrabcastConfig, loadConfig, resolveConfigPath } from './config.js';
-import { WorkspaceRegistry } from './registry.js';
 import { MessageRouter } from './router.js';
-import { PromptLoader } from './prompt.js';
 import { HerdrBridge } from './herdr.js';
 import {
   HERDR_VERSION_NOTICE_FIELD,
@@ -20,8 +18,7 @@ import {
 } from './herdr-health.js';
 import { ensureDataDir, onJsonLines, socketPathFor, writeJsonLine } from './ipc.js';
 import { resolveUserPath, which } from './env.js';
-import { AGENT_LAUNCHERS } from './launchers.js';
-import { AgentRegistry, registryPathFor } from './agent-registry.js';
+import { AgentRegistry, describeUnreadableLog, registryPathFor, scanLogVersions } from './agent-registry.js';
 import { reconcileAgents } from './reconcile.js';
 
 // The single long-lived CrabCast daemon. Owns all sessions and the workspace
@@ -45,23 +42,28 @@ try {
   throw err;
 }
 
-// Each type's defaultLauncher checked against the launcher table now, at
-// boot, not at first activation: the config loader's contract is that a
-// config it accepts is a config the daemon can run, and a typo'd launcher
-// surviving to activation time breaks that in the one field the loader
-// cannot check itself (the table lives here, not in config.ts — validating
-// there would couple the loader to the launchers). Same channel as a
-// ConfigError: stderr, where the operator who just edited the config is
-// looking.
-for (const type of config.workspaceTypes) {
-  if (!AGENT_LAUNCHERS[type.defaultLauncher]) {
-    process.stderr.write(
-      `crabcast: refusing to start: workspace type "${type.name}": defaultLauncher ` +
-      `"${type.defaultLauncher}" is not a known launcher. Valid launchers: ` +
-      `${Object.keys(AGENT_LAUNCHERS).join(', ')}\n`
-    );
-    process.exit(1);
-  }
+// THE DURABLE LOG PRE-FLIGHT, and its placement is the design.
+//
+// Before the socket, before the logger, before anything reads the registry:
+// count the rows this daemon's format does not cover. Non-zero and it refuses
+// to start, naming the file, the count and the two remedies.
+//
+// The check is OUTSIDE `readLog`, deliberately, and tightening `readLog`'s own
+// filter instead would have been the obvious move and the wrong one.
+// Pre-migration rows carry `type`/`key`/`workDir` and no `path`, so a tightened
+// filter would drop every one of them SILENTLY — that filter is silent on
+// purpose, for torn-tail tolerance — and the daemon would come up reporting an
+// empty fleet, indistinguishable from a healthy one. A whole fleet vanishing
+// with no line anywhere saying so is the exact failure this registry exists to
+// remove, so the version question is asked in a different place, out loud, and
+// answered by refusing rather than by half-loading.
+//
+// stderr, like a ConfigError: the operator who just upgraded is looking there,
+// and daemon.log does not exist yet at this point.
+const logScan = scanLogVersions(registryPathFor(config.dataDir));
+if (logScan.preMigration + logScan.fromNewer + logScan.unusable > 0) {
+  process.stderr.write(`crabcast: ${describeUnreadableLog(logScan)}\n`);
+  process.exit(1);
 }
 
 const SOCKET_PATH = socketPathFor(config.dataDir);
@@ -151,10 +153,6 @@ if (!fdUsage) {
   );
 }
 
-const registry = new WorkspaceRegistry(config.workspaceTypes);
-// Prompt paths belong to the config that names them, so they resolve from the
-// config file's directory rather than from any install location.
-const promptLoader = new PromptLoader(config.baseDir);
 const herdrBridge = new HerdrBridge(config.dataDir, config.configPath);
 
 // The one piece of state that outlives the machine. Everything else here —
@@ -164,13 +162,26 @@ const herdrBridge = new HerdrBridge(config.dataDir, config.configPath);
 const agentRegistry = new AgentRegistry(registryPathFor(config.dataDir));
 
 log(`Config loaded from ${config.configPath} (dataDir ${config.dataDir})`);
-log(`Loaded ${config.workspaceTypes.length} workspace type(s):`);
-for (const type of config.workspaceTypes) {
+// What used to be a list of workspace types. There are none: an agent is a
+// directory plus the knobs a caller froze onto it, and the registry is the
+// only place those live. So the equivalent line is about the registry.
+{
+  const intents = agentRegistry.intents();
+  const expected = Array.from(intents.values()).filter((i) => i.event === 'activated').length;
   log(
-    `  ${type.name} — priority ${type.priority}, launcher ${type.defaultLauncher}, ` +
-      `prompt ${type.promptFile}, gateExempt ${type.gateExempt}, ` +
-      `mcpServers [${type.mcpServers.join(', ')}]`
+    `Agent registry: ${intents.size} configured agent(s), ${expected} expected to be running ` +
+    `(${logScan.rows} record(s) in ${registryPathFor(config.dataDir)})`
   );
+  for (const [agentPath, intent] of intents) {
+    const c = intent.record.config;
+    log(
+      `  ${agentPath} — ${intent.event}, priority ${c.priority}, launcher ${c.launcher}, ` +
+        `refusable ${c.refusable}, chargeable ${c.chargeable}, preemptable ${c.preemptable}` +
+        (c.prompt ? `, prompt ${c.prompt}` : '') +
+        (c.mcpServers?.length ? `, mcp [${c.mcpServers.join(', ')}]` : '') +
+        (c.label ? `, label ${JSON.stringify(c.label)}` : '')
+    );
+  }
 }
 
 const daemonStartedAt = new Date();
@@ -188,7 +199,7 @@ const broadcast = (msg: any) => {
 // a disconnected state instead of a frozen last frame.
 herdrBridge.setSessionEndedListener((event) => {
   log(
-    `Session ended: ${event.sessionId} (${event.type}/${event.key}) ` +
+    `Session ended: ${event.sessionId} (${event.path}) ` +
     `reason=${event.reason} exitCode=${event.exitCode}`
   );
   broadcast({ action: 'agent_detached_event', success: true, ...event });
@@ -220,9 +231,7 @@ const server = net.createServer((socket) => {
   // One router per connection: responses go back to the requesting client,
   // and PTY listeners registered by this client die with its connection.
   const router = new MessageRouter({
-    registry,
     config,
-    promptLoader,
     herdrBridge,
     daemonStartedAt,
     agentRegistry,
@@ -384,9 +393,7 @@ function sampleFleetCost() {
  * whatever clients turn up later.
  */
 const daemonRouter = new MessageRouter({
-  registry,
   config,
-  promptLoader,
   herdrBridge,
   daemonStartedAt,
   agentRegistry,
@@ -426,17 +433,17 @@ function sweepForMissingAgents() {
     return;
   }
 
-  const names = new Set(missing.map((agent) => agent.agentName));
+  const names = new Set(missing.map((agent) => agent.path));
   for (const name of announcedMissing) {
     if (!names.has(name)) announcedMissing.delete(name);
   }
 
   for (const agent of missing) {
-    if (announcedMissing.has(agent.agentName)) continue;
-    announcedMissing.add(agent.agentName);
+    if (announcedMissing.has(agent.path)) continue;
+    announcedMissing.add(agent.path);
     log(
-      `AGENT LOST: ${agent.agentName} (${agent.type}/${agent.key}) is recorded as active ` +
-      `since ${agent.since} but herdr has no such agent. Workspace: ${agent.workDir}`
+      `AGENT LOST: ${agent.path} is recorded as active since ${agent.since} but herdr has no ` +
+      `live agent in that directory.`
     );
     broadcast({ action: 'agent_lost_event', success: true, ...agent });
   }
@@ -463,22 +470,31 @@ function onListen() {
     registry: agentRegistry,
     herdrBridge,
     router: daemonRouter,
-    workspaceTypes: registry,
     cause: 'reboot',
     log
   })
     .then((result) => {
       const restored = result.outcomes.filter((o) => o.result === 'restored');
       const failed = result.outcomes.filter((o) => o.result === 'failed');
+      const deferred = result.outcomes.filter((o) => o.result === 'deferred');
       const idle = restored.filter((o) => o.resumedConversation && o.nudged === false);
       log(
         `[reconcile] Done: ${result.expected} expected, ` +
         `${restored.length} restored, ` +
         `${result.outcomes.filter((o) => o.result === 'already-running').length} already running, ` +
-        `${failed.length} failed.` +
+        `${failed.length} failed, ` +
+        // Named separately from `failed` on purpose: a deferred agent was not
+        // refused on its own merits and nothing about it was recorded, so it
+        // is still expected and still restorable. Folding it into "failed"
+        // would read as a verdict this pass never reached.
+        `${deferred.length} deferred (herdr could not confirm their directories were free).` +
+        (deferred.length
+          ? ` Still expected and unrestored: ${deferred.map((o) => o.path).join(', ')} — ` +
+            `reported by the missing-agent sweep until they come back.`
+          : '') +
         (idle.length
           ? ` ${idle.length} restored agent(s) could not be told to carry on and may be idle: ` +
-            idle.map((o) => o.agentName).join(', ')
+            idle.map((o) => o.path).join(', ')
           : '')
       );
       // Whatever restoration could not bring back is a loss, and is announced

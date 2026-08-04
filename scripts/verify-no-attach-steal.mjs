@@ -6,25 +6,35 @@
 // evicted client rendering a dead frame. This drives exactly that sequence
 // and asserts the first PTY is still streaming afterwards.
 //
-// Usage: node scripts/verify-no-attach-steal.mjs <existing-agent-key> [type]
+// Usage: node scripts/verify-no-attach-steal.mjs <directory>
 //
-// The key (and type, default `shell`) must belong to an agent herdr already
-// knows and nothing is attached to. Run it after `npm run build`.
+// The directory is the agent's whole address, and it must be one herdr already
+// has a live agent in with nothing attached to it. Run it after
+// `npm run build`. (It used to take a <key> and a <type>; the pane name is now
+// a pure function of the path, so there is one operand and nothing to
+// disambiguate.)
 
+import fs from 'fs';
 import path from 'path';
-import { HerdrBridge, agentNameFor } from '../dist/herdr.js';
+import { HerdrBridge } from '../dist/herdr.js';
+import { paneNameFor } from '../dist/identity.js';
 import { DEFAULT_DATA_DIR } from '../dist/config.js';
 
-const key = process.argv[2];
-if (!key) {
-  console.error('usage: node scripts/verify-no-attach-steal.mjs <agent-key> [type]');
+const target = process.argv[2];
+if (!target) {
+  console.error('usage: node scripts/verify-no-attach-steal.mjs <directory>');
   process.exit(2);
 }
-const type = process.argv[3] ?? 'shell';
+const agentPath = fs.realpathSync(path.resolve(target));
 const dataDir = process.env.CRABCAST_DATA_DIR
   ? path.resolve(process.env.CRABCAST_DATA_DIR)
   : DEFAULT_DATA_DIR;
-console.log(`target agent: ${agentNameFor(type, key)} (dataDir ${dataDir})\n`);
+console.log(`target agent: ${agentPath} (pane ${paneNameFor(agentPath)}, dataDir ${dataDir})\n`);
+
+/** The knobs the bridge needs. `shell` explicitly — see below. */
+const CONFIG = {
+  priority: 1, refusable: true, chargeable: true, preemptable: true, launcher: 'shell'
+};
 
 const bridge = new HerdrBridge(dataDir);
 const ended = [];
@@ -35,19 +45,20 @@ bridge.setSessionEndedListener((e) => {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// The bridge writes a prompt file into the workspace; pass none so this
-// touches nothing but the attach itself. `shell` explicitly: this script
-// borrows an existing agent, and a claude launcher's setup would write
-// folder trust into the real ~/.claude.json on the way past.
+// No prompt, so this touches nothing but the attach itself — and nothing is
+// written into the caller's directory either way, since the prompt would go to
+// CrabCast's own sidecar. `shell` explicitly: this script borrows an existing
+// agent, and a claude launcher's setup would write folder trust into the real
+// ~/.claude.json on the way past.
 console.log('== first activate ==');
-const first = bridge.spawnSession(type, key, undefined, '', 'shell');
+const first = bridge.spawnSession(agentPath, CONFIG);
 await sleep(2000);
 
 let firstBytes = 0;
 bridge.registerDataListener(first.sessionId, (d) => { firstBytes += d.length; });
 
 console.log('\n== second activate at the same agent (this is what used to steal it) ==');
-const second = bridge.spawnSession(type, key, undefined, '', 'shell');
+const second = bridge.spawnSession(agentPath, CONFIG);
 await sleep(3000);
 
 console.log('\n== result ==');

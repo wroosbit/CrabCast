@@ -69,13 +69,12 @@ export function monotonicNow(): number {
  */
 export async function waitForAgentReady(
   herdrBridge: HerdrBridge,
-  key: string,
-  type: string,
+  agentPath: string,
   readyMarkers: string[]
 ): Promise<boolean> {
   const deadline = monotonicNow() + AGENT_READY_TIMEOUT_MS;
   for (;;) {
-    const tail = herdrBridge.tailAgent(key, type, 40);
+    const tail = herdrBridge.tailAgent(agentPath, 40);
     if (tail.success && typeof tail.text === 'string') {
       const text = tail.text.toLowerCase();
       if (readyMarkers.some((marker) => text.includes(marker.toLowerCase()))) return true;
@@ -103,24 +102,22 @@ export interface NudgeResult {
  */
 export async function nudgeResumedAgent(opts: {
   herdrBridge: HerdrBridge;
-  type: string;
-  key: string;
+  /** The canonical directory this agent is. */
+  path: string;
   cause: ResumeCause;
-  /** Which launcher the caller asked for, when it named one. */
-  defaultAgent?: string;
-  /** The workspace type's `defaultLauncher` from config, for the fallback. */
-  typeDefaultLauncher?: string;
+  /** The launcher frozen onto the agent's record by `configure`. */
+  launcher?: string;
   log: (...args: any[]) => void;
 }): Promise<NudgeResult> {
-  const { herdrBridge, type, key, cause, defaultAgent, typeDefaultLauncher, log } = opts;
-  const label = `${type}/${key}`;
+  const { herdrBridge, path: agentPath, cause, log } = opts;
+  const label = agentPath;
 
-  // The same resolution order the spawn used, so the launcher judged here is
-  // the launcher that actually ran. An unresolvable name cannot be nudged and
-  // says so, rather than guessing at a launcher it might have been.
+  // The same resolution the spawn used, so the launcher judged here is the
+  // launcher that actually ran. An unresolvable name cannot be nudged and says
+  // so, rather than guessing at a launcher it might have been.
   let launcher;
   try {
-    ({ launcher } = resolveLauncher(defaultAgent, typeDefaultLauncher));
+    ({ launcher } = resolveLauncher(opts.launcher));
   } catch (e: any) {
     const error = e?.message ?? String(e);
     log(`[nudge] ${label} has no resolvable launcher; not nudging: ${error}`);
@@ -133,7 +130,7 @@ export async function nudgeResumedAgent(opts: {
   }
 
   try {
-    if (!(await waitForAgentReady(herdrBridge, key, type, launcher.readyMarkers ?? []))) {
+    if (!(await waitForAgentReady(herdrBridge, agentPath, launcher.readyMarkers ?? []))) {
       log(
         `[nudge] ${label} restored its conversation but never reached a prompt within ` +
         `${AGENT_READY_TIMEOUT_MS / 1000}s; not typing at it. It will sit idle until nudged.`
@@ -141,7 +138,7 @@ export async function nudgeResumedAgent(opts: {
       return { nudged: false, error: 'agent did not reach a prompt in time' };
     }
 
-    const sent = await herdrBridge.sendToAgent(key, resumeNudge(type, key, cause), type);
+    const sent = await herdrBridge.sendToAgent(agentPath, resumeNudge(agentPath, cause));
     log(
       `[nudge] ${label} restored its conversation; ` +
       (sent.success

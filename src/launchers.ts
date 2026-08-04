@@ -6,14 +6,26 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
- * The bootstrap prompt file written into every workspace. One constant, shared
- * by herdr.ts (which writes it), resume.ts (whose degraded-resume prompt tells
- * the agent to read it) and the launcher command below (which points a fresh
- * agent at it) — three call sites that must never disagree about the name.
+ * The bootstrap prompt file, written into the agent's SIDECAR — never into the
+ * caller's directory.
+ *
+ * It used to be `.crabcast-prompt.md` in the agent's own working directory,
+ * which cost nothing when CrabCast allocated that directory itself. It does
+ * not any more: the directory is the caller's, and a file we drop into it is a
+ * file somebody has to remember to remove. The sidecar
+ * (`<dataDir>/agents/<hash>/`, see identity.ts) is ours outright, so the
+ * prompt lives there and every reference to it is an absolute path.
  */
-export const PROMPT_FILENAME = '.crabcast-prompt.md';
+export const PROMPT_FILENAME = 'prompt.md';
 
-const PROMPT_CMD = `Please read and follow the instructions in ${PROMPT_FILENAME} to begin.`;
+/**
+ * What a cold-started agent is told to read. A function of the file's absolute
+ * path now rather than a constant, because the file no longer sits in the
+ * agent's cwd — a bare filename would name nothing.
+ */
+export function promptInstruction(promptFile: string): string {
+  return `Please read and follow the instructions in ${promptFile} to begin.`;
+}
 
 // MCP server definitions CrabCast can attach to an agent workspace.
 function mcpServerDefinitions(servers: string[], daemonConfigPath?: string): Record<string, any> {
@@ -102,38 +114,30 @@ export function configureAgyMcp(servers: string[], configPath?: string): void {
   }
 }
 
-// Claude Code's per-project settings. `.claude/settings.local.json` sits in
-// the workspace, so it is CrabCast's to create — but a resumed workspace may
-// already hold keys Claude Code wrote itself (it records enabledMcpjsonServers
-// there once a human approves the .mcp.json servers), so merge rather than
-// replace, and bail on a file we cannot parse.
-export function configureClaudeSettings(workDir: string): void {
-  const settingsPath = path.join(workDir, '.claude', 'settings.local.json');
-  let settings: any = {};
-  if (fs.existsSync(settingsPath)) {
-    try {
-      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-    } catch (e) {
-      console.error('[Launchers] workspace settings.local.json exists but is unparseable; refusing to overwrite it', e);
-      return;
-    }
-  }
-
-  // Auto-approves the workspace .mcp.json servers, so no approval prompt.
-  settings.enableAllProjectMcpServers = true;
-  // Full bypass, not acceptEdits: acceptEdits still routes Bash through the
-  // permission classifier, which strands an unattended agent on commands a
-  // human would have waved through. CrabCast workspaces are disposable and
-  // agent-owned, so the agent runs without a prompt gate at all.
-  settings.permissions = { ...settings.permissions, defaultMode: 'bypassPermissions' };
-
-  try {
-    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-  } catch (e) {
-    console.error('[Launchers] Failed to write workspace settings.local.json', e);
-  }
-}
+// WHAT USED TO BE HERE, AND WHY IT IS NOT
+//
+// `configureClaudeSettings` wrote `.claude/settings.local.json` into every
+// agent's working directory, setting `enableAllProjectMcpServers` and a
+// `bypassPermissions` default mode. That was defensible while CrabCast
+// allocated the directory: it was a disposable, agent-owned workspace, and the
+// file was ours to create.
+//
+// It is not defensible now. The directory is the caller's — their repository
+// checkout, with their own `.claude/` in it — and this daemon writing a
+// permission policy into somebody else's project is the single most invasive
+// thing it could do there. Worse, it is invisible: a merged key in a settings
+// file nobody opened, silently widening what an agent may do in a tree the
+// caller thought they controlled.
+//
+// So it is deleted rather than made conditional. The one thing it bought that
+// still matters — the agent not stopping at a permission prompt nobody is
+// there to answer — is already on the launcher's own command line below
+// (`--permission-mode bypassPermissions`), where it is visible in the process
+// list and scoped to the process CrabCast started, rather than left behind on
+// disk for every later `claude` a human runs in that directory.
+//
+// This is a pure removal: nothing replaces it, and nothing in a later slice is
+// meant to bring it back.
 
 /** Outcome of recording folder trust; `ok: false` must refuse the activation. */
 export interface TrustResult {
@@ -305,11 +309,16 @@ export interface AgentLauncher {
   /**
    * Shell command run inside the herdr pane (via bash -c).
    *
-   * A function rather than a constant because the fallback prompt is not
-   * always the same sentence: an agent being restored after a reboot whose
-   * conversation could not be recovered must be told that, not greeted as if
-   * it were starting fresh. `promptCommand` is what to say when there is no
-   * conversation to continue; omitted, it is the ordinary cold start.
+   * A function rather than a constant because the prompt is not always the
+   * same sentence: an agent being restored after a reboot whose conversation
+   * could not be recovered must be told that, not greeted as if it were
+   * starting fresh. `promptCommand` is what to say when there is no
+   * conversation to continue.
+   *
+   * `undefined` is a real case rather than a default: `prompt` is an optional
+   * `configure` parameter, and an agent configured without one is started with
+   * no opening instruction at all. Substituting a generic one would be this
+   * daemon inventing an instruction nobody wrote.
    */
   command: (promptCommand?: string) => string;
   /**
@@ -360,19 +369,19 @@ export interface AgentLauncher {
   readyMarkers?: string[];
 }
 
-// The only agents CrabCast will launch. defaultAgent arrives from activation
-// requests and MCP tool arguments; it selects from this table and is never
-// itself executed as shell.
+// The only agents CrabCast will launch. `launcher` arrives as a required
+// `configure` parameter; it selects from this table and is never itself
+// executed as shell.
 //
-// The resolution rule (KAN-53, generalized for config-declared types): the
-// caller's defaultAgent wins when present; an omitted one falls to the
-// workspace type's `defaultLauncher` from crabcast.config.json; only when
-// neither names anything is DEFAULT_AGENT consulted — which, the config
-// loader requiring `defaultLauncher` on every type, means DEFAULT_AGENT is
-// the fallback for bridge-level callers with no type config in hand, not for
-// activations. An unknown name at any of the three steps refuses the
-// activation. Nothing resolves to `shell` unless someone asked for `shell`
-// by name: the extraction source's old rule was `name || 'shell'` plus a
+// The resolution rule (KAN-53), now one step shorter: the caller's `launcher`
+// wins, and only a bridge-level caller with no configured agent in hand ever
+// reaches DEFAULT_AGENT. The middle step — a workspace type's
+// `defaultLauncher` — is gone with the types, and nothing replaces it: an
+// agent's launcher is a value its caller froze onto its record, so there is no
+// second place for it to come from and therefore no chance of the two
+// disagreeing. An unknown name at either step refuses the activation.
+// Nothing resolves to `shell` unless someone asked for `shell` by name: the
+// extraction source's old rule was `name || 'shell'` plus a
 // warn-and-fall-back for unknown names, and both halves were the same trap —
 // an activation that omitted or misspelled the field got a bare bash prompt
 // wearing an agent's name, reported `success: true, verified: true` because a
@@ -386,7 +395,19 @@ export interface AgentLauncher {
 // fallback from an unknown one.
 export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
   shell: {
-    command: () => 'bash'
+    // A bare prompt with no runtime behind it is this launcher's delivered
+    // product, so there is nothing here to *instruct* — but a prompt that was
+    // configured must not simply vanish. It used to be written into the
+    // agent's own working directory, where a human in the pane would at least
+    // trip over it; it now lives in CrabCast's sidecar, which nobody browsing
+    // that shell would ever find. Printing it once at start-up is the whole of
+    // the fix: the instruction reaches the pane it was written for, and the
+    // shell that follows is unchanged.
+    //
+    // `exec` so the shell is still PID 1 of the pane and closing it closes the
+    // pane, exactly as `bash` alone did.
+    command: (promptCommand) =>
+      promptCommand ? `printf '%s\\n' ${shellQuote(promptCommand)}; exec bash` : 'bash'
   },
   claude: {
     // Interactive session: resume if a conversation exists, else start one
@@ -400,11 +421,10 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
     // continue", so the fallback is reached exactly when there is nothing to
     // restore — which is what makes it the right place to put the degraded
     // resume prompt.
-    command: (promptCommand = PROMPT_CMD) =>
+    command: (promptCommand) =>
       `claude --permission-mode bypassPermissions --continue || ` +
-      `claude --permission-mode bypassPermissions ${shellQuote(promptCommand)}`,
+      `claude --permission-mode bypassPermissions${promptCommand ? ' ' + shellQuote(promptCommand) : ''}`,
     setup: (workDir) => {
-      configureClaudeSettings(workDir);
       const trust = trustClaudeWorkspace(workDir);
       if (!trust.ok) {
         throw new Error(`Refusing to start claude in an untrusted workspace: ${trust.error}`);
@@ -430,8 +450,8 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
     readyMarkers: ['bypass permissions', 'for shortcuts', '❯']
   },
   'anti-gravity': {
-    command: (promptCommand = PROMPT_CMD) =>
-      `agy --continue || agy -i ${shellQuote(promptCommand)}`,
+    command: (promptCommand) =>
+      `agy --continue || agy${promptCommand ? ' -i ' + shellQuote(promptCommand) : ''}`,
     setup: (_workDir, mcpServers) => configureAgyMcp(mcpServers),
     runtimeComm: 'agy'
     // No restoresConversation, deliberately, despite the `--continue` above:
@@ -455,32 +475,60 @@ export const AGENT_RUNTIME_COMMS: ReadonlySet<string> = new Set(
 );
 
 /**
- * What resolveLauncher falls back to when neither the caller nor the type
- * config names a launcher. See the block above AGENT_LAUNCHERS.
+ * What resolveLauncher falls back to for a bridge-level caller that names no
+ * launcher. Not reachable from `activate`: `configure` requires one.
  */
 export const DEFAULT_AGENT = 'claude';
 
+/** Every launcher name a caller may `configure`. */
+export function knownLaunchers(): string[] {
+  return Object.keys(AGENT_LAUNCHERS);
+}
+
 /**
- * Map a requested agent name to its launcher.
+ * Whether a launcher delivers a live agent RUNTIME behind its pane.
  *
- * The order is: the caller's `name`, else the workspace type's
- * `typeDefault` (its `defaultLauncher` from config), else DEFAULT_AGENT.
- * An unknown name at any step throws, and the message names the valid
- * launchers — the rule set for pty_init's unknown sessionId (KAN-25): refuse
- * rather than substitute something plausible. initPty turns the throw into
- * session.spawnError, the channel activate already answers `success: false`
- * from, so the refusal reaches the caller without new vocabulary.
+ * False only for `shell`, where a bare prompt with nothing running in it is
+ * the delivered product. Everywhere this daemon asks "does an agent exist
+ * here?", the answer for every other launcher is "only if herdr reports a
+ * runtime" — a name registration over a dead pane must not verify (KAN-58) —
+ * and for `shell` the name is all there is to see.
+ *
+ * One function rather than a `!== 'shell'` at each site: `initPty` decides it
+ * for a session, `confirmAgentPresent` is passed it, `ourPaneIn` needs it to
+ * recognise a shell agent as ours, and the census's stale-session release
+ * reads it back. Four places that must agree, and did not: `ourPaneIn`
+ * originally required a runtime unconditionally, which made a `shell` agent
+ * permanently unrecognisable as its own — the same class of always-false
+ * ownership answer as the pane-id one, and found by running the live proof
+ * rather than by reading.
  */
-export function resolveLauncher(
-  name?: string,
-  typeDefault?: string
-): { name: string; launcher: AgentLauncher } {
-  const requested = name?.trim() || typeDefault?.trim() || DEFAULT_AGENT;
+export function launcherDeliversRuntime(launcherName?: string): boolean {
+  try {
+    return resolveLauncher(launcherName).name !== 'shell';
+  } catch {
+    // An unresolvable launcher never starts anything, so nothing can be ours
+    // under it. The strict reading is the safe one.
+    return true;
+  }
+}
+
+/**
+ * Map a requested launcher name to its launcher.
+ *
+ * An unknown name throws, and the message names the valid launchers — the rule
+ * set for pty_init's unknown sessionId (KAN-25): refuse rather than substitute
+ * something plausible. initPty turns the throw into session.spawnError, the
+ * channel activate already answers `success: false` from, so the refusal
+ * reaches the caller without new vocabulary.
+ */
+export function resolveLauncher(name?: string): { name: string; launcher: AgentLauncher } {
+  const requested = name?.trim() || DEFAULT_AGENT;
   const launcher = AGENT_LAUNCHERS[requested];
   if (!launcher) {
     throw new Error(
-      `Unknown agent '${requested}'. Valid launchers: ${Object.keys(AGENT_LAUNCHERS).join(', ')}. ` +
-      `Pass one of these as defaultAgent, or omit it to use the workspace type's defaultLauncher.`
+      `Unknown launcher '${requested}'. Valid launchers: ${knownLaunchers().join(', ')}. ` +
+      `Pass one of these as \`launcher\` to configure.`
     );
   }
   return { name: requested, launcher };

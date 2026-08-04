@@ -33,7 +33,7 @@
 //                   instruction-less agent behind success: true
 //
 // Everything on the daemon side is real: the real MessageRouter, the real
-// HerdrBridge (initPty and all), the real WorkspaceRegistry and PromptLoader,
+// HerdrBridge (initPty and all), a real on-disk AgentRegistry,
 // a real config loaded by the real loader. What is faked is the `herdr`
 // binary itself: a shim on PATH that records every invocation — argv-exact,
 // including the launcher command handed to `agent start` — and answers in
@@ -144,48 +144,55 @@ const launcherCommandOf = (startArgv) => startArgv[startArgv.length - 1];
 
 // -------------------------------------------------------------- the config --
 //
-// The real loader loads a real config: a `task` type whose defaultLauncher is
-// `claude`, which is what section 1's omitted-field activation must resolve
-// to. dataDir points into the scratch, so workspaces land there and nowhere
-// else.
+// The real loader loads a real config, which now declares a dataDir and
+// nothing else — there is no type table left to carry a defaultLauncher, so
+// the launcher this script is about is a per-agent `configure` parameter.
 const dataDir = path.join(scratch, 'data');
 const configPath = path.join(scratch, 'crabcast.config.json');
-fs.mkdirSync(path.join(scratch, 'prompts'), { recursive: true });
-fs.writeFileSync(path.join(scratch, 'prompts', 'task.md'), 'KAN-53 proof workspace {{KEY}}.\n');
-fs.writeFileSync(configPath, JSON.stringify({
-  dataDir,
-  workspaceTypes: [
-    { name: TYPE, priority: 1, promptFile: 'prompts/task.md', defaultLauncher: 'claude' },
-    // A second type for section 5: two types sharing one key are two agents.
-    { name: 'sidecar', priority: 1, promptFile: 'prompts/task.md', defaultLauncher: 'claude' }
-  ]
-}, null, 2));
+fs.writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
 
 // ------------------------------------------------------------- the harness --
 
-const { HerdrBridge, agentNameFor } = await import(path.join(distDir, 'herdr.js'));
+const { HerdrBridge } = await import(path.join(distDir, 'herdr.js'));
 const { MessageRouter } = await import(path.join(distDir, 'router.js'));
-const { WorkspaceRegistry } = await import(path.join(distDir, 'registry.js'));
-const { PromptLoader } = await import(path.join(distDir, 'prompt.js'));
 const { loadConfig } = await import(path.join(distDir, 'config.js'));
 const { AgentRegistry } = await import(path.join(distDir, 'agent-registry.js'));
 const { AGENT_LAUNCHERS, DEFAULT_AGENT, PROMPT_FILENAME } = await import(path.join(distDir, 'launchers.js'));
+const { paneNameFor, sidecarDirFor } = await import(path.join(distDir, 'identity.js'));
 
 const config = loadConfig(configPath);
 const bridge = new HerdrBridge(config.dataDir);
+const agentRegistry = new AgentRegistry(path.join(dataDir, 'agents.jsonl'));
 let sent;
 const router = new MessageRouter({
-  registry: new WorkspaceRegistry(config.workspaceTypes),
   config,
-  promptLoader: new PromptLoader(config.baseDir),
   herdrBridge: bridge,
   daemonStartedAt: new Date(),
-  // The durable registry landed with the T4 slice; a scratch log keeps this
-  // script's activations out of any real fleet record.
-  agentRegistry: new AgentRegistry(path.join(dataDir, 'agents.jsonl')),
+  agentRegistry,
   send: (msg) => { sent = msg; },
   broadcast: () => {}
 });
+
+/** A directory a caller owns. Every address in this script is one. */
+function owned(name) {
+  const dir = path.join(scratch, 'owned', name);
+  fs.mkdirSync(dir, { recursive: true });
+  return fs.realpathSync(dir);
+}
+
+/** configure(path, knobs) — mandatory now, and the only place a launcher lives. */
+function configure(dir, over = {}) {
+  let out;
+  const r = new MessageRouter({
+    config, herdrBridge: bridge, daemonStartedAt: new Date(), agentRegistry,
+    send: (msg) => { out = msg; }, broadcast: () => {}
+  });
+  r.handle({
+    action: 'configure_agent', path: dir,
+    priority: 1, launcher: 'claude', prompt: 'KAN-53 proof.', ...over
+  });
+  return out;
+}
 
 function cleanup() {
   for (const session of bridge.listActiveSessions()) {
@@ -200,12 +207,16 @@ process.on('exit', cleanup);
 // what [Start anyway] sends; verify-agent-capacity.mjs proves the gate.
 const PAST_THE_GATE = { override: true };
 
-async function activate(key, extra = {}) {
+/**
+ * configure-then-activate, which is the only sequence there is: `activate`
+ * takes no attributes, so the launcher under test arrives through `configure`.
+ */
+async function activate(name, knobs = {}) {
+  const dir = owned(name);
+  const configured = configure(dir, knobs);
+  if (configured?.success === false) return { ...configured, action: 'activate_response' };
   sent = undefined;
-  await router.handleActivateByKey(
-    { action: 'activate_by_key', type: TYPE, key, ...PAST_THE_GATE, ...extra },
-    (msg) => { sent = msg; }
-  );
+  await router.handleActivate({ path: dir, ...PAST_THE_GATE }, (msg) => { sent = msg; });
   return sent;
 }
 
@@ -222,17 +233,17 @@ console.log(`fake herdr: ${path.join(shimDir, 'herdr')} (records to ${shimState}
 console.log(`config for this run: ${configPath} (dataDir ${dataDir})`);
 console.log(`valid launchers in the built table: ${JSON.stringify(Object.keys(AGENT_LAUNCHERS))}`);
 console.log(`DEFAULT_AGENT (bridge-level fallback): ${JSON.stringify(DEFAULT_AGENT)}`);
-console.log(`type '${TYPE}' declares defaultLauncher: "claude"`);
+console.log(`the launcher is a \`configure\` parameter now — there is no type to declare one`);
 
 // ------------------------------------------------- 1. omitted defaultAgent --
 
-rule('1. activate_by_key with NO defaultAgent — resolves to the type\'s defaultLauncher');
+rule('1. configure names the launcher, and activate runs exactly that');
 
 const omitted = await activate('KAN-53-OMIT');
-show('activate_by_key response:', omitted);
+show('activate response:', omitted);
 
 const omittedStarts = startsIn(invocations());
-const omittedName = agentNameFor(TYPE, 'KAN-53-OMIT');
+const omittedName = paneNameFor(owned('KAN-53-OMIT'));
 const omittedStart = omittedStarts.find((argv) => argv[2] === omittedName);
 console.log(`\n   agent start invocations so far: ${omittedStarts.length}`);
 if (omittedStart) {
@@ -246,43 +257,52 @@ verdict(
     omittedStart !== undefined &&
     launcherCommandOf(omittedStart).startsWith('claude ') &&
     launcherCommandOf(omittedStart) !== 'bash',
-  `an omitted defaultAgent launched the type's declared 'claude' — the pane runs claude, not a shell`,
-  'the omitted-field activation did not produce a claude launch'
+  `the configured 'claude' is what the pane runs — never a shell. There is no longer a\n` +
+  `    middle step for it to fall through: the launcher is on the agent's own record, so\n` +
+  `    there is no second place for it to come from and no chance of the two disagreeing`,
+  'the activation did not produce a claude launch'
 );
 
 // ------------------------------------------------------ 2. unknown refuses --
 
-rule("2. defaultAgent: 'zzz' — refused, naming the valid launchers");
+rule("2. launcher: 'zzz' — refused at CONFIGURE, naming the valid launchers");
+
+console.log('   The refusal moved one verb earlier, and that is a strict improvement: an');
+console.log('   unknown launcher used to be caught at the first activation, in front of');
+console.log('   whoever was waiting on the agent. It is now caught by the call that wrote');
+console.log('   the mistake, and no record is created at all.\n');
 
 const invocationsBeforeZzz = invocations().length;
-const zzz = await activate('KAN-53-ZZZ', { defaultAgent: 'zzz' });
-show('activate_by_key response:', zzz);
+const zzz = await activate('KAN-53-ZZZ', { launcher: 'zzz' });
+show('configure response:', zzz);
 
-const zzzName = agentNameFor(TYPE, 'KAN-53-ZZZ');
+const zzzDir = owned('KAN-53-ZZZ');
+const zzzName = paneNameFor(zzzDir);
 const zzzStarts = startsIn(invocations()).filter((argv) => argv[2] === zzzName);
-const zzzWorkspace = path.join(dataDir, 'workspaces', TYPE, 'kan-53-zzz');
-const zzzPromptWritten = fs.existsSync(path.join(zzzWorkspace, PROMPT_FILENAME));
+const zzzSidecar = sidecarDirFor(dataDir, zzzDir);
+const zzzPromptWritten = fs.existsSync(path.join(zzzSidecar, PROMPT_FILENAME));
 console.log(`\n   herdr invocations during the refusal: ${invocations().length - invocationsBeforeZzz}`);
 console.log(`   agent start invocations for ${zzzName}: ${zzzStarts.length}`);
-console.log(`   ${PROMPT_FILENAME} written into the refused workspace: ${zzzPromptWritten}`);
+console.log(`   a prompt written into the refused agent's sidecar: ${zzzPromptWritten}`);
+console.log(`   a record written for it: ${agentRegistry.intents().has(zzzDir)}`);
 
 verdict(
   zzz?.success === false &&
     typeof zzz?.error === 'string' &&
-    zzz.error.includes("Unknown agent 'zzz'") &&
+    zzz.error.includes("Unknown launcher 'zzz'") &&
     Object.keys(AGENT_LAUNCHERS).every((name) => zzz.error.includes(name)),
   'success: false, and the error names every valid launcher',
   'the unknown name was not refused, or the refusal does not name the launchers'
 );
 verdict(
-  zzzStarts.length === 0 && !zzzPromptWritten,
-  'nothing was started or provisioned for the refused activation',
+  zzzStarts.length === 0 && !zzzPromptWritten && !agentRegistry.intents().has(zzzDir),
+  'nothing was started, provisioned or recorded for the refused agent',
   'the refusal left something behind'
 );
 
-console.log('\n   the same key again, with a valid launcher — a refusal must not latch:\n');
-const retry = await activate('KAN-53-ZZZ', { defaultAgent: 'claude' });
-show('activate_by_key response:', { success: retry?.success, verified: retry?.verified, sessionId: retry?.sessionId });
+console.log('\n   the same directory again, with a valid launcher — a refusal must not latch:\n');
+const retry = await activate('KAN-53-ZZZ', { launcher: 'claude' });
+show('activate response:', { success: retry?.success, verified: retry?.verified, sessionId: retry?.sessionId });
 verdict(
   retry?.success === true,
   'the earlier refusal locked nothing out',
@@ -291,12 +311,16 @@ verdict(
 
 // ----------------------------------------------------- 3. explicit 'shell' --
 
-rule("3. defaultAgent: 'shell' — explicit shell still works, and only explicit");
+rule("3. launcher: 'shell' — explicit shell still works, and only explicit");
 
-const shell = await activate('KAN-53-SHELL', { defaultAgent: 'shell' });
-show('activate_by_key response:', { success: shell?.success, verified: shell?.verified, sessionId: shell?.sessionId });
+const shellDir = owned('KAN-53-SHELL');
+// No prompt: `shell` with one prints it into the pane before exec'ing bash,
+// which is right but would make the command below something other than the
+// bare `bash` this section is checking for.
+const shell = await activate('KAN-53-SHELL', { launcher: 'shell', prompt: undefined });
+show('activate response:', { success: shell?.success, verified: shell?.verified, sessionId: shell?.sessionId });
 
-const shellStart = startsIn(invocations()).find((argv) => argv[2] === agentNameFor(TYPE, 'KAN-53-SHELL'));
+const shellStart = startsIn(invocations()).find((argv) => argv[2] === paneNameFor(shellDir));
 if (shellStart) {
   console.log(`\n   the command herdr was told to run: ${JSON.stringify(launcherCommandOf(shellStart))}`);
 }
@@ -315,7 +339,7 @@ for (const argv of allStarts) {
   console.log(`   ${argv[2]}  →  ${JSON.stringify(launcherCommandOf(argv))}`);
 }
 const accidentalShells = allStarts.filter(
-  (argv) => launcherCommandOf(argv) === 'bash' && argv[2] !== agentNameFor(TYPE, 'KAN-53-SHELL')
+  (argv) => launcherCommandOf(argv) === 'bash' && argv[2] !== paneNameFor(owned('KAN-53-SHELL'))
 );
 verdict(
   accidentalShells.length === 0,
@@ -323,33 +347,46 @@ verdict(
   `${accidentalShells.length} bash launch(es) were constructed without being asked for`
 );
 
-// ------------------------------------------------- 5. cross-type isolation --
+// -------------------------------------------- 5. same-basename isolation --
 
-rule('5. cross-type isolation — a second type on the same key leaves the first alone');
+rule('5. two directories with the same basename are two agents, start to finish');
 
-console.log('   The session lookup in activate_by_key must be by full address, not by key');
-console.log('   alone: a key-only match would hand sidecar/SHARED the task/SHARED session,');
-console.log('   confirm existence against the sidecar agent name — absent — and abandon the');
-console.log("   task agent's live PTY. A mistyped type must never destroy an unrelated agent.\n");
+console.log('   This used to be "cross-type isolation": two workspace TYPES sharing one key');
+console.log('   were two agents, and a key-only session lookup would hand the second one the');
+console.log('   first\'s session, confirm existence against a name that was absent, and abandon');
+console.log('   the first agent\'s live PTY. A mistyped type destroyed an unrelated agent.\n');
+console.log('   The collision it guarded against cannot be expressed now — the address IS the');
+console.log('   directory — so what is proved here is that the guard\'s PROPERTY survives the');
+console.log('   deletion of the thing it guarded: two agents whose directories share a');
+console.log('   basename are independent, down to the pane names herdr sees.\n');
 
-const SHARED = 'KAN-70-SHARED';
-const first = await activate(SHARED);
+const sharedA = owned(path.join('shared', 'alpha', 'KAN-70-SHARED'));
+const sharedB = owned(path.join('shared', 'beta', 'KAN-70-SHARED'));
+configure(sharedA);
+configure(sharedB);
+
+sent = undefined;
+await router.handleActivate({ path: sharedA, ...PAST_THE_GATE }, (m) => { sent = m; });
+const first = sent;
 const firstSession = bridge.getSession(first?.sessionId);
-show('first activation (task/SHARED):', {
+show('first activation (alpha/KAN-70-SHARED):', {
   success: first?.success, verified: first?.verified, sessionId: first?.sessionId
 });
 
-const second = await activate(SHARED, { type: 'sidecar' });
-show('second activation (sidecar/SHARED):', {
+sent = undefined;
+await router.handleActivate({ path: sharedB, ...PAST_THE_GATE }, (m) => { sent = m; });
+const second = sent;
+show('second activation (beta/KAN-70-SHARED):', {
   success: second?.success, verified: second?.verified, sessionId: second?.sessionId
 });
 
 const firstAfter = bridge.getSession(first?.sessionId);
 const sharedStarts = startsIn(invocations()).map((argv) => argv[2]);
-console.log(`\n   task session after the sidecar activation: status=${firstAfter?.status}, ` +
+console.log(`\n   alpha session after the beta activation: status=${firstAfter?.status}, ` +
   `spawnError ${firstAfter?.spawnError ? 'set' : 'unset'}`);
-console.log(`   agents started for the shared key: ` +
-  `${JSON.stringify(sharedStarts.filter((n) => n.endsWith('-kan-70-shared')))}`);
+console.log(`   the two pane names herdr was given:`);
+console.log(`     ${paneNameFor(sharedA)}`);
+console.log(`     ${paneNameFor(sharedB)}`);
 
 verdict(
   first?.success === true &&
@@ -358,38 +395,52 @@ verdict(
     second.sessionId !== first?.sessionId &&
     firstAfter?.status === 'active' &&
     !firstAfter?.spawnError &&
-    sharedStarts.includes(agentNameFor(TYPE, SHARED)) &&
-    sharedStarts.includes(agentNameFor('sidecar', SHARED)),
-  'two types on one key are two agents, and the first session survived untouched',
-  'the second type reused or destroyed the first session'
+    paneNameFor(sharedA) !== paneNameFor(sharedB) &&
+    sharedStarts.includes(paneNameFor(sharedA)) &&
+    sharedStarts.includes(paneNameFor(sharedB)),
+  'two directories sharing a basename are two agents with two pane names, and the first\n' +
+  '    session survived untouched — there is nothing left for a --type flag to resolve',
+  'the second activation reused or destroyed the first session'
 );
 
 // ---------------------------------------------- 6. unwritable prompt file --
 
-rule('6. a prompt file that cannot be written refuses the activation');
+rule('6. a prompt that cannot be written refuses the activation');
 
 console.log("   The agent's first instruction is to read the prompt file, so an activation");
 console.log('   whose prompt write failed must refuse — spawning anyway would start an agent');
 console.log('   with no instructions behind a success: true, verified: true answer.\n');
+console.log('   The file is in CrabCast\'s own SIDECAR now rather than in the agent\'s working');
+console.log('   directory, which is why this section seals the sidecar rather than the');
+console.log('   caller\'s tree: nothing is written into a caller\'s directory to be sealed.\n');
 
-const RO_KEY = 'KAN-70-READONLY';
-const roDir = path.join(dataDir, 'workspaces', TYPE, RO_KEY.toLowerCase());
-fs.mkdirSync(roDir, { recursive: true });
-fs.chmodSync(roDir, 0o500); // read + traverse, no write: the prompt write must fail
+const roDir = owned('KAN-70-READONLY');
+configure(roDir, { launcher: 'shell', prompt: 'instructions that will not land' });
 
-const readonly = await activate(RO_KEY, { defaultAgent: 'shell' });
-fs.chmodSync(roDir, 0o755); // restored so cleanup can remove the scratch
+// The sidecar's PARENT, so the agent's own sidecar directory cannot be created.
+const sidecarRoot = path.join(dataDir, 'agents');
+fs.mkdirSync(sidecarRoot, { recursive: true });
+fs.chmodSync(sidecarRoot, 0o500);
 
-show('activate_by_key response:', readonly);
-const roStarts = startsIn(invocations()).filter((argv) => argv[2] === agentNameFor(TYPE, RO_KEY));
-console.log(`\n   agent start invocations for ${agentNameFor(TYPE, RO_KEY)}: ${roStarts.length}`);
+sent = undefined;
+await router.handleActivate({ path: roDir, ...PAST_THE_GATE }, (m) => { sent = m; });
+const readonly = sent;
+fs.chmodSync(sidecarRoot, 0o755); // restored so cleanup can remove the scratch
+
+show('activate response:', readonly);
+const roStarts = startsIn(invocations()).filter((argv) => argv[2] === paneNameFor(roDir));
+console.log(`\n   agent start invocations for ${paneNameFor(roDir)}: ${roStarts.length}`);
+console.log(`   files written into the caller's directory: ` +
+  `${JSON.stringify(fs.readdirSync(roDir))}`);
 
 verdict(
   readonly?.success === false &&
     typeof readonly?.error === 'string' &&
-    readonly.error.includes(PROMPT_FILENAME) &&
-    roStarts.length === 0,
-  'refused naming the prompt file, and nothing was started for the broken workspace',
+    readonly.error.includes('bootstrap prompt') &&
+    roStarts.length === 0 &&
+    fs.readdirSync(roDir).length === 0,
+  'refused naming the prompt, nothing was started, and nothing was left in the\n' +
+  '    caller\'s directory on the way out',
   'a failed prompt write did not refuse the activation'
 );
 

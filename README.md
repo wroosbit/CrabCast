@@ -1,6 +1,8 @@
 # CrabCast
 
-CrabCast is standalone agent orchestration for terminal AI agents: one long-lived daemon per machine, a CLI, and a fleet UI, with capacity, priority, and honesty built in. The daemon spawns each agent in its own terminal pane with its own workspace directory, prompt, and MCP tools; refuses work the machine cannot carry, with figures the reader can reproduce; preempts by priority but never automatically; and reports the fleet honestly — including the agents that died, were stood down, or were preempted. CrabCast is a management layer only: it never embeds a terminal, and apps built on top of it may bring their own.
+CrabCast is standalone agent orchestration for terminal AI agents: one long-lived daemon per machine, a CLI, and a fleet UI, with capacity, priority, and honesty built in. The daemon spawns each agent in its own terminal pane, in a directory **you** already own; refuses work the machine cannot carry, with figures the reader can reproduce; preempts by priority but never automatically; and reports the fleet honestly — including the agents that died, were stood down, or were preempted. CrabCast is a management layer only: it never embeds a terminal, and apps built on top of it may bring their own.
+
+**An agent is a directory plus a few knobs.** That is the whole addressing model. There are no workspace types, no keys and no names to remember: you `configure` a directory with what the agent should be worth and what should run in it, and from then on the directory's path *is* the address for every read and every verb. CrabCast never creates that directory and never deletes it — which is what lets it be your repository checkout rather than a scratch space CrabCast hands you.
 
 **What exists today:** the daemon and the CLI, which is the whole system — everything below is driveable from a shell with no browser anywhere. The fleet UI named above is designed but not built, and nothing in this README depends on it.
 
@@ -64,216 +66,221 @@ crabcast --help    # every command it lists exists
 
 If you have previously run `npm link` from a CrabCast clone, remove that link first (`npm rm -g crabcast`). npm cannot replace the symlink a link leaves behind with a real directory, and the install fails with `ENOTDIR ... rename`.
 
-## Walkthrough: CrabCast on a project that is not this one
+## Walkthrough: CrabCast on a directory you already own
 
-A new project directory, no prior state: declare a workspace type, activate an agent, watch it, stand it down. Every command below is one that was run, and the output is what it printed; the long paths are the machine it was run on, and yours will be your own directory.
+A directory with no prior CrabCast state: configure an agent into it, activate it, watch it, address it by path, stand it down, forget it. Every command below is one that was run and the output is what it printed; the paths are the machine it was run on, and yours will be your own.
 
 Five things worth knowing before reading it:
 
-* **The first `activate` may be refused, and that is the system working rather than the walkthrough failing.** CrabCast asks whether this machine can carry another agent *before* it starts one, and on a machine already under load the answer is no. It happened to the first person who followed this document — refused at a load average of 2.99 against the 3.0 cores reserved for agents. The refusal names the binding constraint and shows every term it used; there is a worked example [below](#when-the-machine-is-full-activate-refuses). Two ways past it: wait for the machine to quieten and run the same command again, or pass `--override` to start the agent anyway and have the bypass recorded with the figures it bypassed. Waiting is the better answer on a machine you are also trying to use.
-
-* **Nothing starts a daemon by hand.** `activate`, `deactivate`, `reset` and `send` spawn one when none is running; `list`, `status`, `tail`, `capacity` and `daemon-status` refuse with exit 3 instead of starting a fleet nobody asked for. The first `crabcast list` below is that refusal, on purpose.
-* **This config declares `"dataDir": ".crabcast"`**, which puts the socket, the log, the durable registry and the agents' workspaces inside the project directory, so the whole demo is removable with one `rm -rf`. Omit `dataDir` and CrabCast uses `~/.local/share/crabcast` instead.
-* **The `notes` type below launches `shell`** — a bash prompt in a pane, and the launcher that keeps this walkthrough dependent on nothing but herdr. It is reachable only by asking for it by name. The other launchers in the table are `claude` and `anti-gravity`, and this walkthrough does not exercise them.
-* **The `sleep 25` is in the sequence because it was needed**, and the reason is worth knowing before you think something is broken. `tail` asks herdr for the pane's *recent* output, and a freshly spawned pane is not readable straight away — measured on herdr 0.6.4, this one first returned text about 21 seconds after `activate`. Until then `tail` reports the pane as empty, which is honest (herdr read it and it was empty) but is not the pane. So the walkthrough gives the agent a long-running command and reads it mid-flight, which is what `tail` is for: watching without attaching.
+* **The first `activate` may be refused, and that is the system working rather than the walkthrough failing.** CrabCast asks whether this machine can carry another agent *before* it starts one, and on a machine already under load the answer is no. The refusal names the binding constraint and shows every term it used; there is a worked example [below](#when-the-machine-is-full-activate-refuses). Two ways past it: wait for the machine to quieten and run the same command again, or pass `--override` to start the agent anyway and have the bypass recorded with the figures it bypassed. Waiting is the better answer on a machine you are also trying to use.
+* **Nothing starts a daemon by hand.** `configure`, `activate`, `deactivate`, `forget` and `send` spawn one when none is running; `list`, `status`, `tail`, `capacity` and `daemon-status` refuse with exit 3 instead of starting a fleet nobody asked for. The first `crabcast list` below is that refusal, on purpose.
+* **This config declares `"dataDir": ".crabcast"`**, which puts the socket, the log, the durable registry and each agent's sidecar inside the project directory, so the whole demo is removable with one `rm -rf`. Omit `dataDir` and CrabCast uses `~/.local/share/crabcast` instead. Note what is *not* in there: the agent's working directory, which is yours.
+* **`--launcher shell`** is a bash prompt in a pane, and the launcher that keeps this walkthrough dependent on nothing but herdr. It is reachable only by asking for it by name. The other launchers are `claude` and `anti-gravity`, and this walkthrough does not exercise them.
+* **The prompt is finished text, not a template.** `--prompt-file` reads the file *in the CLI* and puts its bytes on the wire; CrabCast writes them into the agent's sidecar verbatim and never inspects them. The file below contains a literal `{{KEY}}` on purpose — watch it arrive at the pane unchanged.
 
 ```
-$ mkdir -p /home/brooswit/.local/share/butchr/workspaces/task/kan-100/demo/prompts
+$ mkdir -p /tmp/ac1-demo/notes && cd /tmp/ac1-demo
 
-$ cd /home/brooswit/.local/share/butchr/workspaces/task/kan-100/demo
+$ echo '{ "dataDir": ".crabcast" }' > crabcast.config.json
 
-$ pwd
-/home/brooswit/.local/share/butchr/workspaces/task/kan-100/demo
+$ cat > prompt.txt <<'EOF'
+You are a CrabCast agent working in the notes directory.
 
-$ cat > crabcast.config.json <<'EOF'
-{
-  "dataDir": ".crabcast",
-  "workspaceTypes": [
-    {
-      "name": "notes",
-      "priority": 1,
-      "promptFile": "prompts/notes.md",
-      "defaultLauncher": "shell",
-      "mcpServers": [],
-      "gateExempt": false
-    }
-  ]
-}
-EOF
-
-$ cat > prompts/notes.md <<'EOF'
-# Notes workspace {{KEY}}
-
-You are working in the `notes` workspace `{{KEY}}`. If the caller supplied a
-URL as metadata, it is: {{URL}}
-
-Everything you do must stay inside this workspace directory — it is what gets
-cleaned up when the workspace is reset.
+This prompt was rendered by the CALLER and handed to CrabCast as finished
+text. CrabCast wrote these bytes verbatim and never looked at them — a literal
+{{KEY}} would have survived unchanged.
 EOF
 
 $ crabcast list
-crabcast: Could not reach the CrabCast daemon at /home/brooswit/.local/share/butchr/workspaces/task/kan-100/demo/.crabcast/crabcast.sock: connect ENOENT /home/brooswit/.local/share/butchr/workspaces/task/kan-100/demo/.crabcast/crabcast.sock
+crabcast: Could not reach the CrabCast daemon at /tmp/ac1-demo/.crabcast/crabcast.sock: connect ENOENT /tmp/ac1-demo/.crabcast/crabcast.sock
 This command does not start a daemon (see `crabcast --help`). Run any of
-  activate, deactivate, reset, send
+  configure, activate, deactivate, forget, send
 and one is spawned if none is running. From a repository checkout you can also
 run one in the foreground: node dist/daemon.js [configPath]
-If one failed to start earlier, its stderr is in /home/brooswit/.local/share/butchr/workspaces/task/kan-100/demo/.crabcast/daemon-spawn.err.
+If one failed to start earlier, its stderr is in /tmp/ac1-demo/.crabcast/daemon-spawn.err.
 [exit 3]
 
-$ crabcast activate notes demo
-activated notes/demo
-  session:       notes-demo-1785799631989 (active)
-  workdir:       /home/brooswit/.local/share/butchr/workspaces/task/kan-100/demo/.crabcast/workspaces/notes/demo
-  created:       2026-08-03T23:27:11.990Z
+$ crabcast configure /tmp/ac1-demo/notes --priority 1 --launcher shell --prompt-file prompt.txt --label "the notes agent"
+configured /tmp/ac1-demo/notes
+  pane name:     crabcast-notes-31e31d1b
   priority:      1
+  launcher:      shell
+  gate:          refusable true, chargeable true, preemptable true
+  prompt:        250 characters (written to the agent's sidecar verbatim)
+  label:         the notes agent
+
+$ crabcast activate /tmp/ac1-demo/notes
+activated /tmp/ac1-demo/notes
+  session:       crabcast-notes-31e31d1b-1785818550627 (active)
+  pane:          crabcast-notes-31e31d1b (w65702dcc803d94-10)
+  created:       2026-08-04T04:42:30.627Z
+  priority:      1
+  launcher:      shell
   verified:      true
 
 $ crabcast list
 agents (1)
-  notes/demo  [unknown]  runtime (none reported)
-    session notes-demo-1785799631989 (active), created 2026-08-03T23:27:11.990Z
-    workdir /home/brooswit/.local/share/butchr/workspaces/task/kan-100/demo/.crabcast/workspaces/notes/demo
+  /tmp/ac1-demo/notes  [unknown]  runtime (none reported)
+    session crabcast-notes-31e31d1b-1785818550627 (active), created 2026-08-04T04:42:30.627Z
+    label the notes agent
+    pane crabcast-notes-31e31d1b (w65702dcc803d94-10)
 
-missing agents (0)
-  (none)
+foreign panes (7) — live agents this daemon did not start
+  butchr-task-kan-79 [done]  runtime claude  pane_id w65702dcc803d94-8
+    cwd /home/brooswit/.local/share/butchr/workspaces/task/kan-79
+  butchr-task-kan-124 [working]  runtime claude  pane_id w65702dcc803d94-7
+    cwd /home/brooswit/.local/share/butchr/workspaces/task/kan-124
+  … five more
 
-preempted agents (0)
-  (none)
-
-standby agents (0)
-  (none)
-
-capacity:
-  1/3 charged agents, room for 1 more (4 cores, load 1.60, 6.2 GiB available; bound by load)
-  cap 3 (bound by cpu) · running 1 · exempt 0 · headroom 1 (bound by load)
-  reason: the load average is 1.60, against the 3.0 cores this machine leaves to agents
-  cap terms: cpu allows 3, memory allows 20  ·  headroom terms: count allows 2, load allows 1, memory allows 6
-  machine: 4 cores, load 1.6, 6395 MB available of 15737 MB
-  agent cost: 650 MB (seed), 0.75 core (seed)
-
-priorities — what an activation would have to strictly outrank:
-  notes/demo  priority 1  [unknown]  crabcast-notes-demo
-
-herdr health: 754/65536 open files (1%), room for about 12956 more panes (pid 875)
-
-$ crabcast send --type notes demo 'for i in $(seq 1 40); do echo tick $i; sleep 1; done'
-sent to demo — the message was typed into its terminal and Enter pressed
-
-$ sleep 25
-
-$ crabcast tail demo --type notes --lines 8
-pane text for demo:
-tick 20
-tick 21
-tick 22
-tick 23
-tick 24
-tick 25
-tick 26
-
-$ crabcast status demo --type notes
-notes/demo — unknown
-  agent name:    crabcast-notes-demo
-  session:       notes-demo-1785799631989
+$ crabcast status /tmp/ac1-demo/notes
+/tmp/ac1-demo/notes — unknown
+  pane name:     crabcast-notes-31e31d1b
+  pane id:       w65702dcc803d94-10
+  label:         the notes agent
+  configured:    true
+  session:       crabcast-notes-31e31d1b-1785818550627
   status:        active
-  created:       2026-08-03T23:27:11.990Z
-  workdir:       /home/brooswit/.local/share/butchr/workspaces/task/kan-100/demo/.crabcast/workspaces/notes/demo
+  created:       2026-08-04T04:42:30.627Z
 
-$ crabcast deactivate demo --type notes
-deactivated notes/demo
-  session:       notes-demo-1785799631989
+$ crabcast send /tmp/ac1-demo/notes cat /tmp/ac1-demo/.crabcast/agents/31e31d1b/prompt.md
+sent to /tmp/ac1-demo/notes — the message was typed into its terminal and Enter pressed
 
-$ crabcast list
-agents (0)
-  (none)
+$ crabcast tail /tmp/ac1-demo/notes --lines 20
+pane text for /tmp/ac1-demo/notes:
+bcast/agents/31e31d1b/prompt.md
+You are a CrabCast agent working in the notes directory.
 
-missing agents (0)
-  (none)
+This prompt was rendered by the CALLER and handed to CrabCast as finished
+text. CrabCast wrote these bytes verbatim and never looked at them — a literal
+{{KEY}} would have survived unchanged.
+brooswit@kchb-ThinkPad-X1-Carbon-5th:/tmp/ac1-demo/notes$
 
-preempted agents (0)
-  (none)
+$ crabcast deactivate /tmp/ac1-demo/notes
+deactivated /tmp/ac1-demo/notes — now standby
+  pane:          crabcast-notes-31e31d1b
+  session:       crabcast-notes-31e31d1b-1785818550627
 
-standby agents (1) — switched off on purpose, workspace still on disk
-  notes/demo — since 2026-08-03T23:27:38.018Z
-    Switched off deliberately. Its workspace is still on disk, so switching it back on resumes the conversation it was stopped in rather than starting a new one.
+$ crabcast forget /tmp/ac1-demo/notes
+forgot /tmp/ac1-demo/notes
+  removed:       record
+  left in place: /tmp/ac1-demo/.crabcast/agents/31e31d1b
 
-capacity:
-  0/3 charged agents, room for 1 more (4 cores, load 1.64, 6.6 GiB available; bound by load)
-  cap 3 (bound by cpu) · running 0 · exempt 0 · headroom 1 (bound by load)
-  reason: the load average is 1.64, against the 3.0 cores this machine leaves to agents
-  cap terms: cpu allows 3, memory allows 20  ·  headroom terms: count allows 3, load allows 1, memory allows 6
-  machine: 4 cores, load 1.64, 6770 MB available of 15737 MB
-  agent cost: 650 MB (seed), 0.75 core (seed)
-
-herdr health: 746/65536 open files (1%), room for about 12958 more panes (pid 875)
-
-$ crabcast reset notes demo
-reset notes/demo — workspace directory deleted
-  agent closed:  false
-  the agent's own complaint: agent target crabcast-notes-demo not found
+$ ls -a /tmp/ac1-demo/notes
+.  ..
 ```
 
-Two lines in that session are worth reading twice, because both are CrabCast declining to round an answer up:
+Four things in that session are worth reading twice, because each is CrabCast declining to round an answer up:
 
-* **After `deactivate`, `list` reports the agent under `standby agents`, not as gone.** Being switched off deliberately and having died are different facts, and the workspace is still on disk — so the row says which one this is, and says the workspace is still there.
-* **`reset` reports `agent closed: false` and quotes herdr's own complaint** (`agent target crabcast-notes-demo not found`). The pane was already closed by the `deactivate` on the line above, so there was nothing left to close. `reset`'s job — deleting the workspace directory — is done and it says so, and it still does not claim to have closed a pane it did not close. Run `reset` without a prior `deactivate` and it closes the pane itself.
+* **`configure` and `activate` are two verbs, and `activate` takes no attributes.** Everything the agent *is* lives on its record, so there is nothing an activation could pass that might disagree with it — and `activate` on a directory nobody configured refuses, naming what is missing, rather than inventing a priority and a launcher.
+* **`list` reports seven `foreign panes`** — live agents this daemon did not start, which on this machine are its own unrelated fleet. They used to be invisible: "one of ours" was a pane name that started with `crabcast-`, so anything else was silently dropped. It is now a question the durable registry answers, and a foreign pane sitting in a directory you have configured is the thing that will make your next `activate` refuse. Better to see it coming.
+* **The literal `{{KEY}}` reached the pane unchanged.** There is no interpolator. Render your prompt however you like — conditionals, loops, your own syntax — and hand over the result; CrabCast never looks at the bytes.
+* **After the whole lifecycle, `/tmp/ac1-demo/notes` is empty.** Not "tidied up": nothing was ever written into it. The prompt went to the sidecar, and `forget` removed the record and named the sidecar it left rather than quietly deleting anything. CrabCast created that directory neither, so it deletes it neither.
+
+### When the directory is already occupied, `activate` refuses
+
+Two agents in one directory is how work gets overwritten with neither of them finding out, so `activate` checks the directory before it spawns — and the check is a *separate question* from "is this pane ours". A freshly-configured agent has no pane recorded yet, so "not ours" is true of every pane in the world; reading that as "nothing is there" is exactly the bug this guard exists for.
+
+This is a real refusal against a live agent from an unrelated fleet on the same machine:
+
+```
+$ crabcast configure /home/brooswit/.local/share/butchr/workspaces/task/kan-79 --priority 1 --launcher shell
+configured /home/brooswit/.local/share/butchr/workspaces/task/kan-79
+  pane name:     crabcast-kan-79-b9c315e8
+  priority:      1
+  launcher:      shell
+  gate:          refusable true, chargeable true, preemptable true
+
+live panes already in that directory (1):
+  pane_id w65702dcc803d94-8  name butchr-task-kan-79  [done]  cwd /home/brooswit/.local/share/butchr/workspaces/task/kan-79
+
+Something is already running in /home/brooswit/.local/share/butchr/workspaces/task/kan-79. The record is written, but activate will REFUSE until that pane is gone — stand it down, then activate.
+
+$ crabcast activate /home/brooswit/.local/share/butchr/workspaces/task/kan-79
+FAILED: activate /home/brooswit/.local/share/butchr/workspaces/task/kan-79
+
+Refusing to activate /home/brooswit/.local/share/butchr/workspaces/task/kan-79: 1 live pane(s) are already running in that directory and none of them is ours.
+  pane_id w65702dcc803d94-8, name 'butchr-task-kan-79', agent_status done, cwd /home/brooswit/.local/share/butchr/workspaces/task/kan-79
+NOTHING WAS STARTED. Two agents in one directory is how work gets overwritten and neither of them finds out. Stop the pane above, or point CrabCast at a different directory. This is not a claim on that pane: CrabCast never closes a pane it did not start.
+  refused by:    occupied
+  started:       false — NOTHING was spawned
+[exit 1]
+```
+
+**`configure` reports the occupant; only `activate` refuses on it.** That asymmetry is deliberate and load-bearing: adopting a fleet of directories that already have agents in them means configuring them all, standing your own panes down, then activating. A `configure` that inherited the guard would fail every call on day one and make the required ordering undiscoverable.
+
+**There is a third answer, and it is the one that would otherwise fail silently.** If herdr does not answer at all, the census comes back empty — which looks identical to "the directory is free". `activate` refuses that too, as *unverifiable*, and starts nothing: a check that renders its own failure as an all-clear would spawn into an occupied directory precisely when it cannot see it.
 
 ### When the machine is full, `activate` refuses
 
-A capacity refusal is a normal outcome, not a malfunction, and it is the same command with a different answer. This is a real refusal of that same `activate`, from that same directory, on a busier moment of the same machine:
+A capacity refusal is a normal outcome, not a malfunction, and it is the same command with a different answer. This is a real one, forced with `CRABCAST_MAX_AGENTS=0` so the transcript is reproducible on any machine:
 
 ```
-$ crabcast activate notes demo
-FAILED: activate notes/demo
+$ crabcast activate /tmp/cap-demo/notes
+FAILED: activate /tmp/cap-demo/notes
 
-Refusing to activate notes/demo: load too high — the load average is 3.41, against the 3.0 cores this machine leaves to agents.
-machine: 4 cores, 15.4 GiB RAM (6.5 GiB available), load average 3.41
+Refusing to activate /tmp/cap-demo/notes: at capacity — 0 charged agents are already running against a cap of 0.
+machine: 4 cores, 15.4 GiB RAM (7.5 GiB available), load average 0.93
 agent cost: 650 MB resident (seed), 0.75 core while active (seed)
   no live measurement; seed figures are the 2026-07-31 constants, not a measurement of this fleet
 reserved for you: 1 core(s), 2.3 GiB
-cap: 3 charged agents — CPU allows 3 ((4 cores − 1 reserved − 0.5 for herdr) ÷ 0.75 core/agent), memory allows 20 ((15.4 GiB − 2.3 GiB) ÷ 650 MB/agent); bound by cpu
+cap: 0 charged agents (set by CRABCAST_MAX_AGENTS, derivation skipped)
 running: 0 charged agent(s)
-headroom: 0 more — count allows 3 (3 cap − 0 running), load allows 0 ((4 cores − 1 reserved − 3.41 load) ÷ 0.75), memory allows 6 ((6.5 GiB available − 2.3 GiB reserved) ÷ 650 MB); bound by load
+headroom: 0 more — count allows 0 (0 cap − 0 running), load allows 2 ((4 cores − 1 reserved − 0.93 load) ÷ 0.75), memory allows 8 ((7.5 GiB available − 2.3 GiB reserved) ÷ 650 MB); bound by cap
 Deactivate an agent to make room, or pass override: true to start it anyway (the override is recorded with these numbers).
+Nothing running is below priority 1, so there is nothing this activation may stand down. Running: nothing is running that could be stood down. Preemption is strictly-greater: an agent may not displace one of its own priority.
+  refused by:    capacity
+  reason:        0 charged agents are already running against a cap of 0
+  priority:      1
+  started:       false — NOTHING was spawned
+[exit 1]
 ```
 
-Every term is reproducible by hand, and the headline names the *binding* constraint — here the load average, not the count and not memory. Wait for room, stand something down, or pass `--override` and have the bypass recorded with the figures it bypassed.
+Every term is reproducible by hand, and the headline names the *binding* constraint. An unforced refusal on a busy machine names the load average instead, and shows the same terms. Wait for room, stand something down, or pass `--override` and have the bypass recorded with the figures it bypassed.
+
+**What an agent is worth is its own `priority`,** frozen on by `configure` — it used to be a property of its workspace type. And the single `gateExempt` flag that type carried is now three: `refusable` (may the gate refuse this agent), `chargeable` (does it occupy a slot), `preemptable` (may anything take it). They were always three different decisions, and bundling them meant you could not have an agent that costs a slot but can never be taken.
 
 ### Editing the config after the daemon is running
 
-The daemon reads `crabcast.config.json` once, at boot. After adding or changing a workspace type, restart it: `crabcast daemon-status` reports the pid, `kill` it, and the next activating command spawns a fresh one that reads the new file.
+The daemon reads `crabcast.config.json` once, at boot — but there is very little in it now, and nothing about any agent: everything an agent is arrives through `configure`, at runtime, and takes effect without a restart. The only reason to restart is a changed `dataDir`, which is a different daemon.
 
 There is no `crabcast daemon` that runs one in the foreground, and nothing above needed one. A config the daemon would refuse never reaches the daemon: the CLI loads it first and refuses with the reason, having attempted nothing.
 
 ```
-$ crabcast --config bad.json activate my-notes demo
-crabcast: refusing to run: workspace type "my-notes": "name" must not contain a dash — agent names are <prefix>-<type>-<key> and the type is recovered by splitting at the first dash, so a dashed type breaks addressing silently
+$ crabcast --config bad.json list
+crabcast: refusing to run: bad.json: "workspaceTypes" is no longer a config key — workspace types are gone: an agent is a directory plus the knobs a caller freezes onto it with `configure`. priority, prompt, launcher, mcpServers and the gate flags are now per-agent `configure` parameters rather than per-type config, so this declaration has no consumer. Remove the key; there is nothing to move it to in this file.
 exit=4
 ```
+
+A config still declaring `workspaceTypes` is **refused rather than ignored**. Dropping it silently would start a daemon that agrees with the file about nothing, and the first evidence would be an activation refused for a knob nobody knew had moved.
 
 ## The CLI
 
 `crabcast` drives the daemon from a shell, so the system is complete with no browser anywhere.
 
 ```bash
-crabcast activate notes demo     # start an agent  (--url, --agent, --override, --preempt)
+crabcast configure <dir> --priority 1 --launcher claude   # make an agent EXIST
+crabcast activate <dir>          # run it  (--override, --preempt; no other options)
 crabcast list                    # the whole fleet, plus capacity
-crabcast status demo --type notes
-crabcast tail demo --lines 40    # its recent pane text, without attaching
-crabcast send --type notes demo 'run the tests'
-crabcast deactivate demo --type notes
-crabcast reset notes demo        # stand down AND delete the workspace
+crabcast status <dir>
+crabcast tail <dir> --lines 40   # its recent pane text, without attaching
+crabcast send <dir> 'run the tests'
+crabcast deactivate <dir>        # stop it; the record survives
+crabcast forget <dir>            # make it stop EXISTING; deletes no directory
 crabcast capacity                # how many more this machine can carry, and why
-crabcast daemon-status           # pid, uptime, the config it loaded, the types it knows
+crabcast daemon-status           # pid, uptime, the config it loaded, where the registry lives
 ```
+
+Every agent-addressing command takes exactly one operand: the directory. There is nothing to disambiguate — two agents cannot share a directory the way they could share a key — so there is no `--type` flag and no ambiguity to resolve.
+
+`configure`'s flags are `--priority` and `--launcher` (both required, neither defaulted), plus `--prompt <text>` or `--prompt-file <path>`, `--mcp a,b`, `--label`, and the gate triple `--refusable`/`--chargeable`/`--preemptable` (all default true, `--gate-exempt` is shorthand for all three false).
 
 The CLI is a client, not a second brain: it parses arguments, sends one action, and renders the answer. It never computes capacity, decides preemption, or infers whether an agent is alive — the daemon owns all of that. What it prints is what the daemon said, and a capacity derivation is printed **verbatim and unindented**, because the figures are the product.
 
 * **`--json`** prints the daemon's response exactly as it arrived — every field, including the `id` the invocation used to correlate it. Nothing is dropped, renamed or reordered. Human-readable output is the default; anything the renderers do not recognise is printed anyway rather than swallowed.
 * **Exit codes** are part of the contract: `0` success · `1` the daemon answered `success: false` (a capacity refusal lands here) · `2` usage error · `3` could not reach or spawn the daemon · `4` a config that was named would not load.
 * **Config resolution** is `--config <path>`, else `$CRABCAST_CONFIG`, else `./crabcast.config.json` — the same rule the daemon and the MCP server use, from the same function. A config that was *named* and will not load is a refusal, never a silent fallback onto some other daemon.
-* **Which commands start a daemon:** `activate`, `deactivate`, `reset` and `send` spawn one if none is running; `list`, `status`, `tail`, `capacity` and `daemon-status` do not, and exit `3` instead. Spawning the daemon runs its boot reconcile, which re-activates every agent the durable registry expects — a fleet-sized side effect nobody asked for by typing `crabcast list`.
-* **Messages that start with a dash are messages.** Flag parsing stops where `send`'s `<message...>` begins, so `crabcast send demo --help` types the text `--help` into the agent rather than printing this help and sending nothing. Quoting does not help with a leading dash — the shell eats the quotes — which is why the rule is in the parser rather than in a note. The trade is that a flag written *after* the message is message text (`crabcast send demo hi --type shell` sends `hi --type shell`, and says so on stderr); put flags before the operands. `--` still ends flag parsing for the commands with no trailing message, e.g. `crabcast status -- -odd-key`.
+* **Which commands start a daemon:** `configure`, `activate`, `deactivate`, `forget` and `send` spawn one if none is running; `list`, `status`, `tail`, `capacity` and `daemon-status` do not, and exit `3` instead. Spawning the daemon runs its boot reconcile, which re-activates every agent the durable registry expects — a fleet-sized side effect nobody asked for by typing `crabcast list`.
+* **Messages that start with a dash are messages.** Flag parsing stops where `send`'s `<message...>` begins, so `crabcast send demo --help` types the text `--help` into the agent rather than printing this help and sending nothing. Quoting does not help with a leading dash — the shell eats the quotes — which is why the rule is in the parser rather than in a note. The trade is that a flag written *after* the message is message text (`crabcast send <dir> hi --timeout 5000` sends `hi --timeout 5000`); put flags before the operands. `--` still ends flag parsing for the commands with no trailing message, e.g. `crabcast status -- -odd-path`.
 * **Capacity arithmetic:** `capacity` and a refused `activate` carry the daemon's derivation and print it verbatim. `list_agents` ships no derivation, so `list` prints the same figures as numbers — the cap and headroom terms and the machine they were read off — rather than dropping them.
 
 `crabcast --help` is rendered from the command table exported by `src/cli.ts`, so every command it lists exists. `node scripts/verify-cli-refusal.mjs` is the live proof of the refusal, the exit codes, `--json`, and the `--override`/`--preempt` round trip.
@@ -287,24 +294,17 @@ npm run build
 node dist/daemon.js [configPath]
 ```
 
-The config path is the first CLI argument, else the `CRABCAST_CONFIG` environment variable, else `crabcast.config.json` in the current directory. `crabcast.config.json` declares an optional `dataDir` (default `~/.local/share/crabcast`; socket, logs, and workspaces live under it) and the workspace types:
+The config path is the first CLI argument, else the `CRABCAST_CONFIG` environment variable, else `crabcast.config.json` in the current directory. The whole of it is an optional `dataDir` — default `~/.local/share/crabcast`, and the socket, the log, the durable registry and each agent's sidecar live under it:
 
 ```json
-{
-  "workspaceTypes": [
-    {
-      "name": "shell",
-      "priority": 1,
-      "promptFile": "prompts/shell.md",
-      "defaultLauncher": "shell",
-      "mcpServers": [],
-      "gateExempt": false
-    }
-  ]
-}
+{}
 ```
 
-A type is data, not code — adding one is editing this file. Validation refuses rather than repairs: `priority` is required (a silently-defaulted priority would be preemptable by everything), and a type `name` must not contain a dash (agent names are `<prefix>-<type>-<key>`, split at the first dash after the prefix). `mcpServers` defaults to `[]` and `gateExempt` to `false`; `promptFile` paths resolve relative to the config file's directory. A `dataDir` whose socket path would exceed 104 characters is refused too: a unix socket address is a fixed buffer and an over-long path is silently *truncated*, so the daemon would bind outside its own data directory, fail to chmod or unlink what it bound, and leave the next daemon reporting a stale socket file in a directory that is empty.
+That is a complete, working config, and this repository ships exactly it. It used to declare a table of workspace types, each with a priority, a prompt file, a launcher and a gate flag; those are per-agent values a caller freezes on with `configure`, so there is nothing left for a config file to say about an agent.
+
+Validation still refuses rather than repairs, on the two things that remain. A config declaring the retired `workspaceTypes` is refused by name (see above). And a `dataDir` whose socket path would exceed 104 characters is refused: a unix socket address is a fixed buffer and an over-long path is silently *truncated*, so the daemon would bind outside its own data directory, fail to chmod or unlink what it bound, and leave the next daemon reporting a stale socket file in a directory that is empty.
+
+**The daemon also refuses to start against a durable registry it cannot fully read.** Records written before agents were addressed by path carry a `type` and a `key` and no path, and their priority, gate flags and prompt lived in the deleted `workspaceTypes` — so there is nowhere to get them from. Converting such a row would mean inventing values nobody decided, and loading the file part-way would mean some agents silently ceasing to exist. So the daemon names the file, the count and two remedies (delete the log, or hand-edit it) and stops.
 
 Exactly one daemon owns the socket: a second daemon that finds a live socket exits 0; a stale socket file left by a crash is unlinked and reclaimed. `node scripts/daemon-status.mjs` round-trips a `daemon_status` request over the socket, and `node scripts/verify-config-and-socket.mjs` is the live proof of all of the above.
 
