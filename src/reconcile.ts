@@ -240,6 +240,22 @@ export async function reconcileAgents(opts: {
     // agent that never stopped — and calling it `restored` would put a line in
     // the boot summary claiming this daemon started something it did not.
     if (response.alreadyRunning === true) {
+      // THE POSTCONDITION, CHECKED RATHER THAN ASSUMED. What went wrong here
+      // is precisely that a survivor was reported fine while this daemon held
+      // no terminal for it, so "the response said alreadyRunning" is not the
+      // fact worth logging — a session id coming back is. `activate` answers
+      // `success: false` when it cannot attach, so this branch is unreachable
+      // today; it is here so that if it ever becomes reachable again the boot
+      // log SAYS SO instead of printing a re-attach that did not happen.
+      if (typeof response.sessionId !== 'string') {
+        const error =
+          `${agentPath} is running and this daemon holds no terminal for it: activate ` +
+          `reported it already running but returned no session id, so nothing can read it, ` +
+          `type at it, or notice it dying except the 30s sweep.`;
+        log(`[reconcile] ${error}`);
+        return { path: agentPath, paneName, result: 'failed', error };
+      }
+
       log(
         `[reconcile] ${agentPath} survived with its pane intact; re-attached to it ` +
         `(session ${response.sessionId}). Nothing was started and it has nothing to resume.`
