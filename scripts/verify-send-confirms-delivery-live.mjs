@@ -184,7 +184,22 @@ function closeAgent() {
     if (paneId) spawnSync(realHerdr, ['pane', 'close', paneId], { encoding: 'utf8' });
   } catch { /* best effort */ }
 }
+// ON SIGNALS TOO, AND THIS IS A LEAK I CAUSED RATHER THAN A PRECAUTION.
+// `exit` does not fire for SIGINT or SIGTERM, so a run somebody Ctrl-Cs — which
+// is the ordinary way to stop a hand-run proof, and which happened to this one
+// — leaves a REAL CLAUDE CODE AGENT running in a scratch directory, costing
+// tokens and holding a slot with nobody watching it. Measured rather than
+// assumed: `herdr agent list` still held a `crabcast-kan114-live-agent-…` pane
+// from an interrupted run. Re-raising after cleanup preserves the exit status
+// so the shell still sees an interrupted run as interrupted.
 process.on('exit', closeAgent);
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, () => {
+    closeAgent();
+    process.removeAllListeners(signal);
+    process.kill(process.pid, signal);
+  });
+}
 
 // THROUGH THE REAL SPAWN PATH, and the first version of this script did not,
 // which cost it two whole sections. Starting the agent with a bare `herdr
