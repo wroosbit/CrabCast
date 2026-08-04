@@ -38,6 +38,7 @@ import {
 } from './priority.js';
 import { AgentIntent, AgentRecord, AgentRegistry, RecordOutcome } from './agent-registry.js';
 import { nudgeResumedAgent } from './nudge.js';
+import { BuildSnapshot, buildProvenanceReport } from './provenance.js';
 
 type Respond = (msg: any) => void;
 
@@ -346,6 +347,16 @@ export interface RouterDeps {
    * them up in. That is what makes `configure` mandatory.
    */
   agentRegistry: AgentRegistry;
+  /**
+   * What this process was loaded from, frozen when it booted (KAN-122).
+   *
+   * Handed in rather than read here, and that is the whole design: taken at
+   * boot it is a fact about the RUNNING PROCESS, and re-reading it on request
+   * would silently answer a different question — what is on disk now — which
+   * is the question the filesystem already answers and the one that goes on
+   * looking healthy while a daemon serves a build that has been replaced.
+   */
+  bootBuild: BuildSnapshot;
   /** Replies to the requesting client. */
   send: (msg: DaemonResponse) => void;
   /** Events for every connected client (activations, teardowns, PTY deaths). */
@@ -580,9 +591,22 @@ export class MessageRouter {
 
     switch (data.action) {
       case 'daemon_status': {
-        const { config, daemonStartedAt, agentRegistry } = this.deps;
+        const { config, daemonStartedAt, agentRegistry, bootBuild } = this.deps;
         const intents = agentRegistry.intents();
+        // What this process was built from, and whether that is still what is
+        // on disk (KAN-122). Computed per request rather than cached, because
+        // half the answer is about the tree as it is RIGHT NOW — a daemon that
+        // cached "current" at boot would report it forever, including for the
+        // hour after somebody rebuilt underneath it.
+        const { build, freshness } = buildProvenanceReport(bootBuild);
         respond({
+          // Every other reply in this router carries one, and this was the
+          // single exception. Butchr's client layer dispatches purely on
+          // `action` (KAN-122), and an inconsistency that survives because it
+          // was never worth fixing alone is a trap for whoever meets it next.
+          // Clients still correlate by `id` — see cli.ts DaemonClient — and
+          // adding this changes nothing about that.
+          action: 'daemon_status_response',
           success: true,
           pid: process.pid,
           startedAt: daemonStartedAt.toISOString(),
@@ -594,7 +618,9 @@ export class MessageRouter {
           // the only place an agent's configuration exists.
           registryPath: agentRegistry.path,
           configuredAgents: intents.size,
-          expectedAgents: Array.from(intents.values()).filter((i) => i.event === 'activated').length
+          expectedAgents: Array.from(intents.values()).filter((i) => i.event === 'activated').length,
+          build,
+          freshness
         });
         return;
       }

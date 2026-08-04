@@ -20,6 +20,7 @@ import { ensureDataDir, onJsonLines, socketPathFor, writeJsonLine } from './ipc.
 import { resolveUserPath, which } from './env.js';
 import { AgentRegistry, describeUnreadableLog, registryPathFor, scanLogVersions } from './agent-registry.js';
 import { reconcileAgents } from './reconcile.js';
+import { snapshotBuild } from './provenance.js';
 
 // The single long-lived CrabCast daemon. Owns all sessions and the workspace
 // registry. Clients (the CLI, the MCP server) connect over a Unix domain
@@ -186,6 +187,32 @@ log(`Config loaded from ${config.configPath} (dataDir ${config.dataDir})`);
 
 const daemonStartedAt = new Date();
 
+/**
+ * What THIS process was loaded from, frozen now (KAN-122).
+ *
+ * Taken here, at boot, and never retaken. That is the entire value of it: from
+ * the next moment on, `dist/` can be rebuilt underneath this process and the
+ * filesystem will look perfectly current while this daemon goes on executing
+ * the code it read at startup. Nothing but the process itself can report that,
+ * and it can only do so by having remembered.
+ *
+ * Before the socket opens, so the first client to ask gets an answer about the
+ * build this daemon actually loaded rather than about whatever arrived since.
+ */
+const bootBuild = snapshotBuild();
+{
+  const p = bootBuild.provenance;
+  log(
+    `Build provenance: ${p.commit ?? 'UNKNOWN commit'} ` +
+    `(${p.clean === true ? 'clean checkout' : p.clean === false ? 'DIRTY CHECKOUT' : 'cleanliness UNKNOWN'}), ` +
+    `built ${p.builtAt ?? 'UNKNOWN'}, from ${p.distDir} ` +
+    `(${bootBuild.dist.files} file(s), newest ${bootBuild.dist.newestAt ?? 'n/a'})`
+  );
+  for (const [field, reason] of Object.entries(p.unknown)) {
+    log(`  build provenance UNKNOWN — ${field}: ${reason}`);
+  }
+}
+
 const connections = new Set<net.Socket>();
 
 const broadcast = (msg: any) => {
@@ -235,6 +262,7 @@ const server = net.createServer((socket) => {
     herdrBridge,
     daemonStartedAt,
     agentRegistry,
+    bootBuild,
     send,
     broadcast
   });
@@ -397,6 +425,7 @@ const daemonRouter = new MessageRouter({
   herdrBridge,
   daemonStartedAt,
   agentRegistry,
+  bootBuild,
   send: () => {},
   broadcast
 });

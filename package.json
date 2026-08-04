@@ -15,7 +15,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc",
-    "prepare": "tsc"
+    "postbuild": "node scripts/stamp-build.mjs",
+    "prepare": "npm run build"
   },
   "engines": {
     "node": ">=20"
