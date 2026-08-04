@@ -179,7 +179,12 @@ log(`Config loaded from ${config.configPath} (dataDir ${config.dataDir})`);
       `  ${agentPath} — ${intent.event}, priority ${c.priority}, launcher ${c.launcher}, ` +
         `refusable ${c.refusable}, chargeable ${c.chargeable}, preemptable ${c.preemptable}` +
         (c.prompt ? `, prompt ${c.prompt}` : '') +
-        (c.mcpServers?.length ? `, mcp [${c.mcpServers.join(', ')}]` : '') +
+        // Names only. The definitions are the caller's own command lines and can
+        // carry credentials in `env`; a boot-time log line is not where those
+        // belong, and the names are what identifies the agent's tooling anyway.
+        (Object.keys(c.mcpServers ?? {}).length
+          ? `, mcp [${Object.keys(c.mcpServers ?? {}).join(', ')}]`
+          : '') +
         (c.label ? `, label ${JSON.stringify(c.label)}` : '')
     );
   }

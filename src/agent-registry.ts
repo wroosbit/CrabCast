@@ -178,6 +178,24 @@ export interface AgentLogEntry extends AgentRecord {
    * gets reported as one somebody switched off on purpose. Nobody did.
    */
   wasPreempted?: boolean;
+  /**
+   * Whether CrabCast has ever actually RUN an agent at this path.
+   *
+   * Derived in {@link AgentRegistry.intents} by looking for any `activated`
+   * event, and written onto rows by {@link AgentRegistry.compact} for the same
+   * reason `wasPreempted` is: compaction keeps one row per agent, so the
+   * earlier `activated` rows a `deactivated`-last or `configured`-last agent
+   * was carrying disappear, and with them the fact that it ever ran.
+   *
+   * IT IS A SAFETY FACT, NOT A STATISTIC. It is what the resume rule (resume.ts)
+   * is gated on: a path CrabCast has never run in may hold a HUMAN'S Claude Code
+   * transcripts, and resuming those into an agent pane hands somebody's private
+   * session to an agent. Losing this marker to compaction would fail in the safe
+   * direction — an agent starting fresh instead of resuming — which is exactly
+   * why it would go unnoticed until somebody wondered where their conversation
+   * went.
+   */
+  everActivated?: boolean;
 }
 
 /** The last thing said about one agent. */
@@ -188,6 +206,8 @@ export interface AgentIntent {
   preemption?: PreemptionRecord;
   /** See {@link AgentLogEntry.wasPreempted}. */
   wasPreempted?: boolean;
+  /** See {@link AgentLogEntry.everActivated}. The resume rule's input. */
+  everActivated?: boolean;
 }
 
 /** An agent that was stood down to make room, and has not come back. */
@@ -630,22 +650,44 @@ export class AgentRegistry {
         intents.delete(entry.path);
         continue;
       }
-      // `v`, `preemption` and `wasPreempted` are pulled out rather than left in
-      // the rest: `record` is what a later activation is rebuilt from, and it
-      // must not carry the reason a previous stand-down happened — nor a
-      // marker about it, which would then travel into the record of an agent
-      // somebody simply switched back on. `v` is the file's business, not the
-      // record's.
-      const { v, event, at, preemption, wasPreempted, ...record } = entry;
+      // `v`, `preemption`, `wasPreempted` and `everActivated` are pulled out
+      // rather than left in the rest: `record` is what a later activation is
+      // rebuilt from, and it must not carry the reason a previous stand-down
+      // happened — nor a marker about it, which would then travel into the
+      // record of an agent somebody simply switched back on. `v` is the file's
+      // business, not the record's.
+      const { v, event, at, preemption, wasPreempted, everActivated, ...record } = entry;
+      // ONE PASS, NO EXTRA READ. An `activated` row is self-evident; anything
+      // later carries the fact forward from the intent it is replacing, and a
+      // row written by compaction carries it explicitly. `forgotten` clears it
+      // with the rest of the agent, which is right: forgetting is the caller
+      // saying this agent no longer exists, and a path re-configured afterwards
+      // starts from no history — deliberately the safe direction, since the
+      // alternative is inheriting a claim on a conversation from an agent
+      // somebody deleted.
+      const ran =
+        event === 'activated' ||
+        everActivated === true ||
+        intents.get(entry.path)?.everActivated === true;
       intents.set(entry.path, {
         event,
         at,
         record,
         ...(preemption ? { preemption } : {}),
-        ...(wasPreempted ? { wasPreempted: true } : {})
+        ...(wasPreempted ? { wasPreempted: true } : {}),
+        ...(ran ? { everActivated: true } : {})
       });
     }
     return intents;
+  }
+
+  /**
+   * Whether CrabCast has ever run an agent at this path — THE RESUME RULE'S
+   * input, and the only question that decides whether a conversation on disk
+   * there may be continued. See resume.ts, and {@link AgentLogEntry.everActivated}.
+   */
+  public ranBefore(agentPath: string): boolean {
+    return this.intents().get(agentPath)?.everActivated === true;
   }
 
   /** The record for one path, or undefined when no agent is configured there. */
@@ -757,7 +799,17 @@ export class AgentRegistry {
     const out: AgentLogEntry[] = [];
     for (const intent of this.intents().values()) {
       if (intent.event !== 'activated') continue;
-      out.push({ v: LOG_VERSION, ...intent.record, event: 'activated', at: intent.at });
+      // `everActivated` is redundant on an `activated` row — the event itself
+      // says it — and is written anyway so every carried row states the fact
+      // the same way. A reader that had to know which events imply it is a
+      // reader that will eventually get one of them wrong.
+      out.push({
+        v: LOG_VERSION,
+        ...intent.record,
+        event: 'activated',
+        at: intent.at,
+        everActivated: true
+      });
     }
     return out;
   }
@@ -791,7 +843,18 @@ export class AgentRegistry {
     const out: AgentLogEntry[] = [];
     for (const intent of this.intents().values()) {
       if (intent.event !== 'configured') continue;
-      out.push({ v: LOG_VERSION, ...intent.record, event: 'configured', at: intent.at });
+      // A `configured`-last agent that HAS run before — activated, stood down,
+      // then reconfigured — must not be turned into a never-run one by
+      // compaction. That would silently re-arm the resume rule's protection
+      // against an agent whose conversation genuinely is its own, and the agent
+      // would come back with no memory and nobody would know why.
+      out.push({
+        v: LOG_VERSION,
+        ...intent.record,
+        event: 'configured',
+        at: intent.at,
+        ...(intent.everActivated ? { everActivated: true } : {})
+      });
     }
     return out;
   }
@@ -853,7 +916,11 @@ export class AgentRegistry {
         // happened to it — nobody chose to stop this agent, its slot was
         // taken. Dropping a debt is a decision; asserting a falsehood about
         // how work ended is not, and this is the difference.
-        ...(intent.preemption || intent.wasPreempted ? { wasPreempted: true } : {})
+        ...(intent.preemption || intent.wasPreempted ? { wasPreempted: true } : {}),
+        // A stood-down agent has by definition run, so this is all but
+        // guaranteed true — written from the intent rather than hardcoded so
+        // there is exactly one derivation of it, in `intents()`.
+        ...(intent.everActivated ? { everActivated: true } : {})
       });
     }
     out.sort((a, b) => b.at.localeCompare(a.at));
