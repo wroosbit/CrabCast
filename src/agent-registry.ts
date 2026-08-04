@@ -285,11 +285,6 @@ export interface PreemptedAgent {
   record: AgentRecord;
   at: string;
   preemption: PreemptionRecord;
-  /** The normalized pair from {@link AgentIntent}, carried so a reporting
-   * caller never has to reach back into the intent map for them. */
-  configVersion: number;
-  configuredAt: string | null;
-  everActivated: boolean;
 }
 
 /**
@@ -826,15 +821,7 @@ export class AgentRegistry {
     const out: PreemptedAgent[] = [];
     for (const [agentPath, intent] of intents) {
       if (intent.event !== 'deactivated' || !intent.preemption) continue;
-      out.push({
-        path: agentPath,
-        record: intent.record,
-        at: intent.at,
-        preemption: intent.preemption,
-        configVersion: intent.configVersion,
-        configuredAt: intent.configuredAt,
-        everActivated: intent.everActivated
-      });
+      out.push({ path: agentPath, record: intent.record, at: intent.at, preemption: intent.preemption });
     }
     return out;
   }

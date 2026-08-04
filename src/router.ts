@@ -768,9 +768,18 @@ function parseAgentConfig(data: any): ConfigParse {
  * `undefined` in, "there is no record" out, as explicit nulls: see
  * {@link ConfigEcho.config}.
  */
-function configEcho(intent: AgentIntent | undefined): ConfigEcho {
+function configEcho(intent: AgentIntent | undefined, live = false): ConfigEcho {
+  // AN AGENT THAT IS RUNNING HAS RUN, whatever the log says, and `live` is
+  // what keeps those two from contradicting each other on one row. The log can
+  // legitimately lack an `activated` event for a live agent — a durable write
+  // that failed, or a record restated by `configure` — and a row reading
+  // `state: 'running'` beside `everActivated: false` would be telling a reader
+  // that activating this agent starts a fresh conversation while it is in the
+  // middle of one. The field answers "will the next activate resume?", and for
+  // something already running the answer is yes.
+  const everActivated = Boolean(intent?.everActivated) || live;
   if (!intent) {
-    return { config: null, configVersion: null, configuredAt: null, everActivated: false };
+    return { config: null, configVersion: null, configuredAt: null, everActivated };
   }
   return {
     // The frozen object itself, not a rebuild of it. A field-by-field copy here
@@ -780,7 +789,7 @@ function configEcho(intent: AgentIntent | undefined): ConfigEcho {
     config: intent.record.config,
     configVersion: intent.configVersion,
     configuredAt: intent.configuredAt,
-    everActivated: intent.everActivated
+    everActivated
   };
 }
 
@@ -1749,12 +1758,11 @@ export class MessageRouter {
         // caller, and it is the read it makes most often — so it carries the
         // same echo the spawning branch does rather than being the one answer
         // that says less.
-        ...configEcho(intent),
-        // As of AFTER this call, which is what a response describes. The echo
-        // is built from the intent read before the handler ran, and this agent
-        // is running now — so `everActivated: false` here would say "it has
-        // never run" on the response that confirms it is running.
-        everActivated: true,
+        // `live` — as of AFTER this call, which is what a response describes.
+        // The echo is built from the intent read before the handler ran, and
+        // this agent is running now, so `everActivated: false` here would say
+        // "it has never run" on the response that confirms it is running.
+        ...configEcho(intent, true),
         ...(coOccupants.length
           ? {
               occupiedBy: coOccupants,
@@ -1915,10 +1923,9 @@ export class MessageRouter {
       // The whole record, on the response that started it. A caller that
       // activates and then reads back should find the same values, and saying
       // them here is what lets it check that without a second call.
-      ...configEcho(intent),
-      // See the `alreadyRunning` branch: the echo is built from the intent as
-      // it was BEFORE this activation, and this agent has now run.
-      everActivated: true,
+      // `live`: see the `alreadyRunning` branch. The echo is built from the
+      // intent as it was BEFORE this activation, and this agent has now run.
+      ...configEcho(intent, true),
       // Not decoration: it is the difference between this response and the
       // KAN-23 false success. `true` means the agent was found in herdr's
       // census before this was sent, and success is never reported without it.
@@ -2295,7 +2302,7 @@ export class MessageRouter {
     const state = this.stateOf(intent, ours !== null, census.reachable);
 
     const session = this.deps.herdrBridge.getSessionByPath(agentPath);
-    const echo = configEcho(intent);
+    const echo = configEcho(intent, ours !== null);
 
     if (session) {
       // From the census this handler already took, rather than a second read.
@@ -2632,9 +2639,12 @@ export class MessageRouter {
    */
   private preemptedAgents(agents: ListedAgent[], sharedIntents?: Map<string, AgentIntent>) {
     const alive = new Set(agents.map((a) => a.path));
-    const preempted = sharedIntents
-      ? AgentRegistry.preemptedFrom(sharedIntents)
-      : this.deps.agentRegistry.preempted();
+    // The intent map rather than the derived list alone, so the echo below
+    // comes from `configEcho` like every other category's. A second place that
+    // assembles the block by hand is a second place that can be left behind
+    // when `configure` grows a knob.
+    const intents = sharedIntents ?? this.deps.agentRegistry.intents();
+    const preempted = AgentRegistry.preemptedFrom(intents);
     return preempted
       .filter((entry) => !alive.has(entry.path))
       .map((entry) => ({
@@ -2644,10 +2654,7 @@ export class MessageRouter {
         // The frozen configuration, on the category a caller is most likely to
         // act on: deciding whether to re-staff preempted work means knowing
         // what it would come back as, and what it would have to outrank.
-        config: entry.record.config,
-        configVersion: entry.configVersion,
-        configuredAt: entry.configuredAt,
-        everActivated: entry.everActivated,
+        ...configEcho(intents.get(entry.path)),
         at: entry.at,
         priority: entry.preemption.priority,
         herdrStatusWhenPreempted: entry.preemption.herdrStatus,
@@ -2859,7 +2866,7 @@ export class MessageRouter {
       // read uses, so the two can never disagree.
       state: this.stateOf(intent, true),
       configured: Boolean(intent),
-      ...configEcho(intent),
+      ...configEcho(intent, true),
       path: agentPath,
       paneName,
       paneId: census?.paneId ?? null,
@@ -3023,7 +3030,10 @@ export class MessageRouter {
                     ourPaneIn(census, occupies!, occupied.record.config.launcher) !== null,
                     census.reachable
                   ),
-                  ...configEcho(occupied)
+                  ...configEcho(
+                    occupied,
+                    ourPaneIn(census, occupies!, occupied.record.config.launcher) !== null
+                  )
                 }
               : null
           });
