@@ -1217,10 +1217,16 @@ export class AgentRegistry {
    * `missingAgents` that an agent had been active "since" a housekeeping event
    * it had nothing to do with; it collapsed every expected agent onto one
    * identical timestamp; and — because the reporting path sorts newest-first
-   * before it clips at 25 — it turned that sort into an all-ties comparison,
-   * so the clip hid an *arbitrary* twenty-five rather than the oldest ones.
-   * The ordering guarantee the clip is built on only exists if the timestamps
-   * are real, and only the log knows them.
+   * before it pages — it turned that sort into an all-ties comparison, so the
+   * first page held an *arbitrary* twenty-five rather than the newest ones.
+   *
+   * That third consequence is smaller than it was and has not gone away.
+   * `list_agents` now breaks ties on the row's path, so an all-ties timestamp
+   * gives a page that is stable and complete-if-walked (KAN-163) rather than
+   * an arbitrary subset with no way past it — but "newest first" is still a
+   * claim about these timestamps, and a page ordered by path is not the
+   * ordering this daemon publishes. The guarantee only exists if the times are
+   * real, and only the log knows them.
    */
   public compact(): RecordOutcome {
     const kept: AgentLogEntry[] = [

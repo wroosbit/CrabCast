@@ -485,10 +485,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "crabcast_list_agents",
         description:
-          "Lists every running agent, from herdr's view of what exists joined against the durable registry rather than the daemon's session map — so agents that outlived a daemon restart are still listed. Each entry carries sessionless: true when the daemon is not attached to it, in which case the session-only fields (sessionId, createdAt, status) are null. ALSO CHECK missingAgents: agents recorded as active that are not running at all — their work has silently stopped while still looking staffed, so treat a non-empty missingAgents as work that needs re-activating or deliberately standing down. ALSO CHECK preemptedAgents: agents stood down to free capacity for higher-priority work, listed until somebody puts them back. Their work was interrupted rather than finished, so whoever supervises each one owes it a decision: re-activate it (which resumes the conversation it was stopped in) or stand it down for good. standbyAgents is NOT a problem to fix: agents somebody switched off on purpose whose directory is still there, listed so they can be started again with crabcast_activate_agent. foreignPanes are live panes this daemon did not start; a row whose `occupies` is set is sitting in a directory you have configured, and activating that agent WILL be refused until it is gone. unstartedAgents are agents that exist and have NEVER run — configured, never activated. They are deliberately not standby, and the difference is behavioural rather than cosmetic: activating a standby agent resumes the conversation it was stopped in, while activating an unstarted one starts a fresh conversation from the prompt on its record. unbackedPanes are our own panes with nothing running behind them. EVERY ROW IN EVERY ONE OF THESE CATEGORIES carries the agent's frozen configuration read back from the durable record — `config`, `configVersion`, `configuredAt` and `everActivated` — so you never need to keep a shadow copy of what you asked for; compare `configVersion` to find out whether your view is current. (On a foreignPanes row that block is nested under `occupiedAgent`, because a foreign pane is not ours and has no configuration of its own — what is described there is the agent it is BLOCKING.) The response's `provenance` block names which fields are durable, which were observed from herdr just now, and which this daemon computed: paneId is observed and never durable, because herdr renumbers panes whenever any pane closes. All the clipped lists are newest-first and capped at 25 with an unclipped total alongside, so a total larger than its list means there are older entries this response did not carry.",
+          "Lists every running agent, from herdr's view of what exists joined against the durable registry rather than the daemon's session map — so agents that outlived a daemon restart are still listed. Each entry carries sessionless: true when the daemon is not attached to it, in which case the session-only fields (sessionId, createdAt, status) are null. ALSO CHECK missingAgents: agents recorded as active that are not running at all — their work has silently stopped while still looking staffed, so treat a non-empty missingAgents as work that needs re-activating or deliberately standing down. ALSO CHECK preemptedAgents: agents stood down to free capacity for higher-priority work, listed until somebody puts them back. Their work was interrupted rather than finished, so whoever supervises each one owes it a decision: re-activate it (which resumes the conversation it was stopped in) or stand it down for good. standbyAgents is NOT a problem to fix: agents somebody switched off on purpose whose directory is still there, listed so they can be started again with crabcast_activate_agent. foreignPanes are live panes this daemon did not start; a row whose `occupies` is set is sitting in a directory you have configured, and activating that agent WILL be refused until it is gone. unstartedAgents are agents that exist and have NEVER run — configured, never activated. They are deliberately not standby, and the difference is behavioural rather than cosmetic: activating a standby agent resumes the conversation it was stopped in, while activating an unstarted one starts a fresh conversation from the prompt on its record. unbackedPanes are our own panes with nothing running behind them. EVERY ROW IN EVERY ONE OF THESE CATEGORIES carries the agent's frozen configuration read back from the durable record — `config`, `configVersion`, `configuredAt` and `everActivated` — so you never need to keep a shadow copy of what you asked for; compare `configVersion` to find out whether your view is current. (On a foreignPanes row that block is nested under `occupiedAgent`, because a foreign pane is not ours and has no configuration of its own — what is described there is the agent it is BLOCKING.) The response's `provenance` block names which fields are durable, which were observed from herdr just now, and which this daemon computed: paneId is observed and never durable, because herdr renumbers panes whenever any pane closes. THE FIVE LISTS missingAgents, preemptedAgents, standbyAgents, unstartedAgents and foreignPanes ARE PAGED, newest-first, 25 rows by default — so a default read of a large category leaves out the rows that have been waiting LONGEST, which for standby is the agent nobody has switched back on for a week. Do not treat one response as the whole category: read `pages.<category>.nextCursor` and, when it is not null, call again with category set to that name and after set to that cursor, repeating until it comes back null. `pages.<category>` also carries returned, total, limit and remaining. `agents` and `unbackedPanes` are never paged and are always complete.",
         inputSchema: {
           type: "object",
-          properties: {},
+          properties: {
+            category: {
+              type: "string",
+              enum: ["missingAgents", "preemptedAgents", "standbyAgents", "unstartedAgents", "foreignPanes"],
+              description:
+                "Which paged category `after`/`limit` apply to. Omit for the ordinary fleet read, where every category returns its first page.",
+            },
+            after: {
+              type: "string",
+              description:
+                "A `pages.<category>.nextCursor` from a previous call, to get the next page of that category. Opaque: pass it back unchanged rather than parsing it. An invented cursor is refused rather than answered from the beginning.",
+            },
+            limit: {
+              type: "number",
+              description:
+                "Rows in that category's page, 1-200 (default 25). This is not how you get a whole category — follow nextCursor until it is null, whatever the page size.",
+            },
+          },
           required: [],
         },
       },
@@ -608,7 +625,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === "crabcast_list_agents") {
-      const res = await callDaemonAPI('list_agents');
+      const { category, after, limit } = args as any;
+      // The three arguments are one request field. `after`/`limit` without a
+      // category are NOT silently dropped — a caller that meant to page and
+      // forgot to say which category would otherwise get the default read back
+      // and no sign that their cursor did nothing, which is the same silence
+      // this paging exists to remove (KAN-163).
+      if ((after !== undefined || limit !== undefined) && !category) {
+        throw new Error(
+          "`after` and `limit` apply to one category: pass `category` as well " +
+          "(missingAgents, preemptedAgents, standbyAgents, unstartedAgents or foreignPanes)."
+        );
+      }
+      const res = await callDaemonAPI('list_agents',
+        category ? { pages: { [String(category)]: { after, limit } } } : undefined);
       return {
         content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
         // isError when an agent is missing, not only when the call failed: a
