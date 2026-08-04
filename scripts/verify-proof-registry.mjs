@@ -113,6 +113,22 @@ const EXCLUSIONS = [
     evidence: 'scripts/verify-tab-per-agent.mjs:1 live check against a real herdr, at the HerdrBridge level'
   },
   {
+    script: 'verify-send-confirms-delivery-live',
+    reason:
+      'Needs a real herdr AND a real Claude Code agent, for two facts neither of which a stub ' +
+      'can hold. (1) What a REAL composer looks like: COMPOSER_MARKERS is the load-bearing ' +
+      'assumption of the whole delivery mechanism — everything else in delivery.ts is arithmetic ' +
+      'over where that marker is — and its CI sibling cannot test it, because a shimmed pane ' +
+      'renders the marker it is then checked against. (2) A GENUINELY CONTENDED RECIPIENT: the ' +
+      'only state send_to_agent exists for. §1b drives all three — idle, mid-task, and blocked ' +
+      'in a shell command — and a shim has no turn to be busy in, so the contended case cannot ' +
+      'be reproduced on a runner at all. It also measures Claude Code\'s real hard-wrapping of ' +
+      'the echo, which is why flattening exists, and that the interrupt TERMINATES an in-flight ' +
+      'tool call, which is what the tool description\'s narrowed safety sentence rests on. It ' +
+      'starts one Claude agent and closes it; its output goes on the PR (KAN-114).',
+    evidence: 'scripts/verify-send-confirms-delivery-live.mjs:12 two facts a shimmed pane cannot hold: the real marker, and a recipient that is genuinely busy'
+  },
+  {
     script: 'verify-fleet-switch-live',
     reason:
       'Uses `herdr agent list` as the ground truth for whether an agent is running, across daemon ' +

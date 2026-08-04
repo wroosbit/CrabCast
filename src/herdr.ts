@@ -12,6 +12,8 @@ import {
 } from './launchers.js';
 import type { AgentLauncher } from './launchers.js';
 import { diagnoseSpawnFailure } from './herdr-health.js';
+import { EVIDENCE_TAIL_CHARS, landedCount, messageInComposer } from './delivery.js';
+import type { SendEvidence, SendOutcome, SendVerdict } from './delivery.js';
 import { canonicalizeOrNull, paneNameFor, sidecarDirFor } from './identity.js';
 import {
   ProvisioningError,
@@ -205,6 +207,59 @@ const PANE_NOT_FOUND = 'pane_not_found';
 
 /** Time the agent's TUI gets to redraw after the interrupt, before we type. */
 const INTERRUPT_SETTLE_MS = 100;
+
+/**
+ * How long a sent message gets to appear as SUBMITTED output before the send
+ * gives up on seeing it.
+ *
+ * Paid in full only when a message did not land, which is the case where a slow
+ * honest answer beats a fast false one — the same trade
+ * {@link RUNTIME_CONFIRM_TIMEOUT_MS} makes one layer up. On the healthy path
+ * Claude Code echoes a submitted message within a poll or two, so a delivered
+ * send costs a couple of `agent read` calls rather than the whole budget.
+ */
+const DELIVERY_CONFIRM_TIMEOUT_MS = 10_000;
+
+/** Gap between pane reads while waiting for a message to appear as submitted. */
+const DELIVERY_CONFIRM_POLL_MS = 500;
+
+/**
+ * Enough tail to hold a long message's echo and the composer beneath it.
+ * Larger than {@link TAIL_DEFAULT_LINES} because the composer has to be on
+ * screen for the positional test to mean anything: a window that stops above it
+ * would put unsent text on the submitted side and confirm the very failure this
+ * is looking for.
+ */
+const DELIVERY_TAIL_LINES = 60;
+
+/** The tail carried back as evidence, bounded so a response cannot be a scrollback. */
+function capTail(tail: string | null): string | null {
+  return tail === null ? null : tail.slice(-EVIDENCE_TAIL_CHARS);
+}
+
+/** What a confirmed-absent send tells its caller, including what to do next. */
+function notDeliveredMessage(paneName: string, timeoutMs: number, inComposer: boolean): string {
+  return inComposer
+    ? `NOT DELIVERED to '${paneName}': the message is sitting UNSUBMITTED in the agent's ` +
+      `composer ${timeoutMs}ms after Enter was pressed twice, so the agent has not seen a word ` +
+      `of it. The text is on screen, which is why this looks delivered to anyone glancing at ` +
+      `the pane. Nothing further was typed; send again if you still want it there.`
+    : `NOT DELIVERED to '${paneName}': the pane was read and this message is not in it as ` +
+      `submitted output ${timeoutMs}ms after it was typed, and it is not in the composer ` +
+      `either. The agent did not receive it. This is evidence of absence, not a failure to ` +
+      `look — the pane answered.`;
+}
+
+/** What an unconfirmable send tells its caller, and what it must not conclude. */
+function unverifiableMessage(paneName: string, timeoutMs: number, readError?: string): string {
+  return (
+    `UNVERIFIABLE for '${paneName}': the message was typed and submitted, but the pane could ` +
+    `not be read for ${timeoutMs}ms afterwards${readError ? ` (${readError})` : ''}, so whether ` +
+    `it landed is unknown. THIS IS NOT A FAILED SEND — the agent may well have it. Do not ` +
+    `record it as undelivered and do not assume it arrived; read the agent once herdr is ` +
+    `answering again.`
+  );
+}
 
 /** How much of an agent's terminal a tail returns when the caller doesn't say. */
 const TAIL_DEFAULT_LINES = 40;
@@ -1222,7 +1277,7 @@ export class HerdrBridge {
    *
    * WITHOUT THE ATTACH THERE IS NO WAY BACK. The session is what gives this
    * daemon a terminal to read, a terminal to type into, and — through
-   * `ptyProcess.onExit` — the immediate `agent_detached_event` that tells
+   * `ptyProcess.onExit` — the immediate `agent.detached` event that tells
    * clients the agent died. An agent recognised but not attached is one the
    * daemon can see and cannot reach: `list_agents` reports it `sessionless`,
    * every client is told to re-activate by path to obtain a session id, and
@@ -1671,32 +1726,284 @@ export class HerdrBridge {
   }
 
   /**
-   * Deliver a message to an agent's terminal the way a human would: clear
-   * whatever is half-typed, type the message, submit it. Never throws — the
-   * caller is a request handler that owes its client a response either way.
+   * One reading of a pane, as delivery evidence: how many submitted copies of
+   * this message it holds, whether a copy is sitting unsent in the composer,
+   * and — the field that keeps the other two honest — WHETHER IT COULD BE READ
+   * AT ALL.
+   *
+   * A count of 0 from an unreadable pane is the defect this shape exists to
+   * make unrepresentable. The primitive we borrowed this mechanism from returns
+   * a bare number and answers 0 when the tail fails, so "nothing landed" and "I
+   * could not look" are the same value to every caller downstream; an assertion
+   * that a message did NOT land is then satisfied just as well by a pane nobody
+   * could read. Readability is asserted at the point absence is asserted.
    */
-  public async sendToAgent(agentPath: string, message: string): Promise<{ success: boolean; error?: string }> {
+  private readDeliveryEvidence(
+    agentPath: string,
+    message: string
+  ): { readable: true; count: number; inComposer: boolean; tail: string }
+    | { readable: false; error: string } {
+    const tail = this.tailAgent(agentPath, DELIVERY_TAIL_LINES);
+    if (!tail.success || typeof tail.text !== 'string') {
+      return { readable: false, error: tail.error ?? `herdr returned no readable output for '${agentPath}'` };
+    }
+    return {
+      readable: true,
+      count: landedCount(tail.text, message),
+      inComposer: messageInComposer(tail.text, message),
+      tail: tail.text
+    };
+  }
+
+  /**
+   * Deliver a message to an agent's terminal the way a human would — clear
+   * whatever is half-typed, type the message, submit it — AND THEN LOOK,
+   * because the first three of those are things we did and only the fourth is a
+   * fact about the agent.
+   *
+   * WHAT THIS RETURNS IS A CLAIM ABOUT THE RECIPIENT. The old version returned
+   * `{success: true}` from any path that did not throw, having observed nothing
+   * after the submit: it reported that keystrokes were dispatched and was read
+   * as reporting that a message arrived. Those came apart three times in one
+   * fleet in one day (KAN-114) — each time leaving the text visible in the
+   * recipient's composer, which is why nobody noticed.
+   *
+   * THE RETRY PRESSES ENTER. IT DOES NOT TYPE AGAIN, and that is the whole
+   * difference between a retry and a second interrupt. Exactly one Ctrl+C is
+   * safe here; a second is how Claude Code quits, which would kill the very
+   * agent we are trying to talk to. When the confirmation finds our text
+   * sitting in the composer, the composer already holds everything that needs
+   * to arrive — what is missing is the submit, and pressing Enter is precisely
+   * what the human did by hand in the witnessed incident. `interrupts` is
+   * reported so that constraint is auditable rather than promised.
+   *
+   * IT ALSO DOES NOT RETRY WHAT IT CANNOT SEE. An unreadable pane answers
+   * `unverifiable` and stops: typing again at an agent we cannot observe is how
+   * a bounded retry becomes a loop of interrupts at somebody's working agent.
+   * A caller that wants another attempt calls again, which is a fresh send with
+   * its own single Ctrl+C — that decision is the caller's, which is what
+   * "expose confirm-or-retry to the caller" means.
+   *
+   * Never throws — the caller is a request handler that owes its client a
+   * response either way.
+   */
+  public async sendToAgent(
+    agentPath: string,
+    message: string,
+    opts: { confirmTimeoutMs?: number; pollMs?: number } = {}
+  ): Promise<SendOutcome> {
+    const confirmTimeoutMs = opts.confirmTimeoutMs ?? DELIVERY_CONFIRM_TIMEOUT_MS;
+    const pollMs = opts.pollMs ?? DELIVERY_CONFIRM_POLL_MS;
     const paneName = paneNameFor(agentPath);
+    const startedAt = Date.now();
+
+    let interrupts = 0;
+    let submits = 0;
+    let checks = 0;
+
+    /** The one place a verdict is built, so no branch can forget a field. */
+    const outcome = (
+      verdict: SendVerdict,
+      evidence: Partial<SendEvidence> & Pick<SendEvidence, 'readable'>,
+      error?: string
+    ): SendOutcome => ({
+      success: verdict === 'delivered',
+      delivered: verdict === 'delivered',
+      verdict,
+      interrupts,
+      submits,
+      retried: submits > 1,
+      evidence: {
+        landedBefore: null,
+        landedAfter: null,
+        inComposer: false,
+        checks,
+        waitedMs: Date.now() - startedAt,
+        tail: null,
+        ...evidence
+      },
+      ...(error ? { error } : {})
+    });
+
+    // The baseline, taken BEFORE anything is typed. Without it a pane that
+    // already held this text would report delivered while nothing landed — a
+    // check passing on a coincidence. A baseline we could not read is not a
+    // baseline of zero: it is no baseline, and it makes every later reading
+    // unattributable, which is `unverifiable` rather than a guess in either
+    // direction.
+    const baseline = this.readDeliveryEvidence(agentPath, message);
+    checks++;
+    if (!baseline.readable) {
+      const error =
+        `Could not read agent '${paneName}' before sending, so whether this message arrived ` +
+        `could not be established: ${baseline.error}. NOTHING WAS TYPED — a send whose delivery ` +
+        `cannot be observed is not attempted, because the interrupt it begins with lands on a ` +
+        `working agent whether or not we can see the result.`;
+      console.error(`[HerdrBridge] ${error}`);
+      return outcome('unverifiable', { readable: false, readError: baseline.error }, error);
+    }
+    const landedBefore = baseline.count;
+
+    let paneId: string;
     try {
-      const paneId = this.runHerdr(['agent', 'get', paneName])?.result?.agent?.pane_id;
-      if (typeof paneId !== 'string' || !paneId) {
+      const resolved = this.runHerdr(['agent', 'get', paneName])?.result?.agent?.pane_id;
+      if (typeof resolved !== 'string' || !resolved) {
         throw new Error(`Agent '${paneName}' has no pane to send to`);
       }
+      paneId = resolved;
+    } catch (e: any) {
+      const error = e?.message ?? String(e);
+      console.error(`[HerdrBridge] Failed to resolve a pane for agent at '${agentPath}':`, error);
+      // herdr NAMING the absence is evidence; herdr failing to answer is not.
+      // The same two codes `terminateSession` treats as "already satisfied"
+      // are the ones that mean there is genuinely nothing there to type into.
+      const code = (e as HerdrCliError)?.herdrCode;
+      const named = code === AGENT_NOT_FOUND || code === PANE_NOT_FOUND || /has no pane to send to/.test(error);
+      return outcome(
+        named ? 'not-delivered' : 'unverifiable',
+        { readable: true, landedBefore, landedAfter: landedBefore, tail: capTail(baseline.tail) },
+        named
+          ? `Nothing was delivered to '${paneName}': ${error}. herdr says there is no pane there, ` +
+            `so no keystroke was issued.`
+          : `Could not tell whether '${paneName}' has a pane to send to: ${error}. Nothing was ` +
+            `typed, and this is an unverified send rather than a failed one.`
+      );
+    }
 
-      // Exactly one Ctrl+C. It clears a partially typed line, but a second
-      // one is how Claude Code quits — which would kill the very agent we are
-      // trying to talk to.
+    try {
+      // Exactly one Ctrl+C, for the whole of this call including its retry. It
+      // clears a partially typed line, but a second one is how Claude Code
+      // quits — which would kill the very agent we are trying to talk to.
       this.runHerdr(['pane', 'send-keys', paneId, 'C-c']);
+      interrupts++;
       await delay(INTERRUPT_SETTLE_MS);
       this.runHerdr(['pane', 'send-text', paneId, message]);
       this.runHerdr(['pane', 'send-keys', paneId, 'Enter']);
-
-      return { success: true };
+      submits++;
     } catch (e: any) {
       const error = e?.message ?? String(e);
       console.error(`[HerdrBridge] Failed to send message to agent at '${agentPath}':`, error);
-      return { success: false, error };
+      // herdr refused a keystroke mid-sequence. What reached the pane is
+      // genuinely unknown — the interrupt may have landed and the text may
+      // not — so the pane is read once more and allowed to answer.
+      const after = this.readDeliveryEvidence(agentPath, message);
+      checks++;
+      if (!after.readable) {
+        return outcome('unverifiable', { readable: false, landedBefore, readError: after.error }, error);
+      }
+      return outcome(
+        after.count > landedBefore ? 'delivered' : 'not-delivered',
+        {
+          readable: true,
+          landedBefore,
+          landedAfter: after.count,
+          inComposer: after.inComposer,
+          tail: capTail(after.tail)
+        },
+        after.count > landedBefore ? undefined : error
+      );
     }
+
+    const first = await this.confirmDelivery(agentPath, message, landedBefore, confirmTimeoutMs, pollMs);
+    checks += first.checks;
+    if (first.verdict === 'delivered' || first.verdict === 'unverifiable') {
+      return outcome(first.verdict, {
+        readable: first.verdict !== 'unverifiable',
+        landedBefore,
+        landedAfter: first.count,
+        inComposer: first.inComposer,
+        tail: capTail(first.tail),
+        ...(first.error ? { readError: first.error } : {})
+      }, first.verdict === 'delivered' ? undefined : unverifiableMessage(paneName, confirmTimeoutMs, first.error));
+    }
+
+    // Read, and not there. If our text is sitting in the composer this is the
+    // exact witnessed failure and the fix is a submit, not another attempt.
+    if (!first.inComposer) {
+      return outcome('not-delivered', {
+        readable: true,
+        landedBefore,
+        landedAfter: first.count,
+        inComposer: false,
+        tail: capTail(first.tail)
+      }, notDeliveredMessage(paneName, confirmTimeoutMs, false));
+    }
+
+    this.runHerdr(['pane', 'send-keys', paneId, 'Enter']);
+    submits++;
+    const second = await this.confirmDelivery(agentPath, message, landedBefore, confirmTimeoutMs, pollMs);
+    checks += second.checks;
+    return outcome(second.verdict, {
+      readable: second.verdict !== 'unverifiable',
+      landedBefore,
+      landedAfter: second.count,
+      inComposer: second.inComposer,
+      tail: capTail(second.tail),
+      ...(second.error ? { readError: second.error } : {})
+    }, second.verdict === 'delivered'
+      ? undefined
+      : second.verdict === 'unverifiable'
+        ? unverifiableMessage(paneName, confirmTimeoutMs, second.error)
+        : notDeliveredMessage(paneName, confirmTimeoutMs, second.inComposer));
+  }
+
+  /**
+   * Watch the pane until one more submitted copy of the message exists than
+   * there was, or until the budget runs out.
+   *
+   * The three answers are the three verdicts, decided by what the LAST reading
+   * could see rather than by a running tally: a pane that was unreadable
+   * halfway through and readable at the deadline has been read, and a pane that
+   * never once answered has not. `unverifiable` therefore means every read in
+   * the window failed, which is the only state in which nothing may be
+   * concluded.
+   */
+  private async confirmDelivery(
+    agentPath: string,
+    message: string,
+    landedBefore: number,
+    timeoutMs: number,
+    pollMs: number
+  ): Promise<{
+    verdict: SendVerdict;
+    count: number | null;
+    inComposer: boolean;
+    tail: string | null;
+    checks: number;
+    error?: string;
+  }> {
+    const deadline = Date.now() + timeoutMs;
+    let checks = 0;
+    let last: { readable: true; count: number; inComposer: boolean; tail: string } | undefined;
+    let lastError: string | undefined;
+
+    for (;;) {
+      const reading = this.readDeliveryEvidence(agentPath, message);
+      checks++;
+      if (reading.readable) {
+        last = reading;
+        lastError = undefined;
+        if (reading.count > landedBefore) {
+          return {
+            verdict: 'delivered',
+            count: reading.count,
+            inComposer: reading.inComposer,
+            tail: reading.tail,
+            checks
+          };
+        }
+      } else {
+        last = undefined;
+        lastError = reading.error;
+      }
+
+      if (Date.now() + pollMs >= deadline) break;
+      await delay(pollMs);
+    }
+
+    return last
+      ? { verdict: 'not-delivered', count: last.count, inComposer: last.inComposer, tail: last.tail, checks }
+      : { verdict: 'unverifiable', count: null, inComposer: false, tail: null, checks, error: lastError };
   }
 
   /**

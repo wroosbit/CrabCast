@@ -139,7 +139,7 @@ export interface CommandSpec {
    * (see {@link DaemonClient}). Every reply carries a label as of KAN-122 —
    * `daemon_status` was the last one that did not — and correlating on those
    * labels would still be wrong, because the same socket also carries
-   * unsolicited broadcasts (`agent_lost_event`, `agent_detached_event`) and
+   * unsolicited broadcasts (`agent.lost`, `agent.detached`) and
    * nothing about an action name distinguishes somebody's answer from
    * somebody else's event. The field is here for the parity check, which
    * verifies each recorded label against the router that sends it.
@@ -943,9 +943,28 @@ function renderConfigure(reader: ResponseReader, request: Record<string, unknown
       : null,
     occupiedBlock(occupied),
     outcomesBlock(reader.take('outcomes')),
+    // OURS BY NAME, AND UNKNOWN TO THE RECORD. Printed above the daemon's
+    // `note` rather than folded into it: it is the one thing on a successful
+    // `configure` that changes what the NEXT command will do, and a caller who
+    // reads it at `activate` instead has already adopted a pane they did not
+    // mean to. The sentence is the daemon's, verbatim — which pane state means
+    // what is its rule, and a copy here is the copy that goes stale.
+    unrecordedPaneBlock(reader.take('unrecordedPane')),
     note ? `\n${note}` : null,
     durability(reader),
     residue(reader)
+  );
+}
+
+function unrecordedPaneBlock(pane: unknown): string | null {
+  if (!pane || typeof pane !== 'object') return null;
+  const p = pane as any;
+  return lines(
+    `\nA LIVE PANE OF OURS IS ALREADY THERE, and nothing had been configured for it:`,
+    `${INDENT}pane name:     ${p.paneName ?? '(not reported)'}` +
+      (p.paneId ? `  (${p.paneId})` : ''),
+    indent(String(p.meaning ?? ''), INDENT),
+    p.remedy ? `${INDENT}remedy:        ${p.remedy}` : null
   );
 }
 
@@ -1225,11 +1244,66 @@ function renderTail(reader: ResponseReader, request: Record<string, unknown>): s
   );
 }
 
+/**
+ * The outcome of a send, WHICH IS NOT THE SAME SENTENCE AS BEFORE.
+ *
+ * This used to print "the message was typed into its terminal and Enter
+ * pressed" on `success: true` — an accurate description of what the daemon did
+ * and a description of nothing at all about the agent. The daemon now answers
+ * with a verdict read off the pane, so this prints the verdict.
+ *
+ * `unverifiable` gets its own branch rather than being folded into the failure
+ * line, because a human reading "FAILED" reaches for the resend and that is the
+ * wrong move: the message may already be in front of the agent.
+ */
 function renderSend(reader: ResponseReader, request: Record<string, unknown>): string {
   const key = addressed(reader, request);
-  if (!reader.success) return lines(failure(reader, `send to ${key}`), residue(reader));
+  const verdict = reader.take<string>('verdict');
+  const delivered = reader.take<boolean>('delivered');
+  const evidence = reader.take<Record<string, any>>('evidence');
+  const interrupts = reader.take<number>('interrupts');
+  const submits = reader.take<number>('submits');
+  const retried = reader.take<boolean>('retried');
+
+  // Read off the same fields the verdict lines quote, so a delivery field the
+  // daemon grew and this CLI has not been taught still lands in the residue.
+  const detail = lines(
+    field('read from', evidence
+      ? `${evidence.checks} pane read(s) over ${evidence.waitedMs}ms` +
+        (evidence.landedBefore === null ? '' : `; submitted copies ${evidence.landedBefore} → ${evidence.landedAfter}`)
+      : null),
+    field('keystrokes', typeof interrupts === 'number'
+      ? `${interrupts} interrupt (Ctrl+C), ${submits} submit (Enter)${retried ? ' — the second was the confirm-and-retry' : ''}`
+      : null),
+    evidence?.tail
+      ? lines(`${INDENT}pane the verdict was read from:`, indent(String(evidence.tail), INDENT + INDENT))
+      : null
+  );
+
+  // A request that never became a send says so, rather than being printed as a
+  // delivery that did not happen. The daemon's own error already names what was
+  // wrong with the call, so this is the ordinary failure line.
+  if (verdict === 'refused') {
+    return lines(
+      failure(reader, `send to ${key} — REFUSED, nothing was typed at any agent`),
+      field('refused by', reader.take('refused')),
+      residue(reader)
+    );
+  }
+  if (verdict === 'unverifiable') {
+    return lines(
+      `UNVERIFIABLE: send to ${key} — the message was typed, and whether it landed is UNKNOWN.`,
+      reader.take<string>('error') ?? '',
+      detail,
+      residue(reader)
+    );
+  }
+  if (!reader.success || delivered === false) {
+    return lines(failure(reader, `send to ${key} — NOT DELIVERED`), detail, residue(reader));
+  }
   return lines(
-    `sent to ${key} — the message was typed into its terminal and Enter pressed`,
+    `delivered to ${key} — the message was seen in its transcript as submitted output`,
+    detail,
     residue(reader)
   );
 }
@@ -1433,6 +1507,12 @@ function renderDaemonStatus(reader: ResponseReader): string {
     field('registry', reader.take('registryPath')),
     field('agents', `${reader.take('configuredAgents')} configured, ` +
       `${reader.take('expectedAgents')} expected to be running`),
+    // The event stream's identity, for a human asking the question a
+    // subscriber asks programmatically: is this the same daemon boot I was
+    // talking to? A different `bootId` means every sequence number anyone held
+    // is meaningless and the fleet must be re-read from `list`.
+    field('events', `bootId ${reader.take('bootId')}, ` +
+      `${reader.take('eventSeq')} published since boot`),
     buildBlock(reader.take('build')),
     freshnessBlock(reader.take('freshness')),
     residue(reader)
@@ -2170,7 +2250,7 @@ function operandsFor(spec: CommandSpec, given: string[]): string[] {
  * because `daemon_status` used to reply with no `action` field at all, and a
  * client matching on names would have hung on it; KAN-122 gave it one, and the
  * rule is unchanged for the reason that outlives that case — the same socket
- * carries unsolicited broadcasts (`agent_lost_event`, `agent_detached_event`),
+ * carries unsolicited broadcasts (`agent.lost`, `agent.detached`),
  * so an action name tells a client what a frame is ABOUT and never whose
  * request it answers. The `id === undefined` line below is that rule.
  */

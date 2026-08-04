@@ -150,7 +150,19 @@ $ crabcast status /tmp/ac1-demo/notes
   created:       2026-08-04T07:53:07.483Z
 
 $ crabcast send /tmp/ac1-demo/notes cat /tmp/ac1-demo/.crabcast/agents/31e31d1b7540dabf/prompt.md
-sent to /tmp/ac1-demo/notes — the message was typed into its terminal and Enter pressed
+delivered to /tmp/ac1-demo/notes — the message was seen in its transcript as submitted output
+  read from:     2 pane read(s) over 127ms; submitted copies 0 → 1
+  keystrokes:    1 interrupt (Ctrl+C), 1 submit (Enter)
+  pane the verdict was read from:
+    Please read and follow the instructions in /tmp/ac1-demo/.crabcast/agents/31e31d1b7540dabf/prompt.md to begin.
+    brooswit@kchb-ThinkPad-X1-Carbon-5th:/tmp/ac1-demo/notes$ ^C
+    brooswit@kchb-ThinkPad-X1-Carbon-5th:/tmp/ac1-demo/notes$ cat /tmp/ac1-demo/.crabcast/agents/31e31d1b7540dabf/prompt.md
+    You are a CrabCast agent working in the notes directory.
+
+    This prompt was rendered by the CALLER and handed to CrabCast as finished
+    text. CrabCast wrote these bytes verbatim and never looked at them — a literal
+    {{KEY}} would have survived unchanged.
+    brooswit@kchb-ThinkPad-X1-Carbon-5th:/tmp/ac1-demo/notes$
 
 $ crabcast tail /tmp/ac1-demo/notes --lines 20
 pane text for /tmp/ac1-demo/notes:
@@ -283,6 +295,28 @@ pane text for /tmp/kan126-live/owned/alpha:
 I-SURVIVED-THE-REFUSED-RECONFIGURATION
 brooswit@kchb-ThinkPad-X1-Carbon-5th:/tmp/kan126-live/owned/alpha$
 ```
+
+**The refusal is a *re*configuration's, and a *first* `configure` is answered even when a pane is live.** The refusal exists so a caller does not silently spend a running agent's conversation on a knob change; a first `configure` has no prior configuration to preserve and no conversation being spent, so there is nothing there for it to protect — and refusing would strand the path, because `activate` requires `configure` first. That case is reachable: a `forget` over an agent that kept running, or a registry lost while herdr's panes survived. Below, the record was deleted out from under a live agent and the directory configured again:
+
+```
+$ crabcast configure /tmp/kan153-live/owned/adopted --priority 5 --launcher shell --label "the adopted agent"
+configured /tmp/kan153-live/owned/adopted
+  pane name:     crabcast-adopted-5e306b396cd82470
+  changed:       every knob — this call created the record
+  pane:          w65702dcc803d94-12
+  version:       1, frozen 2026-08-04T16:57:09.251Z
+  …
+per knob:
+  priority     applied — takes effect at the next activate
+  …
+
+A LIVE PANE OF OURS IS ALREADY THERE, and nothing had been configured for it:
+  pane name:     crabcast-adopted-5e306b396cd82470  (w65702dcc803d94-12)
+  A pane named crabcast-adopted-5e306b396cd82470 is already live in /tmp/kan153-live/owned/adopted. It is OURS by name, but nothing was configured at this path until this call, so this daemon has no record of what that agent was started with — a registry lost while herdr's panes survived, or a `forget` over an agent that kept running. NOTHING WAS APPLIED TO IT: the configuration above was written and is what the NEXT activation will use, and it does not describe the process running there now. `activate` on this path ADOPTS that pane rather than starting one, so it would answer `alreadyRunning: true` over a configuration no process has ever read. Stand the pane down first if you want an agent that is really running what you just configured.
+  remedy:        deactivate(/tmp/kan153-live/owned/adopted); activate(/tmp/kan153-live/owned/adopted)
+```
+
+**It is answered, but it is not adopted quietly**, and the difference is the block above. Recording the knobs and saying nothing about the pane would leave the caller to discover the state at `activate` — which reports `already running — nothing was started` and then echoes the configuration it *just* read from the record, over a process that was started before that record existed. The knobs read `applied`, never `applied-in-place`: a live pane of ours is not the same fact as a live *agent* of ours, and nothing here knows what that process was started with. Standing it down and activating again is what makes the two agree.
 
 **A silent defer is not the middle ground it looks like.** Accepting the change and applying it "at next start" leaves the configuration and the world disagreeing behind a `success: true` — the same failure in a quieter costume, and it would make the config echo describe what was last *requested* rather than what the agent is *running with*. The refusal is what makes the echo honest.
 
@@ -480,6 +514,14 @@ Validation still refuses rather than repairs, on the two things that remain. A c
 **The daemon also refuses to start against a durable registry it cannot fully read.** Records written before agents were addressed by path carry a `type` and a `key` and no path, and their priority, gate flags and prompt lived in the deleted `workspaceTypes` — so there is nowhere to get them from. Converting such a row would mean inventing values nobody decided, and loading the file part-way would mean some agents silently ceasing to exist. So the daemon names the file, the count and two remedies (delete the log, or hand-edit it) and stops.
 
 Exactly one daemon owns the socket: a second daemon that finds a live socket exits 0; a stale socket file left by a crash is unlinked and reclaimed. `node scripts/daemon-status.mjs` round-trips a `daemon_status` request over the socket, and `node scripts/verify-config-and-socket.mjs` is the live proof of all of the above.
+
+### Events
+
+The daemon announces fleet changes to every connected client — nine of them, `agent.configured` through `registry.degraded` — on the socket and as structured MCP notifications. **[`docs/event-contract.md`](docs/event-contract.md) is the contract**: the events, their payloads, what an unrecognised action does, and the delivery guarantees.
+
+Read the delivery section before you build on them. Events are **at-most-once** and are a latency optimisation over an authoritative `list` poll, never a replacement for one: **a subscriber that does not independently poll `list` on a timer is not entitled to convergence.** For a subscriber that polls, a missed event costs slower convergence; for one with no timer it costs correctness. `bootId` on every event — and on `list_agents` and `daemon_status`, so a reconnecting subscriber need not wait for an event — is how you find out the daemon restarted and your sequence watermark is meaningless.
+
+`node scripts/verify-event-contract.mjs` is the live proof.
 
 ### Which build is running
 

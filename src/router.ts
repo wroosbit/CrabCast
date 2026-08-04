@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { CrabcastConfig } from './config.js';
 import { MAX_LINE_CHARS } from './ipc.js';
+import { EventFrame, events } from './events.js';
 import { AgentConfig, DaemonResponse, McpServerSpec } from './types.js';
 import { removeProvisionedArtifacts } from './provisioning.js';
 import {
@@ -412,13 +413,33 @@ function invalidFlag(name: string, value: unknown): string | null {
  * it that herdr cannot show is a loss, reported on every `list_agents` poll
  * rather than written to a log.
  */
-interface MissingAgent extends ConfigEcho {
+export interface MissingAgent extends ConfigEcho {
   path: string;
   paneName: string;
   label: string | null;
   /** When the registry last recorded this agent as activated. */
   since: string;
   reason: string;
+}
+
+/**
+ * One agent's herdr status as of a particular census, for the sweep that
+ * publishes `agent.status_changed`.
+ */
+export interface FleetStatusReading {
+  path: string;
+  paneName: string;
+  /** Observed, never durable: herdr renumbers panes whenever any pane closes. */
+  paneId: string | null;
+  herdrStatus: HerdrAgentStatus;
+}
+
+/** One sweep's worth of observation. See {@link MessageRouter.observeFleet}. */
+export interface FleetObservation {
+  /** Whether herdr answered at all. False means every field below is silence. */
+  reachable: boolean;
+  missing: MissingAgent[];
+  statuses: FleetStatusReading[];
 }
 
 /**
@@ -682,7 +703,7 @@ export interface RouterDeps {
   /** Replies to the requesting client. */
   send: (msg: DaemonResponse) => void;
   /** Events for every connected client (activations, teardowns, PTY deaths). */
-  broadcast: (msg: DaemonResponse) => void;
+  broadcast: (msg: EventFrame) => void;
 }
 
 /**
@@ -1308,6 +1329,57 @@ function configEcho(intent: AgentIntent | undefined): ConfigEcho {
   };
 }
 
+/**
+ * `bootId` and the current `seq`, for a subscriber deciding whether to resync.
+ *
+ * Read from the process-wide event stream rather than threaded through the
+ * router's deps, because there is one boot per process and the daemon's
+ * broadcast stamps from the same object — two copies could disagree, and the
+ * one a subscriber compares against would be the one that was wrong.
+ */
+function eventWatermark() {
+  return { bootId: events.bootId, eventSeq: events.seq };
+}
+
+/**
+ * `agent.deactivated`'s reason, and the preemption block when there is one.
+ *
+ * WHY THIS EXISTS AS A DISCRIMINATOR RATHER THAN A FLAG. The event used to
+ * carry `preempted: true` and only when true, so "was this the agent's own
+ * idea" was read from a field's ABSENCE — indistinguishable from a daemon that
+ * forgot to set it, which is the same defect `alreadyRunning`/`started` were
+ * put on every activate response to remove. `reason` is on every stand-down,
+ * always, and takes one of two words.
+ *
+ * The block is everything the retired `agent_preempted_event` carried: who
+ * took the slot and what they were worth, what the victim was worth and was
+ * doing, the capacity arithmetic that made the slot necessary, and when. The
+ * victim itself is the event's own `path`, which is why the old event's
+ * separate `victim` object is gone rather than lost — it was the same agent
+ * named twice.
+ */
+function deactivationCause(data: any, preemption?: PreemptionRecord) {
+  if (!preemption) return { reason: 'requested' as const };
+  return {
+    reason: 'preempted' as const,
+    preemption: {
+      // The gate's own timestamp, which is the moment it DECIDED. Falling back
+      // to now would silently re-date a preemption to whenever the teardown
+      // finished, and the two differ by however long herdr took.
+      at: typeof data?.preemptedAt === 'string' ? data.preemptedAt : new Date().toISOString(),
+      by: {
+        path: preemption.byPath,
+        paneName: preemption.byPaneName,
+        priority: preemption.byPriority
+      },
+      priority: preemption.priority,
+      herdrStatus: preemption.herdrStatus,
+      derivation: preemption.derivation,
+      ...(data?.preemptionCapacity ? { capacity: data.preemptionCapacity } : {})
+    }
+  };
+}
+
 export class MessageRouter {
   private activePtyListeners = new Map<string, () => void>();
 
@@ -1369,6 +1441,11 @@ export class MessageRouter {
           registryPath: agentRegistry.path,
           configuredAgents: intents.size,
           expectedAgents: Array.from(intents.values()).filter((i) => i.event === 'activated').length,
+          // The same two fields `list_agents` carries. Here too because this is
+          // the cheapest call on the socket, and a subscriber whose only
+          // question is "did the daemon restart" should not have to survey the
+          // whole fleet to find out.
+          ...eventWatermark(),
           build,
           freshness
         });
@@ -1551,6 +1628,26 @@ export class MessageRouter {
     const running = Boolean(session) || (occupancy.reachable && occupancy.ours !== null);
     const ourPaneId = occupancy.reachable ? (occupancy.ours?.paneId ?? null) : null;
 
+    // A LIVE PANE OF OURS IS NOT THE SAME FACT AS A LIVE AGENT OF OURS, and
+    // treating them as one fact is what KAN-153 was.
+    //
+    // `running` answers "is something live at this path bearing our name". It
+    // does NOT answer whether this daemon knows what is live there — that is
+    // the record, and the record can be absent while the pane is not:
+    //
+    //   * a registry lost while herdr's panes survived — the state
+    //     `verify-restart-survival` exists for, from the other side;
+    //   * a `forget` that landed over a still-running agent, which `forget`
+    //     refuses when it can see the pane and cannot refuse when it cannot.
+    //
+    // Every claim below about "the agent this call is changing" needs BOTH
+    // halves, so the two are named apart here rather than being spelled
+    // `running` at one call site and `running && existing` at another — which
+    // is precisely the drift that put a non-null assertion on a branch
+    // reachable without one.
+    const liveAgentOfOurs = running && existing !== undefined;
+    const unrecordedPane = running && existing === undefined;
+
     // ------------------------------------------- what this call asks to move
     //
     // ON A FIRST `configure`, EVERY KNOB MOVED. There was no record, so every
@@ -1577,7 +1674,14 @@ export class MessageRouter {
             ? RECONFIGURATION_COST[name] === 'restart-required'
               ? 'refused-restart-required'
               : 'withheld'
-            : running
+            // `liveAgentOfOurs`, NOT `running`. "In place" is a claim that the
+            // value took effect on an agent this daemon is maintaining, and
+            // over an UNRECORDED pane there is no such agent to make it about:
+            // nothing here knows what that process was started with, so what
+            // this call wrote is what the next `activate` will use. Saying
+            // `applied-in-place` there would be the echo describing a process
+            // no record accounts for.
+            : liveAgentOfOurs
               ? 'applied-in-place'
               : 'applied';
       }
@@ -1613,7 +1717,33 @@ export class MessageRouter {
         }
       : {};
 
-    if (restartRequired.length) {
+    // BOTH REFUSALS BELOW ARE ABOUT A *RE*CONFIGURATION, and the `existing` in
+    // this condition is the whole of it (KAN-153).
+    //
+    // WHY IT IS NOT JUST A NULL GUARD. On a FIRST `configure` there is no
+    // record, so `changed` is every attribute and `restartRequired` is
+    // non-empty by construction — which used to walk a first configure over a
+    // live pane straight into a refusal written for a reconfiguration, where
+    // it read `existing!.configVersion` and threw. Guarding only the read
+    // would have stopped the throw and left the refusal: a first `configure`
+    // refused because a pane happens to be live, with no way out, since
+    // `activate` requires `configure` first.
+    //
+    // So the refusal is scoped to what it was written to protect. Its whole
+    // purpose is that a caller does not silently spend a running agent's
+    // conversation on a knob change; a first configure has no prior
+    // configuration to preserve and no conversation being spent, so there is
+    // nothing here for it to protect. Occupancy is `activate`'s question and
+    // `activate` already asks it — CrabCast maintains agents, it does not own
+    // the directory or the pane, and a `configure` that refused because a pane
+    // exists would be answering a question it was not asked.
+    //
+    // AND THE COMPILER NOW KNOWS. Narrowing here is what lets the message
+    // below read `existing.configVersion` with no `!`: the claim "this branch
+    // is only reachable with a record" is enforced rather than asserted, which
+    // is the difference the assertion papered over. A `!` is a claim about the
+    // world with no proof attached.
+    if (existing && restartRequired.length) {
       // THE CENSUS COULD NOT ANSWER, AND THE RECORD SAYS THIS AGENT IS UP.
       //
       // Checked BEFORE the running test rather than after, because the running
@@ -1695,7 +1825,7 @@ export class MessageRouter {
               : `.`) +
             ` The agent is untouched and still running` +
             (ourPaneId ? ` in pane ${ourPaneId}` : '') +
-            `, and its configuration is still version ${existing!.configVersion}.\n` +
+            `, and its configuration is still version ${existing.configVersion}.\n` +
             `Remedy: deactivate(${agentPath}); configure(${agentPath}, …); activate(${agentPath}). ` +
             `There is no force flag, deliberately — one would be this destroy-and-recreate ` +
             `with a label on it, and the decision to spend a conversation is the caller's.`,
@@ -1800,8 +1930,7 @@ export class MessageRouter {
       : [];
 
     this.deps.broadcast({
-      action: 'agent_configured_event',
-      success: true,
+      action: 'agent.configured',
       path: agentPath,
       config: parsed.config,
       configVersion: record.configVersion,
@@ -1882,7 +2011,12 @@ export class MessageRouter {
        * world rather than about the call, so it is stated rather than left to
        * be inferred from a status read.
        */
-      appliedInPlace: running && changed.length > 0,
+      appliedInPlace: liveAgentOfOurs && changed.length > 0,
+      // `running` is still reported as the fact it is — something of ours is
+      // live at this path — even where `appliedInPlace` is false because
+      // nothing here knows what it is. The two fields answer different
+      // questions and a caller needs both; see `unrecordedPane` below, which
+      // is what makes the combination legible instead of contradictory.
       ...(running ? { running: true, ...(ourPaneId ? { paneId: ourPaneId } : {}) } : {}),
       ...(running && existing && changed.length
         ? {
@@ -1892,6 +2026,39 @@ export class MessageRouter {
               `the decision that needs ${changed.length === 1 ? 'it' : 'them'} is made, so ` +
               `nothing was respawned and the conversation is untouched. The pane is the ` +
               `same one${ourPaneId ? ` (${ourPaneId})` : ''}.`
+          }
+        : {}),
+      // A LIVE PANE OF OURS, AND NO RECORD UNTIL THIS CALL WROTE ONE.
+      //
+      // IT IS NOT REFUSED — see the block on the refusal above for why the
+      // refusal is a reconfiguration's and not this call's. BUT IT IS NOT
+      // ADOPTED SILENTLY EITHER, and that is what this field is: recording the
+      // knobs and saying nothing about the pane would be a quieter version of
+      // the same failure, leaving the caller to discover the state at
+      // `activate` and to misread `alreadyRunning: true` as "it is running
+      // what I configured".
+      //
+      // A SEPARATE KEY RATHER THAN A `note`, deliberately: the notes on this
+      // response are mutually exclusive spreads that overwrite each other, and
+      // this one has to survive alongside whichever of them also applies.
+      ...(unrecordedPane
+        ? {
+            unrecordedPane: {
+              paneName: paneNameFor(agentPath),
+              ...(ourPaneId ? { paneId: ourPaneId } : {}),
+              meaning:
+                `A pane named ${paneNameFor(agentPath)} is already live in ${agentPath}. It is ` +
+                `OURS by name, but nothing was configured at this path until this call, so ` +
+                `this daemon has no record of what that agent was started with — a registry ` +
+                `lost while herdr's panes survived, or a \`forget\` over an agent that kept ` +
+                `running. NOTHING WAS APPLIED TO IT: the configuration above was written and ` +
+                `is what the NEXT activation will use, and it does not describe the process ` +
+                `running there now. \`activate\` on this path ADOPTS that pane rather than ` +
+                `starting one, so it would answer \`alreadyRunning: true\` over a ` +
+                `configuration no process has ever read. Stand the pane down first if you ` +
+                `want an agent that is really running what you just configured.`,
+              remedy: `deactivate(${agentPath}); activate(${agentPath})`
+            }
           }
         : {}),
       willWrite: willWrite.length
@@ -2070,8 +2237,7 @@ export class MessageRouter {
     const removed = ['record', ...residue.removed];
 
     this.deps.broadcast({
-      action: 'agent_forgotten_event',
-      success: true,
+      action: 'agent.forgotten',
       path: agentPath,
       removed
     });
@@ -2175,7 +2341,12 @@ export class MessageRouter {
       // agent stops, not two.
       let standDown: any = null;
       this.handleDeactivateAgent(
-        { path: victim.path, preemption },
+        // `preemptedAt` and `preemptionCapacity` ride along with the record for
+        // the same reason the record does: the stand-down is where the
+        // `agent.deactivated` event is built, and since the merge these three
+        // are what that event's `preemption` block is made of. They used to be
+        // fields of a SECOND broadcast this path sent afterwards.
+        { path: victim.path, preemption, preemptedAt: at, preemptionCapacity: capacityDto(capacity) },
         (msg: any) => {
           standDown = msg;
         }
@@ -2197,20 +2368,15 @@ export class MessageRouter {
         `[capacity] preemption: ${agentPath} (priority ${priority}) stood down ` +
         `${describeCandidate(victim)} at ${at}\n${derivation}`
       );
-      // The event carries the full PreemptionRecord. The durable copy was
-      // written by the stand-down above, which is what keeps `preemptedAgents`
-      // reporting this debt until somebody re-activates the victim. The
-      // broadcast is the live announcement, not the record, but nothing here
-      // may drop a field of it: it is also what a client renders.
-      this.deps.broadcast({
-        action: 'agent_preempted_event',
-        success: true,
-        at,
-        victim: offer(victim),
-        by: { path: agentPath, paneName, priority },
-        record: preemption,
-        capacity: capacityDto(capacity)
-      });
+      // NO SECOND BROADCAST HERE. `agent_preempted_event` used to be sent from
+      // this line, immediately after the stand-down above had already sent
+      // `agent_deactivated_event` for the same agent — two events describing
+      // one thing, arriving in an order a subscriber had to correlate, with
+      // the victim named `path` on one and `victim.path` on the other. The
+      // contract merges them: the stand-down emits ONE `agent.deactivated`
+      // carrying `reason: 'preempted'` and a `preemption` block built from the
+      // record, the timestamp and the capacity arithmetic handed to it above.
+      // Nothing that event carried has been dropped; it is carried once.
 
       // Re-surveyed rather than reused: the caller is about to be told what the
       // machine looks like, and it is not the machine that refused a moment ago.
@@ -2251,8 +2417,10 @@ export class MessageRouter {
       `[capacity] override: starting ${agentPath} past capacity at ${at}\n${derivation}`
     );
     this.deps.broadcast({
-      action: 'capacity_override_event',
-      success: true,
+      action: 'capacity.overridden',
+      // `what` rather than `path`, and the contract says so: the subject of
+      // this event is the machine that was overcommitted, and `what` names the
+      // activation that overcommitted it.
       what: agentPath,
       at,
       capacity: capacityDto(capacity)
@@ -2381,8 +2549,7 @@ export class MessageRouter {
   private surfaceRegistryOutcome(outcome: RecordOutcome, what: string): RecordOutcome {
     if (!outcome.ok) {
       this.deps.broadcast({
-        action: 'registry_degraded_event',
-        success: false,
+        action: 'registry.degraded',
         what,
         error: outcome.error ?? 'registry write failed',
         consequence:
@@ -2749,13 +2916,17 @@ export class MessageRouter {
       // broadcasts nothing, because nothing changed.
       if (reattached) {
         this.deps.broadcast({
-          action: 'agent_activated_event',
-          success: true,
+          action: 'agent.activated',
           path: agentPath,
           paneName,
           paneId: occupancy.ours.paneId,
           sessionId: session.sessionId,
-          status: session.status
+          status: session.status,
+          // The version of the configuration this agent is running under, so a
+          // subscriber can tell from the event alone whether the agent that
+          // just came up is the one it configured — without a second call, and
+          // without keeping a shadow copy that is wrong after a reconfigure.
+          configVersion: intent.configVersion
         });
       }
 
@@ -2954,13 +3125,13 @@ export class MessageRouter {
     const durable = this.rememberActivated(intent.record, callerIdentity(data));
 
     this.deps.broadcast({
-      action: 'agent_activated_event',
-      success: true,
+      action: 'agent.activated',
       path: agentPath,
       paneName,
       paneId: confirmed.paneId,
       sessionId: session.sessionId,
-      status: session.status
+      status: session.status,
+      configVersion: intent.configVersion
     });
 
     respond({
@@ -3069,11 +3240,14 @@ export class MessageRouter {
 
     if (success && session) {
       this.deps.broadcast({
-        action: 'agent_deactivated_event',
-        success: true,
+        action: 'agent.deactivated',
         path: session.path,
         paneName: session.paneName,
-        sessionId: session.sessionId
+        sessionId: session.sessionId,
+        // Session-addressed stand-downs are never the preempt path — that one
+        // goes through `handleDeactivateAgent` by path, because a preemption
+        // has to work on an agent that outlived the daemon holding its session.
+        reason: 'requested'
       });
     }
 
@@ -3177,12 +3351,11 @@ export class MessageRouter {
       // exists to prevent, arriving as an event instead of as a response.
       if (success) {
         this.deps.broadcast({
-          action: 'agent_deactivated_event',
-          success: true,
+          action: 'agent.deactivated',
           path: agentPath,
           paneName: session.paneName,
           sessionId: session.sessionId,
-          ...(preemption ? { preempted: true } : {})
+          ...deactivationCause(data, preemption)
         });
       }
 
@@ -3269,11 +3442,10 @@ export class MessageRouter {
 
     if ((result.success || goneAlready) && !alreadyStandby) {
       this.deps.broadcast({
-        action: 'agent_deactivated_event',
-        success: true,
+        action: 'agent.deactivated',
         path: agentPath,
         paneName: result.paneName,
-        ...(preemption ? { preempted: true } : {})
+        ...deactivationCause(data, preemption)
       });
     }
 
@@ -3301,14 +3473,61 @@ export class MessageRouter {
   // ------------------------------------------------------------------ reads
 
   /**
-   * Type a message into a running agent's terminal. The delivery is
-   * asynchronous (there is a settle delay between the interrupt and the
-   * text), so every outcome — including a rejection we never expect — has to
-   * be turned back into a response; the caller is blocked on one.
+   * Type a message into a running agent's terminal AND REPORT WHETHER IT
+   * LANDED. The delivery is asynchronous — an interrupt, a settle delay, the
+   * text, a submit, and then a confirmation that watches the pane — so every
+   * outcome, including a rejection we never expect, has to be turned back into
+   * a response; the caller is blocked on one.
+   *
+   * THREE VERDICTS REACH THE CALLER, NOT TWO. `verdict` and `delivered` are on
+   * EVERY response, both outcomes, so "did this land" is read rather than
+   * inferred from a missing field — and `unverifiable` is a distinct answer
+   * from `not-delivered` for the same reason `activate` refuses as
+   * unverifiable rather than as occupied: a caller that cannot tell "it did not
+   * arrive" from "I could not see" will eventually treat one as the other, and
+   * the two license opposite actions. Resending on `not-delivered` is right;
+   * resending on `unverifiable` types a duplicate at an agent that may already
+   * be working on the first copy.
+   *
+   * `success` stays aligned with `delivered`, so the MCP `isError` mapping and
+   * every existing `success`-only caller become strictly more honest without
+   * being taught anything: a send that was merely typed no longer answers true.
+   *
+   * The bridge's evidence — the pane state the verdict was read from, the
+   * before/after counts, whether the text was seen sitting in the composer, and
+   * the Ctrl+C count — travels with it rather than being summarised away. A
+   * verdict a caller cannot audit is a verdict they have to trust, which is
+   * what the old `success: true` asked of them.
    */
   private handleSendToAgent(data: any, respond: Respond) {
+    /**
+     * The request never became a send, so NO PANE WAS READ — and this must not
+     * borrow the vocabulary of a verdict that was.
+     *
+     * `not-delivered` is defined as evidence: the pane was read and the message
+     * is not in it. An unresolvable path and a blank message are neither that
+     * nor `unverifiable` — nothing was attempted, so there is nothing to have
+     * been uncertain about. Answering `not-delivered` here was true in outcome
+     * and false in its stated basis, which is this epic's recurring defect in
+     * miniature: a claim whose wording covers more than its mechanism.
+     *
+     * So it says `refused`, in the vocabulary `activate` already uses for a
+     * call rejected before anything happened (`refused: 'not-configured'`,
+     * `refused: 'unverifiable'`). `delivered: false` and `verdict` are still on
+     * the response, both outcomes, because a caller must never have to infer
+     * the outcome from a missing field — and the ABSENCE of an `evidence`
+     * block is deliberately not the signal, since inference-from-absence is the
+     * thing being refused. `refused` is the field to read.
+     */
     const fail = (error: string) =>
-      respond({ action: 'send_to_agent_response', success: false, error });
+      respond({
+        action: 'send_to_agent_response',
+        success: false,
+        delivered: false,
+        verdict: 'refused',
+        refused: 'invalid-request',
+        error
+      });
 
     const address = this.addressOfRequest(data.path, true);
     if ('error' in address) {
@@ -3323,7 +3542,18 @@ export class MessageRouter {
 
     this.deps.herdrBridge.sendToAgent(address.path, message).then(
       (result) => respond({ action: 'send_to_agent_response', path: address.path, ...result }),
-      (err) => fail(err?.message ?? String(err))
+      // A rejection here is a bug in the bridge rather than a fact about the
+      // agent, and the honest reading of "our own confirmation threw" is that
+      // nothing was established either way.
+      (err) =>
+        respond({
+          action: 'send_to_agent_response',
+          path: address.path,
+          success: false,
+          delivered: false,
+          verdict: 'unverifiable',
+          error: `The send could not be completed or confirmed: ${err?.message ?? String(err)}`
+        })
     );
   }
 
@@ -3675,6 +3905,16 @@ export class MessageRouter {
       // these have no conversation to resume. Always present, even when empty,
       // for the same reason `missingAgents` is.
       unstartedTotal,
+      // THE RESYNC HANDLE, on the authoritative read rather than only on the
+      // events. This is what closes the event contract's resync path: a
+      // subscriber that reconnects has no event to compare `bootId` against —
+      // it has whatever arrives next, which may be nothing for an hour — so
+      // the poll it is REQUIRED to make anyway is where "am I talking to the
+      // same daemon" gets answered, in the same round trip that gives it the
+      // whole fleet. `eventSeq` is the highest sequence number stamped so far,
+      // so a subscriber can also tell whether it has missed anything since its
+      // last event without waiting for the next one.
+      ...eventWatermark(),
       // Which fields above are durable, which were observed just now, and
       // which this daemon computed. See MessageRouter.provenance.
       provenance: this.provenance(census),
@@ -3966,14 +4206,50 @@ export class MessageRouter {
   }
 
   /**
+   * Everything the daemon's periodic sweep needs, from ONE census read.
+   *
+   * Two questions are asked on that timer — which recorded agents are absent,
+   * and which live agents changed what herdr says they are doing — and they
+   * are answered together rather than by two passes, for the reason this file
+   * gives everywhere else: two reads of herdr can disagree, and a sweep that
+   * announced a loss from one census and a status transition from another
+   * would be publishing two incompatible pictures of the same instant. It is
+   * also what makes `agent.status_changed` free: the census was being taken
+   * anyway.
+   *
+   * `reachable` is carried out because the caller must be able to tell an
+   * observation from a silence. An unreachable herdr answers with an empty
+   * census, and every status in `statuses` then reads `unknown` — which is
+   * this daemon's blindness rather than the agents' behaviour, and must not be
+   * published as a transition.
+   */
+  public observeFleet(): FleetObservation {
+    const intents = this.deps.agentRegistry.intents();
+    const { agents, staleSessions, census } = this.surveyAgents(intents);
+    return {
+      reachable: census.reachable,
+      missing: this.missingAgents(agents, staleSessions, intents),
+      // Ours only. A foreign pane's status is not ours to publish — it belongs
+      // to whoever started it, and this daemon holds no record it could name
+      // the agent by.
+      statuses: agents
+        .filter((agent) => agent.configured)
+        .map((agent) => ({
+          path: agent.path,
+          paneName: agent.paneName,
+          paneId: agent.paneId,
+          herdrStatus: agent.herdrStatus
+        }))
+    };
+  }
+
+  /**
    * `missingAgents`, for callers outside a request — the daemon's periodic
    * sweep. Public because the sweep runs on a timer rather than in response to
    * a client, and must ask the same question the list answers.
    */
   public findMissingAgents(): MissingAgent[] {
-    const intents = this.deps.agentRegistry.intents();
-    const { agents, staleSessions } = this.surveyAgents(intents);
-    return this.missingAgents(agents, staleSessions, intents);
+    return this.observeFleet().missing;
   }
 
   private rowFrom(

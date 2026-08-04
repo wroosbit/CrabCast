@@ -145,13 +145,46 @@ if (a === 'agent' && b === 'start') {
 if (a === 'agent' && b === 'list') {
   out({ result: { agents: load().map((s) => ({ name: s.name, agent: 'shell', cwd: s.cwd, agent_status: 'working' })) } });
 }
+// A PANE WITH A COMPOSER. This shim answered a FIXED string, so \`crabcast
+// send\` could report success into a pane that never changed — the three send
+// checks below assert an exit code that now depends on whether the message
+// LANDED (KAN-114), and under a static pane it never can. Typed text sits
+// after the caret; only Enter moves it above, which is the whole of what the
+// delivery check reads.
+const paneFileFor = (name) => path.join(state, \`pane-\${Buffer.from(name).toString('hex')}.json\`);
+const readPane = (name) => fs.existsSync(paneFileFor(name))
+  ? JSON.parse(fs.readFileSync(paneFileFor(name), 'utf8'))
+  : { transcript: \`KAN-93 pane text for \${name}\`, composer: '' };
+const writePane = (name, p) => fs.writeFileSync(paneFileFor(name), JSON.stringify(p));
+const nameOfPane = (paneId) => (load().find((s) => s.pane_id === paneId) || {}).name;
+
 if (a === 'agent' && b === 'read') {
   const found = load().find((s) => s.name === args[2]);
   if (!found) {
     process.stderr.write(JSON.stringify({ error: { code: 'not_found', message: \`no agent '\${args[2]}'\` } }));
     process.exit(1);
   }
-  out({ result: { read: { text: \`KAN-93 pane text for \${args[2]}\`, truncated: false } } });
+  const p = readPane(args[2]);
+  out({ result: { read: { text: p.transcript + '\\n❯ ' + p.composer, truncated: false } } });
+}
+if (a === 'pane' && b === 'send-text') {
+  const n = nameOfPane(args[2]);
+  if (n) { const p = readPane(n); p.composer = args[3] ?? ''; writePane(n, p); }
+  out({ result: {} });
+}
+if (a === 'pane' && b === 'send-keys') {
+  const n = nameOfPane(args[2]);
+  if (n) {
+    const p = readPane(n);
+    if (args[3] === 'Enter') {
+      if (p.composer) p.transcript += '\\n❯ ' + p.composer;
+      p.composer = '';
+    } else if (args[3] === 'C-c') {
+      p.composer = '';
+    }
+    writePane(n, p);
+  }
+  out({ result: {} });
 }
 if (a === 'agent' && b === 'attach') {
   setInterval(() => {}, 60000); // hold the terminal open, as a real attach would

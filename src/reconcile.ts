@@ -134,7 +134,7 @@ async function waitForHerdr(herdrBridge: HerdrBridge, timeoutMs: number): Promis
  *     wait for herdr. A blip that has cleared costs one extra pass.
  *  4. Anything still deferred is named in the summary AND — because it is
  *     still `expected()` and still absent — is picked up by the missing-agent
- *     sweep, broadcast as `agent_lost_event`, and reported in every
+ *     sweep, broadcast as `agent.lost`, and reported in every
  *     `list_agents` poll. So it cannot be a silent skip either: two
  *     independent channels report it until somebody acts.
  */

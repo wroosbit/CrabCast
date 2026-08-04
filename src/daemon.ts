@@ -7,7 +7,7 @@ import { finishMeasurement, startMeasurement, MeasurementStart } from './agent-c
 import { dampCost, sampleFromMeasurement, MIN_MEASURED_CORES } from './agent-cost-damping.js';
 import { AgentCost, MEASURED_AGENT_COST, setMeasuredAgentCost } from './capacity.js';
 import { ConfigError, CrabcastConfig, loadConfig, resolveConfigPath } from './config.js';
-import { MessageRouter } from './router.js';
+import { FleetStatusReading, MessageRouter, MissingAgent } from './router.js';
 import { HerdrBridge } from './herdr.js';
 import {
   HERDR_VERSION_NOTICE_FIELD,
@@ -17,6 +17,8 @@ import {
   readFdUsage
 } from './herdr-health.js';
 import { ensureDataDir, onJsonLines, socketPathFor, writeJsonLine } from './ipc.js';
+import { describeContract, describeEvent, events } from './events.js';
+import { HerdrAgentStatus } from './herdr.js';
 import { resolveUserPath, which } from './env.js';
 import { AgentRegistry, describeUnreadableLog, registryPathFor, scanLogVersions } from './agent-registry.js';
 import { reconcileAgents } from './reconcile.js';
@@ -218,11 +220,47 @@ const bootBuild = snapshotBuild();
   }
 }
 
+// THE CONTRACT, ANNOUNCED ONCE. A breaking rename is news exactly here: in the
+// log of the daemon that stopped emitting the old names, beside the `bootId`
+// that tells every reconnecting subscriber to resync. Once rather than per
+// event, for the same reason the herdr version notice rides on one response —
+// a notice repeated is a notice skipped.
+log(describeContract(events.bootId));
+
 const connections = new Set<net.Socket>();
 
+/**
+ * The one choke point every published event passes through.
+ *
+ * Two jobs, and the second is the one that was missing. It stamps the envelope
+ * — `at`, a per-boot monotonic `seq`, and this boot's `bootId` — so a
+ * subscriber can detect a gap or a restart without being told. And it asks the
+ * contract whether it recognises the action, so an event added to this daemon
+ * without being added to `events.ts` is a warning naming it rather than a
+ * frame nobody downstream will forward.
+ *
+ * An off-contract action is still written to the socket, deliberately.
+ * `broadcast` filters nothing and matching is the subscriber's job — that is
+ * the socket half of the contract, and the forward-compatibility clause
+ * (ignore what you do not recognise, do not error) is what makes adding an
+ * event later non-breaking. Dropping it here would trade a loud warning for a
+ * silent disappearance, which is the trade this whole slice exists to undo.
+ * The MCP path is the strict one: there the allowlist drops it, because an MCP
+ * notification has a declared payload shape and there is none for an action
+ * nobody wrote down.
+ */
 const broadcast = (msg: any) => {
+  const { onContract, frame } = events.stamp(msg);
+  if (!onContract) {
+    log(
+      `WARNING: broadcasting an action that is not on the event contract: ` +
+      `${JSON.stringify(msg?.action)}. It goes out on the socket unsequenced — a subscriber ` +
+      `must ignore an action it does not recognise — and the MCP forwarder will DROP it. ` +
+      `Add it to EVENT_NAMES/EVENT_CONTRACT in src/events.ts and to docs/event-contract.md.`
+    );
+  }
   for (const conn of connections) {
-    writeJsonLine(conn, msg);
+    writeJsonLine(conn, frame);
   }
 };
 
@@ -234,7 +272,7 @@ herdrBridge.setSessionEndedListener((event) => {
     `Session ended: ${event.sessionId} (${event.path}) ` +
     `reason=${event.reason} exitCode=${event.exitCode}`
   );
-  broadcast({ action: 'agent_detached_event', success: true, ...event });
+  broadcast({ action: 'agent.detached', ...event });
 });
 
 const server = net.createServer((socket) => {
@@ -442,8 +480,13 @@ const daemonRouter = new MessageRouter({
  * a different decision from one that was killed by a power cut, with different
  * failure modes, and the loss is surfaced rather than guessed at. Restoring is
  * startup's job.
+ *
+ * It is also `agent.status_changed`'s latency bound, and that is a deliberate
+ * reuse rather than a coincidence: both questions are answered from ONE census
+ * read per tick, so publishing status transitions costs no extra herdr calls.
+ * The bound is published in docs/event-contract.md as part of the contract.
  */
-const MISSING_SWEEP_INTERVAL_MS = 30_000;
+const FLEET_SWEEP_INTERVAL_MS = 30_000;
 
 /**
  * The detectability half. Silent loss is what made the extraction source's
@@ -458,15 +501,87 @@ const MISSING_SWEEP_INTERVAL_MS = 30_000;
  */
 const announcedMissing = new Set<string>();
 
-function sweepForMissingAgents() {
-  let missing;
+/**
+ * The last herdr status this daemon OBSERVED for each live agent of ours.
+ *
+ * The whole of `agent.status_changed`'s detection mechanism, and the design
+ * deliberately left it to this slice to choose. It is a poll, on the sweep
+ * that already runs, and the cost of the event is therefore zero additional
+ * herdr invocations: `observeFleet` takes the one census the loss sweep was
+ * taking anyway and answers both questions from it. That is why the cadence is
+ * the sweep's rather than a second one of its own — a faster watcher would be
+ * a second `herdr agent list` on a second timer, and Butchr has said (KAN-59
+ * comment 10548) that nothing in their supervision model needs sub-poll
+ * latency to be CORRECT.
+ *
+ * In-memory, so a daemon restart forgets it. That is correct rather than
+ * merely acceptable: after a restart there is no previous observation, so
+ * there is no transition to report, and inventing a `from` out of a durable
+ * copy would be claiming to have witnessed a change nobody watched. A
+ * subscriber crossing that restart is told to resync by the new `bootId`.
+ */
+const lastObservedStatus = new Map<string, HerdrAgentStatus>();
+
+function sweepFleet() {
+  let observation;
   try {
-    missing = daemonRouter.findMissingAgents();
+    observation = daemonRouter.observeFleet();
   } catch (e: any) {
-    log('Missing-agent sweep failed:', e?.message ?? String(e));
+    log('Fleet sweep failed:', e?.message ?? String(e));
     return;
   }
 
+  announceStatusChanges(observation);
+  announceLosses(observation.missing);
+}
+
+/**
+ * SILENCE IS NOT A STATUS.
+ *
+ * An unreachable herdr answers with an empty census, and every row this daemon
+ * still reports from its own session map then carries `herdrStatus: 'unknown'`.
+ * Reading that as a transition would broadcast `working → unknown` for the
+ * whole fleet on any herdr blip and `unknown → working` when it came back —
+ * events describing our own blindness as the agents' behaviour. So when the
+ * census did not answer, nothing is compared, nothing is recorded, and nothing
+ * is announced. It is the same rule the bridge applies to liveness
+ * (`reachable: false` is silence, not evidence) applied to status.
+ *
+ * A status of `unknown` from a herdr that DID answer is a real observation and
+ * is reported as one: herdr saw the pane and had nothing to say about it.
+ */
+function announceStatusChanges(observation: { reachable: boolean; statuses: FleetStatusReading[] }) {
+  if (!observation.reachable) return;
+
+  const seen = new Set<string>();
+  for (const reading of observation.statuses) {
+    seen.add(reading.path);
+    const from = lastObservedStatus.get(reading.path);
+    lastObservedStatus.set(reading.path, reading.herdrStatus);
+    // No previous observation is not a transition. A first sighting — a fresh
+    // activation, an agent that came back — seeds the map silently, because
+    // the alternative is a `from` this daemon never saw.
+    if (from === undefined || from === reading.herdrStatus) continue;
+    log(`AGENT STATUS: ${reading.path} ${from} → ${reading.herdrStatus}`);
+    broadcast({
+      action: 'agent.status_changed',
+      path: reading.path,
+      paneName: reading.paneName,
+      paneId: reading.paneId,
+      from,
+      to: reading.herdrStatus
+    });
+  }
+
+  // An agent that is no longer live forgets its last status, so that coming
+  // back is a first sighting rather than a transition from whatever it was
+  // doing when it disappeared.
+  for (const path of lastObservedStatus.keys()) {
+    if (!seen.has(path)) lastObservedStatus.delete(path);
+  }
+}
+
+function announceLosses(missing: MissingAgent[]) {
   const names = new Set(missing.map((agent) => agent.path));
   for (const name of announcedMissing) {
     if (!names.has(name)) announcedMissing.delete(name);
@@ -479,7 +594,7 @@ function sweepForMissingAgents() {
       `AGENT LOST: ${agent.path} is recorded as active since ${agent.since} but herdr has no ` +
       `live agent in that directory.`
     );
-    broadcast({ action: 'agent_lost_event', success: true, ...agent });
+    broadcast({ action: 'agent.lost', ...agent });
   }
 }
 
@@ -540,8 +655,10 @@ function onListen() {
           : '')
       );
       // Whatever restoration could not bring back is a loss, and is announced
-      // by the same sweep that watches for losses later.
-      sweepForMissingAgents();
+      // by the same sweep that watches for losses later. This first pass also
+      // SEEDS the status map — it reports no transitions, because there is no
+      // previous observation to have transitioned from.
+      sweepFleet();
     })
     .catch((err) => log('[reconcile] Reconciliation failed:', err))
     .finally(() => {
@@ -549,12 +666,12 @@ function onListen() {
       // alongside it, the first tick could land mid-restore — reconcile
       // staggers 3s between starts, so a fleet of a dozen agents is still
       // being brought back at t+30s — and every agent whose turn had not yet
-      // come would be broadcast as an agent_lost_event and latched in
+      // come would be broadcast as an agent.lost and latched in
       // announcedMissing, a loss announcement with no recovery signal to
       // follow it. `.finally` so a reconcile that failed outright still
       // leaves the watch running: whatever it could not restore genuinely is
       // missing, and the sweep is what says so.
-      const sweep = setInterval(sweepForMissingAgents, MISSING_SWEEP_INTERVAL_MS);
+      const sweep = setInterval(sweepFleet, FLEET_SWEEP_INTERVAL_MS);
       sweep.unref();
     });
 

@@ -13,9 +13,15 @@
 //                   terminal, tail_agent returns pane text, agent_status
 //                   reports it, deactivate stands it down and the list no
 //                   longer shows it
-//   4. events     — the activation's agent_activated_event arrives as an MCP
+//   4. events     — the activation's agent.activated arrives as an MCP
 //                   notification on a SECOND connected client, proving the
-//                   daemon's broadcasts are forwarded, not just responses
+//                   daemon's broadcasts are forwarded, not just responses —
+//                   and as a STRUCTURED PAYLOAD rather than a rendered
+//                   sentence, which is what makes it something a subscriber
+//                   can act on (KAN-128). The event contract itself is proven
+//                   in full by verify-event-contract.mjs; what this section
+//                   keeps is the property it has always had, restated against
+//                   the payload
 //   5. reset      — reset_agent stands a second agent down AND deletes its
 //                   workspace directory; a reset of nothing is isError (the
 //                   mapping this port deliberately adds over the extraction
@@ -129,13 +135,47 @@ if (a === 'agent' && b === 'start') {
 if (a === 'agent' && b === 'list') {
   out({ result: { agents: load().map((s) => ({ name: s.name, agent: 'shell', cwd: s.cwd, agent_status: 'working' })) } });
 }
+// THE PANE IS STATEFUL, because send_to_agent's answer is now read off it.
+// This shim used to return a fixed string, so a send could report success into
+// a pane that never changed — the send_to_agent section below asserted
+// \`success: true\` and would have kept asserting it with the Enter dropped,
+// which is the KAN-114 defect the check was supposed to be evidence against.
+// Typed text sits after the caret; only Enter moves it above.
+const paneFileFor = (name) => path.join(state, \`pane-\${Buffer.from(name).toString('hex')}.json\`);
+const readPane = (name) => fs.existsSync(paneFileFor(name))
+  ? JSON.parse(fs.readFileSync(paneFileFor(name), 'utf8'))
+  : { transcript: \`$ echo KAN-73 pane text for \${name}\\nKAN-73 pane text for \${name}\`, composer: '' };
+const writePane = (name, p) => fs.writeFileSync(paneFileFor(name), JSON.stringify(p));
+const renderPane = (p) => \`\${p.transcript}\\n❯ \${p.composer}\`;
+/** The pane a pane_id belongs to, since keystrokes address ids and reads address names. */
+const nameOfPane = (paneId) => load().find((s) => s.pane_id === paneId)?.name;
+
 if (a === 'agent' && b === 'read') {
   const found = load().find((s) => s.name === args[2]);
   if (!found) {
     process.stderr.write(JSON.stringify({ error: { code: 'not_found', message: \`no agent '\${args[2]}'\` } }));
     process.exit(1);
   }
-  out({ result: { read: { text: \`$ echo KAN-73 pane text for \${args[2]}\\nKAN-73 pane text for \${args[2]}\\n$\`, truncated: false } } });
+  out({ result: { read: { text: renderPane(readPane(args[2])), truncated: false } } });
+}
+if (a === 'pane' && b === 'send-text') {
+  const name = nameOfPane(args[2]);
+  if (name) { const p = readPane(name); p.composer = args[3] ?? ''; writePane(name, p); }
+  out({ result: {} });
+}
+if (a === 'pane' && b === 'send-keys') {
+  const name = nameOfPane(args[2]);
+  if (name) {
+    const p = readPane(name);
+    if (args[3] === 'Enter') {
+      if (p.composer) p.transcript += \`\\n❯ \${p.composer}\`;
+      p.composer = '';
+    } else if (args[3] === 'C-c') {
+      p.composer = '';
+    }
+    writePane(name, p);
+  }
+  out({ result: {} });
 }
 if (a === 'agent' && b === 'attach') {
   setInterval(() => {}, 60000); // hold the terminal open, as a real attach would
@@ -469,10 +509,17 @@ const sent = await clientA.callTool('crabcast_send_to_agent', {
 });
 const sentRes = parsedText(sent);
 show('crabcast_send_to_agent:', sentRes);
+// `success` alone is no longer the claim worth checking: it used to be true
+// whenever three keystrokes were dispatched. The verdict is read off the pane
+// now (KAN-114), so this asserts the word AND the evidence behind it — a
+// before/after count that went up is what separates a delivery from a send
+// that merely happened not to throw.
 verdict(
-  sent.isError !== true && sentRes?.success === true,
-  'send_to_agent delivered to the agent\'s terminal',
-  'send_to_agent did not report delivery'
+  sent.isError !== true && sentRes?.success === true &&
+    sentRes?.verdict === 'delivered' && sentRes?.delivered === true &&
+    sentRes?.evidence?.landedAfter > sentRes?.evidence?.landedBefore,
+  'send_to_agent CONFIRMED delivery by reading the agent\'s pane back',
+  'send_to_agent did not report a confirmed delivery'
 );
 
 const tailed = await clientA.callTool('crabcast_tail_agent', { path: AGENT_PATH });
@@ -515,7 +562,7 @@ rule('4. broadcasts — the activation event arrived on the second client');
 await waitFor(
   () => clientB.notifications.some((n) =>
     n.method === 'notifications/message' &&
-    String(n.params?.data ?? '').includes('agent_activated_event')),
+    n.params?.data?.action === 'agent.activated'),
   5000,
   'the activation event on client B'
 ).catch(() => {});
@@ -524,11 +571,25 @@ const eventNotes = clientB.notifications.filter((n) => n.method === 'notificatio
 show('client B notifications:', eventNotes.map((n) => n.params?.data));
 
 const activationNote = eventNotes.find((n) =>
-  String(n.params?.data ?? '').includes(`agent_activated_event - ${AGENT_PATH}`));
+  n.params?.data?.action === 'agent.activated' && n.params?.data?.path === AGENT_PATH);
 verdict(
-  activationNote !== undefined,
-  'client B — which made no request — received the agent_activated_event notification',
-  'no activation event reached the second client'
+  activationNote !== undefined &&
+    // A payload that is a rendered string is a failure — this line is the
+    // assertion, not a formatting preference. The forwarder used to send
+    // `[CrabCast Event] <action> - <subject>`, and a subscriber cannot act on
+    // prose.
+    typeof activationNote.params.data === 'object' &&
+    typeof activationNote.params.data.seq === 'number' &&
+    typeof activationNote.params.data.bootId === 'string' &&
+    // PRESENT, not necessarily non-null. `paneId` is observed from herdr's
+    // census and this shim's `agent list` does not report one; null is the
+    // honest answer and the contract's requirement is that the field is
+    // carried, not that it is always populated.
+    'paneId' in activationNote.params.data &&
+    activationNote.params.data.configVersion === 1,
+  'client B — which made no request — received agent.activated as a STRUCTURED payload\n' +
+  '    carrying its envelope (seq, bootId, at) and its declared fields',
+  'no structured activation event reached the second client'
 );
 
 // ---------------------------------------------------------------- 5. forget --

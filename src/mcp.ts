@@ -10,12 +10,24 @@ import * as net from 'net';
 import * as nodePath from 'path';
 import { DEFAULT_DATA_DIR, loadConfig, resolveConfigSource } from './config.js';
 import { connectToDaemon, onJsonLines, writeJsonLine } from './ipc.js';
+import { EVENT_NAMES, projectEvent } from './events.js';
 
 // The daemon's MCP server: stdio to its client, and an ordinary NDJSON client
 // of the daemon's unix socket on the other side. One protocol on the socket,
-// multiplexed by convention — a message carrying an `id` answers a pending
-// request, an `action` ending `_event` is a broadcast forwarded as an MCP
-// notification, anything else is dropped.
+// multiplexed by an explicit rule rather than by convention:
+//
+//   an `id` we are waiting on   → somebody's answer; resolve the request
+//   an `id` we are NOT          → a late answer to a request that already timed
+//                                 out; discarded, and said so as such
+//   no `id`, an `action`        → a broadcast; forwarded as a structured MCP
+//                                 notification when the event contract
+//                                 (src/events.ts) names it, dropped with a
+//                                 warning when it does not
+//
+// The middle rule is not a nicety. Correlation is by `id`, so "has no id" is
+// what makes something a broadcast — and a late response routed into the
+// forwarder gets reported as a broadcast that is not on the event contract,
+// which is the wrong complaint about the wrong kind of message.
 
 const server = new Server(
   {
@@ -73,6 +85,83 @@ try {
   spawnIfMissing = false;
 }
 
+/**
+ * THE FORWARDER. A positive allowlist and a structured payload, replacing a
+ * suffix test and a rendered sentence.
+ *
+ * What was here before failed in both halves, and only one of them was
+ * visible. The filter asked whether the action ended in `_event` — a
+ * convention masquerading as a filter, which would have dropped every event
+ * the moment the names changed, silently, on both sides. And the notification
+ * carried `[CrabCast Event] <action> - <subject>`: prose. A subscriber could
+ * read our broadcast over our shoulder and could not act on it, because there
+ * was no structured payload on this path at all.
+ *
+ * Now:
+ *
+ *   - The allowlist is `EVENT_CONTRACT`, imported rather than restated. An
+ *     action not on it is DROPPED and logged HERE, on our side of the
+ *     boundary, so an event added to the daemon without being added to the
+ *     contract is a warning naming it rather than a subscriber that quietly
+ *     stops hearing about something.
+ *   - The payload is the event, projected onto exactly the fields the contract
+ *     publishes for it. That closes the `undefined/undefined` defect as a side
+ *     effect rather than by special-casing: the contract knows which events
+ *     carry `path` and which carry `what`, so nothing renders a field an event
+ *     never had.
+ *   - Drift is warned about in BOTH directions — a declared field the daemon
+ *     did not send, and a field the daemon sent that nobody published. Either
+ *     one means the document and the wire have come apart, and the whole point
+ *     of this file is that they cannot do that quietly.
+ *
+ * The notification stays `notifications/message` because that is the transport
+ * an MCP client already subscribes to; what changed is that `data` is the
+ * event object rather than a sentence about it. `logger` names the stream so a
+ * client can route these apart from anything else this server logs.
+ */
+function forwardEvent(msg: any) {
+  const projected = projectEvent(msg);
+
+  if (!projected) {
+    // Dropped, and said out loud. This is the branch a future event lands in
+    // when somebody adds a broadcast and forgets the contract — the daemon
+    // warns on its side too, and this is the same fact from the subscriber's
+    // side of the boundary.
+    console.error(
+      `crabcast-mcp: dropping a broadcast whose action is not on the event contract: ` +
+      `${JSON.stringify(msg?.action)}. Nothing was forwarded to the MCP client. ` +
+      `Published events: ${EVENT_NAMES.join(', ')}.`
+    );
+    return;
+  }
+
+  if (projected.missing.length) {
+    console.error(
+      `crabcast-mcp: ${msg.action} arrived without contract field(s) ` +
+      `${projected.missing.join(', ')}; forwarded without them. This is the defect that ` +
+      `used to render "undefined" at a subscriber — fix the emitting site or the contract.`
+    );
+  }
+  if (projected.undeclared.length) {
+    console.error(
+      `crabcast-mcp: ${msg.action} carried undeclared field(s) ` +
+      `${projected.undeclared.join(', ')}; NOT forwarded. A field on the wire that is not ` +
+      `in docs/event-contract.md is an internal convention, which is what this contract ` +
+      `replaced — declare it in src/events.ts or stop sending it.`
+    );
+  }
+
+  server.notification({
+    method: "notifications/message",
+    params: {
+      level: "info",
+      logger: "crabcast.events",
+      // The event itself. A rendered string here is the defect, not the format.
+      data: projected.payload
+    }
+  }).catch(() => {});
+}
+
 // Persistent connection to the CrabCast daemon's Unix socket. Requests carry
 // an id the daemon echoes back; broadcast events arrive without one and are
 // forwarded as MCP logging notifications.
@@ -96,26 +185,22 @@ function daemonLink(): Promise<net.Socket> {
             clearTimeout(entry.timer);
             const { id, ...body } = msg;
             entry.resolve(body);
-          } else if (typeof msg?.action === 'string' && msg.action.endsWith('_event')) {
-            // The subject, in whatever vocabulary the event actually uses.
-            // This line used to be `${msg.type}/${msg.key}`, which rendered
-            // `undefined/undefined` for the three events that never carried a
-            // type or key — and would now do so for every one of them, since
-            // agents are addressed by path. A forwarder that reliably prints
-            // "undefined" is worse than one that says it has nothing to say.
-            //
-            // Still a format string rather than the structured payload: the
-            // typed event contract, its allowlist and the payload-carrying
-            // notification are the event-contract slice's, and building half
-            // of them here would be the second copy that disagrees.
-            const subject = msg.path ?? msg.what ?? '(no subject)';
-            server.notification({
-              method: "notifications/message",
-              params: {
-                level: "info",
-                data: `[CrabCast Event] ${msg.action} - ${subject}`
-              }
-            }).catch(() => {});
+          } else if (msg?.id !== undefined) {
+            // AN ANSWER NOBODY IS WAITING FOR — carrying an `id` whose request
+            // already timed out and was rejected. It is not a broadcast, and
+            // the branch below must not be allowed to treat it as one: this
+            // used to fall through to the forwarder, which dutifully reported
+            // `dropping a broadcast whose action is not on the event contract:
+            // "activate_response"`. That line names the wrong thing about the
+            // wrong kind of message, and an operator reading it would go
+            // looking for a missing event rather than for a slow daemon.
+            console.error(
+              `crabcast-mcp: late answer to a request that already timed out ` +
+              `(${JSON.stringify(msg.action)}, id ${JSON.stringify(msg.id)}); discarded. ` +
+              `The daemon answered after the 30s deadline.`
+            );
+          } else if (msg?.action !== undefined) {
+            forwardEvent(msg);
           }
         });
 
@@ -247,7 +332,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "crabcast_configure_agent",
         description:
-          "Makes an agent exist, AND is how you change one that already does. An agent IS a directory plus the knobs you freeze onto it here — there are no workspace types to inherit from, so priority and launcher arrive in this call or nowhere, and activation refuses a path that was never configured. The directory must already exist; this never creates one, so a mistyped path is refused rather than scattered through your tree. It does NOT refuse an occupied directory: it succeeds and returns `occupiedBy` naming any live pane already in there, so you learn about the occupant now rather than when activation refuses. The intended day-one sequence when adopting directories that already have agents in them is: configure the fleet, stand your own panes down, then activate. It answers `configVersion` — 1 for a new agent, one higher than before for each accepted reconfiguration — which is the token every read echoes back, so a caller can tell whether the configuration it is looking at is the one it wrote. RECONFIGURING A RUNNING AGENT IS ANSWERED PER ATTRIBUTE, and this daemon will NEVER stand an agent down to make a configuration match. `priority`, `refusable`, `chargeable`, `preemptable` and `label` change IN PLACE: they are read out of the record at the moment a capacity or preemption decision is made, so the new value is live immediately, no pane is touched and no conversation is lost. `launcher`, `prompt` and `mcpServers` were consumed when the agent was spawned — the launcher IS the running process, the prompt has already been read, and .mcp.json is read once at boot — so changing one of those under a running agent is REFUSED (`refused: 'restart-required'`), naming each attribute and its reason, with the agent left running and untouched. The remedy is in the response and it is yours to take, not ours: crabcast_deactivate_agent, then this call, then crabcast_activate_agent. There is deliberately no force flag — a reconciler that quietly discards an agent's conversation to satisfy a config diff is the failure this rule exists to prevent, and a force flag is that path with a label on it. IT IS ALSO ATOMIC: a refused call applies NOTHING, including knobs that could have changed in place, because applying half of one desired-state document leaves an agent half-new and half-old, which no retry converges out of. So the response reports PER KNOB rather than a bare success — `outcomes` maps every attribute to one of `unchanged`, `applied`, `applied-in-place`, `refused-restart-required` or `withheld` (in-place-capable, not applied because the call was refused whole), alongside `changed`, `applied`, `withheld` and `attributes`. It is also refused as `unverifiable` when a restart-only knob is asked to move, herdr cannot be reached and the record says the agent is active: an empty census from an unreachable herdr is silence, not evidence that nothing is running there.",
+          "Makes an agent exist, AND is how you change one that already does. An agent IS a directory plus the knobs you freeze onto it here — there are no workspace types to inherit from, so priority and launcher arrive in this call or nowhere, and activation refuses a path that was never configured. The directory must already exist; this never creates one, so a mistyped path is refused rather than scattered through your tree. It does NOT refuse an occupied directory: it succeeds and returns `occupiedBy` naming any live pane already in there, so you learn about the occupant now rather than when activation refuses. The intended day-one sequence when adopting directories that already have agents in them is: configure the fleet, stand your own panes down, then activate. It answers `configVersion` — 1 for a new agent, one higher than before for each accepted reconfiguration — which is the token every read echoes back, so a caller can tell whether the configuration it is looking at is the one it wrote. RECONFIGURING A RUNNING AGENT IS ANSWERED PER ATTRIBUTE, and this daemon will NEVER stand an agent down to make a configuration match. `priority`, `refusable`, `chargeable`, `preemptable` and `label` change IN PLACE: they are read out of the record at the moment a capacity or preemption decision is made, so the new value is live immediately, no pane is touched and no conversation is lost. `launcher`, `prompt` and `mcpServers` were consumed when the agent was spawned — the launcher IS the running process, the prompt has already been read, and .mcp.json is read once at boot — so changing one of those under a running agent is REFUSED (`refused: 'restart-required'`), naming each attribute and its reason, with the agent left running and untouched. The remedy is in the response and it is yours to take, not ours: crabcast_deactivate_agent, then this call, then crabcast_activate_agent. There is deliberately no force flag — a reconciler that quietly discards an agent's conversation to satisfy a config diff is the failure this rule exists to prevent, and a force flag is that path with a label on it. IT IS ALSO ATOMIC: a refused call applies NOTHING, including knobs that could have changed in place, because applying half of one desired-state document leaves an agent half-new and half-old, which no retry converges out of. So the response reports PER KNOB rather than a bare success — `outcomes` maps every attribute to one of `unchanged`, `applied`, `applied-in-place`, `refused-restart-required` or `withheld` (in-place-capable, not applied because the call was refused whole), alongside `changed`, `applied`, `withheld` and `attributes`. It is also refused as `unverifiable` when a restart-only knob is asked to move, herdr cannot be reached and the record says the agent is active: an empty census from an unreachable herdr is silence, not evidence that nothing is running there. THAT REFUSAL IS A *RE*CONFIGURATION'S, AND A FIRST CONFIGURE IS ANSWERED EVEN OVER A LIVE PANE. A path with no record yet has no prior configuration to preserve and no conversation being spent, so there is nothing for the refusal to protect — and refusing would strand the path, since activation requires a configure first. That state is reachable (a registry lost while herdr's panes survived, or a forget over an agent that kept running), so it is REPORTED rather than adopted quietly: the response carries `unrecordedPane`, naming the pane and saying that NOTHING was applied to the process running in it. The knobs you just froze are what the NEXT activation will use; they do not describe what is running there now, so they read `applied` and never `applied-in-place`. Note what that means for your next call: crabcast_activate_agent ADOPTS that pane rather than starting one, and would answer `alreadyRunning: true` over a configuration no process has ever read. Stand it down and activate again if you want an agent really running what you configured.",
         inputSchema: {
           type: "object",
           properties: {
@@ -356,7 +441,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "crabcast_send_to_agent",
         description:
-          "Sends a message to a running agent's terminal as if a human typed it: interrupts any partially typed input, types the message, and presses Enter. Use this to give a still-running agent new instructions (e.g. review feedback) without attaching to its terminal.",
+          "Sends a message to a running agent's terminal as if a human typed it — interrupts any partially typed input, types the message, presses Enter — AND THEN READS THE PANE BACK TO SEE WHETHER THE AGENT ACTUALLY GOT IT. Use this to give a still-running agent new instructions (e.g. review feedback) without attaching to its terminal. READ `verdict`, NOT JUST `success`. It is on EVERY response, so what happened is read rather than inferred from a missing field. THREE OF ITS WORDS ARE DELIVERY VERDICTS, and each is a statement about a pane that was actually looked at: `delivered` — the message was seen in the agent's transcript as submitted output that was not there before, which is a claim about the agent rather than about our keystrokes; `not-delivered` — the pane was read and the message is not in it, so the agent does not have it (most often the Enter did not take and the text is sitting UNSUBMITTED in the composer, which is why a glance at the terminal shows the message and looks like success — `evidence.inComposer` says when that is what happened); `unverifiable` — the pane could not be read, so whether it landed is UNKNOWN. THE FOURTH WORD IS NOT A DELIVERY VERDICT: `refused` means the request never became a send at all — a path that does not resolve, or an empty message — so no pane was read and nothing was typed at anybody. `refused` names which, and it is a bug in the call rather than a fact about the agent. Treat the two middle ones differently, because they license opposite actions: resend on `not-delivered`; on `unverifiable` do NOT resend blindly and do NOT record the message as lost — read the agent with crabcast_tail_agent once herdr is answering and decide then. `evidence` carries what the verdict was read from — the pane tail, the before/after counts of this message as submitted output, and `interrupts`, which is never more than 1 because a second Ctrl+C is how Claude Code quits. THIS CALL INTERRUPTS THE RECIPIENT. Its first keystroke is a Ctrl+C, and if the agent is mid-tool-call that tool call is TERMINATED — a pane sent to while running a command is left reading `Interrupted · What should Claude do instead?`. That is the cost of typing at a running agent and there is no version of this that avoids it, so treat a send as disruptive and decide it is worth interrupting before you call. What is bounded is the retry, not the call: the retry only presses Enter again, so one call never interrupts twice — but a SECOND call is a second interrupt, which matters because the contract above tells you to resend on `not-delivered`. TWO LIMITS OF CONFIRMING BY PANE ECHO, disclosed rather than left to be discovered: (1) `delivered` means the text appeared as submitted output, which is NOT the same as arriving intact — two sends in quick succession can be submitted as a single concatenated line, and both correctly report `delivered` while the agent acts only on the first. This is not theoretical: it bit CrabCast's own delivery proof in the pull request that documented it, concatenating a setup instruction with the message that depended on it. So leave time between sends to the same agent rather than pipelining them, and if something depends on the first having landed, wait for evidence of THAT rather than for this call's `delivered`; (2) the interrupt makes Claude Code restore its own in-flight prompt into the composer, and this call's text is appended after it, so a delivered message can arrive with the recipient's interrupted text in front of it.",
         inputSchema: {
           type: "object",
           properties: {
