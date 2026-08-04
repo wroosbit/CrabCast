@@ -1259,7 +1259,12 @@ rule('7. the durable record and the response agree when the write fails');
     `disk holds ${path.basename(oldBoss)}, the call claimed ${path.basename(newBoss)}, ` +
       `the response said ${JSON.stringify(activated.activatedBy)}`
   );
-  const degraded = h.events.find((e) => e.action === 'registry_degraded_event');
+  // `registry.degraded` — T6's event contract renamed it from
+  // `registry_degraded_event` and records the old name as `formerly` in
+  // src/events.ts. Followed rather than loosened to a substring match: the
+  // point of this assertion is that a SPECIFIC event fires, and a matcher
+  // that tolerates any name would stop noticing if it stopped firing.
+  const degraded = h.events.find((e) => e.action === 'registry.degraded');
   check(
     Boolean(degraded),
     'and a registry_degraded_event is broadcast, so the failure is not only in the reply to ' +

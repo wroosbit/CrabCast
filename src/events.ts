@@ -171,6 +171,19 @@ export const EVENT_CONTRACT: Record<CrabcastEventName, EventSpec> = {
       'configVersion',
       'configuredAt',
       'everActivated',
+      // The supervisor of record (KAN-113). DECLARED rather than stripped,
+      // because this event already publishes the whole durable echo and the
+      // payload is the `MissingAgent` row spread whole — so a field added to
+      // `ConfigEcho` arrives here by construction, and the contract's job is to
+      // describe the wire truthfully rather than to lag it.
+      //
+      // It is also the field this event's reader most needs: "an agent you are
+      // responsible for has been lost" is the sentence a supervisor wants, and
+      // without this they are told an agent is gone and not whose it was.
+      // Stripping it to keep the contract unchanged would make `agent.lost` the
+      // one place the echo is deliberately partial, which is precisely the
+      // silent-omission failure KAN-113 exists to prevent.
+      'activatedBy',
       'since',
       'reason'
     ],

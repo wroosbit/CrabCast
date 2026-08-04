@@ -164,11 +164,19 @@ B deactivates X
 B activates X (down)   → X.activatedBy = B     ← B stood it up this time
 ```
 
-So **a reconciler that converges by polling `activate` is safe; one that
-converges by stop/start would take the fleet.** That is a real difference in
-what a consumer's reconciler may do, it follows from "whoever most recently
-stood the agent up", and it is written here because it is the kind of property
-that changes silently when somebody refactors a reconciler.
+So **whichever caller most recently started an agent is its supervisor of
+record, and a caller that stops and restarts agents becomes the supervisor of
+every agent it restarts.** That follows from the rule rather than qualifying it,
+and it is written here because it is the kind of property that changes silently
+when somebody refactors the thing that calls `activate`.
+
+**This document does not say which callers that makes safe.** It states what the
+daemon does; whether a given consumer's design collides with it depends on
+decisions on their side of the boundary — how they converge, and whether one
+component is the sole writer — which are not facts this repository holds. A
+sentence here declaring some caller unaffected would be exactly the kind of
+claim this project keeps filing against itself: a property asserted about a
+category on the strength of knowing one path through it.
 
 Proved by `scripts/verify-activated-by.mjs` §5, including the control that a
 genuine restart by another supervisor *does* re-parent — without which
