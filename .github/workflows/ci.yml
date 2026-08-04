@@ -77,6 +77,13 @@ jobs:
       #                                      and an over-large one is refused
       #                                      legibly rather than truncated.
       #
+      # verify-daemon-provenance starts daemons but needs no herdr either: it
+      # drives `daemon_status`, which touches neither panes nor the herdr
+      # binary. It builds its OWN fixture trees under $RUNNER_TEMP — one a real
+      # little git repo, one with no git metadata at all — because "reports
+      # unknown rather than something plausible" cannot be demonstrated in a
+      # tree that has a commit in it (KAN-122).
+      #
       # DELIBERATELY EXCLUDED — these need a real herdr server and real
       # terminal panes, which no GitHub runner has (herdr's public
       # availability is itself an open question on this project). Running
@@ -113,6 +120,7 @@ jobs:
             verify-herdr-version-notice
             verify-refuses-occupied-directory
             verify-prompt-is-not-a-template
+            verify-daemon-provenance
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,
