@@ -88,9 +88,8 @@ jobs:
       #                                      checks go red, because a check that
       #                                      cannot fail is not a check.
       #
-      # And one more with the idempotence contract, for the same reason —
-      # calling a verb again is what a reconciler does constantly, and every
-      # way that can break is silent:
+      # And two more, both for the same class of reason — a reconciler calls
+      # these paths constantly, and every way they can break is silent:
       #
       #   verify-idempotent-lifecycle        `activate` three times leaves ONE
       #                                      pane, `deactivate` twice does not
@@ -103,6 +102,22 @@ jobs:
       #                                      a pane and `pane close` really
       #                                      removes one, so the pane count is a
       #                                      measurement rather than a fixture.
+      #   verify-state-read-echoes-config    every fleet category echoes the
+      #                                      agent's frozen configuration, and
+      #                                      `unstartedAgents` is distinct from
+      #                                      standby. A state read that omits a
+      #                                      field fails silently — the caller
+      #                                      gets a well-formed response with
+      #                                      less in it than it should have. It
+      #                                      PRODUCES every category before
+      #                                      asserting on it (a completeness
+      #                                      check over an empty list passes
+      #                                      vacuously) and then MUTATES the
+      #                                      compiled daemon to prove its own
+      #                                      assertions can go red. It also
+      #                                      spawns a real daemon and drives the
+      #                                      real CLI and MCP server against the
+      #                                      herdr shim.
       #
       # And one for restart survival, which until now had exactly ONE
       # assertion anywhere in this suite — in the live half, which CI cannot
@@ -175,6 +190,7 @@ jobs:
             verify-prompt-is-not-a-template
             verify-callers-directory
             verify-daemon-provenance
+            verify-state-read-echoes-config
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

@@ -44,6 +44,148 @@ import { BuildSnapshot, buildProvenanceReport } from './provenance.js';
 type Respond = (msg: any) => void;
 
 /**
+ * WHAT AN AGENT IS, ECHOED BACK — the durable half of every state read.
+ *
+ * THE PROBLEM THIS FIELD IS THE ANSWER TO. A consumer reconciling desired
+ * state against ours has to diff against what CrabCast believes each agent's
+ * configuration is — priority, the gate flags, launcher, prompt, MCP servers —
+ * not merely whether it is alive. Without that it has to keep a shadow copy of
+ * what it asked for, and then the two can disagree with no way to tell which is
+ * right: the drift detector becomes the drift. The values were already written
+ * on every record and read back by nothing.
+ *
+ * VERBATIM FROM THE RECORD, and that word is load-bearing. Nothing here is
+ * re-derived from live config, from the launcher table, or from the census —
+ * every one of those would be a second copy of a rule, and the second copy is
+ * the one that is wrong after somebody reconfigures. `config` is the object
+ * `configure` accepted, echoed as it was frozen.
+ *
+ * WHY THE ECHO IS HONEST ABOUT A RUNNING AGENT, which is the part worth
+ * reviewing: the echoed block claims to describe what the agent is ACTUALLY
+ * running with, and that can only diverge from what was last requested if a
+ * spawn-time attribute changed under a live agent. `configure` refuses exactly
+ * that. So for a running agent the echoed config IS the running config, and for
+ * a stopped one it is what the next `activate` will use. Both honest, and
+ * distinguishable by the liveness the read already carries.
+ */
+interface ConfigEcho {
+  /**
+   * `configure`'s argument list, exactly as it was frozen onto the record.
+   *
+   * `null` — explicitly, never omitted — when no record backs this row at all.
+   * Over JSON an absent field reads as "not answered", and this is answered:
+   * there is nothing to echo. It is the one honest way to say "not configured"
+   * without inventing a configuration, and it is why every consumer of this
+   * block has to handle null rather than assuming a shape.
+   */
+  config: AgentConfig | null;
+  /** {@link AgentIntent.configVersion} — the compare-and-set token. Null with `config`. */
+  configVersion: number | null;
+  /** When that version was frozen. Null on a pre-field row, and with `config`. */
+  configuredAt: string | null;
+  /**
+   * Whether activating this agent RESUMES a conversation or starts a fresh
+   * one. See {@link AgentIntent.everActivated}: it is the behavioural
+   * difference between `unstartedAgents` and `standbyAgents`, and it is on
+   * every row rather than only on those two because it is a fact about the
+   * agent rather than about the list it happens to be in.
+   */
+  everActivated: boolean;
+}
+
+/**
+ * The fleet category an agent is in, derived in ONE place.
+ *
+ * `agent_status` and `list_agents` answer the same question about the same
+ * agent, and two derivations of that could disagree — which is precisely the
+ * failure a reconciler cannot survive, since it would see a row in one category
+ * and a different verdict from the other read. So both call
+ * {@link MessageRouter.stateOf}, and the verify script asserts the two agree
+ * for every state.
+ */
+type AgentState =
+  /** Live, by the single ownership test. */
+  | 'running'
+  /** The record says activated; the census has no such agent. A loss. */
+  | 'missing'
+  /** Stood down to make room for something else. A debt. */
+  | 'preempted'
+  /** Stood down, and it has run before: activating it resumes. */
+  | 'standby'
+  /** Configured and NEVER activated: activating it starts fresh. */
+  | 'unstarted'
+  /** No record at all. Not an agent; nothing to echo. */
+  | 'unconfigured'
+  /**
+   * A record that has run, and a census that did not answer.
+   *
+   * Every other state below `running` is a claim that the agent is NOT
+   * running, and only a census that answered can support one. Saying `missing`
+   * because herdr was down would hand a reconciler "your agent died" as the
+   * report of our own outage. `unstarted` is the one that stands without a
+   * census, because a record that never carried an activation has no
+   * activation for the census to be stale about.
+   */
+  | 'unknown';
+
+/**
+ * Which fields of a state read came from the durable record, which were
+ * observed live, and which are computed from the identity.
+ *
+ * SAID IN THE RESPONSE RATHER THAN ONLY IN THE DOCS, because conflating the
+ * two is exactly the ambiguity the config echo exists to remove. `paneId` is
+ * the sharpest case: it is not on the durable record at all — herdr pane ids
+ * are positions in a list that compacts, so every one reported here is read
+ * live from the census that answered this call, and a consumer that stored one
+ * as though it were configuration would be holding a value that goes stale when
+ * an unrelated pane closes.
+ *
+ * The three buckets are exhaustive over every key any row carries, and the
+ * verify script asserts that — a field added later without being classified
+ * fails the check rather than quietly joining whichever bucket a reader
+ * assumes. That is the whole reason this is data rather than prose.
+ */
+const STATE_READ_PROVENANCE = {
+  /**
+   * Read from the append-only registry. Survives a daemon restart unchanged,
+   * because it never lived in memory in the first place.
+   *
+   * One caveat stated rather than left to be discovered: on a row whose
+   * `configured` is `false` there is no record, so `config` is null and the
+   * loose gate flags are the SAFE READING of an unknown rather than anybody's
+   * configuration. A row with `config: null` is the one row here that is not
+   * echoing anything.
+   */
+  durable: [
+    'path', 'config', 'configVersion', 'configuredAt', 'everActivated', 'configured',
+    'label', 'refusable', 'chargeable', 'preemptable', 'launcher', 'priority',
+    'since', 'at', 'wasPreempted', 'by', 'derivation', 'herdrStatusWhenPreempted',
+    'occupiedAgent'
+  ],
+  /**
+   * Read live, from the census or the session that answered THIS call. True
+   * when it was read and not one moment longer.
+   *
+   * `paneId` is the one to look at: it is deliberately NOT on the durable
+   * record, because herdr pane ids are positions in a list that compacts
+   * whenever any pane anywhere closes. A consumer that stored one as though it
+   * were configuration would hold a value that goes stale when an unrelated
+   * agent finishes.
+   */
+  observed: [
+    'paneId', 'herdrStatus', 'agentRuntime', 'status', 'sessionId', 'createdAt',
+    'sessionless', 'workDir'
+  ],
+  /**
+   * Computed by this daemon from the two above. Never stored and never read off
+   * a pane: `paneName` is a pure function of the path, `state` and `occupies`
+   * join the record against the census, and `reason` is the sentence that
+   * explains the result.
+   */
+  derived: ['paneName', 'state', 'occupies', 'reason']
+} as const;
+
+/**
  * One row of `list_agents`. Two kinds of entry share this shape, and the
  * difference between them is the point of the field that names it:
  *
@@ -57,8 +199,16 @@ type Respond = (msg: any) => void;
  * Nulls are explicit rather than omitted: over JSON an absent field reads as
  * "not answered", and these are answered — with nothing.
  */
-interface ListedAgent {
+interface ListedAgent extends ConfigEcho {
   sessionless: boolean;
+  /** Which category this row would appear in. See {@link AgentState}. */
+  state: AgentState;
+  /**
+   * Whether a durable record backs this row. `false` means `config` is null
+   * and the gate flags below are the safe reading of an unknown rather than
+   * anybody's configuration.
+   */
+  configured: boolean;
   /** The canonical directory this agent is. The address; nothing else is. */
   path: string;
   /** The opaque herdr token for that path. Nothing parses it back out. */
@@ -100,7 +250,7 @@ interface ListedAgent {
  * it cannot act on, but silently dropping it would repeat the mistake the
  * census exists to fix.
  */
-interface UnbackedPane {
+interface UnbackedPane extends ConfigEcho {
   paneName: string;
   paneId: string | null;
   path: string;
@@ -133,6 +283,19 @@ interface ForeignPane {
   occupies: string | null;
   herdrStatus: HerdrAgentStatus;
   agentRuntime: string | null;
+  /**
+   * OUR agent for the directory this pane is sitting in — its configuration,
+   * version and state — or null when it occupies nothing we hold a record for.
+   *
+   * NAMED THIS WAY ON PURPOSE, and it is the one place on this response where
+   * the config echo could be misread. A foreign pane is not ours: it has no
+   * CrabCast configuration, and putting a bare `config` on this row would say
+   * it did. What the block describes is the agent this pane is BLOCKING — the
+   * one whose `activate` will be refused until the pane is gone — which is the
+   * thing a reader of this row actually needs, and the nesting is what keeps
+   * the two from being confused.
+   */
+  occupiedAgent: (ConfigEcho & { path: string; state: AgentState }) | null;
 }
 
 /**
@@ -212,7 +375,7 @@ function invalidFlag(name: string, value: unknown): string | null {
  * it that herdr cannot show is a loss, reported on every `list_agents` poll
  * rather than written to a log.
  */
-interface MissingAgent {
+interface MissingAgent extends ConfigEcho {
   path: string;
   paneName: string;
   label: string | null;
@@ -231,15 +394,25 @@ interface MissingAgent {
  *
  *   - {@link MissingAgent}    — recorded active, absent anyway. A loss.
  *   - preempted (see below)   — stood down so something else could run. A debt.
- *   - StandbyAgent            — stood down because a person said so.
+ *   - StandbyAgent            — stood down, and it HAS run.
+ *   - {@link UnstartedAgent}  — configured, and it has never run.
  *
- * The three are disjoint on purpose, so no agent grows two switches.
+ * The four are disjoint on purpose, so no agent grows two switches.
  *
  * Only agents whose directory still exists are offered: a directory the caller
  * has since deleted is the evidence that "turn this back on" is not what
  * anyone means by it.
+ *
+ * THE MEMBERSHIP TEST IS NOT "last event is `deactivated`", and the difference
+ * is what keeps this list's own promise true. Reconfiguring a stopped agent
+ * writes a `configured` row, so an agent that ran, was switched off and was
+ * then reconfigured has `configured` as its last event while its conversation
+ * is still on disk. Testing the event alone would drop it out of every category
+ * — a silent hole — or, if `unstartedAgents` claimed it on the event, would put
+ * it in the list that promises a FRESH start. So membership is: not running,
+ * not preempted, directory present, and {@link AgentIntent.everActivated}.
  */
-interface StandbyAgent {
+interface StandbyAgent extends ConfigEcho {
   path: string;
   paneName: string;
   label: string | null;
@@ -254,6 +427,42 @@ interface StandbyAgent {
    * reading why it is off does not.
    */
   wasPreempted?: boolean;
+  reason: string;
+}
+
+/**
+ * An agent that exists and has never run: `configure` accepted, `activate`
+ * never called.
+ *
+ * WHY THIS IS ITS OWN CATEGORY AND NOT PART OF STANDBY, which is the whole of
+ * the question this shape answers. The distinction is BEHAVIOURAL rather than
+ * taxonomic: switching a standby agent back on **resumes the conversation it
+ * was stopped in**, and every standby row says so in as many words. An agent
+ * that has never run has no conversation, so activating it starts a fresh one —
+ * `claude --continue` finds nothing and falls through to the cold command.
+ * Folding the two together does not merely blur a label; it makes the standby
+ * list's own promise false for half its members.
+ *
+ * Before this category existed those rows belonged to NO list. `standbyAgents`
+ * filtered on a `deactivated` event, so a `configured`-last row fell through
+ * every category — configured, real, activatable, and invisible to any client
+ * building its controls from this response.
+ *
+ * THE NAME. The design left the distinction settled and the word open. This is
+ * `unstartedAgents` because `unstarted` is already the word this daemon uses
+ * for the state — `deactivate` on a never-run agent has answered
+ * `state: 'unstarted'` since the verb existed, and `agent_status` reports the
+ * same string. A second word for a state the API already names would mean two
+ * vocabularies for one fact, and the one already on the wire wins.
+ */
+interface UnstartedAgent extends ConfigEcho {
+  path: string;
+  paneName: string;
+  label: string | null;
+  /** Which launcher it will run when it is first activated. */
+  launcher: string;
+  /** When it was configured. This category has no later event to report. */
+  since: string;
   reason: string;
 }
 
@@ -673,6 +882,60 @@ function parseAgentConfig(data: any): ConfigParse {
   };
 }
 
+/**
+ * The durable half of a state read, from the intent that holds it.
+ *
+ * ONE FUNCTION, EVERY CATEGORY. The failure this task exists to prevent is a
+ * category that silently omits the attributes, and the structural defence
+ * against it is that no category builds this block itself — a new list gets the
+ * echo by calling this, and a list that forgot to call it has a `config` field
+ * missing rather than a plausible-looking row.
+ *
+ * `undefined` in, "there is no record" out, as explicit nulls: see
+ * {@link ConfigEcho.config}.
+ */
+function configEcho(intent: AgentIntent | undefined): ConfigEcho {
+  // EVERY FIELD HERE COMES FROM THE RECORD AND NOTHING ELSE. That is what the
+  // provenance legend promises about this block, and it has to be true field by
+  // field rather than mostly.
+  //
+  // THIS USED TO BE `Boolean(intent?.everActivated) || live`, and that was a
+  // real defect rather than a shortcut. The argument for it was that a row
+  // reading `state: 'running'` beside `everActivated: false` looks
+  // contradictory — but the two are answers to different questions, and mixing
+  // them broke the one this block exists to keep clean. A `configured`-last
+  // record over a live pane (reachable: a durable write that failed after an
+  // activation leaves exactly that, and this daemon says so at
+  // `handleDeactivateAgent`) then read back `everActivated: true` from a record
+  // that says otherwise — a field the legend calls DURABLE, changing with
+  // liveness, and reverting the moment the pane went away. A supervisor would
+  // see the agent move into `unstartedAgents`, whose CLI line says it has never
+  // run, while it holds a conversation.
+  //
+  // The honest reading is the record's: `everActivated` means CRABCAST'S OWN
+  // LOG SHOWS AN ACTIVATION AT THIS PATH. `false` beside `state: 'running'` is
+  // not a contradiction, it is the record being behind — which is a real state
+  // with a real name (`recordReconciled`, T5) and a real repair, and hiding it
+  // behind an `||` removed the only signal that it had happened.
+  //
+  // The case the `||` was reaching for is answered properly instead: the
+  // activate paths build this block AFTER the record is written, so what they
+  // echo is a record that genuinely carries the activation. See handleActivate.
+  if (!intent) {
+    return { config: null, configVersion: null, configuredAt: null, everActivated: false };
+  }
+  return {
+    // The frozen object itself, not a rebuild of it. A field-by-field copy here
+    // would be a second place that has to learn about every attribute
+    // `configure` grows, and the day it did not is the day the echo starts
+    // lying by omission.
+    config: intent.record.config,
+    configVersion: intent.configVersion,
+    configuredAt: intent.configuredAt,
+    everActivated: intent.everActivated
+  };
+}
+
 export class MessageRouter {
   private activePtyListeners = new Map<string, () => void>();
 
@@ -912,6 +1175,11 @@ export class MessageRouter {
           path: agentPath,
           refused: 'running',
           applied: [],
+          // UNCHANGED, and said so: a refusal applies nothing, so the token a
+          // caller holds is still current. Reporting it here is what lets a
+          // reconciler tell "my write was rejected" from "my view is stale".
+          configVersion: existing.configVersion,
+          config: existing.record.config,
           ...(occupancy.reachable && occupancy.ours
             ? { paneId: occupancy.ours.paneId }
             : {})
@@ -920,7 +1188,24 @@ export class MessageRouter {
       return;
     }
 
-    const record: AgentRecord = { path: agentPath, config: parsed.config };
+    // MONOTONIC PER PATH, minted here because this is the only verb that
+    // accepts a configuration. `activate` and `deactivate` carry the record
+    // forward unchanged, so the version moves when — and only when — the
+    // configuration does, which is what makes it usable as a compare-and-set
+    // token by a caller reconciling desired state against ours.
+    //
+    // It counts ACCEPTED configures, not distinct ones: re-freezing identical
+    // knobs still bumps it, because "was this call accepted" is the question
+    // this verb answers today. Whether an identical restatement should be a
+    // no-op is the idempotence slice's question, and answering it here would
+    // decide it in the wrong PR.
+    const configuredAt = new Date().toISOString();
+    const record: AgentRecord = {
+      path: agentPath,
+      config: parsed.config,
+      configVersion: (existing?.configVersion ?? 0) + 1,
+      configuredAt
+    };
 
     const durable = this.surfaceRegistryOutcome(
       this.deps.agentRegistry.recordConfigured(record),
@@ -933,7 +1218,9 @@ export class MessageRouter {
       action: 'agent_configured_event',
       success: true,
       path: agentPath,
-      config: parsed.config
+      config: parsed.config,
+      configVersion: record.configVersion,
+      configuredAt
     });
 
     // WHAT ACTIVATION WILL WRITE INTO THE CALLER'S DIRECTORY, said now.
@@ -953,7 +1240,15 @@ export class MessageRouter {
       path: agentPath,
       paneName: paneNameFor(agentPath),
       config: parsed.config,
+      // Answered by the call that minted it, so a caller learns the token
+      // without a follow-up read — which is the difference between a
+      // compare-and-set it can perform and one it has to poll for.
+      configVersion: record.configVersion,
+      configuredAt,
       reconfigured: Boolean(existing),
+      // Carried on the reconfigure path so a caller can see the token move,
+      // and so a refusal (the next slice's) has a value to report unchanged.
+      ...(existing ? { previousConfigVersion: existing.configVersion } : {}),
       willWrite: willWrite.length
         ? [
             {
@@ -1702,7 +1997,15 @@ export class MessageRouter {
       // this, so the steady-state no-op writes nothing at all — the repair
       // costs a row only on the call that actually needed it.
       const recordWasBehind = intent.event !== 'activated';
-      const durable = this.rememberActivated({ path: agentPath, config });
+      // `intent.record`, NOT a rebuilt `{path, config}`, and the difference is
+      // only visible once both slices are in the tree. The record also carries
+      // `configVersion` and `configuredAt`; rebuilding it from the two fields
+      // this branch happens to have named drops them, and `intents()`
+      // normalizes an absent version to 1 — so the call whose whole job is
+      // REPAIRING the record would silently reset the compare-and-set token a
+      // reconciler diffs on, on an agent that had been configured seven times.
+      // A converging write that loses a field is not a repair.
+      const durable = this.rememberActivated(intent.record);
 
       // THE SECOND QUESTION, ASKED SEPARATELY (KAN-136). `occupancy.ours`
       // answers "is this pane ours"; it says nothing about whether THIS daemon
@@ -1784,6 +2087,19 @@ export class MessageRouter {
         status: session.status,
         createdAt: session.createdAt.toISOString(),
         verified: true,
+        // An idempotent activation is the ordinary state of a reconciling
+        // caller, and it is the read it makes most often — so it carries the
+        // same echo the spawning branch does rather than being the one answer
+        // that says less.
+        //
+        // FROM A RECORD RE-READ AFTER THE CONVERGING WRITE ABOVE, not from the
+        // intent this handler opened with. A response describes the world it
+        // leaves behind, and `rememberActivated` has just run — so re-reading
+        // is how `everActivated` can be `true` here while remaining a purely
+        // durable fact. Inferring it from liveness instead was the defect this
+        // replaces: it made a field the legend calls durable change with the
+        // census and revert on restart.
+        ...configEcho(this.deps.agentRegistry.intents().get(agentPath)),
         // Present only when THIS call took the terminal back — the agent was
         // running and unreachable, and now is not. Silent on the steady-state
         // no-op, where the session was already ours.
@@ -1936,7 +2252,14 @@ export class MessageRouter {
     //
     // The pane id comes from the census that PROVED the agent is there, which
     // is what makes it a binding rather than a guess.
-    const durable = this.rememberActivated({ path: agentPath, config });
+    //
+    // `intent.record` rather than a rebuilt `{path, config}`: the record also
+    // carries `configVersion` and `configuredAt`, and rebuilding it from the
+    // two fields this handler happens to have named would drop them — the
+    // activation would then write a row whose version had silently reset,
+    // which is exactly the compare-and-set-goes-backwards failure the field
+    // exists to avoid.
+    const durable = this.rememberActivated(intent.record);
 
     this.deps.broadcast({
       action: 'agent_activated_event',
@@ -1964,6 +2287,16 @@ export class MessageRouter {
       createdAt: session.createdAt.toISOString(),
       priority: config.priority,
       launcher: config.launcher,
+      // The whole record, on the response that started it. A caller that
+      // activates and then reads back should find the same values, and saying
+      // them here is what lets it check that without a second call.
+      //
+      // RE-READ AFTER `rememberActivated`, for the reason spelled out on the
+      // already-running branch: this is a durable field, so it is answered from
+      // the durable record as it stands once this call's write has landed. If
+      // that write failed, this correctly still reads `false` — and `durable:
+      // false` below says why, which is better than a `true` nothing backs.
+      ...configEcho(this.deps.agentRegistry.intents().get(agentPath)),
       // Not decoration: it is the difference between this response and the
       // KAN-23 false success. `true` means the agent was found in herdr's
       // census before this was sent, and success is never reported without it.
@@ -2180,7 +2513,15 @@ export class MessageRouter {
     // does not, the record is stale and the pane is what is real, so this
     // falls through to the close path below rather than reporting a state it
     // has not checked.
-    if (intent.event === 'configured' && !oursIsLive) {
+    //
+    // `everActivated`, not the event alone. A `configured`-last row is not
+    // proof of a never-run agent: reconfiguring a STOPPED agent writes one, and
+    // that agent has a conversation on disk. Answering `unstarted` for it would
+    // put the same word on two agents that behave differently on their next
+    // activation — one starts fresh, one resumes — which is the distinction
+    // this word exists to draw. Such a row falls through and is answered
+    // `standby`, which is what it is.
+    if (intent.event === 'configured' && !intent.everActivated && !oursIsLive) {
       respond({
         action: 'deactivate_response',
         success: true,
@@ -2330,6 +2671,20 @@ export class MessageRouter {
    * degrades to herdr's own view (`sessionless: true`) rather than failing —
    * an agent that outlived its daemon is exactly the one a supervisor most
    * needs to inspect.
+   *
+   * IT SUCCEEDS FOR AN AGENT THAT IS NOT RUNNING, and that is a change worth
+   * naming. It used to answer `success: false` whenever herdr had no pane —
+   * true of every configured-and-stopped agent — with the record squeezed onto
+   * the failure branch as two fields. For a caller diffing desired state
+   * against ours that is the partial read this whole surface exists to remove:
+   * `success: false` means "the read failed", so a stopped agent's
+   * configuration was unreadable through the one verb that addresses ONE agent.
+   *
+   * The rule now: **a record is an answer.** `success` is about whether the
+   * question could be answered, not about whether the agent is up — liveness is
+   * what `state`, `sessionless` and `herdrStatus` are for. Only a path with
+   * neither a record nor a pane is a failure, and only that one means the
+   * caller mistyped.
    */
   private handleAgentStatus(data: any, respond: Respond) {
     const fail = (error: string, extra: Record<string, unknown> = {}) =>
@@ -2343,53 +2698,183 @@ export class MessageRouter {
     const agentPath = address.path;
     const intent = this.deps.agentRegistry.intents().get(agentPath);
 
-    try {
-      const session = this.deps.herdrBridge.getSessionByPath(agentPath);
-      if (session) {
-        const statuses = this.deps.herdrBridge.listHerdrStatuses();
-        respond({
-          action: 'agent_status_response',
-          success: true,
-          sessionless: false,
-          path: agentPath,
-          paneName: session.paneName,
-          paneId: this.deps.herdrBridge.paneIdFor(session.paneName),
-          sessionId: session.sessionId,
-          createdAt: session.createdAt.toISOString(),
-          status: session.status,
-          herdrStatus: statuses.get(session.paneName) ?? 'unknown',
-          label: intent?.record.config.label ?? null,
-          configured: Boolean(intent)
-        });
-        return;
-      }
+    // ONE census read for this whole answer, and the same one the fleet list
+    // uses — `state` here and the category there must be derived from the same
+    // evidence or the two reads can disagree about the same agent.
+    const census = this.deps.herdrBridge.listHerdrAgentsChecked();
+    // THE single ownership test, asked here exactly as the fleet list asks it.
+    // With no record there is no launcher to judge by, and `ourPaneIn` then
+    // takes the strict reading (a runtime is required), which is the safe one:
+    // a bare pane nobody configured is not an agent.
+    const ours = ourPaneIn(census, agentPath, intent?.record.config.launcher);
+    const state = this.stateOf(intent, ours !== null, census.reachable);
 
-      const described = this.deps.herdrBridge.describeAgent(agentPath);
+    const session = this.deps.herdrBridge.getSessionByPath(agentPath);
+    // The record, and only the record. `ours` decides `state` — an observed
+    // field — and must not reach the echo: that mixing is what made a durable
+    // field change with the census.
+    const echo = configEcho(intent);
+
+    if (session) {
+      // From the census this handler already took, rather than a second read.
+      // Two reads of herdr can disagree, and `state` above and `herdrStatus`
+      // here would then be two answers about the same pane at two moments —
+      // which is exactly the ambiguity a caller diffing against us cannot
+      // resolve. It also drops a subprocess from every status call.
+      const pane = census.agents.find((a) => a.name === session.paneName);
       respond({
         action: 'agent_status_response',
         success: true,
-        sessionless: true,
+        sessionless: false,
         path: agentPath,
-        paneName: described.paneName,
-        paneId: described.paneId,
-        sessionId: null,
-        createdAt: null,
-        status: null,
-        workDir: described.workDir,
-        herdrStatus: described.herdrStatus,
+        paneName: session.paneName,
+        paneId: pane?.paneId ?? null,
+        sessionId: session.sessionId,
+        createdAt: session.createdAt.toISOString(),
+        status: session.status,
+        herdrStatus: pane?.herdrStatus ?? 'unknown',
         label: intent?.record.config.label ?? null,
-        configured: Boolean(intent)
-      });
-    } catch (err: any) {
-      // The record is reported even when herdr has nothing, because "this
-      // agent is configured and not running" and "there is no such agent" are
-      // different answers and only one of them means the caller mistyped.
-      fail(err?.message ?? String(err), {
-        path: agentPath,
         configured: Boolean(intent),
-        ...(intent ? { state: intent.event === 'configured' ? 'unstarted' : intent.event } : {})
+        state,
+        ...echo,
+        provenance: this.provenance(census)
       });
+      return;
     }
+
+    // No session of ours. herdr may still have the pane — every agent that
+    // outlived a daemon restart is in exactly this state — so the census is
+    // consulted for it, and answers with nothing when there is nothing.
+    //
+    // FROM THE CENSUS RATHER THAN A SECOND `agent get`, which is what this used
+    // to do. The census is the read the fleet list uses, so a status and a list
+    // taken together now describe one moment rather than two, and this handler
+    // makes exactly one herdr call whatever branch it takes.
+    const paneName = paneNameFor(agentPath);
+    const pane = census.agents.find((a) => a.name === paneName) ?? null;
+
+    if (!intent && !pane) {
+      // Neither a record nor a pane. This is the one answer that means the
+      // caller is asking about something that does not exist — and it is said
+      // differently when herdr could not be asked, because "there is no such
+      // agent" and "I could not look" are not the same answer.
+      fail(
+        census.reachable
+          ? `No agent is configured at '${agentPath}' and herdr has no pane named ` +
+            `'${paneName}'. Nothing here has ever been an agent.`
+          : `No agent is configured at '${agentPath}', and herdr did not answer, so whether ` +
+            `a pane is running there could not be checked. An empty census from an ` +
+            `unreachable herdr is silence, not evidence.`,
+        {
+          path: agentPath,
+          paneName,
+          configured: false,
+          state: 'unconfigured' as AgentState,
+          ...echo,
+          provenance: this.provenance(census)
+        }
+      );
+      return;
+    }
+
+    respond({
+      action: 'agent_status_response',
+      success: true,
+      sessionless: true,
+      path: agentPath,
+      paneName,
+      paneId: pane?.paneId ?? null,
+      sessionId: null,
+      createdAt: null,
+      status: null,
+      workDir: pane?.workDir ?? null,
+      herdrStatus: pane?.herdrStatus ?? 'unknown',
+      label: intent?.record.config.label ?? null,
+      configured: Boolean(intent),
+      state,
+      ...echo,
+      provenance: this.provenance(census)
+    });
+  }
+
+  /**
+   * Which category an agent is in — the ONE derivation, shared by the
+   * single-agent read and the fleet list.
+   *
+   * Two derivations of the same question could disagree, and a caller that saw
+   * a row in `standbyAgents` and a `state` of `unstarted` for the same path
+   * would have no way to decide which to believe. So there is one, and the
+   * verify script asserts the two surfaces agree for every state.
+   */
+  private stateOf(
+    intent: AgentIntent | undefined,
+    live: boolean,
+    /**
+     * Whether the census that decided `live` actually answered. Defaults to
+     * true for the callers that only ever ask about a pane they can already
+     * see — a row in `agents` is live by having been found.
+     */
+    censusReachable = true
+  ): AgentState {
+    if (live) return 'running';
+    if (!intent) return 'unconfigured';
+
+    // AN UNREACHABLE herdr DOES NOT MAKE AN AGENT MISSING. Every category
+    // below except one is a claim that the agent is NOT running, and the only
+    // thing that can support that claim is a census that answered. Reporting
+    // `missing` off an empty census from a herdr that never replied is the
+    // check rendering its own failure as a finding — and this one would reach a
+    // reconciler as "the agent you are supervising has died".
+    //
+    // The exception is the same one `deactivate` already draws: a record that
+    // has NEVER carried an activation has no activation for the census to be
+    // stale about, so `unstarted` stands without one.
+    if (!censusReachable && intent.everActivated) return 'unknown';
+
+    if (intent.event === 'activated') return 'missing';
+    if (intent.event === 'deactivated' && (intent.preemption || intent.wasPreempted)) {
+      return 'preempted';
+    }
+    // Not the event: an agent that ran, stopped and was then reconfigured has
+    // `configured` as its last event and a conversation on disk. See
+    // {@link UnstartedAgent}.
+    return intent.everActivated ? 'standby' : 'unstarted';
+  }
+
+  /**
+   * The legend that says which fields of this response are durable, which were
+   * observed just now, and which this daemon computed.
+   *
+   * On the response rather than only in the docs, because conflating durable
+   * state with a live observation is precisely the ambiguity the config echo
+   * exists to remove — and `paneId` is a value that a consumer would otherwise
+   * quite reasonably store.
+   *
+   * NOT THE SAME PROVENANCE AS `provenance.ts`, and the two are worth telling
+   * apart because they arrived within an hour of each other. That module
+   * answers "which BUILD is this daemon running", on `daemon_status` as
+   * `build` and `freshness`. This answers "where did each FIELD of this agent's
+   * state come from", on `agent_status` and `list_agents`. Different question,
+   * different response, no shared field name on the wire.
+   */
+  private provenance(census: HerdrCensus) {
+    return {
+      ...STATE_READ_PROVENANCE,
+      /** When the census behind every `observed` field answered. */
+      observedAt: new Date().toISOString(),
+      /**
+       * Whether herdr answered at all. `false` means every `observed` field is
+       * this daemon's last resort rather than a reading — an empty census from
+       * an unreachable herdr is silence, not evidence, and a reader must not
+       * take an absent pane as proof the agent is down.
+       */
+      censusReachable: census.reachable,
+      note:
+        'durable fields come from the append-only agent registry and survive a daemon ' +
+        'restart unchanged; observed fields were read from herdr for THIS response and ' +
+        'are true as of observedAt; derived fields are computed from the two. paneId is ' +
+        'observed, never durable — herdr pane ids are positions in a list that compacts.'
+    };
   }
 
   /**
@@ -2418,7 +2903,8 @@ export class MessageRouter {
     // mid-response to make the categories contradict each other.
     const intents = this.deps.agentRegistry.intents();
 
-    const { agents, unbackedPanes, foreignPanes, staleSessions } = this.surveyAgents(intents);
+    const { agents, unbackedPanes, foreignPanes, staleSessions, census } =
+      this.surveyAgents(intents);
 
     // Agents that should be here and are not. Computed from the same census the
     // list is built from, so the two can never disagree about what is running.
@@ -2436,6 +2922,10 @@ export class MessageRouter {
     // Agents a person switched off. From the same census for the same reason:
     // an agent that is running must never be offered an On button.
     const { standby, total: standbyTotal } = this.standbyAgents(agents, intents);
+
+    // Agents that exist and have never run. Same census, same reason: an agent
+    // that is running must never be offered as one that has yet to start.
+    const { unstarted, total: unstartedTotal } = this.unstartedAgents(agents, intents);
 
     const foreign = clipFleetCategory(foreignPanes, (row) => row.paneName);
 
@@ -2472,6 +2962,17 @@ export class MessageRouter {
       // Where a fleet client's On button gets its candidates.
       standbyAgents: standby,
       standbyTotal,
+      // Agents that exist and have NEVER run — the fifth answer to "not
+      // running", and the one that used to belong to no list at all. Kept
+      // separate from standby because the difference is behavioural: switching
+      // a standby agent on resumes the conversation it was stopped in, and
+      // these have no conversation to resume. Always present, even when empty,
+      // for the same reason `missingAgents` is.
+      unstartedAgents: unstarted,
+      unstartedTotal,
+      // Which fields above are durable, which were observed just now, and
+      // which this daemon computed. See MessageRouter.provenance.
+      provenance: this.provenance(census),
       capacity: capacityDto(capacity),
       // What each running agent is worth, and therefore what a would-be
       // activation would have to outrank. "There is no room" and "there is no
@@ -2556,15 +3057,22 @@ export class MessageRouter {
    */
   private preemptedAgents(agents: ListedAgent[], sharedIntents?: Map<string, AgentIntent>) {
     const alive = new Set(agents.map((a) => a.path));
-    const preempted = sharedIntents
-      ? AgentRegistry.preemptedFrom(sharedIntents)
-      : this.deps.agentRegistry.preempted();
+    // The intent map rather than the derived list alone, so the echo below
+    // comes from `configEcho` like every other category's. A second place that
+    // assembles the block by hand is a second place that can be left behind
+    // when `configure` grows a knob.
+    const intents = sharedIntents ?? this.deps.agentRegistry.intents();
+    const preempted = AgentRegistry.preemptedFrom(intents);
     return preempted
       .filter((entry) => !alive.has(entry.path))
       .map((entry) => ({
         path: entry.path,
         paneName: paneNameFor(entry.path),
         label: entry.record.config.label ?? null,
+        // The frozen configuration, on the category a caller is most likely to
+        // act on: deciding whether to re-staff preempted work means knowing
+        // what it would come back as, and what it would have to outrank.
+        ...configEcho(intents.get(entry.path)),
         at: entry.at,
         priority: entry.preemption.priority,
         herdrStatusWhenPreempted: entry.preemption.herdrStatus,
@@ -2609,6 +3117,10 @@ export class MessageRouter {
         path: agentPath,
         paneName: paneNameFor(agentPath),
         label: intent.record.config.label ?? null,
+        // A loss is the row a supervisor most needs the configuration on: the
+        // decision it prompts is "re-activate this or stand it down", and both
+        // halves of that need to know what would come back.
+        ...configEcho(intent),
         since: intent.at,
         // Both cases are "not running", but they are not the same event and a
         // reader acting on this deserves the difference: an agent that never
@@ -2653,7 +3165,13 @@ export class MessageRouter {
     const standby: StandbyAgent[] = [];
 
     for (const [agentPath, intent] of sharedIntents ?? this.deps.agentRegistry.intents()) {
-      if (intent.event !== 'deactivated') continue;
+      // NOT `event === 'deactivated'`. A stopped agent that was then
+      // reconfigured has `configured` as its last event and a conversation on
+      // disk, and testing the event alone dropped it out of every category.
+      // What decides this list is whether the agent has ever run — see
+      // {@link StandbyAgent}.
+      if (intent.event === 'activated') continue;
+      if (!intent.everActivated) continue;
       if (intent.preemption) continue;
       if (alive.has(agentPath)) continue;
       if (!fs.existsSync(agentPath)) continue;
@@ -2663,6 +3181,7 @@ export class MessageRouter {
         paneName: paneNameFor(agentPath),
         label: intent.record.config.label ?? null,
         launcher: intent.record.config.launcher,
+        ...configEcho(intent),
         since: intent.at,
         // Set on a row that reached this list through compaction dropping a
         // preemption annotation, so a client can tell the two apart and the
@@ -2680,6 +3199,62 @@ export class MessageRouter {
 
     const clipped = clipFleetCategory(standby, (row) => row.since);
     return { standby: clipped.rows, total: clipped.total };
+  }
+
+  /**
+   * Agents that exist and have never run.
+   *
+   * THE CATEGORY THAT USED TO BE NO CATEGORY. `standbyAgents` filters on a
+   * `deactivated` event, so a `configured`-last row matched nothing and fell
+   * out of the response entirely — configured, activatable, and invisible to
+   * any client building its controls from this list. That is the same class of
+   * failure as a silently-clipped list, one level up: not "we showed you 25 of
+   * 40" but "we showed you none of these and said nothing".
+   *
+   * IT IS NOT STANDBY, and the reason is behavioural rather than taxonomic.
+   * Every standby row promises that switching it back on "resumes the
+   * conversation it was stopped in", and `claude --continue` makes that true.
+   * An agent that has never run has nothing to continue, so the same command
+   * falls through to the cold branch and it starts fresh. One list, two
+   * behaviours, and a promise that is false for half its members.
+   *
+   * The same two filters standby applies, for the same reasons: an agent that
+   * is running is never offered as one that has yet to start, and a directory
+   * the caller has deleted is not a thing anyone means to start.
+   */
+  private unstartedAgents(
+    agents: ListedAgent[],
+    sharedIntents?: Map<string, AgentIntent>
+  ): { unstarted: UnstartedAgent[]; total: number } {
+    const alive = new Set(agents.map((a) => a.path));
+    const unstarted: UnstartedAgent[] = [];
+
+    for (const [agentPath, intent] of sharedIntents ?? this.deps.agentRegistry.intents()) {
+      // `everActivated` is the whole test, and it is deliberately not
+      // `event === 'configured'`: an agent that ran, stopped and was
+      // reconfigured has that event and a conversation on disk, and claiming it
+      // starts fresh would be exactly the false promise this category exists to
+      // stop standby from making.
+      if (intent.everActivated) continue;
+      if (alive.has(agentPath)) continue;
+      if (!fs.existsSync(agentPath)) continue;
+
+      unstarted.push({
+        path: agentPath,
+        paneName: paneNameFor(agentPath),
+        label: intent.record.config.label ?? null,
+        launcher: intent.record.config.launcher,
+        ...configEcho(intent),
+        since: intent.at,
+        reason:
+          'Configured and never activated. It has no conversation, so activating it starts ' +
+          'a fresh one with the prompt on its record — unlike a standby agent, where the ' +
+          'same call resumes the conversation it was stopped in.'
+      });
+    }
+
+    const clipped = clipFleetCategory(unstarted, (row) => row.since);
+    return { unstarted: clipped.rows, total: clipped.total };
   }
 
   /**
@@ -2703,6 +3278,18 @@ export class MessageRouter {
     const config = intent?.record.config;
     return {
       sessionless: !session,
+      // Every row this function builds is a LIVE agent — that is what puts it
+      // in `agents` — so its state is `running` unless there is no record at
+      // all to call it ours. Derived through the same function the single-agent
+      // read uses, so the two can never disagree.
+      state: this.stateOf(intent, true),
+      configured: Boolean(intent),
+      // `state: 'running'` beside `everActivated: false` is NOT a contradiction
+      // here: the first is observed, the second is what our log records, and a
+      // row showing both is a record that has fallen behind a live agent. T5's
+      // converging `activate` is the repair, and hiding the disagreement behind
+      // a liveness fallback removed the only signal that it existed.
+      ...configEcho(intent),
       path: agentPath,
       paneName,
       paneId: census?.paneId ?? null,
@@ -2838,13 +3425,37 @@ export class MessageRouter {
         // machine is not news; a running agent in a directory we hold a record
         // for is exactly the thing that will refuse our next activation.
         if (record.agentRuntime) {
+          const occupies = cwd !== null && intents.has(cwd) ? cwd : null;
+          const occupied = occupies ? intents.get(occupies) : undefined;
           foreignPanes.push({
             paneName: record.name,
             paneId: record.paneId,
             workDir: record.workDir,
-            occupies: cwd !== null && intents.has(cwd) ? cwd : null,
+            occupies,
             herdrStatus: record.herdrStatus,
-            agentRuntime: record.agentRuntime
+            agentRuntime: record.agentRuntime,
+            // OUR agent for this directory — the one whose activation this
+            // pane will refuse — rather than a configuration for the pane
+            // itself, which has none. Nested under its own key precisely so
+            // the two cannot be confused: a bare `config` on a foreign row
+            // would read as the stranger's configuration, which we do not
+            // have and could not honestly report.
+            occupiedAgent: occupied
+              ? {
+                  path: occupies!,
+                  // Asked properly rather than assumed `false`: ours and a
+                  // stranger can be live in the SAME directory, which is the
+                  // case this row exists to make visible, and reporting our
+                  // running agent as stopped on the row that reports the
+                  // stranger would be the more misleading of the two answers.
+                  state: this.stateOf(
+                    occupied,
+                    ourPaneIn(census, occupies!, occupied.record.config.launcher) !== null,
+                    census.reachable
+                  ),
+                  ...configEcho(occupied)
+                }
+              : null
           });
         }
         continue;
@@ -2870,6 +3481,11 @@ export class MessageRouter {
         paneId: record.paneId,
         path: agentPath,
         herdrStatus: record.herdrStatus,
+        // This IS one of ours — a registered path whose pane has nothing behind
+        // it — so it carries the echo like every other category. A reader
+        // deciding what to do about an empty pane needs to know what was
+        // supposed to be in it.
+        ...configEcho(intents.get(agentPath)),
         reason:
           'herdr reports no agent running in this pane and this daemon holds no session for it'
       });

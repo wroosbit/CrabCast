@@ -857,16 +857,34 @@ for (const action of ['forget_agent', 'deactivate_agent', 'agent_status']) {
   );
 }
 
-// `success` is false for both of these and says so about herdr, not about the
-// record: neither agent was ever activated, so no pane exists to describe.
-// `configured` and `state` are the record, and the record is the subject here
-// — `agent_status` reports it on the failure branch precisely so that "this
-// agent is configured and not running" stays distinguishable from "there is
-// no such agent" (router.ts).
+// `success` is TRUE, and that changed with the config echo: a record is an
+// answer. `agent_status` used to fail whenever herdr had no pane — true of
+// every configured-and-stopped agent — which made a stopped agent's
+// configuration unreadable through the one verb that addresses a single agent.
+// `success` is now about whether the question could be answered; liveness is
+// what `state` and `herdrStatus` say. Only a path with neither a record nor a
+// pane fails, and only that means the caller mistyped.
+//
+// `configured` and `state` are the record, and the record is the subject here:
+// "this agent is configured and not running" stays distinguishable from "there
+// is no such agent" (router.ts).
 const survived = await raw(rel, 'agent_status', { path: daemonVictim });
 check(
-  survived.configured === true && survived.state === 'unstarted' && survived.path === daemonVictim,
+  survived.success === true &&
+    survived.configured === true && survived.state === 'unstarted' && survived.path === daemonVictim,
   'and the daemon-cwd agent still has its record — no relative request ever landed on it'
+);
+check(
+  survived.config?.launcher === 'shell' && typeof survived.configVersion === 'number',
+  'and the record is ECHOED rather than merely acknowledged: a stopped agent still reads ' +
+    'back its own configuration'
+);
+// The one case that IS a failure, so `success: true` above is a decision
+// rather than a check that cannot fail.
+const neverHeardOf = await raw(rel, 'agent_status', { path: path.join(scratch, 'no-such-agent-here') });
+check(
+  neverHeardOf.success === false && neverHeardOf.state === 'unconfigured',
+  'while a path with neither a record nor a pane still fails — the answer that means you mistyped'
 );
 
 // --- 9b. Every other verb that takes a path. ---------------------------------

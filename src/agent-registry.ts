@@ -111,6 +111,38 @@ export interface AgentRecord {
   path: string;
   /** The whole of `configure`'s argument list, verbatim. */
   config: AgentConfig;
+  /**
+   * Which configuration this is: 1 for the first accepted `configure` on this
+   * path, incremented by every accepted one after it.
+   *
+   * ONE FIELD, THREE JOBS, which is why it earns a place on the record rather
+   * than being derived at read time: it is a cheap compare-and-set token for a
+   * reconciler diffing desired state against ours, the precise subject a
+   * reconfiguration refusal names, and the resync token a caller compares after
+   * a missed event.
+   *
+   * IT MUST BE STORED RATHER THAN COUNTED. Counting `configured` rows in the
+   * log would work until the first compaction, which rewrites the log as one
+   * row per agent and would silently reset every version to 1 — a
+   * compare-and-set token that goes backwards is worse than none.
+   *
+   * OPTIONAL ON THE TYPE, NEVER ABSENT IN PRACTICE. A row written before this
+   * field existed carries no version, and {@link AgentRegistry.intents}
+   * normalizes that to 1 — see {@link AgentIntent.configVersion} for why that
+   * is a reading rather than a fabrication, and why it is deliberately NOT a
+   * log-version bump.
+   */
+  configVersion?: number;
+  /**
+   * When the `configure` that produced {@link configVersion} was accepted.
+   *
+   * Distinct from an intent's `at`, which is the time of the LAST event —
+   * activation, stand-down — and says nothing about when the knobs were frozen.
+   * Absent only on a row written before this field existed, and reported as
+   * `null` there rather than back-filled from a timestamp that means something
+   * else.
+   */
+  configuredAt?: string;
 }
 
 /**
@@ -181,19 +213,34 @@ export interface AgentLogEntry extends AgentRecord {
   /**
    * Whether CrabCast has ever actually RUN an agent at this path.
    *
+   * TWO SLICES ARRIVED AT THIS FIELD INDEPENDENTLY, for two different jobs, and
+   * both reasons are kept because either one alone would justify it and a
+   * reader who knows only one would under-protect it:
+   *
+   *  - **The resume rule** (resume.ts, KAN-111). A path CrabCast has never run
+   *    in may hold a HUMAN'S Claude Code transcripts, and resuming those into
+   *    an agent pane hands somebody's private session to an agent. IT IS A
+   *    SAFETY FACT, NOT A STATISTIC.
+   *  - **The fleet category** (router.ts, KAN-125). It is what decides whether
+   *    an agent is reported as `unstarted` — activating it starts fresh — or as
+   *    standby, where every row promises that switching it on "resumes the
+   *    conversation it was stopped in". Getting it backwards makes one of those
+   *    two promises false.
+   *
    * Derived in {@link AgentRegistry.intents} by looking for any `activated`
    * event, and written onto rows by {@link AgentRegistry.compact} for the same
    * reason `wasPreempted` is: compaction keeps one row per agent, so the
    * earlier `activated` rows a `deactivated`-last or `configured`-last agent
    * was carrying disappear, and with them the fact that it ever ran.
    *
-   * IT IS A SAFETY FACT, NOT A STATISTIC. It is what the resume rule (resume.ts)
-   * is gated on: a path CrabCast has never run in may hold a HUMAN'S Claude Code
-   * transcripts, and resuming those into an agent pane hands somebody's private
-   * session to an agent. Losing this marker to compaction would fail in the safe
-   * direction — an agent starting fresh instead of resuming — which is exactly
+   * Losing the marker to compaction would fail in the SAFE direction for the
+   * first job — an agent starting fresh instead of resuming — which is exactly
    * why it would go unnoticed until somebody wondered where their conversation
-   * went.
+   * went. It fails in the LOUD direction for the second, since the agent would
+   * move between two visible categories. One field, two failure signatures.
+   *
+   * Absent on a row for an agent that genuinely never ran, and absent on an
+   * `activated` row, where the event itself is the evidence.
    */
   everActivated?: boolean;
 }
@@ -206,8 +253,52 @@ export interface AgentIntent {
   preemption?: PreemptionRecord;
   /** See {@link AgentLogEntry.wasPreempted}. */
   wasPreempted?: boolean;
-  /** See {@link AgentLogEntry.everActivated}. The resume rule's input. */
-  everActivated?: boolean;
+  /**
+   * {@link AgentRecord.configVersion}, normalized: NEVER absent.
+   *
+   * A row written before the field existed reads as **1**, and that is a
+   * reading rather than an invention — the row is one accepted `configure`, so
+   * "the first configuration" is the only version it can be. The next
+   * `configure` on that path takes it to 2, so the token still moves when the
+   * configuration moves, which is the whole of what a compare-and-set needs.
+   *
+   * WHY THIS IS NOT A LOG-VERSION BUMP, since the daemon refuses to boot
+   * against rows it cannot fully understand. That refusal exists for rows whose
+   * missing values would have to be FABRICATED — `priority`, the gate flags and
+   * `prompt` lived in the deleted `workspaceTypes` and have nowhere to come
+   * from, so a converted row would be a configured agent the API could not have
+   * produced. This field has nowhere to go wrong: every value it could take is
+   * derivable from the row's own existence. Refusing to boot over a field that
+   * can be read correctly would apply that rule to a case it was not reasoned
+   * out for, and would cost every existing fleet its agents for a purely
+   * additive field.
+   */
+  configVersion: number;
+  /**
+   * {@link AgentRecord.configuredAt}, or `null` on a row written before the
+   * field existed. NOT back-filled from the entry's `at`, which is the time of
+   * the last event — a stand-down, an activation — and would assert a configure
+   * time nobody recorded.
+   */
+  configuredAt: string | null;
+  /**
+   * Whether this path has EVER carried an `activated` event.
+   *
+   * Derived in one pass over the log this reduction is already making, and
+   * carried across compaction by {@link AgentLogEntry.everActivated}. It is the
+   * whole of the difference between an agent that has never run and one that
+   * has stopped: activating the first starts a fresh conversation, activating
+   * the second resumes the one it was stopped in — and it is the resume rule's
+   * input. See {@link AgentLogEntry.everActivated} for both jobs.
+   *
+   * REQUIRED RATHER THAN OPTIONAL, which is the one place the two slices that
+   * added this field disagreed. `boolean | undefined` would make every consumer
+   * decide what an absent value means, and the two consumers would decide
+   * differently: the resume rule wants absent to mean "do not resume" while a
+   * fleet category wants it to mean "not yet known". `intents()` always knows
+   * the answer — it has just read the whole log — so it always states it.
+   */
+  everActivated: boolean;
 }
 
 /** An agent that was stood down to make room, and has not come back. */
@@ -295,6 +386,33 @@ function isAgentConfig(value: any): value is AgentConfig {
  * Making it loud would fight the tolerance it exists for — and a pre-migration
  * row is not a torn line, it is a whole file this daemon must not half-read.
  */
+/**
+ * The two record fields that are optional on the wire and still have to be
+ * RIGHT when present.
+ *
+ * Absent is a supported reading (see {@link AgentIntent.configVersion}).
+ * `"3"`, `0`, `-1` or `1.5` are not: each would travel into a reconciler's
+ * compare-and-set as though it were a version, and a token that can go
+ * backwards or compare unequal to itself is worse than a missing one. Checked
+ * here rather than at read time so the boot scan catches a hand-edit that got
+ * it wrong, which is the same reason `isAgentConfig` is checked here.
+ */
+function hasValidProvenance(value: any): boolean {
+  if (value.configVersion !== undefined) {
+    if (
+      typeof value.configVersion !== 'number' ||
+      !Number.isSafeInteger(value.configVersion) ||
+      value.configVersion < 1
+    ) {
+      return false;
+    }
+  }
+  if (value.configuredAt !== undefined) {
+    if (typeof value.configuredAt !== 'string' || !value.configuredAt.length) return false;
+  }
+  return true;
+}
+
 function isUsableEntry(value: any): value is AgentLogEntry {
   return (
     value &&
@@ -303,7 +421,7 @@ function isUsableEntry(value: any): value is AgentLogEntry {
     value.path.length > 0 &&
     // A `forgotten` row's only job is to erase; it needs no config to do it,
     // and requiring one would let a config-less tombstone resurrect an agent.
-    (value.event === 'forgotten' || isAgentConfig(value.config))
+    (value.event === 'forgotten' || (isAgentConfig(value.config) && hasValidProvenance(value)))
   );
 }
 
@@ -474,8 +592,16 @@ export function describeUnreadableLog(scan: LogVersionScan): string {
     parts.push(
       `${scan.unusable} row(s) are version v${LOG_VERSION} and still unreadable: a row needs a`,
       `non-empty "path" and a "config" carrying a finite "priority", a non-empty "launcher"`,
-      `and all three of "refusable", "chargeable" and "preemptable" as booleans. This is`,
-      `almost always a hand-edit that dropped a field. It is caught HERE rather than at load`,
+      `and all three of "refusable", "chargeable" and "preemptable" as booleans.`,
+      ``,
+      `Two fields are OPTIONAL and must still be well-formed when present, because a`,
+      `malformed one travels into a caller's compare-and-set as though it were a version:`,
+      `"configVersion" must be a whole number of at least 1 (not "3", not 0, not 1.5), and`,
+      `"configuredAt" must be a non-empty string. Omitting them is fine — an absent version`,
+      `reads as 1 — so if you are hand-editing and unsure, leave them out rather than guess.`,
+      ``,
+      `This is almost always a hand-edit that dropped or mistyped a field; the offending rows`,
+      `are named above. It is caught HERE rather than at load`,
       `because the loader drops such rows silently and on purpose — that silence is what`,
       `makes a torn tail survivable — so an unnoticed hand-edit would otherwise come back as`,
       `a fleet with a hole in it and nothing anywhere saying so.`,
@@ -493,7 +619,8 @@ export function describeUnreadableLog(scan: LogVersionScan): string {
     `     reconciler pass re-creates every record.`,
     `  2. Hand-edit the file: each row needs "v": ${LOG_VERSION}, a "path" (the old`,
     `     "workDir"), and a "config" object carrying priority, launcher, refusable,`,
-    `     chargeable and preemptable — the values you would pass to \`configure\`. Re-run the`,
+    `     chargeable and preemptable — the values you would pass to \`configure\`.`,
+    `     "configVersion" and "configuredAt" may be omitted entirely. Re-run the`,
     `     daemon afterwards: it validates every row against the same predicate the loader`,
     `     uses, so a field you miss is refused here rather than dropped later.`,
     ``,
@@ -655,7 +782,8 @@ export class AgentRegistry {
       // rebuilt from, and it must not carry the reason a previous stand-down
       // happened — nor a marker about it, which would then travel into the
       // record of an agent somebody simply switched back on. `v` is the file's
-      // business, not the record's.
+      // business, not the record's, and `everActivated` is a fact about the
+      // path rather than about the configuration frozen onto it.
       const { v, event, at, preemption, wasPreempted, everActivated, ...record } = entry;
       // ONE PASS, NO EXTRA READ. An `activated` row is self-evident; anything
       // later carries the fact forward from the intent it is replacing, and a
@@ -673,9 +801,16 @@ export class AgentRegistry {
         event,
         at,
         record,
+        // Normalized here and NOWHERE ELSE, so no consumer has to know that an
+        // older row can be missing them. See AgentIntent.configVersion.
+        configVersion: record.configVersion ?? 1,
+        configuredAt: record.configuredAt ?? null,
+        // Always stated, never conditional: see AgentIntent.everActivated for
+        // why an absent value would mean two different things to its two
+        // consumers.
+        everActivated: ran,
         ...(preemption ? { preemption } : {}),
-        ...(wasPreempted ? { wasPreempted: true } : {}),
-        ...(ran ? { everActivated: true } : {})
+        ...(wasPreempted ? { wasPreempted: true } : {})
       });
     }
     return intents;
@@ -843,11 +978,15 @@ export class AgentRegistry {
     const out: AgentLogEntry[] = [];
     for (const intent of this.intents().values()) {
       if (intent.event !== 'configured') continue;
-      // A `configured`-last agent that HAS run before — activated, stood down,
-      // then reconfigured — must not be turned into a never-run one by
-      // compaction. That would silently re-arm the resume rule's protection
-      // against an agent whose conversation genuinely is its own, and the agent
-      // would come back with no memory and nobody would know why.
+      // A `configured`-last row is NOT always a never-run agent: reconfiguring
+      // a stopped agent writes one, and that agent has a conversation on disk.
+      // The compacted log is the only history left, so the fact travels with
+      // the row or it is lost — and it is lost in two directions at once. The
+      // resume rule would silently re-arm its protection against an agent whose
+      // conversation genuinely is its own, so it would come back with no memory
+      // and nobody would know why; and the fleet read would move it from
+      // standby into `unstartedAgents`, promising a fresh start for an agent
+      // that is about to resume. See AgentLogEntry.everActivated.
       out.push({
         v: LOG_VERSION,
         ...intent.record,
@@ -917,9 +1056,16 @@ export class AgentRegistry {
         // taken. Dropping a debt is a decision; asserting a falsehood about
         // how work ended is not, and this is the difference.
         ...(intent.preemption || intent.wasPreempted ? { wasPreempted: true } : {}),
-        // A stood-down agent has by definition run, so this is all but
-        // guaranteed true — written from the intent rather than hardcoded so
-        // there is exactly one derivation of it, in `intents()`.
+        // The same argument once more, about a different fact. Written from
+        // the intent rather than hardcoded to `true` so there is exactly one
+        // derivation of it, in `intents()` — and "all but guaranteed" is the
+        // right reading rather than "guaranteed", because a stand-down does
+        // NOT strictly imply a prior activation: a durable write that failed
+        // after an activation leaves a `configured`-last row over a live pane,
+        // and standing THAT down records a deactivation for an agent whose log
+        // never carried one. Carrying the derived answer is what keeps the
+        // standby row's "resumes the conversation it was stopped in" promise
+        // checkable in that case too.
         ...(intent.everActivated ? { everActivated: true } : {})
       });
     }
