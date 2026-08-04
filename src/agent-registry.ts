@@ -734,7 +734,8 @@ export class AgentRegistry {
   public record(
     event: AgentEvent,
     record: AgentRecord,
-    preemption?: PreemptionRecord
+    preemption?: PreemptionRecord,
+    at?: string
   ): RecordOutcome {
     const entry: AgentLogEntry = {
       v: LOG_VERSION,
@@ -747,7 +748,7 @@ export class AgentRegistry {
       // {@link toActivatedBy}.
       activatedBy: toActivatedBy(record.activatedBy),
       event,
-      at: new Date().toISOString(),
+      at: at ?? new Date().toISOString(),
       ...(preemption ? { preemption } : {})
     };
 
@@ -777,8 +778,24 @@ export class AgentRegistry {
     return this.record('configured', record);
   }
 
-  public recordActivated(record: AgentRecord): RecordOutcome {
-    return this.record('activated', record);
+  /**
+   * `at` OVERRIDES THE TIMESTAMP, and it exists for exactly one caller.
+   *
+   * Reconfiguring a RUNNING agent in place rewrites its record, and the row
+   * that carries the new configuration has to stay `activated` — `expected()`
+   * filters on that event, so a `configured` row over a live agent would drop
+   * it out of the restore set and a daemon restart would silently not bring it
+   * back. But the agent was not activated again; only its knobs moved. Stamping
+   * the row with `now` would assert an activation that did not happen, and that
+   * assertion is read: `preemptionCandidates` uses this timestamp as the
+   * victim-ordering tiebreaker, so a reconfigured agent would quietly become
+   * the youngest thing on the machine and the last one preemption would take.
+   *
+   * So the reconfiguration carries the ORIGINAL activation's `at` forward. The
+   * default remains `now`, and every other caller takes it.
+   */
+  public recordActivated(record: AgentRecord, at?: string): RecordOutcome {
+    return this.record('activated', record, undefined, at);
   }
 
   public recordDeactivated(record: AgentRecord, preemption?: PreemptionRecord): RecordOutcome {
