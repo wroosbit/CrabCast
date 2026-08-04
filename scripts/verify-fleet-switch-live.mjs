@@ -373,8 +373,10 @@ for (const line of grepReconcile()) console.log(`  ${line}`);
 console.log(`\nherdr agent list → probe pane count: ${paneCount} (a double-spawn would need a second name or an error)`);
 console.log(`daemon #2 list_agents row:`);
 console.log(`  ${JSON.stringify({ path: restoredRow?.path, sessionless: restoredRow?.sessionless, sessionId: restoredRow?.sessionId, status: restoredRow?.status })}`);
-console.log(`  (session id ${restoredRow?.sessionId} ≠ daemon #1's ${sessionBefore} — a fresh attach, re-verified through`);
-console.log(`   the activation path's confirmAgentPresent, not a persisted name taken on faith)`);
+console.log(`  (session id ${restoredRow?.sessionId} ≠ daemon #1's ${sessionBefore} — a FRESH ATTACH to`);
+console.log(`   the surviving pane, taken through the real activation path against the live census`);
+console.log(`   that recognised it, not a persisted session id taken on faith. A pane that survives`);
+console.log(`   is still ours; the terminal is not, and re-taking it is what this line proves.)`);
 console.log(`missingAgents after reconcile: ${JSON.stringify(listedAfter.missingAgents)}`);
 
 verdict(

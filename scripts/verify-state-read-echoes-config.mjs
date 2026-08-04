@@ -912,16 +912,26 @@ function mutantDist(name, file, from, to) {
 }
 
 {
-  // MUTATION 1b: the merge case. T5's converging `activate` rebuilds the
-  // record from the two fields that branch happens to name, which is what it
-  // did before this merge — and is a repair that loses the token it repairs.
+  // MUTATION 1b: the record loses its provenance on the way to the disk.
+  //
+  // This is what T5's converging `activate` did before these slices met: it
+  // rebuilt the record as `{path, config}`, the two fields that branch happens
+  // to name, and a repair that drops `configVersion` resets the token it was
+  // repairing.
+  //
+  // MUTATED AT THE WRITE ITSELF RATHER THAN AT ONE CALL SITE, and that is a
+  // correction. This used to anchor on the converge branch's own two lines —
+  // and KAN-136 inserted its re-attach block between them, so the anchor
+  // stopped matching and this script REFUSED TO RUN rather than skipping the
+  // section. That refusal is the guard working; the fix is to stop anchoring
+  // on a neighbourhood that other slices legitimately edit. `rememberActivated`
+  // is the one place every activation's record reaches the log through, so
+  // mutating it states the property directly — "the record travels whole" —
+  // and covers both the spawn path and the converge path at once.
   const dir = mutantDist(
-    'converge-rebuilds-record', 'router.js',
-    // Anchored on the `respond` that follows it, because the SPAWN path makes
-    // the same call one screen down. Two occurrences would make this mutation
-    // ambiguous, and `mutantDist` refuses rather than picking one.
-    'const durable = this.rememberActivated(intent.record);\n            respond({',
-    'const durable = this.rememberActivated({ path: agentPath, config });\n            respond({'
+    'record-loses-provenance', 'router.js',
+    'rememberActivated(record) {\n        const current',
+    'rememberActivated(record) {\n        record = { path: record.path, config: record.config };\n        const current'
   );
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
@@ -1266,10 +1276,33 @@ const CONFIGURE_ARGV = [
       ? undefined
       : `before ${JSON.stringify(before)}\n          after  ${JSON.stringify(after)}`
   );
+  // THIS ASSERTION CHANGED, AND THE CHANGE IS SOMEBODY ELSE'S FIX RATHER THAN
+  // A CONCESSION. It used to require `sessionless: true` after the restart —
+  // the agent alive in herdr, no session of ours — because that is what a
+  // restart left behind when this script was written. KAN-136 made that false
+  // on purpose: `activate` now RE-ATTACHES a surviving pane instead of
+  // returning on ownership alone, so the call that brings the daemon back also
+  // takes the terminal back. The old expectation was of the defect, not of the
+  // contract.
+  //
+  // What criterion 4 is actually about is untouched and asserted above: every
+  // echoed field is identical across the restart, because it comes from the
+  // append-only registry rather than from anything the dead process held. That
+  // is true whether or not a session was re-established — which is the point,
+  // and is why this assertion is now about the stronger fact.
   check(
-    afterStatus.sessionless === true && afterStatus.state === 'running',
-    'the agent is still running and this daemon simply does not hold its session — which ' +
-      'is the case the durable record exists for'
+    afterStatus.state === 'running' && afterStatus.sessionless === false &&
+      typeof afterStatus.sessionId === 'string',
+    'the agent is still running AND the new daemon re-attached to it (KAN-136), so the ' +
+      'restart is survivable rather than merely observable — while the echoed record, ' +
+      'which never needed a session, is unchanged either way',
+    `state ${afterStatus.state}, sessionless ${afterStatus.sessionless}, ` +
+      `sessionId ${afterStatus.sessionId}`
+  );
+  check(
+    respawn.stdout.includes('reattached') || /already running/.test(respawn.stdout),
+    'and the activate that revived the daemon reported it as a re-attach rather than as a ' +
+      'start — nothing was spawned to make the record readable again'
   );
 }
 
