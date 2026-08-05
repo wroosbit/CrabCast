@@ -4,8 +4,20 @@
 //
 // Before the fix, a second spawnSession for one agent opened a second
 // `herdr agent attach --takeover`, which evicted the first and left the
-// evicted client rendering a dead frame. This drives exactly that sequence
-// and asserts the first PTY is still streaming afterwards.
+// evicted client rendering a dead frame. This drives exactly that sequence and
+// asserts that the second activate returned THE SAME session, that the first
+// is still `active`, and that no `agent.detached` fired.
+//
+// WHAT IT DOES NOT ASSERT, because the header used to say it did: that the
+// first PTY is "still streaming". The byte counter is printed and nothing is
+// checked against it — and it could not be, on this path. The probe launches
+// `shell`, which emits its prompt and then sits silent, so a live attach to a
+// healthy pane legitimately streams ZERO bytes; every run prints `bytes
+// streamed: 0`. An assertion on it would fail on working code, and the
+// sentence claiming one was a sentence promising more than the mechanism
+// covered — the defect this suite exists to catch, in this file's own header.
+// Eviction is detected by the three checks above instead, and the counter
+// stays as a diagnostic, labelled as one.
 //
 // WHAT FAILURE THIS WOULD CATCH: a run of this proof that reports PASS while
 // leaving a live herdr pane behind on the machine. It did exactly that, once
@@ -361,10 +373,11 @@ try {
   console.log(`  first session status:  ${first.status}`);
   console.log(`  detach events:         ${ended.length ? JSON.stringify(ended) : 'none'}`);
 
-  // A live attach keeps redrawing, so any traffic at all proves it is streaming.
-  const before = firstBytes;
+  // DIAGNOSTIC, NOT AN ASSERTION — see the header. A `shell` probe is silent
+  // once its prompt is drawn, so zero here is the healthy reading and nothing
+  // may be concluded from it either way.
   await sleep(1500);
-  console.log(`  bytes streamed after the second activate: ${firstBytes - before >= 0 ? firstBytes : 0} total`);
+  console.log(`  [diagnostic, not asserted] bytes streamed on the first attach: ${firstBytes}`);
 
   check(first.sessionId === second.sessionId,
     'the second activate returned the SAME session — no second attach was opened',
