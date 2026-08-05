@@ -109,7 +109,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kan138-mutation-'));
  */
 function recordingMutator() {
   const seen = [];
-  const { mutate, mutationsSkipped } = makeMutator({
+  const { mutate, mutateScript, mutationsSkipped } = makeMutator({
     distDir,
     scratch: tmp,
     report: {
@@ -117,7 +117,7 @@ function recordingMutator() {
       fail: (name, detail) => seen.push({ name, ok: false, detail: detail ?? '' })
     }
   });
-  return { mutate, mutationsSkipped, seen };
+  return { mutate, mutateScript, mutationsSkipped, seen };
 }
 
 const ROUTER = 'router.js';
@@ -298,6 +298,108 @@ console.log('\n== 3. A failed mutation does not poison the next one ==');
 }
 
 // ---------------------------------------------------------------------------
+console.log('\n== 3b. mutateScript — the same four properties, for ONE SOURCE FILE ==');
+// ---------------------------------------------------------------------------
+//
+// The second entry point, added by KAN-170 because
+// `verify-proof-cleans-up-when-interrupted` mutates a SCRIPT rather than a
+// build and therefore reached neither `mutate` nor section 4's sweep. It threw
+// on anchor drift for exactly as long as nothing owned that space.
+//
+// Every branch below is the same branch section 2 walks for `mutate`, because
+// the failure modes are the same and a second entry point with only the happy
+// path tested would be the shape this whole file exists to catch. Plus the one
+// branch `mutate` does not have: a dependency that could not be carried.
+{
+  const fixture = path.join(tmp, 'fixture-script.mjs');
+  const sidecar = path.join(tmp, 'fixture-dep.mjs');
+  fs.writeFileSync(fixture, "import './fixture-dep.mjs';\nconst KEEP_ME = 1;\nexport default KEEP_ME;\n");
+  fs.writeFileSync(sidecar, 'export const dep = 1;\n');
+
+  {
+    const h = recordingMutator();
+    const out = h.mutateScript('script-applies', fixture, [
+      { find: 'const KEEP_ME = 1;', replace: 'const KEEP_ME = 2;' }
+    ]);
+    check('it returns a file path rather than null', typeof out === 'string', String(out));
+    check(
+      'the copy carries the edit and the ORIGINAL script is untouched — a helper that edited ' +
+        'scripts/ in place would corrupt the checkout it was run in',
+      typeof out === 'string' &&
+        fs.readFileSync(out, 'utf8').includes('const KEEP_ME = 2;') &&
+        fs.readFileSync(fixture, 'utf8').includes('const KEEP_ME = 1;'),
+      typeof out === 'string' ? fs.readFileSync(out, 'utf8').split('\n')[1] : String(out)
+    );
+  }
+
+  {
+    const h = recordingMutator();
+    const out = h.mutateScript(
+      'script-deps',
+      fixture,
+      [{ find: 'const KEEP_ME = 1;', replace: 'const KEEP_ME = 3;' }],
+      { deps: ['fixture-dep.mjs'] }
+    );
+    check(
+      'a named dependency is carried next to the mutant — a mutant that cannot resolve its ' +
+        'imports dies on startup, and a mutant that died on startup produces the same ' +
+        'observation as one that behaved well',
+      typeof out === 'string' && fs.existsSync(path.join(path.dirname(out), 'fixture-dep.mjs')),
+      String(out)
+    );
+  }
+
+  for (const [label, args, expect] of [
+    ['matches nothing', ['s-none', fixture, [{ find: 'NOT_IN_THE_FILE', replace: 'x' }]], /found 0/],
+    ['matches more than once', ['s-many', fixture, [{ find: 'KEEP_ME', replace: 'x' }]], /found (?!0\b|1\b)\d+/],
+    ['replaces the text with itself', ['s-noop', fixture, [{ find: 'KEEP_ME', replace: 'KEEP_ME' }]], /identical/],
+    ['names a file that is not there', ['s-gone', path.join(tmp, 'no-such-script.mjs'), [{ find: 'a', replace: 'b' }]], /could not read/],
+    [
+      'names a dependency that is not there',
+      ['s-dep', fixture, [{ find: 'const KEEP_ME = 1;', replace: 'const KEEP_ME = 4;' }], { deps: ['no-such-dep.mjs'] }],
+      /could not be copied/
+    ]
+  ]) {
+    const h = recordingMutator();
+    let threw = null;
+    let result = 'not called';
+    try {
+      result = h.mutateScript(...args);
+    } catch (err) {
+      threw = err;
+    }
+    check(
+      `[script: ${label}] IT DOES NOT THROW — the run survives, so the sections after it still report`,
+      threw === null,
+      threw ? `threw: ${threw.message}` : 'returned normally'
+    );
+    check(`[script: ${label}] it returns null, so the caller can skip its section`, result === null, String(result));
+    const failed = h.seen.filter((s) => !s.ok);
+    check(
+      `[script: ${label}] the failure is COUNTED through the script's own check`,
+      failed.length === 1,
+      `${h.seen.length} report(s), ${failed.length} failing`
+    );
+    const detail = failed[0]?.detail ?? '';
+    check(
+      `[script: ${label}] the detail says what was actually wrong`,
+      expect.test(detail),
+      JSON.stringify(detail.slice(0, 160))
+    );
+    check(
+      `[script: ${label}] and it carries the sentence that stops the next person deleting the guard`,
+      detail.includes(FIX_THE_MUTATION),
+      JSON.stringify(detail.slice(0, 60))
+    );
+    check(
+      `[script: ${label}] the mutation is listed as skipped`,
+      h.mutationsSkipped().includes(args[0]),
+      JSON.stringify(h.mutationsSkipped())
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 console.log('\n== 4. THE SWEEP — every proof that mutates a build goes through the helper ==');
 // ---------------------------------------------------------------------------
 //
@@ -389,6 +491,209 @@ check(
     ? `${offenders.join(', ')} — import { makeMutator } from './mutation.mjs' and drop the private copy`
     : 'none went around it'
 );
+
+// ---------------------------------------------------------------------------
+console.log('\n-- 4a. and every proof that mutates a SCRIPT goes through it too');
+// ---------------------------------------------------------------------------
+//
+// THE GAP THIS CLOSES, which is the reason it exists rather than a completeness
+// gesture (KAN-170). The sweep above looks for `cpSync(` — copying a BUILD —
+// because that is the operation that puts a script in the business of mutating
+// one. `verify-proof-cleans-up-when-interrupted` copies a single SOURCE FILE:
+// it reads a sibling proof, removes its signal-handler block by exact text and
+// runs the result. `cpSync` never appears, so the sweep passed it by; the
+// helper only mutated builds, so it had nothing to offer it. Two mechanisms,
+// each honest about itself, with a script sitting in the space between them
+// throwing on anchor drift for its entire life.
+//
+// THE DETECTOR IS THE SAME KIND OF THING AS `COPIES_BUILD`: the operation that
+// puts a proof in the business of mutating a script is READING A SIBLING
+// SCRIPT'S SOURCE OFF DISK. It is textual and deliberately broad, and the bias
+// is set the same way — a false positive costs whoever wrote it a helper call
+// or a register entry; a false negative is a proof that silently stops being
+// guarded.
+const READS_A_SIBLING_SOURCE =
+  /readFileSync\(\s*(TARGET\b|[^)]*scriptDir|[^)]*verify-[a-z0-9-]+\.mjs)/;
+
+/**
+ * Scripts allowed to read a sibling's source without going through the helper,
+ * because what they are doing is not mutation.
+ *
+ * The same shape as `COPIES_BUT_DOES_NOT_MUTATE` above, for the same reason,
+ * and the first entry arrived the same way that one's did: KAN-170's group A
+ * gave `verify-daemon-provenance` a structural assertion over the stamper's
+ * source, main moved, and this sweep named it the first time the two slices met.
+ * That is the sweep working — it is supposed to ask about anything that reaches
+ * for a sibling's text — and the answer is an entry with a reason, not a
+ * loosened detector.
+ */
+const READS_BUT_DOES_NOT_MUTATE = [
+  {
+    script: 'scripts/verify-daemon-provenance.mjs',
+    reason:
+      'It reads scripts/stamp-build.mjs to ASSERT ON ITS TEXT — that the one `stampVersion` the ' +
+      'writer emits is the shared constant imported from the build it has just stamped, rather ' +
+      'than a literal of its own. It never writes a copy and never runs one: the read is the ' +
+      'assertion, which is the opposite of the practice this sweep is about.',
+    evidence: 'scripts/verify-daemon-provenance.mjs — `fs.readFileSync(stamperJs, ...)` inside the §5b writer/reader agreement check'
+  }
+];
+
+const readRegistered = new Set(READS_BUT_DOES_NOT_MUTATE.map((e) => e.script));
+const scriptMutators = [];
+const scriptOffenders = [];
+for (const rel of tracked) {
+  const text = fs.readFileSync(path.join(repoRoot, rel), 'utf8');
+  if (!READS_A_SIBLING_SOURCE.test(text)) continue;
+  scriptMutators.push(rel);
+  if (USES_HELPER.test(text) || readRegistered.has(rel)) continue;
+  scriptOffenders.push(rel);
+}
+
+console.log(`\n   ${scriptMutators.length} proof(s) read a sibling script's source:`);
+for (const m of scriptMutators) {
+  const self = m.endsWith('verify-mutation-harness.mjs') ? '   (this file, matching on its own fixture text below)' : '';
+  const why = readRegistered.has(m)
+    ? '   (registered: reads to assert, not to mutate)'
+    : scriptOffenders.includes(m)
+      ? '   <-- went around mutation.mjs'
+      : '';
+  console.log(`     ${m}${self}${why}`);
+}
+
+// A NOTE THE READER NEEDS, because the obvious question about this sweep has an
+// unobvious answer. The script that MOTIVATED it —
+// `verify-proof-cleans-up-when-interrupted` — no longer matches the detector at
+// all, because the read it used to do itself now happens inside `mutateScript`.
+// That is the sweep working rather than missing: it is a detector for proofs
+// that reach for a sibling's source ON THEIR OWN, and that one no longer does.
+// What holds the line for it specifically is the direct assertion below, and
+// what holds the line for the detector is the fixture at the end of this
+// section — the sweep's own subject is that a check matching nothing reports
+// the same all-clear as a check matching everything.
+check(
+  '(setup) the script-mutation sweep found something to sweep',
+  scriptMutators.length > 0,
+  `${scriptMutators.length} match(es) for ${READS_A_SIBLING_SOURCE}`
+);
+check(
+  'no proof mutates a sibling script for itself — so a drifted anchor in a SCRIPT mutation is ' +
+    'a counted verdict in that script rather than a throw that takes its later sections with it',
+  scriptOffenders.length === 0,
+  scriptOffenders.length
+    ? `${scriptOffenders.join(', ')} — use mutateScript() from './mutation.mjs'`
+    : 'none went around it'
+);
+// THE PROPERTY THE SWEEP CANNOT SEE, asserted directly on the one script that
+// motivated it: that the throw is actually gone. A script could import the
+// helper and still keep a `throw` beside it, and the sweep would pass.
+{
+  const rel = 'scripts/verify-proof-cleans-up-when-interrupted.mjs';
+  const text = fs.readFileSync(path.join(repoRoot, rel), 'utf8');
+  check(
+    `${rel} mutates through the helper and no longer throws on a drifted anchor`,
+    /mutateScript\(/.test(text) && !/throw new Error\(\s*\n?\s*`expected exactly one/.test(text),
+    `mutateScript: ${/mutateScript\(/.test(text)}, ` +
+      `anchor throw still present: ${/throw new Error\(\s*\n?\s*`expected exactly one/.test(text)}`
+  );
+}
+
+// AND THIS SWEEP CAN FAIL TOO, held to the same standard as the one above: a
+// detector that matched nothing would report the same all-clear, in the same
+// words, as one that matched everything. So it is run against a file written to
+// be caught — the shape `verify-proof-cleans-up-when-interrupted` had before
+// KAN-170 — and then against the same file with the helper imported.
+{
+  const privateScriptMutator =
+    "import * as fs from 'node:fs';\n" +
+    "const TARGET = path.join(scriptDir, 'verify-send-confirms-delivery.mjs');\n" +
+    "const source = fs.readFileSync(TARGET, 'utf8');\n" +
+    "if (source.split(HANDLER).length - 1 !== 1) throw new Error('anchor drifted');\n";
+  check(
+    'the detector CATCHES a proof that mutates a sibling script privately — asserted against a ' +
+      'file written to be caught, because a detector that found nothing would pass the check ' +
+      'above with the same words it uses when everything is right',
+    READS_A_SIBLING_SOURCE.test(privateScriptMutator) && !USES_HELPER.test(privateScriptMutator)
+  );
+  check(
+    'and it CLEARS the same file once the helper is imported',
+    USES_HELPER.test(`import { makeMutator } from './mutation.mjs';\n${privateScriptMutator}`)
+  );
+  check(
+    'while a proof that reads no sibling source is not swept up at all',
+    !READS_A_SIBLING_SOURCE.test("const cfg = fs.readFileSync(configPath, 'utf8');\n")
+  );
+}
+
+// And 4a's register is held to 4b's standard, for 4b's reason: an entry that
+// has gone stale is a hole nobody is watching.
+for (const entry of READS_BUT_DOES_NOT_MUTATE) {
+  const abs = path.join(repoRoot, entry.script);
+  const exists = fs.existsSync(abs);
+  check(
+    `read-register: ${entry.script} still exists`,
+    exists,
+    exists ? '' : 'an entry naming a script that is gone is a hole nobody is watching'
+  );
+  check(
+    `read-register: ${entry.script} still reads a sibling source — otherwise this entry is ` +
+      `stale and should go`,
+    exists && READS_A_SIBLING_SOURCE.test(fs.readFileSync(abs, 'utf8'))
+  );
+  check(
+    `read-register: ${entry.script} carries a reason and a citation a reader can act on`,
+    entry.reason.length > 120 && entry.evidence.includes(entry.script),
+    entry.evidence
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n-- 4c. a SPAWNED mutant has to be shown to have started');
+// ---------------------------------------------------------------------------
+//
+// THE LESSON THIS CARRIES, and it was paid for. A KAN-138 mutant died on
+// startup — an unresolved import, milliseconds after spawning — and did NOT
+// fail loudly. It failed as "the mutant leaked nothing", which is a section
+// passing its subject while proving the opposite of what it claims. A mutant
+// that died produces exactly the observation a well-behaved mutant produces.
+// Only that script's own precondition caught it.
+//
+// SO THE SUITE WAS AUDITED FOR IT, and the finding is that the property holds
+// today by two different mechanisms, neither of which anything asserted:
+//
+//   IMPORTED (7 proofs — activated-by, fleet-enumeration, reconfiguration-
+//   refuses, send-confirms-delivery, state-read-echoes-config and this file)
+//   `await import()` on a mutant that will not load THROWS. A dead mutant
+//   cannot be quiet on this path.
+//
+//   SPAWNED AS A DAEMON (the three below) — the daemon is started and then
+//   WAITED FOR: the socket must appear or the helper throws by name. That wait
+//   is the precondition, written for another reason and doing this job.
+//
+//   SPAWNED AS A SCRIPT (verify-proof-cleans-up-when-interrupted) — the one
+//   that learned it, and the one that says PRECONDITION out loud.
+//
+// WHAT IS CHECKED HERE AND WHAT IS NOT. The three below are a REGISTER, not a
+// sweep, and that is a real weakness stated rather than hidden: a fourth proof
+// that spawns a mutant daemon is not caught by anything here. A sweep was
+// attempted and abandoned — "spawns a MUTANT" is not distinguishable from
+// "spawns anything" in source text, and the detector that came closest went red
+// on two proofs whose spawns are herdr stubs. A check that fails on correct
+// code is worse than a register that admits what it is.
+const SPAWNS_A_MUTANT_DAEMON = [
+  'scripts/verify-config-echo-contract.mjs',
+  'scripts/verify-event-contract.mjs',
+  'scripts/verify-event-durability.mjs'
+];
+for (const rel of SPAWNS_A_MUTANT_DAEMON) {
+  const abs = path.join(repoRoot, rel);
+  const text = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : '';
+  check(
+    `${rel} confirms a spawned daemon came up before measuring it`,
+    /never opened its socket/.test(text) && USES_HELPER.test(text),
+    text ? 'socket-readiness wait present' : 'file is gone — this register entry is stale'
+  );
+}
 
 console.log('\n-- 4b. the register is held to the same standard as the sweep');
 for (const entry of COPIES_BUT_DOES_NOT_MUTATE) {
