@@ -272,31 +272,50 @@ Six things in that session are worth reading twice, because each is CrabCast dec
 
 Two agents in one directory is how work gets overwritten with neither of them finding out, so `activate` checks the directory before it spawns — and the check is a *separate question* from "is this pane ours". A freshly-configured agent has no pane recorded yet, so "not ours" is true of every pane in the world; reading that as "nothing is there" is exactly the bug this guard exists for.
 
-This is a real refusal against a live agent from an unrelated fleet on the same machine:
+This is a real refusal against a live agent from an unrelated fleet on the same machine — a `claude` runtime herdr reports in its own census, which CrabCast did not start and does not touch:
 
 ```
-$ crabcast configure /home/brooswit/.local/share/butchr/workspaces/task/kan-79 --priority 1 --launcher shell
-configured /home/brooswit/.local/share/butchr/workspaces/task/kan-79
-  pane name:     crabcast-kan-79-b9c315e8
+$ crabcast configure /home/brooswit/.local/share/butchr/workspaces/task/kan-39 --priority 1 --launcher shell
+configured /home/brooswit/.local/share/butchr/workspaces/task/kan-39
+  pane name:     crabcast-kan-39-7df1fd9dcf55944e
+  changed:       every knob — this call created the record
+  version:       1, frozen 2026-08-05T14:49:48.140Z
+  activated by:  none — no supervisor of record (you created it)
   priority:      1
   launcher:      shell
   gate:          refusable true, chargeable true, preemptable true
 
 live panes already in that directory (1):
-  pane_id w65702dcc803d94-8  name butchr-task-kan-79  [done]  cwd /home/brooswit/.local/share/butchr/workspaces/task/kan-79
+  pane_id w65702dcc803d94-8  name butchr-task-kan-39  [done]  cwd /home/brooswit/.local/share/butchr/workspaces/task/kan-39
 
-Something is already running in /home/brooswit/.local/share/butchr/workspaces/task/kan-79. The record is written, but activate will REFUSE until that pane is gone — stand it down, then activate.
+per knob:
+  priority     applied — takes effect at the next activate
+  refusable    applied — takes effect at the next activate
+  chargeable   applied — takes effect at the next activate
+  preemptable  applied — takes effect at the next activate
+  label        applied — takes effect at the next activate
+  launcher     applied — takes effect at the next activate
+  prompt       applied — takes effect at the next activate
+  mcpServers   applied — takes effect at the next activate
 
-$ crabcast activate /home/brooswit/.local/share/butchr/workspaces/task/kan-79
-FAILED: activate /home/brooswit/.local/share/butchr/workspaces/task/kan-79
+Something is already running in /home/brooswit/.local/share/butchr/workspaces/task/kan-39. The record is written, but activate will REFUSE until that pane is gone — stand it down, then activate.
 
-Refusing to activate /home/brooswit/.local/share/butchr/workspaces/task/kan-79: 1 live pane(s) are already running in that directory and none of them is ours.
-  pane_id w65702dcc803d94-8, name 'butchr-task-kan-79', agent_status done, cwd /home/brooswit/.local/share/butchr/workspaces/task/kan-79
+$ crabcast activate /home/brooswit/.local/share/butchr/workspaces/task/kan-39
+FAILED: activate /home/brooswit/.local/share/butchr/workspaces/task/kan-39
+
+Refusing to activate /home/brooswit/.local/share/butchr/workspaces/task/kan-39: 1 live pane(s) are already running in that directory and none of them is ours.
+  pane_id w65702dcc803d94-8, name 'butchr-task-kan-39', agent_status done, cwd /home/brooswit/.local/share/butchr/workspaces/task/kan-39
 NOTHING WAS STARTED. Two agents in one directory is how work gets overwritten and neither of them finds out. Stop the pane above, or point CrabCast at a different directory. This is not a claim on that pane: CrabCast never closes a pane it did not start.
   refused by:    occupied
   started:       false — NOTHING was spawned
+  verified:      false — the daemon could not confirm the agent exists
+
+live panes already in that directory (1):
+  pane_id w65702dcc803d94-8  name butchr-task-kan-39  [done]  cwd /home/brooswit/.local/share/butchr/workspaces/task/kan-39
 [exit 1]
 ```
+
+**`verified: false` there is not a second failure.** Nothing was spawned, so there is no agent of ours to confirm. Note also what the response does *not* carry: no `alreadyRunning`, in either direction. This branch found a pane that is **not** ours, so it established nothing about whether our agent is running — `true` would be the swallow that turns a safety refusal into a silent success, and `false` would claim a look that never happened.
 
 **`configure` reports the occupant; only `activate` refuses on it.** That asymmetry is deliberate and load-bearing: adopting a fleet of directories that already have agents in them means configuring them all, standing your own panes down, then activating. A `configure` that inherited the guard would fail every call on day one and make the required ordering undiscoverable.
 
@@ -413,60 +432,125 @@ A call that applies half and reports a bare success is the defect this rule exis
 
 A supervisor reconciles by diffing desired state against actual and calling the verbs to close the gap, which means calling them on things that are **already in the desired state**, constantly. So `activate` and `deactivate` are specified for that case rather than merely surviving it.
 
+The daemon under this transcript was spawned with `CRABCAST_MAX_AGENTS=0` exported, so it is at a cap of zero and **at capacity for every line of it** — see [the capacity section](#when-the-machine-is-full-activate-refuses) for why the variable has to reach the daemon rather than the CLI. That is what makes the first call need `--override` and the repeats not.
+
 ```
-$ crabcast activate /tmp/kan127/probe-a --override      # call #1
-activated /tmp/kan127/probe-a
-  session:       crabcast-probe-a-67445f2bd34e946a-1785828149851 (active)
-  pane:          crabcast-probe-a-67445f2bd34e946a (w65702dcc803d94-14)
+$ crabcast activate /tmp/kan174/idem/probe-a --override      # call #1
+activated /tmp/kan174/idem/probe-a
+  session:       crabcast-probe-a-9eec866d8e3e12c7-1785941446744 (active)
+  pane:          crabcast-probe-a-9eec866d8e3e12c7 (w65702dcc803d94-10)
+  created:       2026-08-05T14:50:46.744Z
+  priority:      1
+  launcher:      shell
+  config v1 frozen 2026-08-05T14:50:46.533Z: priority 1, launcher shell, refusable true, chargeable true, preemptable true
+  prompt: (none — it starts at its runtime's own prompt)
+  next activate: RESUMES the conversation it was stopped in (this path has a recorded activation)
+  activated by: none — no supervisor of record (nothing identified activated it)
   verified:      true
+  conversation:  started a NEW one — CrabCast has not run an agent in this directory before, so nothing on disk here was continued
 
-$ crabcast activate /tmp/kan127/probe-a                 # call #2, no --override
-/tmp/kan127/probe-a is already running — nothing was started
-  pane:          crabcast-probe-a-67445f2bd34e946a (w65702dcc803d94-14)
+started past the cap on purpose (--override) at 2026-08-05T14:50:46.743Z —
+  the machine is now carrying more than it says it can. Recorded with these figures:
+  at capacity: 0/0 charged agents, room for 0 more (4 cores, load 2.23, 9.4 GiB available; bound by cap)
+  cap 0 (bound by configured) · running 0 · exempt 0 · headroom 0 (bound by cap) · AT CAPACITY
+  reason: 0 charged agents are already running against a cap of 0
+  cap terms: cpu allows 3, memory allows 20  ·  headroom terms: count allows 0, load allows 1, memory allows 11
+  machine: 4 cores, load 2.23, 9605 MB available of 15737 MB
+  agent cost: 650 MB (seed), 0.75 core (seed)
+
+the derivation the override bypassed:
+machine: 4 cores, 15.4 GiB RAM (9.4 GiB available), load average 2.23
+agent cost: 650 MB resident (seed), 0.75 core while active (seed)
+  no live measurement; seed figures are the 2026-07-31 constants, not a measurement of this fleet
+reserved for you: 1 core(s), 2.3 GiB
+cap: 0 charged agents (set by CRABCAST_MAX_AGENTS, derivation skipped)
+running: 0 charged agent(s)
+headroom: 0 more — count allows 0 (0 cap − 0 running), load allows 1 ((4 cores − 1 reserved − 2.23 load) ÷ 0.75), memory allows 11 ((9.4 GiB available − 2.3 GiB reserved) ÷ 650 MB); bound by cap
+
+$ crabcast activate /tmp/kan174/idem/probe-a                 # call #2, no --override
+/tmp/kan174/idem/probe-a is already running — nothing was started
+  pane:          crabcast-probe-a-9eec866d8e3e12c7 (w65702dcc803d94-10)
   verified:      true
+  config v1 frozen 2026-08-05T14:50:46.533Z: priority 1, launcher shell, refusable true, chargeable true, preemptable true
+  prompt: (none — it starts at its runtime's own prompt)
+  next activate: RESUMES the conversation it was stopped in (this path has a recorded activation)
+  activated by: none — no supervisor of record (nothing identified activated it)
 
-$ crabcast activate /tmp/kan127/probe-a                 # call #3, no --override
-/tmp/kan127/probe-a is already running — nothing was started
-  pane:          crabcast-probe-a-67445f2bd34e946a (w65702dcc803d94-14)
+other fields in the daemon's response:
+  sessionId: crabcast-probe-a-9eec866d8e3e12c7-1785941446744
+  status: active
+  createdAt: 2026-08-05T14:50:46.744Z
+
+$ crabcast activate /tmp/kan174/idem/probe-a                 # call #3, no --override
+/tmp/kan174/idem/probe-a is already running — nothing was started
+  pane:          crabcast-probe-a-9eec866d8e3e12c7 (w65702dcc803d94-10)
   verified:      true
+  config v1 frozen 2026-08-05T14:50:46.533Z: priority 1, launcher shell, refusable true, chargeable true, preemptable true
+  prompt: (none — it starts at its runtime's own prompt)
+  next activate: RESUMES the conversation it was stopped in (this path has a recorded activation)
+  activated by: none — no supervisor of record (nothing identified activated it)
 
-$ crabcast activate /tmp/kan127/probe-a --json
+other fields in the daemon's response:
+  sessionId: crabcast-probe-a-9eec866d8e3e12c7-1785941446744
+  status: active
+  createdAt: 2026-08-05T14:50:46.744Z
+
+$ crabcast activate /tmp/kan174/idem/probe-a --json
 {
   "action": "activate_response",
   "success": true,
-  "path": "/tmp/kan127/probe-a",
-  "paneName": "crabcast-probe-a-67445f2bd34e946a",
+  "path": "/tmp/kan174/idem/probe-a",
+  "paneName": "crabcast-probe-a-9eec866d8e3e12c7",
   "alreadyRunning": true,
   "started": false,
-  "paneId": "w65702dcc803d94-14",
-  "verified": true
+  "paneId": "w65702dcc803d94-10",
+  "sessionId": "crabcast-probe-a-9eec866d8e3e12c7-1785941446744",
+  "status": "active",
+  "createdAt": "2026-08-05T14:50:46.744Z",
+  "verified": true,
+  "config": {
+    "priority": 1,
+    "refusable": true,
+    "chargeable": true,
+    "preemptable": true,
+    "launcher": "shell"
+  },
+  "configVersion": 1,
+  "configuredAt": "2026-08-05T14:50:46.533Z",
+  "everActivated": true,
+  "activatedBy": null,
+  "id": "cli-1392266-1"
 }
 
-$ herdr agent list | grep -c '"cwd": "/tmp/kan127/probe-a"'
+$ herdr agent list | grep -o '"cwd":"/tmp/kan174/idem/probe-a"' | wc -l
 1
 ```
 
-**One pane, counted in herdr rather than assumed.** And the first call needed `--override` while the second and third did not: that machine was at capacity throughout, so a repeat activation that consulted the gate would have been refused. It does not consult it, because **an agent already running is already counted** — charging it a second slot would make a supervisor's idle poll look like a fleet twice the size.
+**One pane, counted in herdr rather than assumed** — `grep -o … | wc -l` counts *occurrences*, because `herdr agent list` prints the whole census on one line and a `grep -c` there could only ever answer 0 or 1 no matter how many panes were in that directory.
+
+**The `--override` on call #1 is recorded, not merely permitted**, and the two blocks under it are that record: the figures at the moment of the bypass, and the derivation it went past. Calls #2 and #3 did not need it, and that is the point — **an agent already running is already counted**, so a repeat activation does not consult the gate at all. Charging it a second slot would make a supervisor's idle poll look like a fleet twice the size.
 
 **`alreadyRunning` and `started` are on every successful activation**, `true` or `false`. A field that appears only when true asks the caller to read meaning into an absence.
 
 `deactivate` is the mirror, and it never answers a bare success:
 
 ```
-$ crabcast deactivate /tmp/kan127/probe-a      # it was running
-deactivated /tmp/kan127/probe-a — now standby
+$ crabcast deactivate /tmp/kan174/idem/probe-a      # it was running
+deactivated /tmp/kan174/idem/probe-a — now standby
+  pane:          crabcast-probe-a-9eec866d8e3e12c7
+  session:       crabcast-probe-a-9eec866d8e3e12c7-1785941446744
 
-$ crabcast deactivate /tmp/kan127/probe-a      # and again
-/tmp/kan127/probe-a was not running — standby
+$ crabcast deactivate /tmp/kan174/idem/probe-a      # and again
+/tmp/kan174/idem/probe-a was not running — standby
   No agent was running and its stand-down was already recorded. Nothing changed.
+  pane:          crabcast-probe-a-9eec866d8e3e12c7
   alreadyGone:   true
 [exit 0]
 
-$ crabcast deactivate /tmp/kan127/probe-b      # configured, never activated
-/tmp/kan127/probe-b was not running — unstarted
-  This agent is configured but has never been activated. Nothing was running and nothing was
-  recorded — a stand-down row would put it on the standby list, which promises that switching
-  it back on resumes the conversation it was stopped in.
+$ crabcast deactivate /tmp/kan174/idem/probe-b      # configured, never activated
+/tmp/kan174/idem/probe-b was not running — unstarted
+  This agent is configured but has never been activated. Nothing was running and nothing was recorded — a stand-down row would put it on the standby list, which promises that switching it back on resumes the conversation it was stopped in. The census agrees: no pane of ours is live there.
+  pane:          crabcast-probe-b-07d65c32b0dd5c50
 [exit 0]
 ```
 
@@ -485,30 +569,42 @@ One case where calling again does more than nothing: if a registry write failed 
 
 ### When the machine is full, `activate` refuses
 
-A capacity refusal is a normal outcome, not a malfunction, and it is the same command with a different answer. This is a real one, forced with `CRABCAST_MAX_AGENTS=0` so the transcript is reproducible on any machine:
+A capacity refusal is a normal outcome, not a malfunction, and it is the same command with a different answer. This is a real one, forced with `CRABCAST_MAX_AGENTS=0` so the transcript is reproducible on any machine.
+
+**`CRABCAST_MAX_AGENTS` is read by the daemon, once, at boot — not by the CLI.** So it has to be in the environment of the command that *spawns* the daemon, which is why the export below comes before a `configure` in a data directory that has no daemon yet. Putting it in front of the `activate` instead — `CRABCAST_MAX_AGENTS=0 crabcast activate …` — sets it on a client that never reads it and leaves the running daemon's cap exactly where it was, so you get whatever that machine's real answer is rather than the forced one. If a daemon is already up for that `dataDir`, `crabcast deactivate` everything and stop it first, or use a fresh `dataDir`.
 
 ```
-$ crabcast activate /tmp/cap-demo/notes
-FAILED: activate /tmp/cap-demo/notes
+$ export CRABCAST_MAX_AGENTS=0
+$ crabcast configure /tmp/kan174/cap/notes --priority 1 --launcher shell   # spawns the daemon, which reads it here
+$ crabcast activate /tmp/kan174/cap/notes
+FAILED: activate /tmp/kan174/cap/notes
 
-Refusing to activate /tmp/cap-demo/notes: at capacity — 0 charged agents are already running against a cap of 0.
-machine: 4 cores, 15.4 GiB RAM (7.5 GiB available), load average 0.93
+Refusing to activate /tmp/kan174/cap/notes: at capacity — 0 charged agents are already running against a cap of 0.
+machine: 4 cores, 15.4 GiB RAM (9.3 GiB available), load average 2.64
 agent cost: 650 MB resident (seed), 0.75 core while active (seed)
   no live measurement; seed figures are the 2026-07-31 constants, not a measurement of this fleet
 reserved for you: 1 core(s), 2.3 GiB
 cap: 0 charged agents (set by CRABCAST_MAX_AGENTS, derivation skipped)
 running: 0 charged agent(s)
-headroom: 0 more — count allows 0 (0 cap − 0 running), load allows 2 ((4 cores − 1 reserved − 0.93 load) ÷ 0.75), memory allows 8 ((7.5 GiB available − 2.3 GiB reserved) ÷ 650 MB); bound by cap
+headroom: 0 more — count allows 0 (0 cap − 0 running), load allows 0 ((4 cores − 1 reserved − 2.64 load) ÷ 0.75), memory allows 11 ((9.3 GiB available − 2.3 GiB reserved) ÷ 650 MB); bound by cap
 Deactivate an agent to make room, or pass override: true to start it anyway (the override is recorded with these numbers).
 Nothing running is below priority 1, so there is nothing this activation may stand down. Running: nothing is running that could be stood down. Preemption is strictly-greater: an agent may not displace one of its own priority.
   refused by:    capacity
   reason:        0 charged agents are already running against a cap of 0
   priority:      1
   started:       false — NOTHING was spawned
+
+capacity:
+  at capacity: 0/0 charged agents, room for 0 more (4 cores, load 2.64, 9.3 GiB available; bound by cap)
+  cap 0 (bound by configured) · running 0 · exempt 0 · headroom 0 (bound by cap) · AT CAPACITY
+  reason: 0 charged agents are already running against a cap of 0
+  cap terms: cpu allows 3, memory allows 20  ·  headroom terms: count allows 0, load allows 0, memory allows 11
+  machine: 4 cores, load 2.64, 9537 MB available of 15737 MB
+  agent cost: 650 MB (seed), 0.75 core (seed)
 [exit 1]
 ```
 
-Every term is reproducible by hand, and the headline names the *binding* constraint. An unforced refusal on a busy machine names the load average instead, and shows the same terms. Wait for room, stand something down, or pass `--override` and have the bypass recorded with the figures it bypassed.
+Every term is reproducible by hand, and the headline names the *binding* constraint. Read `load allows 0` on that machine as an accident of when it was captured rather than as part of the demonstration: it was genuinely busy and would have refused this activation on its own. What the forced cap buys is that `cap: 0` binds *first*, so the same headline and the same `refused by: capacity` come out of an idle machine too — only the machine figures differ. An unforced refusal names whichever term actually bound, and shows the same ones. Wait for room, stand something down, or pass `--override` and have the bypass recorded with the figures it bypassed.
 
 **What an agent is worth is its own `priority`,** frozen on by `configure` — it used to be a property of its workspace type. And the single `gateExempt` flag that type carried is now three: `refusable` (may the gate refuse this agent), `chargeable` (does it occupy a slot), `preemptable` (may anything take it). They were always three different decisions, and bundling them meant you could not have an agent that costs a slot but can never be taken.
 
@@ -595,16 +691,39 @@ Read the delivery section before you build on them. Events are **at-most-once** 
 
 `crabcast daemon-status` answers what the **running process** was built from — not what is in the directory it was started from. CrabCast is consumed as a linked local checkout (`file:../crabcast`), so there is no published artifact and no version string to ask for; without this, a fleet that misbehaves has nothing that can name the build that did it.
 
+Reaching the interesting state takes a rebuild in the middle of a session — the daemon is spawned out of the `dist/` that is on disk, and then that `dist/` is rebuilt underneath it while it keeps running:
+
+```
+$ crabcast configure /tmp/kan174/prov/notes --priority 1 --launcher shell   # spawns the daemon
+$ crabcast daemon-status                                                    # freshness: CURRENT
+$ touch /tmp/kan174/crabcast/src/router.ts && ( cd /tmp/kan174/crabcast && npm run build )
+$ crabcast daemon-status
+```
+
+`crabcast daemon-status` opens with a daemon header — pid, uptime, config path, data dir, registry, events — and then prints the two blocks below. **Those two are reproduced here in full and verbatim; the header above them is the only thing left out**, and it is left out because it is about the process rather than about the build:
+
 ```
 build — what THIS process was loaded from, read when it started:
-  commit:          5657bfbb87bb8ddd3605c47d87643784b0bbfd0f
+  commit:          b058fda6d68d0282663961ca54e21185fc9d76bb
   checkout:        clean when this build was made
-  built:           2026-08-04T07:44:47.072Z
+  built:           2026-08-05T14:47:59.617Z
+  git root:        /tmp/kan174/crabcast
+  loaded from:     /tmp/kan174/crabcast/dist
+  stamp:           /tmp/kan174/crabcast/dist/build-stamp.json
+  read at:         2026-08-05T14:51:59.463Z
 
 freshness: PROCESS-PREDATES-BUILD
-  THE RUNNING DAEMON IS NOT THE BUILD ON DISK. …/dist was rebuilt after this process loaded
-  it, and the process is still executing what it read at boot … restart the daemon.
+  THE RUNNING DAEMON IS NOT THE BUILD ON DISK. /tmp/kan174/crabcast/dist was rebuilt after this process loaded it, and the process is still executing what it read at boot (2026-08-05T14:47:59.617Z); the build on disk is 2026-08-05T14:52:04.764Z. Nothing on the filesystem shows this — restart the daemon to pick the new build up.
+  running the build on disk: no
+  sources newer than build:  no
+  compared by:               build-stamp
+  build on disk:             2026-08-05T14:52:04.764Z
+  newest in dist/:           2026-08-05T14:52:04.763Z
+  sources:                   /tmp/kan174/crabcast/src
+  newest source:             2026-08-05T14:52:00.756Z (router.ts)
 ```
+
+**The evidence tail is the answer, not decoration.** `built:` and `read at:` are what the *process* holds — the stamp it read at boot — and `build on disk:` is what is there *now*; the two disagreeing is the whole finding. `compared by: build-stamp` says which of the two comparisons was available: a `dist/` with no stamp is compared by file times instead, and that line then says so *and* names what file times cannot see — a weaker answer that must not look like this one.
 
 `npm run build` writes `dist/build-stamp.json` (its `postbuild` step, `scripts/stamp-build.mjs`); the daemon reads it **once, at boot**, out of the `dist/` it was itself loaded from. Three freshness states are told apart, and each is measured rather than assumed:
 
