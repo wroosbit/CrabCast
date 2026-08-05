@@ -72,7 +72,7 @@ A directory with no prior CrabCast state: configure an agent into it, activate i
 
 Five things worth knowing before reading it:
 
-* **The first `activate` may be refused, and that is the system working rather than the walkthrough failing.** CrabCast asks whether this machine can carry another agent *before* it starts one, and on a machine already under load the answer is no. The refusal names the binding constraint and shows every term it used; there is a worked example [below](#when-the-machine-is-full-activate-refuses). Two ways past it: wait for the machine to quieten and run the same command again, or pass `--override` to start the agent anyway and have the bypass recorded with the figures it bypassed. Waiting is the better answer on a machine you are also trying to use — **and this transcript is what the second answer looks like**: the machine it was captured on was running ten other agents at load 3.47, so the `activate` below carries `--override` and prints the derivation it bypassed. On a quiet machine the bare `crabcast activate <path>` is the whole command.
+* **The first `activate` may be refused, and that is the system working rather than the walkthrough failing.** CrabCast asks whether this machine can carry another agent *before* it starts one, and on a machine already under load the answer is no. The refusal names the binding constraint and shows every term it used; there is a worked example [below](#when-the-machine-is-full-activate-refuses). Two ways past it: wait for the machine to quieten and run the same command again, or pass `--override` to start the agent anyway and have the bypass recorded with the figures it bypassed. Waiting is the better answer on a machine you are also trying to use — **and this transcript is what the unrefused case looks like**: the machine it was captured on had room, so the `activate` below is the bare command, nothing was bypassed, and no derivation was printed because none was refused. The `capacity` block inside the `list` that follows is that machine's real arithmetic at the moment it ran, and those are the figures the gate had just used.
 * **Nothing starts a daemon by hand.** `configure`, `activate`, `deactivate`, `forget` and `send` spawn one when none is running; `list`, `status`, `tail`, `capacity` and `daemon-status` refuse with exit 3 instead of starting a fleet nobody asked for. The first `crabcast list` below is that refusal, on purpose.
 * **This config declares `"dataDir": ".crabcast"`**, which puts the socket, the log, the durable registry and each agent's sidecar inside the project directory, so the whole demo is removable with one `rm -rf`. Omit `dataDir` and CrabCast uses `~/.local/share/crabcast` instead. Note what is *not* in there: the agent's working directory, which is yours.
 * **`--launcher shell`** is a bash prompt in a pane, and the launcher that keeps this walkthrough dependent on nothing but herdr. It is reachable only by asking for it by name. The other launchers are `claude` and `anti-gravity`, and this walkthrough does not exercise them.
@@ -103,55 +103,122 @@ If one failed to start earlier, its stderr is in /tmp/ac1-demo/.crabcast/daemon-
 $ crabcast configure /tmp/ac1-demo/notes --priority 1 --launcher shell --prompt-file prompt.txt --label "the notes agent"
 configured /tmp/ac1-demo/notes
   pane name:     crabcast-notes-31e31d1b7540dabf
+  changed:       every knob — this call created the record
+  version:       1, frozen 2026-08-05T13:01:25.211Z
+  activated by:  none — no supervisor of record (you created it)
   priority:      1
   launcher:      shell
   gate:          refusable true, chargeable true, preemptable true
   prompt:        250 characters (written to the agent's sidecar verbatim)
   label:         the notes agent
 
-$ crabcast activate /tmp/ac1-demo/notes --override
+per knob:
+  priority     applied — takes effect at the next activate
+  refusable    applied — takes effect at the next activate
+  chargeable   applied — takes effect at the next activate
+  preemptable  applied — takes effect at the next activate
+  label        applied — takes effect at the next activate
+  launcher     applied — takes effect at the next activate
+  prompt       applied — takes effect at the next activate
+  mcpServers   applied — takes effect at the next activate
+
+$ crabcast activate /tmp/ac1-demo/notes
 activated /tmp/ac1-demo/notes
-  session:       crabcast-notes-31e31d1b7540dabf-1785829987483 (active)
-  pane:          crabcast-notes-31e31d1b7540dabf (w65702dcc803d94-15)
-  created:       2026-08-04T07:53:07.483Z
+  session:       crabcast-notes-31e31d1b7540dabf-1785934891515 (active)
+  pane:          crabcast-notes-31e31d1b7540dabf (w65702dcc803d94-10)
+  created:       2026-08-05T13:01:31.515Z
   priority:      1
   launcher:      shell
+  config v1 frozen 2026-08-05T13:01:25.211Z: priority 1, launcher shell, refusable true, chargeable true, preemptable true
+  prompt: 250 characters
+  label: the notes agent
+  next activate: RESUMES the conversation it was stopped in (this path has a recorded activation)
+  activated by: none — no supervisor of record (nothing identified activated it)
   verified:      true
   conversation:  started a NEW one — CrabCast has not run an agent in this directory before, so nothing on disk here was continued
-
-started past the cap on purpose (--override) at 2026-08-04T07:53:07.480Z —
-  the machine is now carrying more than it says it can. Recorded with these figures:
-  load too high — the load average is 3.47, against the 3.0 cores this machine leaves to agents; 0/3 charged agents, room for 0 more (4 cores, load 3.47, 6.7 GiB available; bound by load)
-  cap 3 (bound by cpu) · running 0 · exempt 0 · headroom 0 (bound by load) · AT CAPACITY
-  … the full derivation the override bypassed follows, elided here
 
 $ crabcast list
 agents (1)
   /tmp/ac1-demo/notes  [unknown]  runtime (none reported)
-    session crabcast-notes-31e31d1b7540dabf-1785829987483 (active), created 2026-08-04T07:53:07.483Z
-    label the notes agent
-    pane crabcast-notes-31e31d1b7540dabf (w65702dcc803d94-15)
+    session crabcast-notes-31e31d1b7540dabf-1785934891515 (active), created 2026-08-05T13:01:31.515Z
+    pane crabcast-notes-31e31d1b7540dabf (w65702dcc803d94-10)
+    config v1 frozen 2026-08-05T13:01:25.211Z: priority 1, launcher shell, refusable true, chargeable true, preemptable true
+    prompt: 250 characters
+    label: the notes agent
+    next activate: RESUMES the conversation it was stopped in (this path has a recorded activation)
+    activated by: none — no supervisor of record (nothing identified activated it)
 
-foreign panes (10) — live agents this daemon did not start
-  butchr-task-kan-125 [working]  runtime claude  pane_id w65702dcc803d94-12
-    cwd /home/brooswit/.local/share/butchr/workspaces/task/kan-125
-  butchr-task-kan-111 [working]  runtime claude  pane_id w65702dcc803d94-11
-    cwd /home/brooswit/.local/share/butchr/workspaces/task/kan-111
-  … eight more
+foreign panes (5) — live agents this daemon did not start
+  butchr-task-kan-39 [done]  runtime claude  pane_id w65702dcc803d94-8
+    cwd /home/brooswit/.local/share/butchr/workspaces/task/kan-39
+  butchr-task-kan-139 [working]  runtime claude  pane_id w65702dcc803d94-9
+    cwd /home/brooswit/.local/share/butchr/workspaces/task/kan-139
+  butchr-story-kan-103 [done]  runtime claude  pane_id w65702dcc803d94-7
+    cwd /home/brooswit/.local/share/butchr/workspaces/story/kan-103
+  butchr-epic-kan-59 [done]  runtime claude  pane_id w65702dcc803d94-6
+    cwd /home/brooswit/.local/share/butchr/workspaces/epic/kan-59
+  butchr-epic-kan-39 [done]  runtime claude  pane_id w65702dcc803d94-5
+    cwd /home/brooswit/.local/share/butchr/workspaces/epic/kan-39
+
+missing agents (0)
+  (none)
+
+preempted agents (0)
+  (none)
+
+standby agents (0)
+  (none)
+
+unstarted agents (0)
+  (none)
+
+where these fields came from — read at 2026-08-05T13:01:36.686Z
+  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent
+  observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir
+  derived  (computed from the two):                 paneName, state, occupies, reason
+
+config echo: every knob on every row is declared (priority, refusable, chargeable, preemptable, launcher, prompt, mcpServers, label)
+
+capacity:
+  1/3 charged agents, room for 2 more (4 cores, load 1.47, 9.5 GiB available; bound by cap)
+  cap 3 (bound by cpu) · running 1 · exempt 0 · headroom 2 (bound by cap)
+  reason: 1 charged agent is already running against a cap of 3
+  cap terms: cpu allows 3, memory allows 20  ·  headroom terms: count allows 2, load allows 2, memory allows 11
+  machine: 4 cores, load 1.47, 9756 MB available of 15737 MB
+  agent cost: 650 MB (seed), 0.75 core (seed)
+
+priorities — what an activation would have to strictly outrank:
+  /tmp/ac1-demo/notes  priority 1  [unknown]
+
+herdr health: 724/65536 open files (1%), room for about 12962 more panes (pid 844)
+
+other fields in the daemon's response:
+  bootId: 6e3b7c3a-8f0a-45b1-be63-29f2fddd2425
+  eventSeq: 2
 
 $ crabcast status /tmp/ac1-demo/notes
 /tmp/ac1-demo/notes — unknown
+  state:         running
   pane name:     crabcast-notes-31e31d1b7540dabf
-  pane id:       w65702dcc803d94-15
-  label:         the notes agent
+  pane id:       w65702dcc803d94-10
   configured:    true
-  session:       crabcast-notes-31e31d1b7540dabf-1785829987483
+  config v1 frozen 2026-08-05T13:01:25.211Z: priority 1, launcher shell, refusable true, chargeable true, preemptable true
+  prompt: 250 characters
+  label: the notes agent
+  next activate: RESUMES the conversation it was stopped in (this path has a recorded activation)
+  activated by: none — no supervisor of record (nothing identified activated it)
+  session:       crabcast-notes-31e31d1b7540dabf-1785934891515
   status:        active
-  created:       2026-08-04T07:53:07.483Z
+  created:       2026-08-05T13:01:31.515Z
+
+where these fields came from — read at 2026-08-05T13:01:42.798Z
+  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent
+  observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir
+  derived  (computed from the two):                 paneName, state, occupies, reason
 
 $ crabcast send /tmp/ac1-demo/notes cat /tmp/ac1-demo/.crabcast/agents/31e31d1b7540dabf/prompt.md
 delivered to /tmp/ac1-demo/notes — the message was seen in its transcript as submitted output
-  read from:     2 pane read(s) over 127ms; submitted copies 0 → 1
+  read from:     2 pane read(s) over 174ms; submitted copies 0 → 1
   keystrokes:    1 interrupt (Ctrl+C), 1 submit (Enter)
   pane the verdict was read from:
     Please read and follow the instructions in /tmp/ac1-demo/.crabcast/agents/31e31d1b7540dabf/prompt.md to begin.
@@ -177,7 +244,7 @@ brooswit@kchb-ThinkPad-X1-Carbon-5th:/tmp/ac1-demo/notes$
 $ crabcast deactivate /tmp/ac1-demo/notes
 deactivated /tmp/ac1-demo/notes — now standby
   pane:          crabcast-notes-31e31d1b7540dabf
-  session:       crabcast-notes-31e31d1b7540dabf-1785829987483
+  session:       crabcast-notes-31e31d1b7540dabf-1785934891515
 
 $ crabcast forget /tmp/ac1-demo/notes
 forgot /tmp/ac1-demo/notes
@@ -192,13 +259,14 @@ $ ls -a /tmp/ac1-demo/.crabcast/agents
 .  ..
 ```
 
-Five things in that session are worth reading twice, because each is CrabCast declining to round an answer up:
+Six things in that session are worth reading twice, because each is CrabCast declining to round an answer up:
 
 * **`configure` and `activate` are two verbs, and `activate` takes no attributes.** Everything the agent *is* lives on its record, so there is nothing an activation could pass that might disagree with it — and `activate` on a directory nobody configured refuses, naming what is missing, rather than inventing a priority and a launcher.
-* **`list` reports ten `foreign panes`** — live agents this daemon did not start, which on this machine are its own unrelated fleet. They used to be invisible: "one of ours" was a pane name that started with `crabcast-`, so anything else was silently dropped. It is now a question the durable registry answers, and a foreign pane sitting in a directory you have configured is the thing that will make your next `activate` refuse. Better to see it coming.
+* **`list` reports five `foreign panes`** — live agents this daemon did not start, which on this machine are an unrelated fleet that happened to be running. They used to be invisible: "one of ours" was a pane name that started with `crabcast-`, so anything else was silently dropped. It is now a question the durable registry answers, and a foreign pane sitting in a directory you have configured is the thing that will make your next `activate` refuse. Better to see it coming.
 * **The literal `{{KEY}}` reached the pane unchanged.** There is no interpolator. Render your prompt however you like — conditionals, loops, your own syntax — and hand over the result; CrabCast never looks at the bytes.
 * **After the whole lifecycle, `/tmp/ac1-demo/notes` is empty.** Not "tidied up": nothing was ever written into it. The prompt went to the sidecar, this agent asked for no MCP servers so no `.mcp.json` was written, and `forget` removed the record and CrabCast's own sidecar — naming both rather than deleting quietly. The directory itself was never touched: CrabCast did not create it, so it does not delete it. [`docs/callers-directory.md`](docs/callers-directory.md) is the whole of what can appear in a directory you own, and how each of it comes back out.
-* **`activate` says which conversation the agent got.** `started a NEW one` is CrabCast declining to resume whatever Claude Code history happens to sit at that path — because at a directory you own, that history is very often *yours*. It resumes only where its own record shows it ran before.
+* **`activate` says which conversation the agent got.** `started a NEW one` is CrabCast declining to resume whatever Claude Code history happens to sit at that path — because at a directory you own, that history is very often *yours*. It resumes only where its own record shows it ran before. The `next activate:` line just above it is the other half of the same sentence: *this* activation started a new conversation, which is precisely what makes the *following* one a resume.
+* **Every state read echoes the configuration it is reporting on, and says where each field came from.** `activate`, `list` and `status` all print the same `config vN frozen <time>` line — the knobs as frozen, and the version they were frozen at — so a caller never has to infer what an agent is running with from what it last asked for. The fleet categories below it (`missing`, `preempted`, `standby`, `unstarted`) print **at zero**, because a heading that appears only when it is non-empty makes an empty answer and an unasked question look the same. And the `where these fields came from` legend splits every field three ways: durable (from the registry, survives a restart), observed (read off herdr just now), derived (computed from the two). A reader who wants to know which half of a row would survive the daemon dying has it on the page rather than in the source.
 
 ### When the directory is already occupied, `activate` refuses
 
