@@ -962,30 +962,40 @@ section('7. Definitions are written through byte-for-byte (KAN-120)');
   resetShim();
   const { activated } = await bringUp(deps, dir, { ...CLAUDE, mcpServers: supplied });
   const written = parseIfPresent(path.join(dir, '.mcp.json')) ?? { mcpServers: {} };
+  // KAN-170 item 15. `parseIfPresent` guarded the READ and nothing guarded the
+  // dereference: under a regression that drops definitions, `.mcpServers` is
+  // there, `.atlassian` is not, and `.args.includes(…)` twenty checks later
+  // threw a TypeError that took the rest of the file with it — 83 of 104
+  // checks ran and §9, the section whose entire job is proving the other checks
+  // can fail, never executed. So the chain is guarded, not just the parse: the
+  // same fix this file already applies twelve times, extended one link.
+  const servers = written?.mcpServers ?? {};
+  const atlassian = servers.atlassian;
   console.log('    what appeared in .mcp.json for `atlassian`:');
-  console.log(JSON.stringify(written.mcpServers.atlassian, null, 2).split('\n').map((l) => `      ${l}`).join('\n'));
+  console.log(JSON.stringify(atlassian, null, 2).split('\n').map((l) => `      ${l}`).join('\n'));
 
   check('the activation succeeded', activated.success === true, activated.error);
   check(
     'the definition is byte-for-byte what was supplied — nothing resolved, renamed or dropped, ' +
       'including fields CrabCast has never heard of',
-    JSON.stringify(written.mcpServers.atlassian) === JSON.stringify(theirDefinition),
-    JSON.stringify(written.mcpServers.atlassian)
+    JSON.stringify(atlassian) === JSON.stringify(theirDefinition),
+    JSON.stringify(atlassian)
   );
   check(
     'the KEY ORDER of the map survives — a daemon that rebuilt or sorted it would show here',
-    JSON.stringify(Object.keys(written.mcpServers)) ===
+    JSON.stringify(Object.keys(servers)) ===
       JSON.stringify(['zzz_last', 'atlassian', 'aaa_first', 'crabcast']),
-    JSON.stringify(Object.keys(written.mcpServers))
+    JSON.stringify(Object.keys(servers))
   );
   check(
     'the one entry CrabCast builds itself IS built — and it bakes in this daemon\'s config path, ' +
       'which is why a caller could not have written it',
-    written.mcpServers.crabcast?.env?.CRABCAST_CONFIG === configPath,
-    JSON.stringify(written.mcpServers.crabcast)
+    servers.crabcast?.env?.CRABCAST_CONFIG === configPath,
+    JSON.stringify(servers.crabcast)
   );
   check("the doubled-brace sequence survived — nothing here interpolates anything",
-    written.mcpServers.atlassian.args.includes('--template={{KEY}}'));
+    Array.isArray(atlassian?.args) && atlassian.args.includes('--template={{KEY}}'),
+    JSON.stringify(atlassian?.args));
 
   // Order also survives the round trip through the durable record, which is
   // where a reconfigure or a restart would read it from.
@@ -1161,11 +1171,14 @@ section('9. The checks above can actually fail (mutation)');
     definitions: { crabcast: { command: 'node' } }
   });
   const merged = parseIfPresent(path.join(noTheirs, '.mcp.json')) ?? { mcpServers: {} };
+  // Guarded for KAN-170 item 15's reason: the `??` covers a missing FILE and
+  // says nothing about a file whose shape has moved.
+  const mergedServers = merged?.mcpServers ?? {};
   check(
     'the merge check goes RED on a real written file that does not carry their server — the ' +
       'predicate discriminates rather than always agreeing',
-    merged.mcpServers['their-linter'] === undefined && merged.mcpServers.crabcast !== undefined,
-    JSON.stringify(merged.mcpServers)
+    mergedServers['their-linter'] === undefined && mergedServers.crabcast !== undefined,
+    JSON.stringify(mergedServers)
   );
 
   // 4's predicate: "the directory came back exactly as it was", over the same

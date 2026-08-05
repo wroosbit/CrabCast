@@ -622,6 +622,84 @@ const s4 = ownedDir('s4', 'ran-then-reconfigured');
   );
 }
 
+// ---------------------------------------------------------------------------
+// THE TWO PROPERTIES SECTION 8 MUTATES AGAINST, WRITTEN ONCE (KAN-170 item 17).
+//
+// Section 8's job is to prove that sections 5 and 7 can go red. It did not do
+// that. MUTATION 1c asserted `no.configVersion === accepted.configVersion + 1`
+// and MUTATION 1d asserted `whileLive.everActivated === true &&
+// afterRestart.everActivated === false` — both PROPERTIES OF THE MUTANT, not
+// re-runs of the assertion under test. Neutering section 5's or section 7's
+// own check would therefore have left the whole suite green, which is the exact
+// opposite of what the comment calling section 8 "the standing proof that the
+// new section 5 assertion is wired to the code" promised.
+//
+// So each property is one function now, called by the section that owns it and
+// called AGAIN by section 8 against the mutated build. Section 8 asserts the
+// function reports a violation — that is the real check going red, and it
+// cannot be satisfied by a build that merely differs.
+// ---------------------------------------------------------------------------
+
+/**
+ * SECTION 5's PROPERTY: a refused configure must not move the compare-and-set
+ * token, on the response OR in the log.
+ *
+ * Returns the violations, so an empty array is the property holding and the
+ * strings are what the failing check prints. Both surfaces, because a response
+ * can say "unchanged" over a row that changed.
+ */
+function refusalTokenViolations({ accepted, refusal, onDisk }) {
+  const bad = [];
+  if (refusal?.configVersion !== accepted?.configVersion) {
+    bad.push(
+      `the refusal REPORTED v${refusal?.configVersion} where the last accepted configure ` +
+        `left v${accepted?.configVersion}`
+    );
+  }
+  if (onDisk && onDisk.configVersion !== accepted?.configVersion) {
+    bad.push(
+      `the RECORD holds v${onDisk.configVersion} where the last accepted configure left ` +
+        `v${accepted?.configVersion}`
+    );
+  }
+  return bad;
+}
+
+/**
+ * Section 7's verdict, kept for section 8. See the note where it is assigned.
+ */
+let driftOnTheRealBuild = [];
+
+/**
+ * SECTION 7's PROPERTY: every field the legend calls DURABLE reads the same
+ * across every perturbation it is handed.
+ *
+ * `reads` is `[{ label, state }, …]`; the first is the baseline. Returns the
+ * fields that drifted, named with both values, which is what the failing check
+ * prints — and what section 8 asserts is non-empty for a mutant.
+ */
+function durableDrift(legend, reads) {
+  const bucketOf = (key) =>
+    legend?.durable?.includes(key) ? 'durable'
+      : legend?.observed?.includes(key) ? 'observed'
+        : legend?.derived?.includes(key) ? 'derived' : null;
+  const [baseline, ...rest] = reads;
+  const drifted = [];
+  for (const key of Object.keys(baseline.state)) {
+    if (bucketOf(key) !== 'durable') continue;
+    const a = JSON.stringify(baseline.state[key]);
+    for (const other of rest) {
+      if (JSON.stringify(other.state[key]) !== a) {
+        drifted.push(
+          `${key}: ${a} ${baseline.label}, ${JSON.stringify(other.state[key])} ${other.label}`
+        );
+        break;
+      }
+    }
+  }
+  return { drifted, bucketOf };
+}
+
 // ===========================================================================
 rule('5. configVersion — minted, monotonic, and carried by every later event');
 // ===========================================================================
@@ -783,22 +861,27 @@ const s5 = ownedDir('s5', 'versioned');
     check(no.success === false && no.refused === 'restart-required' && no.applied?.length === 0,
       'a reconfigure a RUNNING agent cannot take is refused whole, applying nothing');
     check(
-      no.configVersion === before.configVersion,
-      'and the version it reports is UNCHANGED — a refusal that moved the token would tell ' +
-        'a compare-and-set caller its write landed when nothing was applied',
-      `${before.configVersion} → ${no.configVersion}`
-    );
-    check(
       no.config?.priority === 4,
       'and the config it reports is the one still in force, not the one that was refused',
       `priority ${no.config?.priority} (refused call asked for 9)`
     );
     const onDisk = r.agentRegistry.intents().get(refused);
+    // THE assertion, through `refusalTokenViolations` so that section 8 can run
+    // this very function against a mutant and watch it report (KAN-170 item
+    // 17). Both surfaces at once — the response and the log — because a
+    // response can say "unchanged" over a row that changed.
+    const tokenMoved = refusalTokenViolations({ accepted: before, refusal: no, onDisk });
     check(
-      onDisk.configVersion === before.configVersion && onDisk.record.config.priority === 4,
-      'and the RECORD is untouched — read off the log rather than off the response, because ' +
-        'a response can say "unchanged" over a row that changed',
-      `v${onDisk.configVersion}, priority ${onDisk.record.config.priority}`
+      tokenMoved.length === 0,
+      'and the version is UNCHANGED on the response AND in the record — a refusal that moved ' +
+        'the token would tell a compare-and-set caller its write landed when nothing was applied',
+      tokenMoved.length ? tokenMoved.join('; ') : `v${before.configVersion} before and after`
+    );
+    check(
+      onDisk.record.config.priority === 4,
+      'and the record\'s config is untouched too — read off the log rather than off the ' +
+        'response',
+      `priority ${onDisk.record.config.priority}`
     );
     setCensus([]);
   }
@@ -873,27 +956,42 @@ rule('7. `provenance` classifies every key on every row');
   ]);
   const listed = await h.invoke({ action: 'list_agents' });
   const p = listed.provenance;
-  show('provenance:', { ...p, note: `${p.note.slice(0, 60)}…` });
+  // KAN-170 item 19a. `p.note.slice(...)` dereferenced two levels outside any
+  // guard, in the DISPLAY line — so a reply that carried no legend at all took
+  // the whole file out with a TypeError here, before the check whose job is to
+  // report exactly that had run. The bug it would hide is the loudest one this
+  // section can find, and it was the one arrangement in which nothing was
+  // reported.
+  show(
+    'provenance:',
+    p && typeof p === 'object'
+      ? { ...p, note: typeof p.note === 'string' ? `${p.note.slice(0, 60)}…` : p.note }
+      : `(no provenance object on the reply: ${JSON.stringify(p)})`
+  );
 
   check(
     Array.isArray(p?.durable) && Array.isArray(p?.observed) && Array.isArray(p?.derived),
-    'list_agents carries the legend as data rather than as prose'
+    'list_agents carries the legend as data rather than as prose',
+    p && typeof p === 'object' ? undefined : `provenance is ${JSON.stringify(p)}`
   );
+  // Every read below goes through `?.` for the same reason: each of these is a
+  // check that has to be able to FAIL on a missing legend, and a throw is not a
+  // failure — it is the rest of the file not running.
   check(
-    p.durable.includes('config') && p.durable.includes('configVersion'),
+    p?.durable?.includes('config') === true && p?.durable?.includes('configVersion') === true,
     'the config echo is declared DURABLE'
   );
   check(
-    p.observed.includes('paneId') && !p.durable.includes('paneId'),
+    p?.observed?.includes('paneId') === true && p?.durable?.includes('paneId') === false,
     'and `paneId` is declared OBSERVED and never durable — herdr renumbers panes whenever ' +
       'any pane anywhere closes, so a consumer that stored one would hold a stale value'
   );
-  check(typeof p.observedAt === 'string' && p.censusReachable === true,
+  check(typeof p?.observedAt === 'string' && p?.censusReachable === true,
     'with the moment the census answered, and whether it answered at all');
 
   const buckets = new Map();
   for (const bucket of ['durable', 'observed', 'derived']) {
-    for (const key of p[bucket]) {
+    for (const key of p?.[bucket] ?? []) {
       if (buckets.has(key)) {
         check(false, `\`${key}\` is in two buckets (${buckets.get(key)} and ${bucket})`);
       }
@@ -954,21 +1052,17 @@ rule('7. `provenance` classifies every key on every row');
     const afterRebuild = await harness('s7').invoke({ action: 'agent_status', path: probe });
 
     const legend = withPane.provenance;
-    const bucketOf = (key) =>
-      legend.durable.includes(key) ? 'durable'
-        : legend.observed.includes(key) ? 'observed'
-          : legend.derived.includes(key) ? 'derived' : null;
-
-    const drifted = [];
-    for (const key of Object.keys(withPane)) {
-      if (bucketOf(key) !== 'durable') continue;
-      const a = JSON.stringify(withPane[key]);
-      if (JSON.stringify(withoutPane[key]) !== a) {
-        drifted.push(`${key}: ${a} with a pane, ${JSON.stringify(withoutPane[key])} without`);
-      } else if (JSON.stringify(afterRebuild[key]) !== a) {
-        drifted.push(`${key}: ${a} before a restart, ${JSON.stringify(afterRebuild[key])} after`);
-      }
-    }
+    // Through `durableDrift` so section 8 can run this very function against a
+    // mutated build and watch it report (KAN-170 item 17).
+    const { drifted, bucketOf } = durableDrift(legend, [
+      { label: 'with a pane', state: withPane },
+      { label: 'without one', state: withoutPane },
+      { label: 'after a restart', state: afterRebuild }
+    ]);
+    // Kept for section 8, which asserts this same predicate goes red against a
+    // mutant — a claim that is worth nothing unless the predicate is silent
+    // here first.
+    driftOnTheRealBuild = drifted;
     console.log(`\n   durable fields checked against a census change and a restart: ` +
       `${Object.keys(withPane).filter((k) => bucketOf(k) === 'durable').join(', ')}`);
     check(
@@ -997,6 +1091,91 @@ rule('7. `provenance` classifies every key on every row');
         `%77 with the pane and ${JSON.stringify(withoutPane.paneId)} without, which is what ` +
         'makes "observed" a claim rather than a label',
       `moved: ${observedThatMoved.join(', ')}`
+    );
+
+    // ---- THE OBSERVED DIRECTION, CLOSED (KAN-170 item 16) -----------------
+    //
+    // The line above required ONE observed field to move. Every other field
+    // the legend calls observed was free to sit perfectly still — so the
+    // `observed` bucket was a place a durable field could be parked with
+    // nothing to notice. Measured when the item was filed: moving
+    // `everActivated` alone from `durable` to `observed` passed the entire
+    // suite, and so did moving eleven durable fields at once.
+    //
+    // The durable direction is closed by sweeping every field in that bucket.
+    // This is the same sweep in the other direction, with the one complication
+    // that makes it harder: NOT EVERY OBSERVED FIELD CAN MOVE UNDER THIS
+    // SECTION'S ONE PERTURBATION. Adding and removing a pane cannot exercise
+    // the session fields, because this section never opens a session.
+    //
+    // So a field is allowed to sit still only if it is REGISTERED here with a
+    // reason AND a predicate that still holds. A comment would rot; a
+    // predicate fails when its premise stops being true, which is what turns
+    // an excuse into a check. Anything else that sits still fails BY NAME —
+    // which is what a durable field parked in this bucket would do.
+    const OBSERVED_STATIONARY_HERE = {
+      agentRuntime: {
+        why: 'the panes this section puts in the census report no runtime behind them, so ' +
+          'this reads the same null with a pane and without — observed, and the observation ' +
+          'happens to be equal',
+        holds: (a, b) => a.agentRuntime == null && b.agentRuntime == null
+      },
+      status: {
+        why: 'a SESSION field, and this section never opens a session — the record is ' +
+          'activated through the registry rather than by a spawn, so there is no PTY to ' +
+          'report a status for',
+        holds: (a, b) => a.status == null && b.status == null
+      },
+      sessionId: {
+        why: 'the same session that does not exist',
+        holds: (a, b) => a.sessionId == null && b.sessionId == null
+      },
+      createdAt: {
+        why: 'the same session that does not exist',
+        holds: (a, b) => a.createdAt == null && b.createdAt == null
+      },
+      sessionless: {
+        why: 'derived from that absent session, so it reads the same both times: this daemon ' +
+          'holds no terminal for this agent either way',
+        holds: (a, b) => a.sessionless === b.sessionless
+      }
+    };
+
+    const unmovedAndUnexplained = [];
+    const staleExcuses = [];
+    for (const key of Object.keys(withPane)) {
+      if (bucketOf(key) !== 'observed') continue;
+      if (observedThatMoved.includes(key)) continue;
+      const entry = OBSERVED_STATIONARY_HERE[key];
+      if (!entry) {
+        unmovedAndUnexplained.push(
+          `${key} = ${JSON.stringify(withPane[key])} with a pane and without`
+        );
+      } else if (!entry.holds(withPane, withoutPane)) {
+        staleExcuses.push(
+          `${key}: its registered reason no longer describes it ` +
+            `(${JSON.stringify(withPane[key])} / ${JSON.stringify(withoutPane[key])})`
+        );
+      }
+    }
+    console.log(
+      `   observed fields that did NOT move, each registered with a reason: ` +
+        `${Object.keys(OBSERVED_STATIONARY_HERE).join(', ')}`
+    );
+    check(
+      unmovedAndUnexplained.length === 0,
+      'and EVERY OTHER field the legend calls OBSERVED either moved with the census or is ' +
+        'registered here with a reason this section can still verify — so the observed bucket ' +
+        'is no longer somewhere a durable field can be parked unnoticed',
+      unmovedAndUnexplained.length
+        ? `sat still with nothing to say for it: ${unmovedAndUnexplained.join('; ')}`
+        : `${Object.keys(OBSERVED_STATIONARY_HERE).length} registered, ${observedThatMoved.length} moved`
+    );
+    check(
+      staleExcuses.length === 0,
+      'and every registered reason still holds — an excuse whose premise has stopped being ' +
+        'true is how a misclassified field gets a permanent home',
+      staleExcuses.join('; ')
     );
     check(
       withPane.paneName === paneNameFor(probe) && withoutPane.paneName === withPane.paneName,
@@ -1216,11 +1395,31 @@ mutation3: {
   });
   console.log(`   the mutant's refusal reports v${no.configVersion} where the record still holds ` +
     `v${accepted.configVersion}`);
+  // SECTION 5'S OWN ASSERTION, RE-RUN HERE (KAN-170 item 17). What stood here
+  // was `no.configVersion === accepted.configVersion + 1` — a property of the
+  // mutant, true whether or not section 5 checks anything at all. Neuter
+  // section 5's assertion and that line stayed green, which is precisely what
+  // this section claims to make impossible. It now calls the same function
+  // section 5 calls and asserts it REPORTS.
+  const mutantTokenMoved = refusalTokenViolations({
+    accepted,
+    refusal: no,
+    onDisk: b.agentRegistry.intents().get(refused)
+  });
+  console.log(`   section 5's own predicate, run against the mutant: ` +
+    `${mutantTokenMoved.join('; ') || '(no violation — it saw nothing)'}`);
   check(
-    no.configVersion === accepted.configVersion + 1,
-    'a refusal that bumps the version is exactly what section 5 now catches — and until this ' +
-      'assertion existed, this mutation passed the entire suite',
-    `refusal said v${no.configVersion}, record holds v${accepted.configVersion}`
+    mutantTokenMoved.length > 0,
+    "SECTION 5'S OWN ASSERTION GOES RED against this build — the same function, not a " +
+      'restatement of what the mutant does. Delete section 5\'s check and this line fails too, ' +
+      'which is what makes section 8 a proof about section 5 rather than about the mutant',
+    mutantTokenMoved.join('; ')
+  );
+  check(
+    mutantTokenMoved.some((v) => /the refusal REPORTED/.test(v)),
+    'and it goes red for the RIGHT reason — the refusal moved the token, named in the words ' +
+      'section 5 would have printed',
+    mutantTokenMoved.join('; ')
   );
   setCensus([]);
 }
@@ -1249,21 +1448,50 @@ mutation4: {
   setCensus([]);
   await b.invoke({ action: 'configure_agent', path: behind, ...KNOBS });
 
-  // The mutant's echo consults a live flag the real one does not have. With it
-  // set, a record that carries NO activation reports `everActivated: true` —
-  // and reverts the moment it is cleared, which is a restart.
+  // The mutant's echo consults a live flag the real one does not have, so the
+  // flag is driven FROM THE CENSUS here — set when a pane is there, cleared
+  // when it is not. That is what "inferred from liveness" means, and it is what
+  // lets section 7's own scenario be replayed against this build unchanged.
   setCensus([ourPane(behind, '%62')]);
   globalThis.__kan125_live = true;
   const whileLive = await b.invoke({ action: 'agent_status', path: behind });
+  setCensus([]);
   globalThis.__kan125_live = false;
   const afterRestart = await b.invoke({ action: 'agent_status', path: behind });
   console.log(`   the mutant reports everActivated=${whileLive.everActivated} while live and ` +
     `${afterRestart.everActivated} after — from one unchanged record`);
+
+  // SECTION 7'S OWN ASSERTION, RE-RUN HERE (KAN-170 item 17). What stood here
+  // was `whileLive.everActivated === true && afterRestart.everActivated ===
+  // false` — a property of the mutant, which stays true however thoroughly
+  // section 7 is neutered. This calls the same function section 7 calls, over
+  // the same two perturbations, and asserts it REPORTS.
+  const mutantDrift = durableDrift(whileLive.provenance, [
+    { label: 'with a pane', state: whileLive },
+    { label: 'without one', state: afterRestart }
+  ]).drifted;
+  console.log(`   section 7's own predicate, run against the mutant: ` +
+    `${mutantDrift.join('; ') || '(no drift — it saw nothing)'}`);
   check(
-    whileLive.everActivated === true && afterRestart.everActivated === false,
-    'a field the legend calls DURABLE changing with liveness is what section 7 now catches: ' +
-      'one record, two answers, and the completeness check would have passed both',
-    `${whileLive.everActivated} → ${afterRestart.everActivated}`
+    mutantDrift.length > 0,
+    "SECTION 7'S OWN ASSERTION GOES RED against this build — the same function, over the same " +
+      'two reads, rather than a restatement of what the mutant does',
+    mutantDrift.join('; ')
+  );
+  check(
+    mutantDrift.some((d) => d.startsWith('everActivated:')),
+    'and it names `everActivated` — the field that actually shipped mislabelled, so the ' +
+      'failure would point a reader at the right thing rather than merely at something',
+    mutantDrift.join('; ')
+  );
+  // The bound on the two checks above, asserted rather than trusted: they mean
+  // nothing unless section 7's predicate is SILENT on the unmutated build. A
+  // predicate that reported drift for everyone would satisfy them both.
+  check(
+    driftOnTheRealBuild.length === 0,
+    'PRECONDITION: and the same predicate reported NOTHING against the shipping build a moment ' +
+      'ago — the two lines above are about the mutation, not about a predicate that always shouts',
+    driftOnTheRealBuild.join('; ') || '(silent, as section 7 reported it)'
   );
   delete globalThis.__kan125_live;
   setCensus([]);
