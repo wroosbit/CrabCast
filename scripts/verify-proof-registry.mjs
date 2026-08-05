@@ -99,9 +99,11 @@ const EXCLUSIONS = [
     reason:
       'Attaches to a live agent. The KAN-16 property — a second spawnSession does not evict the ' +
       'first client — only exists where there is a real PTY still streaming to steal, so the ' +
-      'assertion has no meaning against a stub. It takes the directory of an agent herdr already ' +
-      'has running with nothing attached to it, which is a machine state, not a fixture.',
-    evidence: 'scripts/verify-no-attach-steal.mjs:12 requires a directory herdr already has a live agent in'
+      'assertion has no meaning against a stub. Since KAN-137 it also measures the machine on ' +
+      'either side of itself, asserting that the herdr pane it spawned is gone at exit and that ' +
+      'no butchr-* pane moved; that census is a real herdr\'s, which is a machine state and not ' +
+      'a fixture.',
+    evidence: 'scripts/verify-no-attach-steal.mjs:10 the failure it catches is a run that reports PASS while leaving a live herdr pane behind'
   },
   {
     script: 'verify-tab-per-agent',
