@@ -292,7 +292,14 @@ const CASES = [
   { id: 'X2', what: 'a real run followed by a trailing echo', want: 'GREEN',
     mutate: block('node scripts/verify-proof-registry.mjs', 'echo done') },
   { id: 'X3', what: 'a brace group at top level', want: 'GREEN',
-    mutate: block('{ node scripts/verify-proof-registry.mjs; }') }
+    mutate: block('{ node scripts/verify-proof-registry.mjs; }') },
+  // `run: >` FOLDS its newlines into spaces. Read as literal, X4 would still
+  // be green by luck and X5 would go red for the wrong reason — "could not be
+  // read as shell" instead of "the exit status is swallowed".
+  { id: 'X4', what: '`run: >` folded scalar, one command', want: 'GREEN',
+    mutate: replaceStep('      - run: >', '          node scripts/verify-proof-registry.mjs') },
+  { id: 'X5', what: '`run: >` folded onto `|| true`', want: 'RED', expect: '|| true',
+    mutate: replaceStep('      - run: >', '          node scripts/verify-proof-registry.mjs', '          || true') }
 ];
 
 // ---------------------------------------------------------------------------

@@ -359,6 +359,13 @@ function keyDisablers(jobId, jobKeys, keys, inheritedShell) {
 function readRunBody(lines, step, run) {
   const pieces = [];
   const isBlock = !run.value || /^[|>]/.test(run.value);
+  // `|` keeps its newlines; `>` FOLDS them into spaces before bash sees them,
+  // which is the same thing a multi-line plain scalar does. Reading a folded
+  // block as if it were literal would put a newline where YAML puts a space
+  // and turn `node x` / `|| true` into two commands, the second of which does
+  // not parse — fail-closed, but for the wrong reason and with a message
+  // about unparsable shell rather than about a swallowed exit.
+  const folded = !isBlock || /^>/.test(run.value);
 
   const bodyLines = [];
   if (!isBlock) bodyLines.push({ idx: run.idx, raw: run.value });
@@ -373,7 +380,7 @@ function readRunBody(lines, step, run) {
   while (bodyLines.length && bodyLines[bodyLines.length - 1].raw.trim() === '') bodyLines.pop();
 
   let text = '';
-  if (isBlock) {
+  if (isBlock && !folded) {
     const indents = bodyLines.filter((l) => l.raw.trim() !== '').map((l) => indentOf(l.raw));
     const base = indents.length ? Math.min(...indents) : 0;
     for (const l of bodyLines) {
@@ -381,6 +388,15 @@ function readRunBody(lines, step, run) {
       pieces.push({ line: l.idx + 1, start: text.length, end: text.length + body.length });
       text += `${body}\n`;
     }
+  } else if (isBlock) {
+    // `run: >` — folded. Each line contributes its trimmed text, joined by the
+    // single space YAML folds the newline into.
+    bodyLines.forEach((l, n) => {
+      const body = l.raw.trim();
+      if (n > 0) text += ' ';
+      pieces.push({ line: l.idx + 1, start: text.length, end: text.length + body.length });
+      text += body;
+    });
   } else {
     // A plain scalar: its first line is the value after `run:`, and any
     // continuation lines are folded onto it with a single space.
