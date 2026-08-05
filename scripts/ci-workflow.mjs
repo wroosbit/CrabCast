@@ -131,9 +131,14 @@
 //                                is assignments and then the command.
 //        an unparsable block     A run value this lexer cannot parse yields no
 //                                live commands at all, and says so by name.
-//        `shell:` other than     Only `bash` and `sh` are read as shell. A step
-//        bash/sh                 declaring anything else is reported, not
-//                                guessed at.
+//        `shell:` other than     Only `bash` and `sh` are read as shell.
+//        bash/sh                 Anything else is reported, not guessed at —
+//                                from the step's own `shell:`, and from a
+//                                `defaults: { run: { shell: … } }` on the job
+//                                or the workflow, which sets it for steps that
+//                                do not say. Reading only the step's own key
+//                                would have believed a `defaults:` shell to be
+//                                bash.
 //
 //      ADMITTED, and new with KAN-148 because the old false alarm was noise
 //      and a guard that cries wolf is a guard someone eventually weakens:
@@ -246,6 +251,8 @@ export function readJobs(text) {
     jobs.push({
       id: m[1],
       line: i + 1,
+      from: i + 1,
+      to: end,
       keys: keysAt(lines, i + 1, end, 4),
       steps: readSteps(lines, i + 1, end)
     });
@@ -275,6 +282,25 @@ const IF_ESCAPE = 'if this `if:` is legitimate, add its exact text to BENIGN_IF 
 const KNOWN_SHELLS = new Set(['bash', 'sh', "'bash'", '"bash"', "'sh'", '"sh"']);
 
 /**
+ * `defaults: { run: { shell: … } }`, which sets the shell for every step that
+ * does not name one. Read at both the workflow and the job level, because a
+ * check that looked only at the step's own `shell:` would read a `defaults:`
+ * of `pwsh` as bash and then lex PowerShell as if it were a POSIX shell.
+ *
+ * `from`/`to` bound the mapping this belongs to and `indent` is that mapping's
+ * key indent: 0 for the workflow, 4 for a job.
+ */
+function defaultsRunShell(lines, from, to, indent) {
+  const defaults = keysAt(lines, from, to, indent).get('defaults');
+  if (!defaults) return undefined;
+  const defaultsEnd = blockEnd(lines, defaults.idx, indent, to);
+  const run = keysAt(lines, defaults.idx + 1, defaultsEnd, indent + 2).get('run');
+  if (!run) return undefined;
+  const runEnd = blockEnd(lines, run.idx, indent + 2, defaultsEnd);
+  return keysAt(lines, run.idx + 1, runEnd, indent + 4).get('shell');
+}
+
+/**
  * The reasons a command that textually exists will not fail the build, taken
  * from the step's and the job's own YAML keys.
  *
@@ -283,7 +309,7 @@ const KNOWN_SHELLS = new Set(['bash', 'sh', "'bash'", '"bash"', "'sh'", '"sh"'])
  *                  step as bash would be guessing, and a wrong guess here
  *                  reads as coverage.
  */
-function keyDisablers(jobId, jobKeys, keys) {
+function keyDisablers(jobId, jobKeys, keys, inheritedShell) {
   const out = [];
   const truthy = (v) => v !== undefined && /^(true|'true'|"true")$/i.test(String(v.value));
   const benign = (v) => BENIGN_IF.includes(String(v.value).trim());
@@ -295,11 +321,13 @@ function keyDisablers(jobId, jobKeys, keys) {
     out.push(`the step carries \`if: ${keys.get('if').value}\` — ${IF_ESCAPE}`);
   }
   if (truthy(keys.get('continue-on-error'))) out.push('the step carries `continue-on-error: true`');
-  const shell = keys.get('shell') ?? jobKeys.get('shell');
+  // The step's own `shell:` wins; otherwise the nearest `defaults.run.shell`.
+  const own = keys.get('shell');
+  const shell = own ?? inheritedShell;
   if (shell && !KNOWN_SHELLS.has(String(shell.value).trim())) {
     out.push(
-      `the step declares \`shell: ${shell.value}\`, which this reader does not model — it reads ` +
-        '`bash` and `sh` only, and will not guess at anything else'
+      `the step ${own ? 'declares' : 'inherits'} \`shell: ${shell.value}\`, which this reader does not ` +
+        'model — it reads `bash` and `sh` only, and will not guess at anything else'
     );
   }
   return out;
@@ -1152,8 +1180,10 @@ export function findRunInvocations(text, needle) {
   const { lines, jobs } = readJobs(text);
   const found = [];
   const seen = new Set();
+  const workflowShell = defaultsRunShell(lines, 0, lines.length, 0);
 
   for (const job of jobs) {
+    const inheritedShell = defaultsRunShell(lines, job.from, job.to, 4) ?? workflowShell;
     for (const step of job.steps) {
       const keys = stepKeys(lines, step);
       const run = keys.get('run');
@@ -1161,7 +1191,7 @@ export function findRunInvocations(text, needle) {
 
       const body = readRunBody(lines, step, run);
       const analysis = analyzeRunBody(body.text);
-      const keyReasons = keyDisablers(job.id, job.keys, keys);
+      const keyReasons = keyDisablers(job.id, job.keys, keys, inheritedShell);
 
       const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
       let m;

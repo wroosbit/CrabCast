@@ -207,6 +207,17 @@ const CASES = [
   { id: 'E', what: 'step deleted outright', want: 'RED', mutate: deleteStep() },
   { id: 'S', what: '`shell: python` on the step', want: 'RED', expect: 'shell: python',
     mutate: replaceStep(STEP_LINE, '        shell: python') },
+  { id: 'S2', what: '`defaults.run.shell: pwsh` on the JOB, step says nothing', want: 'RED',
+    expect: 'inherits `shell: pwsh`',
+    mutate: addJobKey('    defaults:\n      run:\n        shell: pwsh') },
+  { id: 'S3', what: '`defaults.run.shell: pwsh` on the WORKFLOW', want: 'RED',
+    expect: 'inherits `shell: pwsh`',
+    mutate: (yaml) => yaml.replace('\njobs:\n', '\ndefaults:\n  run:\n    shell: pwsh\n\njobs:\n') },
+  { id: 'S4', what: 'workflow `defaults` shell overridden by a `bash` step', want: 'GREEN',
+    mutate: (yaml) =>
+      yaml
+        .replace('\njobs:\n', '\ndefaults:\n  run:\n    shell: pwsh\n\njobs:\n')
+        .replace(STEP_LINE, `${STEP_LINE}\n        shell: bash`) },
 
   // ---- KAN-141: runs, exit status thrown away ------------------------------
   { id: 'F', what: '`|| true`', want: 'RED', expect: '|| true',
