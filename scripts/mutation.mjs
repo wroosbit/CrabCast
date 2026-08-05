@@ -68,6 +68,15 @@
 //       … the section, unchanged …
 //     }
 //
+// TWO ENTRY POINTS, because there are two things in this suite that get
+// mutated. `mutate` copies the compiled BUILD; `mutateScript` copies ONE SOURCE
+// FILE, which is what `verify-proof-cleans-up-when-interrupted` does to a
+// sibling proof. The second was added by KAN-170 and the reason is recorded on
+// the function: that script had both good properties already and still THREW on
+// anchor drift, because it sat in the gap between a helper that copies builds
+// and a sweep that looks for scripts copying builds. Neither was wrong. Nothing
+// owned the space between them.
+//
 // WHAT THIS FILE DOES NOT DO, said here because the gap between two honest
 // mechanisms is where this epic keeps finding defects. It guarantees that a
 // build the caller receives WAS edited exactly as asked. It cannot know whether
@@ -78,6 +87,15 @@
 // says so in its header too, and neither file should be read as covering it.
 // The only defence against it is the one the sections already use: assert the
 // property goes red, not merely that the mutant differs.
+//
+// AND IT DOES NOT KNOW WHETHER A SPAWNED MUTANT RAN. `mutateScript` copies a
+// dependency next to the mutant so an unresolved import cannot kill it
+// silently, and that closes ONE way for a mutant to die on startup, not the
+// class. A mutant that dies for any other reason produces exactly the
+// observation a well-behaved mutant produces — nothing happened — so EVERY
+// SECTION THAT SPAWNS A MUTANT STILL OWES A PRECONDITION THAT IT REALLY RAN.
+// `verify-proof-cleans-up-when-interrupted` has one, and it is the only reason
+// the import failure above was ever noticed.
 //
 // Not named `verify-*`, so the proof-registry job neither runs it nor demands
 // a register entry (KAN-141) — it is a module, like `ci-workflow.mjs`. It is
@@ -202,6 +220,106 @@ export function makeMutator({ distDir, scratch, report }) {
     return target;
   }
 
+  /**
+   * The same thing for ONE SOURCE FILE rather than a build (KAN-170, the tenth
+   * item on that ticket).
+   *
+   * WHY THIS EXISTS. `verify-proof-cleans-up-when-interrupted` mutates a
+   * SCRIPT: it removes the signal-handler block from a sibling proof by exact
+   * text and runs the result. It already had the two good properties — an exact
+   * occurrence count and the {@link FIX_THE_MUTATION} sentence — and it still
+   * THREW on anchor drift — measured: the run died at its §2 with an uncaught
+   * stack trace, printing no verdict line and no exit status of its own. (The
+   * ticket says "§3 never reported"; that script has no §3. What was lost was
+   * the verdict.) It sat in the gap between two mechanisms that
+   * were each honest about themselves: `mutate` above copies a BUILD, and
+   * `verify-mutation-harness` §4 sweeps for scripts that copy a build, so
+   * neither reached a script that copies one file.
+   *
+   * IT WAS FOUND BY CI GOING RED RATHER THAN BY READING, and the way it was
+   * found is the argument for this function existing: converting the sibling to
+   * the shared helper inserted a line INSIDE the handler block, the anchor
+   * stopped matching, and the throw took the rest of the file with it.
+   *
+   * `deps` is the SECOND failure that was underneath that one. A mutant run
+   * from a scratch directory has to have its relative imports satisfied there
+   * too, and a mutant that dies on an unresolved import does not fail loudly —
+   * it fails as "the mutant leaked nothing", which is the section passing its
+   * subject while proving the opposite of what it claims. Named siblings are
+   * copied next to the mutant so that cannot happen quietly. The CALLER still
+   * owes a precondition that the mutant really ran; this only removes one way
+   * for it not to.
+   *
+   * @param {string} name       what this mutation is called, in the verdict
+   * @param {string} sourceFile absolute path to the file to copy and edit
+   * @param {Array<{find: string, replace: string}>} edits
+   * @param {{deps?: string[]}} [opts] sibling files (relative to `sourceFile`'s
+   *        directory) to copy alongside the mutant
+   * @returns {string|null} the mutated file's path, or null — already counted
+   */
+  function mutateScript(name, sourceFile, edits, opts = {}) {
+    const target = path.join(scratch, `mutant-${name}-${path.basename(sourceFile)}`);
+
+    let before;
+    try {
+      before = fs.readFileSync(sourceFile, 'utf8');
+    } catch (err) {
+      return fail(
+        name,
+        `could not read ${sourceFile} (${err?.message ?? err}). Nothing was mutated, so the ` +
+          `section using it would have proved nothing.`
+      );
+    }
+
+    let after = before;
+    for (const { find, replace } of edits) {
+      if (find === replace) {
+        return fail(
+          name,
+          `its \`find\` and \`replace\` are identical, so applying it would change nothing and ` +
+            `the section using it would pass against an unmutated script.`
+        );
+      }
+      const count = after.split(find).length - 1;
+      if (count !== 1) {
+        return fail(
+          name,
+          `expected exactly 1 occurrence of ${JSON.stringify(String(find).slice(0, 70))} in ` +
+            `${path.basename(sourceFile)}, found ${count}. The script was NOT mutated, so the ` +
+            `section using it would have proved nothing.`
+        );
+      }
+      after = after.replace(find, replace);
+    }
+
+    fs.mkdirSync(scratch, { recursive: true });
+    fs.writeFileSync(target, after);
+
+    // Copied rather than symlinked, so the mutant is a self-contained thing on
+    // disk and the copy goes when the scratch directory goes.
+    for (const dep of opts.deps ?? []) {
+      try {
+        fs.copyFileSync(path.join(path.dirname(sourceFile), dep), path.join(scratch, dep));
+      } catch (err) {
+        return fail(
+          name,
+          `its dependency ${dep} could not be copied next to the mutant ` +
+            `(${err?.message ?? err}). A mutant that cannot resolve its imports dies on startup, ` +
+            `and a mutant that died on startup produces the same observation as one that ` +
+            `behaved well.`
+        );
+      }
+    }
+
+    report.pass(
+      `mutation "${name}" applied to a copy of ${path.basename(sourceFile)}`,
+      edits
+        .map((e) => `${JSON.stringify(String(e.find).slice(0, 50))} → ${String(e.replace).length} chars`)
+        .join('; ') + (opts.deps?.length ? `; carried ${opts.deps.join(', ')}` : '')
+    );
+    return target;
+  }
+
   function fail(name, why) {
     skipped.push(name);
     report.fail(
@@ -218,5 +336,5 @@ export function makeMutator({ distDir, scratch, report }) {
    */
   const mutationsSkipped = () => [...skipped];
 
-  return { mutate, mutationsSkipped };
+  return { mutate, mutateScript, mutationsSkipped };
 }

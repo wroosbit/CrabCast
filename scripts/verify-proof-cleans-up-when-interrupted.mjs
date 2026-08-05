@@ -44,6 +44,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import { makeMutator } from './mutation.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const TARGET = path.join(scriptDir, 'verify-send-confirms-delivery.mjs');
@@ -65,6 +66,20 @@ function rule(title) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kan-cleanup-'));
+
+// The shared mutator, bound to THIS script's verdict — so a mutation that stops
+// applying lands in the same failure count every other assertion here lands in,
+// rather than in a throw (KAN-170). `distDir` is unused: this script mutates a
+// SOURCE FILE, not a build, and `mutateScript` is the entry point for that.
+// `check` here is `check(ok, name, detail)`, hence the adapter.
+const { mutateScript, mutationsSkipped } = makeMutator({
+  distDir: DIST,
+  scratch: root,
+  report: {
+    pass: (label, detail) => check(true, label, detail),
+    fail: (label, detail) => check(false, label, detail)
+  }
+});
 
 /**
  * Daemons whose config path is under `dir`, as pids.
@@ -188,8 +203,7 @@ rule('2. THE CHECK CAN FAIL — strip the signal handler and the daemon leaks');
 // a copy of the target and the same measurement re-run: if the survivor count
 // does not go up, section 1 was not measuring the handler.
 
-{
-  const source = fs.readFileSync(TARGET, 'utf8');
+mutation: {
   const HANDLER = `process.on('exit', cleanUp);
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
@@ -198,28 +212,36 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.kill(process.pid, signal);
   });
 }`;
-  const occurrences = source.split(HANDLER).length - 1;
-  if (occurrences !== 1) {
-    throw new Error(
-      `expected exactly one cleanup-handler block in ${path.basename(TARGET)}, found ` +
-      `${occurrences}. THE TARGET WAS NOT MUTATED, so section 2 would have proved nothing. ` +
-      `Fix the mutation, not this check.`
-    );
-  }
-  const mutantPath = path.join(root, 'mutant-verify-send-confirms-delivery.mjs');
-  fs.writeFileSync(mutantPath, source.replace(HANDLER, '/* handler removed by the mutation */'));
 
-  // THE MUTANT RUNS FROM THIS RUN'S OWN SCRATCH ROOT, not from `scripts/`, so
-  // every relative import in the target has to be satisfied here too. The target
-  // imports `./mutation.mjs` (KAN-138), and without this the mutant dies on an
-  // unresolved import a few milliseconds after spawning — which does not fail
-  // loudly, it fails as "the mutant leaked nothing", i.e. as the section PASSING
-  // its subject and failing its own precondition. That precondition is what
-  // caught it; this is the fix. Copied rather than symlinked so the mutant is a
-  // self-contained thing on disk, and so the copy goes when `root` goes.
-  for (const dep of ['mutation.mjs']) {
-    fs.copyFileSync(path.join(scriptDir, dep), path.join(root, dep));
-  }
+  // THROUGH THE SHARED HELPER (KAN-170). This block used to count occurrences
+  // itself — correctly — and then THROW when the count was wrong, which killed
+  // the process: the verdict line never printed and the script never chose its
+  // own exit status. It was the one mutating proof `scripts/mutation.mjs` did
+  // not reach, because the helper copies a BUILD and this copies a single
+  // source file, and `verify-mutation-harness`'s sweep looked for scripts that
+  // copy a build. Two mechanisms, each honest about itself, with this script in
+  // the space between them. `mutateScript` is that gap closed: the same
+  // exact-occurrence rule, the same "Fix the mutation, not this check."
+  // sentence, and a failure that is a COUNTED VERDICT returning null — so this
+  // section skips and the rest of the file still reports.
+  //
+  // `deps` carries `mutation.mjs` next to the mutant because THE MUTANT RUNS
+  // FROM THIS RUN'S OWN SCRATCH ROOT and the target imports it (KAN-138).
+  // Without that the mutant dies on an unresolved import milliseconds after
+  // spawning — which does not fail loudly, it fails as "the mutant leaked
+  // nothing", i.e. as this section PASSING its subject while proving the
+  // opposite. The precondition below is what caught that, and it is still the
+  // only thing that could: the helper closes one way for a mutant to die on
+  // startup, not the class.
+  const mutantPath = mutateScript(
+    'strip-cleanup-handler',
+    TARGET,
+    [{ find: HANDLER, replace: '/* handler removed by the mutation */' }],
+    { deps: ['mutation.mjs'] }
+  );
+  // Already a counted failure. Skip the section rather than asserting about a
+  // script that was never mutated.
+  if (!mutantPath) break mutation;
 
   const mutant = await interruptMidRun(mutantPath, 'mutant');
   console.log(`   mutant: daemons while running: ${mutant.during.length} ${JSON.stringify(mutant.during)}`);
@@ -250,5 +272,12 @@ try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best effor
 
 console.log(`\n${'='.repeat(78)}`);
 console.log(`${checks - failures}/${checks} checks passed.`);
+// Named next to the verdict so "1 FAILED" is not read as an ordinary assertion
+// failure when what actually happened is that a section never executed.
+const skipped = mutationsSkipped();
+if (skipped.length) {
+  console.log(`${skipped.length} mutation(s) DID NOT APPLY, so their section did not run: ` +
+    skipped.join(', '));
+}
 console.log('='.repeat(78));
 process.exit(failures ? 1 : 0);
