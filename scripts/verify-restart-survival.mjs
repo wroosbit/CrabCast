@@ -46,7 +46,7 @@
 //     "it re-attached rather than re-spawning" is evidence rather than
 //     inference — and a double-spawn would be caught even if herdr refused it.
 //
-// FIVE SECTIONS, run once per launcher and then once for the shared cases:
+// SIX SECTIONS, the first four run once per launcher and the last two once:
 //
 //   1. start        — the agent runs, one pane, one `agent start`
 //   2. restart      — a fresh daemon RE-ATTACHES: sessionless false, new
@@ -61,11 +61,22 @@
 //   5. boundary     — a FOREIGN pane after a restart still REFUSES. The attach
 //                     is reached from the ours-branch, so widening it by an
 //                     inch would re-attach to a stranger's terminal.
+//   6. no writes    — `attachSession` is a separate verb because a re-attach
+//                     must not re-provision a directory somebody has been
+//                     working in. Sections 1–5 count panes and count calls;
+//                     this one reads the FILES (KAN-170 item 12).
+//
+// AND EVERY NEGATIVE CLAIM ABOUT THE ARGV LOG WAITS BEFORE IT LOOKS. The attach
+// is issued through `pty.spawn` and lands in the log milliseconds later, so
+// "no second attach was opened", asked at the instant the call resolved, could
+// not tell a refusal from one still in flight (KAN-170 item 13). See
+// `afterQuiescence`.
 //
 // Usage:
 //   npm run build
 //   node scripts/verify-restart-survival.mjs [distDir]
 
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -229,12 +240,61 @@ const callsMatching = (re) => herdrCalls().filter((line) => re.test(line));
  * rather than hanging.
  */
 async function waitForCall(re, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
   for (;;) {
-    if (callsMatching(re).length > 0) return true;
+    if (callsMatching(re).length > 0) {
+      observedAttachLatencies.push(Date.now() - startedAt);
+      return true;
+    }
     if (Date.now() >= deadline) return false;
     await new Promise((r) => setTimeout(r, 50));
   }
+}
+
+/**
+ * NEGATIVE assertions about herdr calls, which need a wait the positive ones
+ * do not — and did not have (KAN-170 item 13).
+ *
+ * `callsMatching(/^agent attach/).length === 0` asked the log a question at the
+ * instant the operation returned. The attach is the one herdr call this daemon
+ * makes through `pty.spawn` rather than `execSync`, so it lands in the log
+ * MILLISECONDS AFTER the call that issued it resolves: a spurious second attach
+ * would have been issued, and counted zero, and the check would have passed
+ * while the thing it forbids was in flight. The positive assertion two sections
+ * up already knew this — it uses `waitForCall` — so the file held both shapes
+ * at once, one waiting and one not.
+ *
+ * THE WINDOW IS DERIVED, NOT PICKED. A magic sleep is a guess that goes stale
+ * on a slower runner, so this uses what THIS RUN has already measured: the
+ * longest time a positive attach actually took to appear, multiplied out, with
+ * a floor for the case where no attach has been observed yet. The multiplier is
+ * the margin; the floor is the fallback. Both are reported in the detail string
+ * so a reader can see what the silence was worth.
+ */
+const observedAttachLatencies = [];
+const QUIESCE_FLOOR_MS = 500;
+const QUIESCE_MULTIPLIER = 20;
+function quiesceMs() {
+  const worst = observedAttachLatencies.length ? Math.max(...observedAttachLatencies) : 0;
+  return Math.max(QUIESCE_FLOOR_MS, worst * QUIESCE_MULTIPLIER);
+}
+
+/**
+ * Wait long enough that a call issued before now would have been logged, then
+ * report what is there. Returns the matching lines and the basis, so the caller
+ * asserts on the count AND says what the silence rests on.
+ */
+async function afterQuiescence(re) {
+  const waited = quiesceMs();
+  await new Promise((r) => setTimeout(r, waited));
+  const worst = observedAttachLatencies.length ? Math.max(...observedAttachLatencies) : 0;
+  return {
+    calls: callsMatching(re),
+    basis:
+      `waited ${waited}ms — ${QUIESCE_MULTIPLIER}× the slowest attach this run has actually ` +
+      `observed (${worst}ms), floor ${QUIESCE_FLOOR_MS}ms`
+  };
 }
 
 /**
@@ -443,11 +503,12 @@ for (const launcher of ['shell', 'claude']) {
     again.success === true && again.alreadyRunning === true && again.started === false,
     `success=${again.success} alreadyRunning=${again.alreadyRunning} started=${again.started}`
   );
+  const quietAfterActivate = await afterQuiescence(/^agent attach\b/);
   check(
     `[${launcher}] it STARTS NOTHING and ATTACHES NOTHING — no \`agent start\`, no second ` +
-      `\`agent attach\`, asserted against the argv log`,
-    callsMatching(/^agent start\b/).length === 0 && callsMatching(/^agent attach\b/).length === 0,
-    JSON.stringify(herdrCalls())
+      `\`agent attach\`, asserted against the argv log AFTER waiting long enough for one to land`,
+    callsMatching(/^agent start\b/).length === 0 && quietAfterActivate.calls.length === 0,
+    `${quietAfterActivate.basis}; log=${JSON.stringify(herdrCalls())}`
   );
   check(
     `[${launcher}] it hands back the session it already holds, and does not claim to have ` +
@@ -474,10 +535,12 @@ for (const launcher of ['shell', 'claude']) {
     secondPass.outcomes.find((o) => o.path === dir)?.result === 'already-running',
     `result=${secondPass.outcomes.find((o) => o.path === dir)?.result}`
   );
+  const quietAfterReconcile = await afterQuiescence(/^agent attach\b/);
   check(
-    `[${launcher}] so no second attach was opened`,
-    callsMatching(/^agent attach\b/).length === 0,
-    JSON.stringify(herdrCalls())
+    `[${launcher}] so no second attach was opened — and the log was read after a wait, not at ` +
+      `the instant reconcile resolved`,
+    quietAfterReconcile.calls.length === 0,
+    `${quietAfterReconcile.basis}; log=${JSON.stringify(herdrCalls())}`
   );
 }
 
@@ -521,10 +584,12 @@ console.log(`\n${'='.repeat(76)}\n5. THE BOUNDARY — a stranger's pane is not s
     outcome?.result === 'failed' && /none of them is ours/.test(outcome?.error ?? ''),
     `result=${outcome?.result} error=${outcome?.error ?? '(none)'}`
   );
+  const quietAfterRefusal = await afterQuiescence(/^agent attach\b/);
   check(
-    'nothing was started and nothing was attached',
-    callsMatching(/^agent start\b/).length === 0 && callsMatching(/^agent attach\b/).length === 0,
-    JSON.stringify(herdrCalls())
+    'nothing was started and nothing was attached — after a wait, because an attach that is ' +
+      'refused and an attach that has not been logged yet look identical at time zero',
+    callsMatching(/^agent start\b/).length === 0 && quietAfterRefusal.calls.length === 0,
+    `${quietAfterRefusal.basis}; log=${JSON.stringify(herdrCalls())}`
   );
   check(
     "and the stranger's pane is untouched — CrabCast never closes a pane it did not start",
@@ -532,6 +597,194 @@ console.log(`\n${'='.repeat(76)}\n5. THE BOUNDARY — a stranger's pane is not s
       !herdrCalls().some((l) => /^pane close\b/.test(l)),
     JSON.stringify(panesIn(dir).map((p) => p.name))
   );
+}
+
+// ===========================================================================
+// 6. THE RE-ATTACH PROVISIONS NOTHING (KAN-170 item 12).
+//
+// `attachSession` is a separate verb from `spawnSession` for one stated reason,
+// and it is a reason about WRITES: routing a restart through the spawn path
+// would re-run `launcher.setup`, rewrite the workspace `.mcp.json` and rewrite
+// the sidecar prompt file for an agent that has been working in that directory
+// for an hour. Those steps are idempotent, so doing them would MOSTLY be
+// harmless — which is exactly why nothing noticed that no assertion anywhere
+// held the separation. Sections 1–5 above count panes and count `agent start`;
+// not one of them reads a file.
+//
+// SO THIS SECTION OBSERVES THE BYTES. The agent is configured with the two
+// artifacts the doc comment names — an `.mcp.json` in the caller's own
+// directory and a bootstrap prompt in CrabCast's sidecar — so the spawn has
+// something to write and the re-attach has something to leave alone. The
+// contrast is the claim: the same run watches the spawn verb create them and
+// the attach verb not touch them.
+//
+// WHAT IT DOES NOT REACH, said here rather than left to be inferred. It watches
+// the agent's directory and CrabCast's sidecar. A `launcher.setup` that writes
+// into the user's GLOBAL config — the claude launcher's folder-trust entry is
+// the live example — is outside both, and this section runs the `shell`
+// launcher, which has no such write. Nothing covers that one today.
+// ===========================================================================
+console.log(`\n${'='.repeat(76)}\n6. THE RE-ATTACH WRITES NOTHING — observed as files, not as calls\n${'='.repeat(76)}`);
+{
+  const dir = ownedDir('provisioned-survivor');
+  const paneName = paneNameFor(dir);
+  setCensus([]);
+  const PROVISIONED = {
+    ...KNOBS,
+    launcher: 'shell',
+    prompt: 'KAN-170 item 12: this agent has been working for an hour. Do not rewrite this file.\n',
+    mcpServers: { crabcast: 'builtin' }
+  };
+
+  const registry1 = new AgentRegistry(path.join(tmp, 'agents-provisioned.jsonl'));
+  const bridge1 = newBridge();
+  const sidecar = bridge1.sidecarDirFor(dir);
+  registry1.recordConfigured({ path: dir, config: PROVISIONED });
+  resetArgvLog();
+
+  check(
+    '(setup) nothing is in the caller\'s directory before the agent is activated',
+    Object.keys(snapshotTree(dir)).length === 0,
+    JSON.stringify(Object.keys(snapshotTree(dir)))
+  );
+
+  const started = await invoke(bridge1, registry1, [], {
+    action: 'activate_agent', path: dir, ...PAST_THE_GATE
+  });
+  const afterSpawn = { ...snapshotTree(dir, 'workspace'), ...snapshotTree(sidecar, 'sidecar') };
+  console.log(`    after the spawn: ${JSON.stringify(Object.keys(afterSpawn))}`);
+
+  check(
+    'the agent started, and the SPAWN verb wrote both artifacts — without this the assertion ' +
+      'below would be about a directory nobody ever writes to',
+    started.success === true &&
+      started.started === true &&
+      Object.keys(afterSpawn).some((f) => f === 'workspace/.mcp.json') &&
+      Object.keys(afterSpawn).some((f) => f.startsWith('sidecar/') && /prompt/i.test(f)),
+    `success=${started.success} error=${started.error ?? '(none)'} files=${JSON.stringify(Object.keys(afterSpawn))}`
+  );
+
+  // Backdated so that a rewrite CANNOT hide inside mtime granularity. An
+  // idempotent rewrite produces identical bytes, so content alone could never
+  // detect one — the mtime is the whole detector, and pushing it an hour into
+  // the past makes any write at all unmissable.
+  const backdated = Date.now() - 3_600_000;
+  for (const f of [...walkAllFiles(dir), ...walkAllFiles(sidecar)]) {
+    fs.utimesSync(f, new Date(backdated), new Date(backdated));
+  }
+  const beforeRestart = { ...snapshotTree(dir, 'workspace'), ...snapshotTree(sidecar, 'sidecar') };
+
+  // The restart, exactly as sections 1–5 stage it.
+  killPtys(bridge1);
+  const registry2 = new AgentRegistry(path.join(tmp, 'agents-provisioned.jsonl'));
+  const bridge2 = newBridge();
+  const events = [];
+  const router2 = routerFor(bridge2, registry2, events);
+  resetArgvLog();
+
+  const reconciled = await reconcileAgents({
+    registry: registry2, herdrBridge: bridge2, router: router2, cause: 'reboot', log: () => {}
+  });
+  const outcome = reconciled.outcomes.find((o) => o.path === dir);
+  await waitForCall(new RegExp(`^agent attach ${paneName}\\b`));
+
+  // PRECONDITION, and it is the one that matters: "nothing was written" is
+  // trivially true of an operation that did not happen. The re-attach has to
+  // have really occurred for the observation below to mean anything.
+  check(
+    'PRECONDITION: the re-attach really happened — reattached, with the attach in the argv log',
+    outcome?.result === 'reattached' &&
+      callsMatching(new RegExp(`^agent attach ${paneName}\\b`)).length === 1,
+    `result=${outcome?.result} error=${outcome?.error ?? '(none)'} ` +
+      `attaches=${JSON.stringify(callsMatching(/^agent attach\b/))}`
+  );
+
+  const afterAttach = { ...snapshotTree(dir, 'workspace'), ...snapshotTree(sidecar, 'sidecar') };
+  const moved = [];
+  for (const rel of new Set([...Object.keys(beforeRestart), ...Object.keys(afterAttach)])) {
+    const a = beforeRestart[rel];
+    const b = afterAttach[rel];
+    if (!a) moved.push(`${rel} APPEARED`);
+    else if (!b) moved.push(`${rel} VANISHED`);
+    else if (a.mtimeMs !== b.mtimeMs) moved.push(`${rel} REWRITTEN (mtime moved)`);
+    else if (a.sha !== b.sha) moved.push(`${rel} CHANGED (same mtime, different bytes)`);
+  }
+  console.log(`    after the re-attach: ${JSON.stringify(Object.keys(afterAttach))}`);
+
+  check(
+    'and NOT ONE BYTE was written: no artifact appeared, vanished, was rewritten or changed — ' +
+      'this is `attachSession` being an attach rather than a spawn with the spawn skipped',
+    moved.length === 0,
+    moved.length ? moved.join('; ') : `${Object.keys(afterAttach).length} file(s) untouched`
+  );
+  // Named separately from the sweep above because it is the artifact the doc
+  // comment argues about — "a prompt file whose write fails would refuse an
+  // activation that needed no prompt" — so it is worth failing by name rather
+  // than as one entry in a list.
+  //
+  // Compared to what the SAME statSync path reported before the restart, never
+  // to the number handed to `utimesSync`: that round trip loses sub-millisecond
+  // precision and reports a value set as …573 back as …572.999. Asserting
+  // against the literal is a flake, and it is the second time this file's
+  // author has walked into it — see verify-daemon-provenance §6c.
+  const promptFiles = Object.entries(afterAttach).filter(
+    ([rel]) => rel.startsWith('sidecar/') && /prompt/i.test(rel)
+  );
+  check(
+    'the prompt file in particular still carries the mtime it had before the restart, and that ' +
+      'mtime is still an hour old — the file whose rewrite would be the rudest of the three, ' +
+      'since the agent read it once and moved on',
+    promptFiles.length === 1 &&
+      promptFiles.every(
+        ([rel, meta]) =>
+          meta.mtimeMs === beforeRestart[rel]?.mtimeMs && Date.now() - meta.mtimeMs > 3_540_000
+      ),
+    JSON.stringify(
+      promptFiles.map(
+        ([rel, m]) =>
+          `${rel} @ ${new Date(m.mtimeMs).toISOString()} ` +
+          `(${Math.round((Date.now() - m.mtimeMs) / 60_000)} min old)`
+      )
+    )
+  );
+}
+
+/** Every regular file under `dir`, at any depth. Absent directory → nothing. */
+function walkAllFiles(dir) {
+  const out = [];
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    const abs = path.join(dir, e.name);
+    if (e.isDirectory()) out.push(...walkAllFiles(abs));
+    else out.push(abs);
+  }
+  return out;
+}
+
+/**
+ * What a directory holds, at a resolution that makes a rewrite visible: the
+ * file set, each file's mtime, and a hash of its bytes. All three, because each
+ * catches something the others do not — a new file, an idempotent rewrite that
+ * changed nothing but the timestamp, and an edit that somehow kept the
+ * timestamp.
+ */
+function snapshotTree(dir, prefix = '') {
+  const out = {};
+  for (const abs of walkAllFiles(dir)) {
+    const rel = path.relative(dir, abs);
+    const st = fs.statSync(abs);
+    out[prefix ? `${prefix}/${rel}` : rel] = {
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+      sha: createHash('sha256').update(fs.readFileSync(abs)).digest('hex').slice(0, 16)
+    };
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
