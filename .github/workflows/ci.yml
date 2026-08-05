@@ -100,12 +100,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      # Full history, for one script only: verify-ci-wiring-guards reproduces
-      # the defect it exists for by loading the PRE-FIX scripts/ci-workflow.mjs
-      # out of `origin/main`, and a shallow clone has no such ref. It reports
-      # that section as NOT RUN rather than as a pass when the ref is missing,
-      # so this is the difference between the demonstration happening and it
-      # being announced as absent (KAN-148).
+      # Full history, for two scripts: verify-ci-wiring-guards reproduces the
+      # defect it exists for by loading the PRE-FIX scripts/ci-workflow.mjs out
+      # of `origin/main`, and verify-readme-is-current runs itself against the
+      # two README revisions that really had drifted (72db4cd, e7ffb58) — a
+      # shallow clone has neither ref. Both report that section as NOT RUN
+      # rather than as a pass when the ref is missing, so this is the
+      # difference between the demonstration happening and it being announced
+      # as absent (KAN-148, KAN-175).
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -544,6 +546,50 @@ jobs:
       #                                     echoes the same object and is not
       #                                     swept.
       #
+      # And one whose subject is the only USER-FACING document, which until now
+      # had no proof at all:
+      #
+      #   verify-readme-is-current           the README's pasted blocks still
+      #                                      show what the program prints. It
+      #                                      re-runs six of the page's thirteen
+      #                                      program-output blocks against the
+      #                                      shim and requires every line of
+      #                                      that — masked, so the figures two
+      #                                      runs cannot share do not matter —
+      #                                      to appear IN THE PAGE'S BLOCK FOR
+      #                                      THAT COMMAND, in order. Per
+      #                                      command, because the drift it
+      #                                      exists for (KAN-139) added the same
+      #                                      five lines to `list` and to
+      #                                      `status`: a page updated for one
+      #                                      and not the other still contains
+      #                                      every label somewhere, and its
+      #                                      §5 BUILDS that cheaper check and
+      #                                      shows it green on exactly that
+      #                                      page. §1 holds every fenced block
+      #                                      of program output to a scenario or
+      #                                      to a register entry with a reason,
+      #                                      so the coverage cannot silently
+      #                                      shrink. §3 alters the page six ways
+      #                                      — four that must be caught, two
+      #                                      that must NOT be, because a mask
+      #                                      wide enough to pass against
+      #                                      anything is this check's own way of
+      #                                      overclaiming. §4 runs it against
+      #                                      72db4cd and e7ffb58, the two
+      #                                      revisions that really were stale,
+      #                                      and asserts WHICH KIND of red each
+      #                                      produces.
+      #                                      WHAT IT CANNOT SEE: whether a
+      #                                      pasted session is real rather than
+      #                                      plausible — the mask removes
+      #                                      exactly the values that would tell
+      #                                      — and whether the page's PROSE is
+      #                                      true, which is where both defects
+      #                                      KAN-174 found actually were. The
+      #                                      reviewer re-running the page is all
+      #                                      there is for either.
+      #
       # verify-daemon-provenance starts daemons but needs no herdr either: it
       # drives `daemon_status`, which touches neither panes nor the herdr
       # binary. It builds its OWN fixture trees under the system temp dir — one
@@ -603,6 +649,7 @@ jobs:
             verify-config-echo-contract
             verify-ci-wiring-guards
             verify-mutation-harness
+            verify-readme-is-current
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

@@ -616,7 +616,7 @@ There is no `crabcast daemon` that runs one in the foreground, and nothing above
 
 ```
 $ crabcast --config bad.json list
-crabcast: refusing to run: bad.json: "workspaceTypes" is no longer a config key — workspace types are gone: an agent is a directory plus the knobs a caller freezes onto it with `configure`. priority, prompt, launcher, mcpServers and the gate flags are now per-agent `configure` parameters rather than per-type config, so this declaration has no consumer. Remove the key; there is nothing to move it to in this file.
+crabcast: refusing to run: /tmp/kan175/badconfig/bad.json: "workspaceTypes" is no longer a config key — workspace types are gone: an agent is a directory plus the knobs a caller freezes onto it with `configure`. priority, prompt, launcher, mcpServers and the gate flags are now per-agent `configure` parameters rather than per-type config, so this declaration has no consumer. Remove the key; there is nothing to move it to in this file.
 exit=4
 ```
 
