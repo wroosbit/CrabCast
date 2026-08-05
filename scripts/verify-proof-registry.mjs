@@ -166,6 +166,19 @@ const EXCLUSIONS = [
     evidence: 'scripts/verify-pty-init-rejects-unknown-session.mjs:7 isolates a real daemon by HERDR_SOCKET_PATH'
   },
   {
+    script: 'verify-herdr-release',
+    reason:
+      'Needs a herdr release BINARY that the caller downloaded, named on the command line, plus a ' +
+      'private server started from it and real panes. It is the only proof in this suite that runs ' +
+      'against a herdr other than the one on PATH — which is the whole point of it, and which no ' +
+      'runner can do: there is no herdr on a GitHub runner to be other than. It also takes an ' +
+      'expected verdict (--expect supported|spawn-broken), so a single CI invocation would have to ' +
+      'pick a release and an answer, and the answer is exactly what a human is running it to find ' +
+      'out. Its output goes on the pull request that changes README.md\'s version table, because ' +
+      'that table is the thing it is evidence for.',
+    evidence: 'scripts/verify-herdr-release.mjs:63 the herdr on this machine\'s PATH is running a live fleet, so the release under test is downloaded and run out-of-place'
+  },
+  {
     script: 'verify-spawn-failure-legibility',
     reason:
       'Private herdr server. The KAN-24 defect was that a REFUSED `herdr agent start` was reported ' +

@@ -235,8 +235,56 @@ export const SUPPORTED_HERDR_MAJOR_MINOR = '0.6';
  * The herdr release CrabCast has actually been run against, named in every
  * verdict so a reader knows what "supported" is grounded in rather than
  * inferring it from a version range.
+ *
+ * It is the release every other proof in `scripts/` that needs a REAL herdr
+ * runs on, because it is what is installed on the machine they run against.
+ * {@link VERIFIED_HERDR_RELEASES} is the full list of releases anybody has
+ * started a pane on.
  */
 export const VERIFIED_HERDR_RELEASE = '0.6.4';
+
+/**
+ * Every 0.6.x release CrabCast has been RUN against, in order.
+ *
+ * This list is the reason the README does not say "0.6.x is supported". Eleven
+ * releases exist in that line (0.6.0 through 0.6.10); two of them have had a
+ * pane started on them. The other nine are neither known-good nor known-bad,
+ * and a range is a claim about every member of it.
+ *
+ *   0.6.4   every proof in scripts/, repeatedly, on the machine they run on
+ *   0.6.10  `scripts/verify-herdr-release.mjs <bin> --expect supported`
+ *           (KAN-181, 2026-08-05): configure → activate → herdr's own census →
+ *           status → tail → deactivate → forget, on a private server
+ *
+ * Adding a release here means somebody ran that script against that binary and
+ * put the output on a pull request. Nothing enforces that from inside the
+ * process, which is why the list is short and its provenance is written down.
+ */
+export const VERIFIED_HERDR_RELEASES = ['0.6.4', '0.6.10'] as const;
+
+/**
+ * Releases ABOVE the supported line that were run and observed to fail, and
+ * what was seen.
+ *
+ * KAN-102 removed a message that told a 0.8 user their activations *would* fail
+ * on evidence taken from 0.7.5 — a prediction stated as a finding. This map is
+ * the other half of that discipline: 0.8.0 has since been run (KAN-181), it
+ * fails identically, and continuing to call it "an unknown — it may well work"
+ * would be the same defect pointing the other way.
+ *
+ * Keyed by the EXACT release, never by a range. 0.8.1 is not in here; nobody
+ * has run it.
+ *
+ * 0.7.5 is listed even though the 0.7.x band has its own message and never
+ * reads this map for its own verdict: what it is read for there is the
+ * ENUMERATION handed to a user on an untested release above the line, and
+ * leaving out one of the two releases that were run would make that list a
+ * smaller prior than the evidence supports.
+ */
+export const HERDR_RELEASES_OBSERVED_BROKEN: Readonly<Record<string, string>> = {
+  '0.7.5': 'observed on a clean machine (KAN-33)',
+  '0.8.0': 'run on 2026-08-05 against a private server (KAN-181)'
+};
 
 /**
  * The line where `agent start` was redesigned — see the docblock above. It is
@@ -266,6 +314,20 @@ export function parseHerdrVersion(versionOutput: string): [number, number] | und
 }
 
 /**
+ * `herdr --version` output → the exact `major.minor.patch` release, or
+ * undefined when the output does not carry one.
+ *
+ * Separate from {@link parseHerdrVersion} because the two answer different
+ * questions and only one of them is a range: the band an installed herdr falls
+ * into is a `[major, minor]` comparison, while "has anybody actually run this"
+ * can only ever be asked of one exact release.
+ */
+export function parseHerdrRelease(versionOutput: string): string | undefined {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(versionOutput);
+  return match ? `${match[1]}.${match[2]}.${match[3]}` : undefined;
+}
+
+/**
  * The single version comparison in this codebase (KAN-102).
  *
  * A verdict on the herdr that is installed, or undefined when it is fine (or
@@ -273,20 +335,33 @@ export function parseHerdrVersion(versionOutput: string): [number, number] | und
  * to run on one would break every future release). Never a refusal: it returns
  * words, and the caller decides where to put them.
  *
- * Three bands, because they rest on three different amounts of evidence and a
+ * Four bands, because they rest on four different amounts of evidence and a
  * message that flattened them would be claiming more than anyone knows:
  *
- *   - **0.6.x** — the supported line, verified on {@link VERIFIED_HERDR_RELEASE}.
- *     Nothing is said. A notice that fires for the configuration we tell people
- *     to install trains them to ignore the one that matters.
+ *   - **0.6.x** — the supported line. Nothing is said. A notice that fires for
+ *     the configuration we tell people to install trains them to ignore the one
+ *     that matters.
+ *
+ *     THIS SILENCE IS WIDER THAN THE EVIDENCE, DELIBERATELY. Two releases in
+ *     that line have been run ({@link VERIFIED_HERDR_RELEASES}); the other nine
+ *     have not. Saying something about those nine would mean firing a notice at
+ *     a user whose herdr is probably fine, on no evidence either way — which is
+ *     the same overclaim pointing the other way. The honest place for "two of
+ *     the eleven were run" is the README's table, where a reader is choosing a
+ *     version, and it says exactly that.
  *   - **0.7.x** — `agent start` was redesigned and `--cwd` is gone; the failure
  *     was *observed*, on 0.7.5, on the extraction source's clean-machine run
  *     (KAN-33). The specific claim is kept, with the version it was seen on.
- *   - **above 0.7, and below 0.6** — untested. Nobody has run CrabCast on 0.8;
- *     deferring that check was a schedule decision, not a finding (KAN-59
- *     decision 7). So the verdict says *untested against*, not *broken*: a
- *     definite prediction that turns out to be wrong is how a diagnostic loses
- *     the credibility the 0.7 message depends on.
+ *   - **an exact release in {@link HERDR_RELEASES_OBSERVED_BROKEN}** — run here,
+ *     failed here, said as a finding rather than a prediction. 0.8.0 is in that
+ *     list since KAN-181: it fails at the same flag as 0.7.5, because 0.8 kept
+ *     the redesign.
+ *   - **anything else above 0.7, and everything below 0.6** — untested. The
+ *     verdict says *untested against*, not *broken*: a definite prediction that
+ *     turns out to be wrong is how a diagnostic loses the credibility the two
+ *     evidenced messages above depend on. It does hand over the prior — the
+ *     releases above the line that WERE run all failed the same way — because
+ *     withholding that from someone on 0.9 would be its own kind of unhelpful.
  */
 export function checkHerdrVersion(versionOutput: string): string | undefined {
   const parsed = parseHerdrVersion(versionOutput);
@@ -312,13 +387,29 @@ export function checkHerdrVersion(versionOutput: string): string | undefined {
   }
 
   if (major > wantMajor || (major === wantMajor && minor > wantMinor)) {
+    const release = parseHerdrRelease(versionOutput);
+    const observed = release ? HERDR_RELEASES_OBSERVED_BROKEN[release] : undefined;
+    if (observed) {
+      // A finding, not a forecast: this exact release was run and this is what
+      // happened. The wording deliberately matches the 0.7 message's, because
+      // the failure is the same failure.
+      return (
+        `${reported} was RUN against CrabCast and every activation failed with ` +
+        `'unknown option: --cwd' — ${observed}. ${HERDR_AGENT_START_REDESIGN_MAJOR_MINOR} ` +
+        `redesigned 'agent start' to attach a --kind to an existing --pane, dropping the --cwd ` +
+        `this spawn path passes, and ${major}.${minor} kept that redesign. Install a ` +
+        `${SUPPORTED_HERDR_MAJOR_MINOR}.x herdr (${VERIFIED_HERDR_RELEASES.join(' and ')} are ` +
+        `the releases CrabCast has been run against).`
+      );
+    }
     return (
       `${reported} is above the herdr line CrabCast is verified against ` +
       `(${VERIFIED_HERDR_RELEASE}) and CrabCast has not been tested on it. That is an unknown, ` +
-      `not a known breakage — nobody has looked yet, so it may well work. If activations do ` +
-      `fail, start with 'herdr agent start': ` +
-      `${HERDR_AGENT_START_REDESIGN_MAJOR_MINOR} redesigned it and dropped the --cwd this ` +
-      `spawn path passes, and nothing has re-checked that since. Installing ` +
+      `not a known breakage — nobody has run this release, so it may well work. What is known ` +
+      `about its neighbours is not encouraging: every release above the line that HAS been run ` +
+      `(${Object.keys(HERDR_RELEASES_OBSERVED_BROKEN).join(', ')}) failed at ` +
+      `'herdr agent start' with 'unknown option: --cwd', which ` +
+      `${HERDR_AGENT_START_REDESIGN_MAJOR_MINOR} dropped and nothing has restored. Installing ` +
       `${VERIFIED_HERDR_RELEASE} puts you on the tested path.`
     );
   }

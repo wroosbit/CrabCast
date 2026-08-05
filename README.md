@@ -16,36 +16,79 @@ Matches the `engines` field in `package.json`.
 
 **herdr is a hard prerequisite.** Every agent CrabCast starts is a herdr pane; with no `herdr` on `PATH`, every activation fails. herdr is a terminal workspace for running many shells at once — [`herdrdev/herdr`](https://github.com/herdrdev/herdr), Apache-2.0 (compatible with CrabCast's MIT), homepage <https://herdr.dev>.
 
-**Install 0.6.4 specifically**, from that release's pinned assets:
+**Install 0.6.4 specifically**, from that release's pinned assets. Change the first line to your platform and paste the rest as it stands — on Linux or macOS this is the whole of it:
 
 ```bash
-# Pick the asset for your platform. Available for v0.6.4:
-#   herdr-linux-x86_64   herdr-linux-aarch64   herdr-macos-x86_64   herdr-macos-aarch64
-curl -fsSL -o herdr https://github.com/herdrdev/herdr/releases/download/v0.6.4/herdr-linux-x86_64
+# Four assets exist for v0.6.4. Pick yours; nothing else in this block changes.
+#   herdr-linux-x86_64     Linux, Intel/AMD
+#   herdr-linux-aarch64    Linux, ARM
+#   herdr-macos-x86_64     macOS, Intel
+#   herdr-macos-aarch64    macOS, Apple silicon
+ASSET=herdr-linux-x86_64
+
+curl -fsSL -o herdr "https://github.com/herdrdev/herdr/releases/download/v0.6.4/$ASSET"
 chmod +x herdr
 mkdir -p ~/.local/bin && mv herdr ~/.local/bin/herdr    # or anywhere on PATH
 herdr --version                                          # herdr 0.6.4
 ```
 
-**0.6.4 is the version CrabCast is verified against — and "not 0.6.x" is not one situation but two.** They rest on different amounts of evidence, so they get different answers. The daemon draws the same three bands, checking the installed herdr at startup:
+That last line is the check that matters, and it is worth actually reading rather than scrolling past: if it prints anything but `herdr 0.6.4`, another herdr is earlier on your `PATH`, and that one is what CrabCast will spawn into.
+
+**Windows is not covered.** herdr publishes Windows binaries in preview builds only, so there is no stable asset to pin, and CrabCast has never been run there.
+
+**The pin is more friction than it should be, and pretending otherwise would waste your time.** herdr's current release is 0.8.0 — which was run here and **starts nothing** (see the table below) — so `brew install herdr`, `herdr update`, or any other "get the latest" route lands you somewhere CrabCast cannot work. Downloading a release asset, `chmod +x`, and putting it on `PATH` yourself is the price of being on the tested version, and there is no one-liner that does it.
+
+**Do not run `npm install herdr`.** The `herdr` package on npm is a **name reservation by the project's own author**, not an impostor. It sits at version `0.0.0`, describes itself as *"Reserved package name for Herdr, a terminal workspace manager for AI coding agents."*, and its sole maintainer is `ogulcancelik` — the account whose `github.com/ogulcancelik/herdr` now redirects to `herdrdev/herdr`, which is what GitHub does after a repository is transferred, and the URL the package's own `repository` field still names. So the rule is unchanged and the reason is not: there is **nothing in that package to install**. It ships two files and no binary. herdr reaches your machine as the release asset above or not at all.
+
+### Which herdr releases have actually been run
+
+**Four: 0.6.4 and 0.6.10, which work, and 0.7.5 and 0.8.0, which do not.** A version table is a claim about every release it covers, so this one names the releases somebody started a pane on, keeps the untried ones in a row of their own, and says in the right-hand column what each row rests on:
 
 | herdr | what is known | what it rests on |
 | --- | --- | --- |
-| **0.6.x** | **Supported.** Every proof in this repository was produced on 0.6.4. | run, repeatedly |
-| **0.7.x** | **A known break — do not use it.** 0.7.0 redesigned `agent start`: it no longer creates a pane but attaches an agent kind to an existing one (`--kind`/`--pane`), and it dropped `--cwd`, `--tab`, `--no-focus` and the trailing `-- <argv>`. CrabCast's spawn path passes all four, so **every activation fails** with `unknown option: --cwd`. | observed, on 0.7.5, on a clean machine |
-| **0.8 and above** | **Untested — a genuine unknown.** Nobody has run CrabCast on it. It may well work; this is not a prediction that it will fail. | nothing, and that is the point |
+| **0.6.4** | **Supported.** It is what the machine this project is developed on has installed, so every proof in `scripts/` that needs a *real* herdr — a live server, real panes — has only ever run against it. (The rest run in CI against a shim modelled on it, which is a statement about CrabCast and not about any herdr.) | run, repeatedly |
+| **0.6.10** | **Run once, end to end, and it worked.** The top of the 0.6 line at the time of writing. | `node scripts/verify-herdr-release.mjs <0.6.10 binary> --expect supported`, 2026-08-05 (KAN-181): configure → activate → **herdr's own census** → status → tail → deactivate → forget, against a private 0.6.10 server |
+| **0.6.0 – 0.6.3, 0.6.5 – 0.6.9** | **Untried.** Nine of the eleven releases in the 0.6 line. They exist, they download, nobody has started a pane on any of them. They are very likely fine — and "likely" is the entire content of this row. | nothing |
+| **0.7.x** | **A known break — do not use it.** 0.7.0 redesigned `agent start`: it no longer creates a pane but attaches an agent kind to an existing one (`--kind`/`--pane`), and it dropped `--cwd`, `--tab`, `--no-focus` and the trailing `-- <argv>`. CrabCast's spawn path passes all four, so **every activation fails** with `unknown option: --cwd`. | observed on 0.7.5 on a clean machine (KAN-33), and reproduced by `verify-herdr-release.mjs … --expect spawn-broken` |
+| **0.8.0** | **Broken the same way.** 0.8 kept the redesign: `herdr agent start` still takes `--kind`/`--pane` and still has no `--cwd`. Activation fails identically, and nothing is half-started. | run, 2026-08-05 (KAN-181), same script, `--expect spawn-broken` |
+| **above 0.8.0** | **Untested.** Nobody has run one. Given the two above it is not a good bet, but that is a prior and not a finding. | nothing, and that is the point |
 
-**Install something other than 0.6.x and the daemon tells you which band you are in**, once, before the answer to whatever you typed. It reports rather than vetoes — it will not refuse to run for you — but on 0.7.x the activation itself still dies at herdr, so the notice is the warning and not a reprieve:
+**The daemon draws the same bands, checking the installed herdr at startup**, and tells you which one you are in — once, before the answer to whatever you typed. It reports rather than vetoes: it will not refuse to run for you. On 0.7 and 0.8 the activation still dies at herdr, so the notice is the warning and not a reprieve:
 
 ```
 crabcast: note: herdr 0.7.5 is the line that redesigned 'agent start': it takes --kind/--pane and no longer accepts --cwd, which CrabCast's spawn path passes on every activation — so activations fail with 'unknown option: --cwd'. Observed on herdr 0.7.5, on a clean machine (KAN-33). Install a 0.6.x herdr (0.6.4 is the release CrabCast is verified against).
 ```
 
-Adapting the spawn path to 0.7's API, and validating 0.8, are both planned after launch. Until then, pinning is what lets this README say only what it has actually seen.
+```
+crabcast: note: herdr 0.8.0 was RUN against CrabCast and every activation failed with 'unknown option: --cwd' — run on 2026-08-05 against a private server (KAN-181). 0.7 redesigned 'agent start' to attach a --kind to an existing --pane, dropping the --cwd this spawn path passes, and 0.8 kept that redesign. Install a 0.6.x herdr (0.6.4 and 0.6.10 are the releases CrabCast has been run against).
+```
 
-**The pin is more friction than it should be, and pretending otherwise would waste your time.** Current herdr is 0.8.0, so `brew install herdr` — or any other "get the latest" route — gets you a version CrabCast has never been run against, and a route that happens to land on 0.7.x gets you one where nothing will start at all. Downloading a release asset, `chmod +x`, and putting it on `PATH` yourself is the price of being on the tested version, and there is no one-liner that does it.
+**The daemon is silent for every 0.6.x, including the nine nobody has run, and that is deliberate.** A notice fired at a user whose herdr is probably fine is the same overclaim pointing the other way, and a diagnostic that cries wolf for the supported configuration teaches people to ignore the one that matters. The place for "two of the eleven were run" is this table, where you are choosing a version — not a warning on every command after you have chosen.
 
-**Do not run `npm install herdr`.** There is a package by that name on npm, at version `0.0.0`, published by an unrelated third party and self-described as a reserved name. It is not herdr, and installing it gets you nothing that CrabCast can use.
+**You can check any release yourself, without replacing the herdr you are using.** `scripts/verify-herdr-release.mjs` takes a downloaded binary and an expected verdict, runs it as a private server on its own socket, and drives a real CrabCast daemon through the lifecycle against it. It is how both new rows above were produced, and it is the honest way to add a third:
+
+```bash
+curl -fsSL -o /tmp/herdr-0.6.9 \
+  https://github.com/herdrdev/herdr/releases/download/v0.6.9/herdr-linux-x86_64
+chmod +x /tmp/herdr-0.6.9
+
+# --expect is the verdict you are TESTING FOR, not one you are asserting.
+# For an untried release, ask for `supported` and let it answer: green earns
+# that release a row, and red earns it a different one.
+node scripts/verify-herdr-release.mjs /tmp/herdr-0.6.9 --expect supported
+```
+
+It never writes to an installed herdr: the release under test is symlinked into a scratch directory, served by a private herdr server on its own socket, and the daemon it drives has its own data directory. The herdr running your own fleet is not touched, which is what makes checking 0.7 or 0.8 something you can just do.
+
+#### Decision: CrabCast stays pinned to 0.6.x, and does not follow 0.7/0.8
+
+This is a decision, not an omission, and it is recorded here rather than only in a ticket because this table is where a reader meets its consequences.
+
+* **Following 0.7+ is not a flag change.** `agent start` was redesigned from "create a pane running this argv" into "attach one of a fixed list of agent kinds to a pane that already exists at a shell prompt". CrabCast's spawn path would have to create the pane, wait for its prompt, then attach — and `shell`, the launcher this README's walkthrough uses, is not one of the kinds 0.8 will attach at all. That is a slice with its own proofs, and it is not documentation work.
+* **We have a verified, still-downloadable version.** v0.6.4 is published with all four platform assets and nothing in the 0.6 line has been yanked. Pinning costs a reader the block above; the alternative costs an unproven rewrite of the spawn path.
+* **Being two minor versions behind a dependency that is pushed daily is a real risk, and pinning does not remove it — it makes it visible.** That is the trade, taken deliberately.
+
+The migration is tracked as **KAN-182**. Until it lands, this page says only what has been run.
 
 ## Install
 
