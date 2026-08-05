@@ -53,6 +53,22 @@
 //                           straight into `respond({…})` — which no type can
 //                           catch, and which `FleetCategories` says so — is
 //                           swept the day it ships.
+//   6. the scaffolding    — the fixture every section above depends on
+//                           ACTIVATES agents, so it goes through the capacity
+//                           gate, so a loaded machine used to decide what this
+//                           proof observed (KAN-171). The activations are past
+//                           the gate now, and this section backs that out and
+//                           watches sections 1 and 2's exact failure come back.
+//
+// A PROOF THAT GOES RED ABOUT THE RUNNER (KAN-171). §1 and §2 read a fleet
+// spanning three categories, and the fleet is built by activating agents. On a
+// machine whose load average is above ~2.25 the gate refused both activations,
+// every row landed in `unstartedAgents`, and this script reported "drift not
+// proven" — a statement about the laptop wearing the words of a statement about
+// the echo. Measured: 8/8 failures at load 2.6–2.8, 2/2 passes quiet, and green
+// on the GitHub runner throughout, because the runner is quiet. The fixture
+// passes `override` now (see PAST_THE_GATE), every lifecycle call it makes is
+// checked, and the load average is PRINTED rather than compared against.
 //
 // WHAT THIS SCRIPT SUPPLIES, AND WHAT IT THEREFORE DOES NOT TEST. Sections 2-5
 // INJECT the undeclared knob into a compiled build, at the place `configure`
@@ -299,11 +315,11 @@ function makeConfig(name) {
   return { name, dataDir, configPath };
 }
 
-async function startDaemon(cfg, dist, label) {
+async function startDaemon(cfg, dist, label, env = {}) {
   const errFile = path.join(cfg.dataDir, `spawn-${label}.err`);
   const errFd = fs.openSync(errFile, 'a');
   const child = spawn(process.execPath, [path.join(dist, 'daemon.js'), cfg.configPath], {
-    env: childEnv,
+    env: { ...childEnv, ...env },
     detached: true,
     stdio: ['ignore', 'ignore', errFd]
   });
@@ -383,10 +399,10 @@ class SocketClient {
 
 /** MCP over stdio is newline-delimited JSON-RPC 2.0. Hand-rolled on purpose. */
 class McpClient {
-  constructor(label, { dist = distDir, config }) {
+  constructor(label, { dist = distDir, config, env = {} }) {
     this.label = label;
     this.child = spawn(process.execPath, [path.join(dist, 'mcp.js'), config], {
-      env: childEnv,
+      env: { ...childEnv, ...env },
       stdio: ['pipe', 'pipe', 'pipe']
     });
     clients.push(this);
@@ -484,22 +500,122 @@ const CALLER_SERVERS = {
 };
 
 /**
+ * PAST THE GATE — and the distinction that makes it legitimate (KAN-171).
+ *
+ * The two activations below are SCAFFOLDING. Their purpose is to put a row in
+ * `agents[]` and a row in `standbyAgents[]` so the sweep has more than one
+ * category to walk; nothing in this file is a claim about the capacity gate.
+ * Without this flag the gate is consulted, and on a machine whose 1-minute load
+ * average is above ~2.25 (4 cores − 1 reserved for the human, ÷ 0.75 core per
+ * agent) `headroomByLoad` is 0, both activations are refused, all three rows
+ * land in `unstartedAgents`, and this proof goes red about the MACHINE:
+ *
+ *   §1  GIVEN FAILED  across at least three categories … unstartedAgents
+ *   §2  FAILED — drift not proven: undeclared=["unstartedAgents[0].config.…"]
+ *
+ * Measured, not reasoned about: 8/8 failures at load 2.6–2.8 and 2/2 passes
+ * quiet (KAN-170's table), reproduced at load 2.77 with the refusal printed —
+ * `load too high — the load average is 2.77, against the 3.0 cores this machine
+ * leaves to agents`. Every other artifact §2 prints is byte-identical between a
+ * passing and a failing run; only the categories move. It passes on the GitHub
+ * runner because the runner is quiet, which is what kept it hidden.
+ *
+ * THIS IS NOT "ADD A RETRY", AND IT IS NOT STEPPING AROUND THE CAP. `override`
+ * on a fixture inside a proof is the established pattern here —
+ * `verify-reconfiguration-refuses` and `verify-agent-power-controls` both name
+ * a constant exactly like this one, and boot reconciliation (src/reconcile.ts)
+ * passes `override: true` for the same reason. What remains forbidden is a
+ * supervisor passing `override` to start REAL work past the machine's cap; the
+ * gate exists because a human found their desktop unusable (KAN-34). Immunising
+ * a fixture is not that.
+ *
+ * §6 is where this flag is shown to be load-bearing, deterministically.
+ */
+const PAST_THE_GATE = { override: true };
+
+/**
  * Produce three echo-carrying categories on a daemon, through real lifecycle
  * calls: `agents` (running), `standbyAgents` (ran, stopped) and
  * `unstartedAgents` (configured, never run).
+ *
+ * EVERY LIFECYCLE CALL IS CHECKED, and that is the second half of the fix. The
+ * flag above stops the known refusal; the preconditions below stop the NEXT one
+ * from being read as evidence about the echo. A fleet that did not build is a
+ * failure of the run — reported here, naming the refusal — rather than an empty
+ * category the sweep then draws a conclusion from three sections later.
+ *
+ * The load average is PRINTED and never compared against. It is a measurement a
+ * reader may want when something else goes wrong; a verdict derived from it
+ * would be this script going red about the runner again, one level up.
+ *
+ * `gate` and `expectRefusals` are seams for §6 alone: they are how the red half
+ * backs this defence out and says, on the line, that the refusals it gets are
+ * the result rather than a failure. Every ordinary caller takes the defaults,
+ * and an ordinary caller that IS refused fails the run.
  */
-async function buildFleet(mcp, tag) {
+async function buildFleet(mcp, tag, { gate = PAST_THE_GATE, expectRefusals = false } = {}) {
   const running = owned(`${tag}-running`);
   const standby = owned(`${tag}-standby`);
   const unstarted = owned(`${tag}-unstarted`);
-  const configure = (p) => parsedText(mcp.callTool('crabcast_configure_agent', {
+  // AWAITED. This used to read `parsedText(mcp.callTool(…))` with no `await`,
+  // so it parsed a Promise, answered `{unparseable: ''}`, and the loop below
+  // did not wait for the configure it had just issued — the three configures
+  // and the activate that depends on them were in flight together. Nothing
+  // asserted on the result, so it never showed. It has to be awaited now
+  // because the preconditions below read it.
+  const configure = async (p) => parsedText(await mcp.callTool('crabcast_configure_agent', {
     path: p, priority: 2, launcher: LAUNCHER, label: `${tag} row`, mcpServers: CALLER_SERVERS
   }));
-  for (const p of [running, standby, unstarted]) await configure(p);
-  await parsedText(await mcp.callTool('crabcast_activate_agent', { path: running }));
-  await parsedText(await mcp.callTool('crabcast_activate_agent', { path: standby }));
-  await parsedText(await mcp.callTool('crabcast_deactivate_agent', { path: standby }));
-  return { running, standby, unstarted };
+  const configured = [];
+  for (const p of [running, standby, unstarted]) configured.push(await configure(p));
+  const upRunning = parsedText(
+    await mcp.callTool('crabcast_activate_agent', { path: running, ...gate }));
+  const upStandby = parsedText(
+    await mcp.callTool('crabcast_activate_agent', { path: standby, ...gate }));
+  const down = parsedText(await mcp.callTool('crabcast_deactivate_agent', { path: standby }));
+
+  const why = (r) => String(r?.error ?? JSON.stringify(r)).split('\n')[0].slice(0, 200);
+  const steps = [
+    ...configured.map((r, i) => [`configure ${['running', 'standby', 'unstarted'][i]}`, r]),
+    ['activate running', upRunning],
+    ['activate standby', upStandby],
+    ['deactivate standby', down]
+  ];
+  const refused = steps.filter(([, r]) => r?.success !== true);
+  console.log(
+    `   [${tag}] load average while this fleet was built: ` +
+    `${fs.readFileSync('/proc/loadavg', 'utf8').trim().split(' ').slice(0, 3).join(' ')} ` +
+    `(reported, never asserted on — see PAST_THE_GATE)`
+  );
+  for (const [what, r] of refused) console.log(`   [${tag}] ${what} → REFUSED: ${why(r)}`);
+
+  if (expectRefusals) {
+    // Not a `given`: §6 asks for these refusals, and counting them as failures
+    // of the run would put "GIVEN FAILED" in the log next to the section that
+    // exists to produce them. The verdict there asserts on `refused` directly.
+    console.log(`   [${tag}] ${refused.length} refusal(s) — EXPECTED by the caller (§6)`);
+  } else {
+    given(
+      refused.length === 0,
+      `[${tag}] every lifecycle call the fixture makes succeeded, so the categories below are ` +
+        'what the daemon produced rather than what the machine refused',
+      refused.length === 0
+        ? `${steps.length} calls: ${steps.map(([w]) => w).join(', ')}`
+        : `${refused.length} of ${steps.length} refused — ${refused.map(([w]) => w).join(', ')}`
+    );
+  }
+
+  return { running, standby, unstarted, refused: refused.map(([what, r]) => ({ what, why: why(r) })) };
+}
+
+/** The categories one fleet's three directories actually landed in. */
+function categoriesOf(listed, fleet) {
+  const mine = new Set([fleet.running, fleet.standby, fleet.unstarted]);
+  return new Set(
+    echoRows(listed)
+      .filter(({ row }) => mine.has(row.path))
+      .map(({ at }) => at.replace(/\[\d+\].*/, ''))
+  );
 }
 
 const listAgents = async (mcp) => parsedText(await mcp.callTool('crabcast_list_agents'));
@@ -973,16 +1089,152 @@ mutation4: {
   rogueMcp.kill();
   stopDaemon(rogueStatus.pid);
 
-  // ------------------------------------------------------------------ verdict --
+}
 
-  console.log(`\n${'='.repeat(78)}`);
-  if (failures > 0) {
-    console.log(`${failures} CHECK(S) FAILED`);
-  } else {
-    console.log('all sections passed');
-  }
-  console.log('='.repeat(78));
+// ============ 6. THE SCAFFOLDING — this proof measures the echo, not the box --
 
-  process.exit(failures ? 1 : 0);
+rule('6. THE SCAFFOLDING — the fixture\'s activations are past the gate, shown red by backing it out');
+
+// WHY THIS SECTION EXISTS (KAN-171). Everything above depends on a fleet that
+// spans three categories, and the fleet is built by ACTIVATING agents — which
+// goes through the capacity gate. On a loaded machine the gate refused, all
+// three rows collapsed into `unstartedAgents`, and §1 and §2 went red about the
+// load average. `PAST_THE_GATE` is the fix. A fix whose proof has only ever
+// passed is evidence of nothing, so this section backs it out and watches it.
+//
+// AT CRABCAST_MAX_AGENTS=0, NOT UNDER LOAD, and that is the point rather than a
+// convenience. `configuredCap` skips the derivation entirely — cap 0, headroom
+// 0, `atCapacity` on any machine — so the red half below is red on a quiet
+// GitHub runner exactly as it is on a busy laptop. A section that reproduced
+// the defect by GENERATING load would be a second load-dependent check bolted
+// on to fix the first, and it would be green on the runner for the same reason
+// the original defect was.
+//
+// THE THREE FLEETS ARE ON ONE DAEMON, on purpose: the red and the green differ
+// by the flag and by nothing else — same daemon, same cap, same census.
+let gateDist;
+mutation5: {
+  const gateCfg = makeConfig('gate');
+  const gateStatus = await startDaemon(gateCfg, distDir, 'gate', { CRABCAST_MAX_AGENTS: '0' });
+  const gateMcp = new McpClient('gate', { config: gateCfg.configPath, env: { CRABCAST_MAX_AGENTS: '0' } });
+  await gateMcp.initialize();
+
+  const capacity = parsedText(await gateMcp.callTool('crabcast_capacity'));
+  console.log(`\n   the daemon under this section: CRABCAST_MAX_AGENTS=0`);
+  console.log(`     atCapacity=${capacity?.atCapacity} headroom=${capacity?.headroom} ` +
+    `cap=${capacity?.cap} boundBy=${capacity?.headroomBoundBy}`);
+
+  // --- RED: the defence backed out, on a daemon that will refuse ------------
+  const ungatedFleet = await buildFleet(gateMcp, 'ungated', { gate: {}, expectRefusals: true });
+  const ungatedList = await listAgents(gateMcp);
+  const ungatedCategories = categoriesOf(ungatedList, ungatedFleet);
+
+  const ungatedRows = echoRows(ungatedList)
+    .filter(({ row }) => [ungatedFleet.running, ungatedFleet.standby, ungatedFleet.unstarted]
+      .includes(row.path));
+  console.log(`\n   WITHOUT the flag — categories the three rows reached: ` +
+    `${[...ungatedCategories].join(', ') || '(none)'}`);
+  // WHERE the rows are, not what the sweep said about them. This daemon is the
+  // UNMUTATED build, so `undeclared` is `[]` here whatever happens — printing
+  // it would be showing an empty list as though it were evidence, which is the
+  // vacuous read §1's own comment warns about. The addresses are the evidence:
+  // three rows, all present, all in the one category.
+  show('…and the addresses those rows arrived at:', ungatedRows.map(({ at }) => at));
+
+  // --- GREEN: the shipped default, same daemon, same cap -------------------
+  const gatedFleet = await buildFleet(gateMcp, 'gated');
+  const gatedList = await listAgents(gateMcp);
+  const gatedCategories = categoriesOf(gatedList, gatedFleet);
+  console.log(`\n   WITH the flag — categories the three rows reached: ` +
+    `${[...gatedCategories].join(', ')}`);
+
+  gateMcp.kill();
+  stopDaemon(gateStatus.pid);
+
+  // --- and the flag is honoured by the DAEMON, not merely accepted ---------
+  //
+  // The green half above proves the fleet built. It does NOT by itself prove
+  // the flag is why: a daemon that ignored `override` and had room anyway would
+  // look identical. This mutation removes the branch that honours it, leaving
+  // everything else — including the flag on the wire — exactly as it is.
+  gateDist = mutatedBuild('override-ignored', [{
+    file: 'router.js',
+    find: 'if (!override) {',
+    replace: '/* KAN-171 section 6: the override branch backed out */ if (true) {'
+  }]);
+  if (!gateDist) break mutation5;
+  const deafCfg = makeConfig('deaf');
+  const deafStatus = await startDaemon(deafCfg, gateDist, 'deaf', { CRABCAST_MAX_AGENTS: '0' });
+  const deafMcp = new McpClient('deaf', { config: deafCfg.configPath, env: { CRABCAST_MAX_AGENTS: '0' } });
+  await deafMcp.initialize();
+
+  const deafFleet = await buildFleet(deafMcp, 'deaf', { expectRefusals: true });
+  const deafList = await listAgents(deafMcp);
+  const deafCategories = categoriesOf(deafList, deafFleet);
+  console.log(`\n   with the daemon's override branch removed, the SAME flag reached: ` +
+    `${[...deafCategories].join(', ')}`);
+
+  deafMcp.kill();
+  stopDaemon(deafStatus.pid);
+
+  given(
+    capacity?.atCapacity === true && capacity?.headroom === 0,
+    'the daemon really was at capacity — a daemon with room would let the red half through ' +
+      'and this section would prove nothing',
+    `atCapacity=${capacity?.atCapacity}, headroom=${capacity?.headroom}`
+  );
+
+  verdict(
+    // RED: without the flag the fixture collapses to exactly the reported shape
+    // — one category, and it is `unstartedAgents`.
+    ungatedCategories.size === 1 && ungatedCategories.has('unstartedAgents') &&
+      ungatedFleet.refused.length === 2 &&
+      ungatedFleet.refused.every(({ why }) => /Refusing to activate/.test(why)) &&
+      // …and all three rows ARE on the response, carrying echoes. The collapse
+      // is rows in the wrong category, not rows that never arrived — which is
+      // what made §1's precondition the thing that caught it and §2's
+      // by-path assertion the thing that failed.
+      ungatedRows.length === 3 && ungatedRows.every(({ row }) => row.config) &&
+      // GREEN: the shipped default, on the same at-capacity daemon.
+      gatedCategories.size === 3 && gatedFleet.refused.length === 0 &&
+      // And the flag is honoured rather than merely tolerated: with the branch
+      // that honours it removed, the identical call collapses again.
+      deafCategories.size === 1 && deafCategories.has('unstartedAgents') &&
+      deafFleet.refused.length === 2,
+    `on one daemon pinned at CRABCAST_MAX_AGENTS=0 — at capacity on any machine, quiet runner\n` +
+    `    included — the fixture WITHOUT \`override\` had both activations refused and all three\n` +
+    `    rows collapsed into unstartedAgents, which is KAN-171's report reproduced from its\n` +
+    `    cause rather than from a load average. The shipped default spanned all three categories\n` +
+    `    on that same daemon. And with the daemon's override branch mutated away the same flag\n` +
+    `    collapsed again, so the green half is the gate being overridden rather than a machine\n` +
+    `    that happened to have room`,
+    `the scaffolding defence is not proven: ungated=${JSON.stringify([...ungatedCategories])}, ` +
+    `ungatedRefusals=${ungatedFleet.refused.length}, gated=${JSON.stringify([...gatedCategories])}, ` +
+    `gatedRefusals=${gatedFleet.refused.length}, ` +
+    `overrideIgnored=${JSON.stringify([...deafCategories])}`
+  );
 
 }
+
+// ------------------------------------------------------------------ verdict --
+
+// AT TOP LEVEL, and it did not used to be. The verdict and the exit lived
+// INSIDE section 5's `mutation4:` block, so the one thing that block is built
+// to do — `break` out when its edit does not apply — skipped the verdict line
+// and the exit status with it: a run with failures already counted would print
+// no total and exit 0. Found while adding section 6 below it (KAN-171).
+const skipped = mutationsSkipped();
+console.log(`\n${'='.repeat(78)}`);
+if (skipped.length) {
+  // Named separately from the count, because "3 FAILED" reads as three
+  // assertions disagreeing when what happened is that three sections never ran.
+  console.log(`mutations that did not apply, so their sections were SKIPPED: ${skipped.join(', ')}`);
+}
+if (failures > 0) {
+  console.log(`${failures} CHECK(S) FAILED`);
+} else {
+  console.log('all sections passed');
+}
+console.log('='.repeat(78));
+
+process.exit(failures ? 1 : 0);
