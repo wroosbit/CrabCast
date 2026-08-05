@@ -563,8 +563,40 @@ show(`$ crabcast activate ${junkDir} --override=yes`, overrideJunk.stderr.trim()
 
 // (b) --preempt, end to end: one agent running, a higher-priority activation
 //     refused with a preemption offer, then the same call with the flag.
-//     Costs are pinned tiny so the cap — not this machine's live load — is
-//     what binds, which is the constraint the preemption is about.
+//
+// THIS SECTION USED TO MEASURE THE MACHINE (KAN-138 item 2, and item 26's
+// category). It said the costs below were "pinned tiny so the cap — not this
+// machine's live load — is what binds", and that sentence was false. Five of
+// its assertions went red on a loaded machine, in a REQUIRED check, for reasons
+// with nothing to do with the code under test.
+//
+// WHY THE TINY COSTS DO NOT IMMUNISE ANYTHING, since the sentence that claimed
+// they did survived three reviews. `capacity.ts`:
+//
+//     const loadBudget = machine.cores - reservedCores - machine.load1;
+//     const headroomByLoad = Math.max(0, Math.floor(loadBudget / cost.cores));
+//
+// `CRABCAST_AGENT_CORES` is the DIVISOR. Once the budget is negative — 4 cores
+// − 1 reserved − 6.63 load — a smaller divisor makes it more negative, not
+// less. `headroomByLoad` is 0 at any cost, so the setup activation below was
+// refused and the four assertions after it were asserting about a fleet that
+// had never been stood up. Reproduced at load 6.63 on unmodified `origin/main`;
+// green at load 2.30 twenty minutes earlier, which is why it read as solid.
+//
+// THE FIX IS NOT A RETRY, and it is not "run it at low load". It is the shape
+// T8 used for terminal width: REPORT THE MEASUREMENT, ASSERT THE INVARIANT.
+// The load average is printed below so a human reading a failure can see the
+// machine it ran on, and it is allowed to fail nothing.
+//
+// What is under test here is the REFUSAL AND THE PREEMPTION — that a second
+// activation is refused, that the refusal names who could be stood down, and
+// that `--preempt` stands them down and starts. The agent that has to be
+// running first is SCAFFOLDING, so it is put past the gate with `--override`,
+// exactly as `verify-idempotent-lifecycle`'s `PAST_THE_GATE` does and for the
+// same stated reason. Nothing about the refusal is weakened by that: with
+// `CRABCAST_MAX_AGENTS=1` and one agent running, `headroomByCap` is 0 at any
+// load, so the refusal under test is load-independent — and because ties in
+// `headroomBoundBy` resolve to `cap`, so is its wording.
 const fleet = fixture(
   'preempt',
   null,
@@ -576,9 +608,24 @@ const humbleDir = configure(fleet, 'humble');
 const chiefDir = fleet.dirFor('chief');
 crabcast(fleet, ['configure', chiefDir, '--priority', '5', '--launcher', 'shell']);
 
-const first = crabcast(fleet, ['activate', humbleDir]);
+// REPORTED, NEVER ASSERTED ON. If this section ever fails again, the first
+// question is "on what machine", and the answer should be in the output rather
+// than in somebody's shell history.
+show(
+  'the machine this section ran on (reported, not asserted):',
+  `load average: ${os.loadavg().map((n) => n.toFixed(2)).join(', ')}   cores: ${os.cpus().length}\n` +
+    `the assertions below are about the refusal and the preemption; none of them reads any of\n` +
+    `these numbers, which is the property that stops this being a check about the machine.`
+);
+
+const first = crabcast(fleet, ['activate', humbleDir, '--override']);
 await trackDaemon(fleet);
-check(first.code === EXIT.OK, `the one slot is taken by the priority-1 agent (exit ${first.code})`);
+check(
+  first.code === EXIT.OK,
+  `the one slot is taken by the priority-1 agent (exit ${first.code}) — SCAFFOLDING, put past ` +
+    `the capacity gate on purpose, because what is under test is what happens to the SECOND ` +
+    `activation`
+);
 
 const refusedForRoom = crabcast(fleet, ['activate', chiefDir]);
 show(`$ crabcast activate ${chiefDir}`, refusedForRoom.stdout);
