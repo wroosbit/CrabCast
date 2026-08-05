@@ -283,6 +283,46 @@ jobs:
       #                                      the guards on the real file
       #                                      (KAN-148).
       #
+      # And one whose subject is the instrument every "the checks can fail"
+      # section in this suite is built on:
+      #
+      #   verify-mutation-harness            EVERY MUTATION IN THIS SUITE GOES
+      #                                      THROUGH ONE HELPER, and that helper
+      #                                      refuses to hand back a build it did
+      #                                      not really edit. Eight scripts each
+      #                                      had their own copy; all eight
+      #                                      already counted occurrences, and all
+      #                                      eight THREW when the count was
+      #                                      wrong — so a drifted anchor killed
+      #                                      the run and every section after it
+      #                                      went unreported, which was observed
+      #                                      happening (KAN-138). A failed
+      #                                      mutation is now a NAMED, COUNTED
+      #                                      failure that returns null, so the
+      #                                      section skips and the file finishes.
+      #                                      It asserts the DIAGNOSTIC TEXT and
+      #                                      not merely the verdict, because
+      #                                      every not-applied outcome fails
+      #                                      closed and would satisfy "it went
+      #                                      red" while having lost its
+      #                                      diagnosis. Its last section SWEEPS
+      #                                      `git ls-files scripts/verify-*.mjs`
+      #                                      for anyone copying a build without
+      #                                      the helper — a walk rather than a
+      #                                      list, so the ninth such proof is
+      #                                      caught without anyone remembering
+      #                                      to add it anywhere.
+      #                                      WHAT IT CANNOT SEE: it supplies its
+      #                                      own mutations, so it proves the
+      #                                      helper answers correctly about a
+      #                                      mutation it is given — NOT that any
+      #                                      real section's anchor still applies
+      #                                      to today's build. Nothing owns that;
+      #                                      it is proven only by those scripts
+      #                                      running here, where a drifted anchor
+      #                                      is now a named FAIL instead of a
+      #                                      stack trace.
+      #
       # And one for the send path, whose regression is silent in the worst way
       # available — it does not fail, it CLAIMS:
       #
@@ -561,6 +601,7 @@ jobs:
             verify-fleet-enumeration
             verify-config-echo-contract
             verify-ci-wiring-guards
+            verify-mutation-harness
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

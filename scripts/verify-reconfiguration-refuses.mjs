@@ -92,6 +92,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
+import { makeMutator } from './mutation.mjs';
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(process.argv[2] ?? path.join(scriptDir, '..', 'dist'));
 
@@ -1205,22 +1207,25 @@ try {
   if (e?.code !== 'EEXIST') throw e;
 }
 
-function mutantDist(name, file, from, to) {
-  const dir = path.join(tmp, `mutant-${name}`);
-  fs.cpSync(distDir, dir, { recursive: true });
-  const target = path.join(dir, file);
-  const before = fs.readFileSync(target, 'utf8');
-  const occurrences = before.split(from).length - 1;
-  if (occurrences !== 1) {
-    throw new Error(
-      `mutation '${name}' expected exactly one occurrence of ${JSON.stringify(from)} in ` +
-        `${file}, found ${occurrences}. The mutation target moved; fix this script rather ` +
-        `than deleting the section — an un-mutatable check is an unproven one.`
-    );
+/**
+ * A copy of dist with one string replaced, or NULL when the edit did not apply.
+ *
+ * THIS USED TO THROW. A mutation whose anchor had drifted killed the process,
+ * so every section after it — including the ones whose whole job is proving the
+ * other checks can fail — never ran, and the reader got a stack trace with no
+ * signal that anything had been skipped (KAN-138 item 18). `scripts/mutation.mjs`
+ * keeps the exact-occurrence guard that was already right here and changes only
+ * what happens when it fires: the failure is COUNTED into this script's own
+ * verdict and the call returns null, so the rest of the file still reports.
+ */
+const { mutate: mutantDist, mutationsSkipped } = makeMutator({
+  distDir,
+  scratch: tmp,
+  report: {
+    pass: (label, detail) => check(true, label, detail),
+    fail: (label, detail) => check(false, label, detail)
   }
-  fs.writeFileSync(target, before.replace(from, to));
-  return dir;
-}
+});
 
 async function mutantHarness(dir, name) {
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
@@ -1252,13 +1257,16 @@ function liveControl(mutation, dir, res) {
   );
 }
 
-{
+mutation1: {
   // MUTATION A: `prompt` is reclassified as in-place — the exact shape of the
   // bug this task exists to prevent, and the one a future knob would take by
   // accident if the table were not total.
   const dir = mutantDist(
     'prompt-in-place', 'router.js', "prompt: 'restart-required'", "prompt: 'in-place'"
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation1;
   const b = await mutantHarness(dir, 'm-a');
   const p = ownedDir('s9', 'a');
   setCensus([]);
@@ -1271,7 +1279,7 @@ function liveControl(mutation, dir, res) {
     `success ${res.success}`);
 }
 
-{
+mutation2: {
   // MUTATION B: atomicity removed — the in-place half of a refused call is
   // applied anyway. This is "applies half and reports a bare success", and it
   // is why section 3 reads the RECORD rather than the response.
@@ -1283,6 +1291,9 @@ function liveControl(mutation, dir, res) {
       'path: agentPath, config: parsed.config, configVersion: existing.configVersion + 1, ' +
       'configuredAt: new Date().toISOString() }); }'
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation2;
   const b = await mutantHarness(dir, 'm-b');
   const p = ownedDir('s9', 'b');
   setCensus([]);
@@ -1299,7 +1310,7 @@ function liveControl(mutation, dir, res) {
     `refused ${res.success === false}, record priority ${landed}`);
 }
 
-{
+mutation3: {
   // MUTATION C: the running agent's row is written as `configured` rather than
   // carried as `activated` — the silent fleet loss. Nothing in the response
   // changes; the agent simply stops being restored.
@@ -1308,6 +1319,9 @@ function liveControl(mutation, dir, res) {
     "existing?.event === 'activated'\n            ? this.deps.agentRegistry.recordActivated(record, existing.at)\n            : this.deps.agentRegistry.recordConfigured(record)",
     'this.deps.agentRegistry.recordConfigured(record)'
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation3;
   const b = await mutantHarness(dir, 'm-c');
   const p = ownedDir('s9', 'c');
   setCensus([]);
@@ -1329,13 +1343,16 @@ function liveControl(mutation, dir, res) {
     `expected: ${JSON.stringify(b.agentRegistry.expected().map((r) => r.path))}`);
 }
 
-{
+mutation4: {
   // MUTATION D: the unverifiable case reads its own blindness as an all-clear.
   const dir = mutantDist(
     'blind-is-clear', 'router.js',
     "if (!running && !occupancy.reachable && existing?.event === 'activated') {",
     'if (false) {'
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation4;
   const b = await mutantHarness(dir, 'm-d');
   const p = ownedDir('s9', 'd');
   setCensus([]);
@@ -1358,7 +1375,7 @@ function liveControl(mutation, dir, res) {
   setCensus([]);
 }
 
-{
+mutation5: {
   // MUTATION E: KAN-153's fix removed. The `existing &&` is taken off the
   // refusal's guard, so the reconfiguration refusal is once again reachable on
   // a FIRST configure — where it reads a record that is not there.
@@ -1373,6 +1390,9 @@ function liveControl(mutation, dir, res) {
     'refusal-not-scoped', 'router.js',
     'if (existing && restartRequired.length) {', 'if (restartRequired.length) {'
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation5;
   const p = ownedDir('s9', 'e');
   setCensus([]);
   const b = await mutantHarness(dir, 'm-e');
@@ -1843,6 +1863,14 @@ rule('11. NO TRACKED FILE CARRIES A LITERAL NUL — the guard, not the fix');
 }
 
 // ===========================================================================
+if (mutationsSkipped().length) {
+  // Named next to the verdict, because "N FAILED" reads as N ordinary assertion
+  // failures when what actually happened is that a section never executed.
+  console.log(
+    `\n${mutationsSkipped().length} MUTATION(S) DID NOT APPLY, so their sections did not run: ` +
+      mutationsSkipped().join(', ')
+  );
+}
 console.log(
   failures.length
     ? `\n${failures.length} CHECK(S) FAILED:\n${failures.map((f) => `  - ${f}`).join('\n')}`

@@ -95,7 +95,10 @@ function recordingMutator() {
   const { mutate, mutationsSkipped } = makeMutator({
     distDir,
     scratch: tmp,
-    check: (name, ok, detail) => seen.push({ name, ok, detail: detail ?? '' })
+    report: {
+      pass: (name, detail) => seen.push({ name, ok: true, detail: detail ?? '' }),
+      fail: (name, detail) => seen.push({ name, ok: false, detail: detail ?? '' })
+    }
   });
   return { mutate, mutationsSkipped, seen };
 }

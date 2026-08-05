@@ -62,6 +62,8 @@ import * as path from 'path';
 import { execFileSync, spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
+import { makeMutator } from './mutation.mjs';
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = process.argv[2] ?? path.resolve(scriptDir, '../dist');
 
@@ -586,7 +588,15 @@ function cleanUp() {
 process.on('exit', cleanUp);
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
-    cleanUp();
+    if (mutationsSkipped().length) {
+  // Named next to the verdict, because "N FAILED" reads as N ordinary assertion
+  // failures when what actually happened is that a section never executed.
+  console.log(
+    `\n${mutationsSkipped().length} MUTATION(S) DID NOT APPLY, so their sections did not run: ` +
+      mutationsSkipped().join(', ')
+  );
+}
+cleanUp();
     process.removeAllListeners(signal);
     process.kill(process.pid, signal);
   });
@@ -802,29 +812,28 @@ try {
 }
 
 /** A copy of dist with one string replaced. Returns the mutated module dir. */
-function mutantDist(name, file, from, to) {
-  const dir = path.join(scratchRoot, `mutant-${name}`);
-  fs.rmSync(dir, { recursive: true, force: true });
-  fs.cpSync(distDir, dir, { recursive: true });
-  const target = path.join(dir, file);
-  const before = fs.readFileSync(target, 'utf8');
-  const occurrences = before.split(from).length - 1;
-  if (occurrences !== 1) {
-    throw new Error(
-      `mutation '${name}' expected exactly one occurrence of ${JSON.stringify(from)} in ` +
-      `${file}, found ${occurrences}. THE BUILD WAS NOT MUTATED, so the section using it ` +
-      `would have proved nothing. Fix the mutation, not this check.`
-    );
+/**
+ * A copy of dist with one string replaced, or NULL when the edit did not apply.
+ *
+ * THIS USED TO THROW. A mutation whose anchor had drifted killed the process,
+ * so every section after it — including the ones whose whole job is proving the
+ * other checks can fail — never ran, and the reader got a stack trace with no
+ * signal that anything had been skipped (KAN-138 item 18). `scripts/mutation.mjs`
+ * keeps the exact-occurrence guard that was already right here and changes only
+ * what happens when it fires: the failure is COUNTED into this script's own
+ * verdict and the call returns null, so the rest of the file still reports.
+ */
+const { mutate: mutantDist, mutationsSkipped } = makeMutator({
+  distDir,
+  scratch: scratchRoot,
+  report: {
+    pass: (label, detail) => check(true, label, detail),
+    fail: (label, detail) => check(false, label, detail)
   }
-  const after = before.replace(from, to);
-  fs.writeFileSync(target, after);
-  if (after === before) {
-    throw new Error(`mutation '${name}' replaced the text with itself — nothing was mutated.`);
-  }
-  return dir;
-}
+});
 
-{
+
+mutation1: {
   // MUTATION A: the positional test stops being positional. `landedCount`
   // counts over the WHOLE tail instead of the part above the composer, which
   // is the naive `tail.includes(message)` this mechanism exists to replace.
@@ -848,6 +857,9 @@ function mutantDist(name, file, from, to) {
     'return flatten(splitAtComposer(tail).submitted).split(needle).length - 1;',
     'return flatten(tail).split(needle).length - 1;'
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation1;
   const { HerdrBridge: Broken } = await import(path.join(dir, 'herdr.js'));
   const broken = await scenario(new Broken(dataDir, configPath));
   showVerdict('mutant A says:', broken);
@@ -857,7 +869,7 @@ function mutantDist(name, file, from, to) {
     JSON.stringify(broken.evidence));
 }
 
-{
+mutation2: {
   // MUTATION B: an unreadable pane is coerced to a count of zero — the shape
   // the primitive we borrowed from actually ships, and the shape KAN-138
   // collects: an assertion of "nothing landed" that an unreadable pane
@@ -886,6 +898,9 @@ function mutantDist(name, file, from, to) {
     "return { readable: false, error: tail.error ?? `herdr returned no readable output for '${agentPath}'` };",
     'return { readable: true, count: 0, inComposer: false, tail: "" };'
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation2;
   const { HerdrBridge: Broken } = await import(path.join(dir, 'herdr.js'));
   const broken = await scenario(new Broken(dataDir, configPath));
   showVerdict('mutant B says:', broken);
@@ -895,7 +910,7 @@ function mutantDist(name, file, from, to) {
     JSON.stringify(broken));
 }
 
-{
+mutation3: {
   // MUTATION C: the retry becomes a second interrupt — the shape the borrowed
   // primitive uses, and the one KAN-114 forbids because a second Ctrl+C is how
   // Claude Code quits. Section 3's keystroke assertion is what stands between
@@ -918,6 +933,9 @@ function mutantDist(name, file, from, to) {
     "        this.runHerdr(['pane', 'send-keys', paneId, 'Enter']);\n        submits++;\n        const second = await this.confirmDelivery",
     "        this.runHerdr(['pane', 'send-keys', paneId, 'C-c']);\n        this.runHerdr(['pane', 'send-text', paneId, message]);\n        this.runHerdr(['pane', 'send-keys', paneId, 'Enter']);\n        submits++;\n        const second = await this.confirmDelivery"
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation3;
   const { HerdrBridge: Broken } = await import(path.join(dir, 'herdr.js'));
   const brokenKeys = await scenario(new Broken(dataDir, configPath));
   console.log(`   mutant C's keystrokes: ${JSON.stringify(brokenKeys)}`);

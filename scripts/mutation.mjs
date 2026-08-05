@@ -47,8 +47,8 @@
 //      guard, which is the outcome this whole file is trying to buy off.
 //
 //   4. A FAILED MUTATION IS A COUNTED VERDICT, NOT A THROW. `mutate` reports
-//      the failure through the script's OWN `check()`, so it lands in the
-//      failure list and the verdict goes red, and then RETURNS NULL so the
+//      the failure through the script's OWN verdict, so it lands in the
+//      failure list and the run goes red, and then RETURNS NULL so the
 //      caller can skip its section and let the rest of the file run. The run
 //      still fails — that is not softened — but it fails having told you
 //      everything else it knows.
@@ -97,25 +97,39 @@ import * as path from 'node:path';
 export const FIX_THE_MUTATION = 'Fix the mutation, not this check.';
 
 /**
- * Build a mutator bound to one script's dist, scratch directory and `check`.
+ * Build a mutator bound to one script's dist, scratch directory and verdict.
  *
  * @param {object} opts
  * @param {string} opts.distDir  the compiled build to copy from
  * @param {string} opts.scratch  a directory the mutants may be written under
- * @param {(name: string, ok: boolean, detail?: string) => void} opts.check
- *        the SCRIPT'S OWN check function. Handed in rather than reimplemented,
- *        because property 4 means a failed mutation has to land in the same
- *        failure list every other assertion lands in — a private counter here
- *        would be a second verdict nobody reads.
+ * @param {{pass: (label: string, detail?: string) => void,
+ *          fail: (label: string, detail?: string) => void}} opts.report
+ *        how this script records a verdict. TWO CALLBACKS RATHER THAN ONE
+ *        `check(ok, …)`, and that is a deliberate choice about a bug this
+ *        suite could otherwise have: the eight scripts adopting this helper do
+ *        not agree on argument order — five are `check(ok, claim, detail)`,
+ *        three are `verdict(ok, yes, no)`, and `verify-idempotent-lifecycle` is
+ *        `check(name, ok, detail)`. Every one of them therefore needs an
+ *        adapter, and an adapter that puts the boolean in the wrong place would
+ *        INVERT the verdict silently — a failed mutation reported as a pass,
+ *        which is precisely the inversion this file exists to prevent, arriving
+ *        through the fix for it. With no boolean to misplace, that adapter
+ *        cannot be written wrong; it can only be written or not.
+ *
+ *        Handed in rather than reimplemented because property 4 means a failed
+ *        mutation must land in the same failure list every other assertion
+ *        lands in. A private counter here would be a second verdict nobody
+ *        reads.
  */
-export function makeMutator({ distDir, scratch, check }) {
-  if (typeof check !== 'function') {
+export function makeMutator({ distDir, scratch, report }) {
+  if (typeof report?.pass !== 'function' || typeof report?.fail !== 'function') {
     // Not a counted failure: there is nothing to count it into. A mutator
     // built without the script's verdict is the one error here that cannot be
     // reported the normal way, so it is loud.
     throw new Error(
-      'makeMutator({ check }) needs the script\'s own check function — without it a failed ' +
-        'mutation could not be counted into the verdict, which is the whole point of this helper.'
+      'makeMutator({ report }) needs { pass, fail } bound to this script\'s own verdict — ' +
+        'without them a failed mutation could not be counted, which is the whole point of ' +
+        'this helper.'
     );
   }
 
@@ -179,19 +193,19 @@ export function makeMutator({ distDir, scratch, check }) {
       fs.writeFileSync(p, before.replace(find, replace));
     }
 
-    check(
+    report.pass(
       `mutation "${name}" applied to a copy of the build`,
-      true,
-      edits.map((e) => `${e.file}: ${JSON.stringify(e.find).slice(0, 60)} → ${e.replace.length} chars`).join('; ')
+      edits
+        .map((e) => `${e.file}: ${JSON.stringify(e.find).slice(0, 60)} → ${e.replace.length} chars`)
+        .join('; ')
     );
     return target;
   }
 
   function fail(name, why) {
     skipped.push(name);
-    check(
+    report.fail(
       `mutation "${name}" DID NOT APPLY — the section that needed it did not run`,
-      false,
       `${why} ${FIX_THE_MUTATION}`
     );
     return null;

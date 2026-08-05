@@ -103,6 +103,8 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import { makeMutator } from './mutation.mjs';
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(process.argv[2] ?? path.join(scriptDir, '..', 'dist'));
 const repoRoot = path.join(scriptDir, '..');
@@ -255,25 +257,25 @@ try {
   if (e.code !== 'EEXIST') throw e;
 }
 
-function mutatedBuild(name, edits) {
-  const target = path.join(scratch, `dist-${name}`);
-  fs.cpSync(distDir, target, { recursive: true });
-  for (const { file, find, replace } of edits) {
-    const p = path.join(target, file);
-    const before = fs.readFileSync(p, 'utf8');
-    const count = before.split(find).length - 1;
-    if (count !== 1) {
-      throw new Error(
-        `mutation "${name}" expected exactly 1 occurrence of ${JSON.stringify(find)} in ` +
-        `${file}, found ${count}. The build was NOT mutated, so the section using it ` +
-        `would have proved nothing. Fix the mutation, not this check.`
-      );
-    }
-    fs.writeFileSync(p, before.replace(find, replace));
-    console.log(`   mutated ${name}/${file}: ${JSON.stringify(find.slice(0, 60))}… → (${replace.length} chars)`);
+/**
+ * A copy of dist with one string replaced, or NULL when the edit did not apply.
+ *
+ * THIS USED TO THROW. A mutation whose anchor had drifted killed the process,
+ * so every section after it — including the ones whose whole job is proving the
+ * other checks can fail — never ran, and the reader got a stack trace with no
+ * signal that anything had been skipped (KAN-138 item 18). `scripts/mutation.mjs`
+ * keeps the exact-occurrence guard that was already right here and changes only
+ * what happens when it fires: the failure is COUNTED into this script's own
+ * verdict and the call returns null, so the rest of the file still reports.
+ */
+const { mutate: mutatedBuild, mutationsSkipped } = makeMutator({
+  distDir,
+  scratch,
+  report: {
+    pass: (label, detail) => verdict(true, `${label}${detail ? ` — ${detail}` : ''}`, ''),
+    fail: (label, detail) => verdict(false, '', `${label} — ${detail}`)
   }
-  return target;
-}
+});
 
 // -------------------------------------------------------- daemons & clients --
 
@@ -889,95 +891,106 @@ console.log('\n  4A. `durability()` always answers `durable: true` — the uncon
 const CLAIM = `    if (outcome === undefined || outcome.ok)
         return { durable: true };
     return { durable: false, durabilityError: outcome.error ?? 'registry write failed' };`;
-const alwaysTrue = mutatedBuild('always-true', [
-  { file: 'router.js', find: CLAIM, replace: `    return { durable: true };` }
-]);
-const mutantA = await driveLifecycle(alwaysTrue, 'always-true');
-const heldA = degradedHolds(mutantA);
-for (const name of LIFECYCLE) {
-  console.log(`   ${name.padEnd(20)} event durable=${JSON.stringify(mutantA.events.degraded[name]?.durable)} ` +
-    `while its response says durable=${JSON.stringify(
-      { 'agent.configured': mutantA.responses.degraded.configure,
-        'agent.activated': mutantA.responses.degraded.activate,
-        'agent.deactivated': mutantA.responses.degraded.deactivate }[name]?.durable
-    )}`);
-}
-console.log(`\n   section 3's assertion against this build: ${heldA.ok ? 'PASSED (wrong)' : 'FAILED (right)'}`);
-if (!heldA.ok) console.log(`     ${heldA.reasons.join('\n     ')}`);
+// Hoisted so this section can be SKIPPED WHOLE when an edit does not apply,
+// without changing what anything after it can see. See scripts/mutation.mjs.
+let alwaysTrue, silent;
+mutation1: {
+  alwaysTrue = mutatedBuild('always-true', [
+    { file: 'router.js', find: CLAIM, replace: `    return { durable: true };` }
+  ]);
+  // Already a counted failure. Skip the rest of this section rather
+  // than asserting about a build that was never mutated.
+  if (!alwaysTrue) break mutation1;
+  const mutantA = await driveLifecycle(alwaysTrue, 'always-true');
+  const heldA = degradedHolds(mutantA);
+  for (const name of LIFECYCLE) {
+    console.log(`   ${name.padEnd(20)} event durable=${JSON.stringify(mutantA.events.degraded[name]?.durable)} ` +
+      `while its response says durable=${JSON.stringify(
+        { 'agent.configured': mutantA.responses.degraded.configure,
+          'agent.activated': mutantA.responses.degraded.activate,
+          'agent.deactivated': mutantA.responses.degraded.deactivate }[name]?.durable
+      )}`);
+  }
+  console.log(`\n   section 3's assertion against this build: ${heldA.ok ? 'PASSED (wrong)' : 'FAILED (right)'}`);
+  if (!heldA.ok) console.log(`     ${heldA.reasons.join('\n     ')}`);
 
-verdict(
-  !heldA.ok,
-  'restoring the unconditional claim turns section 3 RED. The events assert a record that is\n' +
-  '    not on disk while the responses on the same daemon say it is not — the defect as filed,\n' +
-  '    reproduced and caught',
-  'section 3 PASSED against a daemon whose events always claim durability. It is not\n' +
-  '    measuring what it says it measures'
-);
-
-// ---- 4B: remove the field entirely -------------------------------------------
-//
-// `durability()` answers `{}`, so the events carry no `durable` at all. That is
-// literally the behaviour on `origin/main`: the event silent, the response
-// honest. It also exercises the OTHER half of the contract — a declared field a
-// broadcast did not carry is the `undefined`-at-a-subscriber defect, and the MCP
-// forwarder is supposed to say so on our side of the boundary.
-console.log('\n  4B. `durability()` answers `{}` — the field gone, which is what `origin/main` sends.\n');
-const silent = mutatedBuild('silent', [
-  { file: 'router.js', find: CLAIM, replace: `    return {};` }
-]);
-const mutantB = await driveLifecycle(silent, 'silent');
-const heldB = degradedHolds(mutantB);
-const warned = LIFECYCLE.filter((name) =>
-  new RegExp(`${name.replace('.', '\\.')} arrived without contract field\\(s\\)[^\\n]*durable`).test(mutantB.mcpStderr)
-);
-console.log(`   events carrying durable at all: ` +
-  LIFECYCLE.map((n) => `${n}=${'durable' in (mutantB.events.degraded[n] ?? {})}`).join(', '));
-console.log(`   MCP forwarder warned "arrived without contract field(s) … durable" for: ` +
-  `${warned.length ? warned.join(', ') : '(none)'}`);
-console.log(`\n   section 3's assertion against this build: ${heldB.ok ? 'PASSED (wrong)' : 'FAILED (right)'}`);
-if (!heldB.ok) console.log(`     ${heldB.reasons.join('\n     ')}`);
-
-verdict(
-  !heldB.ok && warned.length === 3,
-  'removing the field turns section 3 RED, and the MCP forwarder names all three events as\n' +
-  '    arriving without a contract field — so the drift is loud on our side of the boundary\n' +
-  '    rather than rendering as an absence on the subscriber\'s',
-  `section 3 passed=${heldB.ok} (expected false), forwarder warned for ${warned.length}/3 events`
-);
-
-// ---- 4C: the static audit, shown to be measuring something ---------------------
-//
-// Sections 4A and 4B mutate the helper, which turns all six sites at once — a
-// good test of the runtime assertion and NO test of the scan in section 1, which
-// is what catches a site that never spread the helper in the first place. This
-// mutation is against the SOURCE TEXT rather than a build, because that is what
-// the scan reads; nothing is written to disk.
-console.log('\n  4C. one site\'s spread deleted from the source — does the section 1 scan notice?\n');
-const spawnSite = routerSrc.indexOf(`action: 'agent.activated'`, routerSrc.indexOf(`action: 'agent.activated'`) + 1);
-const spreadAt = routerSrc.indexOf('...durability(durable)', spawnSite);
-if (spreadAt === -1) {
-  throw new Error(
-    'mutation 4C found no `...durability(durable)` after the second agent.activated site. ' +
-    'The scan would have been run over an unmutated source, proving nothing. Fix the mutation.'
+  verdict(
+    !heldA.ok,
+    'restoring the unconditional claim turns section 3 RED. The events assert a record that is\n' +
+    '    not on disk while the responses on the same daemon say it is not — the defect as filed,\n' +
+    '    reproduced and caught',
+    'section 3 PASSED against a daemon whose events always claim durability. It is not\n' +
+    '    measuring what it says it measures'
   );
+
+  // ---- 4B: remove the field entirely -------------------------------------------
+  //
+  // `durability()` answers `{}`, so the events carry no `durable` at all. That is
+  // literally the behaviour on `origin/main`: the event silent, the response
+  // honest. It also exercises the OTHER half of the contract — a declared field a
+  // broadcast did not carry is the `undefined`-at-a-subscriber defect, and the MCP
+  // forwarder is supposed to say so on our side of the boundary.
+  console.log('\n  4B. `durability()` answers `{}` — the field gone, which is what `origin/main` sends.\n');
+  silent = mutatedBuild('silent', [
+    { file: 'router.js', find: CLAIM, replace: `    return {};` }
+  ]);
+  // Already a counted failure. Skip the rest of this section rather
+  // than asserting about a build that was never mutated.
+  if (!silent) break mutation1;
+  const mutantB = await driveLifecycle(silent, 'silent');
+  const heldB = degradedHolds(mutantB);
+  const warned = LIFECYCLE.filter((name) =>
+    new RegExp(`${name.replace('.', '\\.')} arrived without contract field\\(s\\)[^\\n]*durable`).test(mutantB.mcpStderr)
+  );
+  console.log(`   events carrying durable at all: ` +
+    LIFECYCLE.map((n) => `${n}=${'durable' in (mutantB.events.degraded[n] ?? {})}`).join(', '));
+  console.log(`   MCP forwarder warned "arrived without contract field(s) … durable" for: ` +
+    `${warned.length ? warned.join(', ') : '(none)'}`);
+  console.log(`\n   section 3's assertion against this build: ${heldB.ok ? 'PASSED (wrong)' : 'FAILED (right)'}`);
+  if (!heldB.ok) console.log(`     ${heldB.reasons.join('\n     ')}`);
+
+  verdict(
+    !heldB.ok && warned.length === 3,
+    'removing the field turns section 3 RED, and the MCP forwarder names all three events as\n' +
+    '    arriving without a contract field — so the drift is loud on our side of the boundary\n' +
+    '    rather than rendering as an absence on the subscriber\'s',
+    `section 3 passed=${heldB.ok} (expected false), forwarder warned for ${warned.length}/3 events`
+  );
+
+  // ---- 4C: the static audit, shown to be measuring something ---------------------
+  //
+  // Sections 4A and 4B mutate the helper, which turns all six sites at once — a
+  // good test of the runtime assertion and NO test of the scan in section 1, which
+  // is what catches a site that never spread the helper in the first place. This
+  // mutation is against the SOURCE TEXT rather than a build, because that is what
+  // the scan reads; nothing is written to disk.
+  console.log('\n  4C. one site\'s spread deleted from the source — does the section 1 scan notice?\n');
+  const spawnSite = routerSrc.indexOf(`action: 'agent.activated'`, routerSrc.indexOf(`action: 'agent.activated'`) + 1);
+  const spreadAt = routerSrc.indexOf('...durability(durable)', spawnSite);
+  if (spreadAt === -1) {
+    throw new Error(
+      'mutation 4C found no `...durability(durable)` after the second agent.activated site. ' +
+      'The scan would have been run over an unmutated source, proving nothing. Fix the mutation.'
+    );
+  }
+  const mutatedSrc = routerSrc.slice(0, spreadAt) + '/* deleted by 4C */' + routerSrc.slice(spreadAt + '...durability(durable)'.length);
+  const mutatedSites = lifecycleSites(mutatedSrc);
+  const uncovered = mutatedSites.filter((s) => !s.carriesDurable);
+  console.log(`   sites found in the mutated source: ${mutatedSites.length} (same as before: ${mutatedSites.length === sites.length})`);
+  console.log(`   sites the scan reports WITHOUT a durability answer: ${uncovered.length}`);
+  for (const s of uncovered) console.log(`     router.ts:${s.line} ${s.action}`);
+
+  verdict(
+    mutatedSites.length === sites.length && uncovered.length === 1 &&
+      uncovered[0].action === 'agent.activated',
+    'deleting one site\'s spread is reported BY NAME and by line. The scan in section 1 is a\n' +
+    '    measurement of the sites, not a count of them — so a fourteenth instance of "fix the\n' +
+    '    member the reviewer named and leave its siblings" would fail this check',
+    `the scan did not notice a deleted spread: ${mutatedSites.length} sites (was ${sites.length}), ` +
+    `${uncovered.length} reported uncovered ${JSON.stringify(uncovered)}`
+  );
+
 }
-const mutatedSrc = routerSrc.slice(0, spreadAt) + '/* deleted by 4C */' + routerSrc.slice(spreadAt + '...durability(durable)'.length);
-const mutatedSites = lifecycleSites(mutatedSrc);
-const uncovered = mutatedSites.filter((s) => !s.carriesDurable);
-console.log(`   sites found in the mutated source: ${mutatedSites.length} (same as before: ${mutatedSites.length === sites.length})`);
-console.log(`   sites the scan reports WITHOUT a durability answer: ${uncovered.length}`);
-for (const s of uncovered) console.log(`     router.ts:${s.line} ${s.action}`);
-
-verdict(
-  mutatedSites.length === sites.length && uncovered.length === 1 &&
-    uncovered[0].action === 'agent.activated',
-  'deleting one site\'s spread is reported BY NAME and by line. The scan in section 1 is a\n' +
-  '    measurement of the sites, not a count of them — so a fourteenth instance of "fix the\n' +
-  '    member the reviewer named and leave its siblings" would fail this check',
-  `the scan did not notice a deleted spread: ${mutatedSites.length} sites (was ${sites.length}), ` +
-  `${uncovered.length} reported uncovered ${JSON.stringify(uncovered)}`
-);
-
 // ================================================================== verdict --
 
 rule('VERDICT');
