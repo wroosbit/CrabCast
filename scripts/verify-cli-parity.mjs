@@ -473,7 +473,10 @@ if (fs.existsSync(distDir)) {
 // the raw workflow text, and passed on a commented-out invocation and on
 // `if: false` — the job gone, the string still there. It now asks
 // scripts/ci-workflow.mjs whether the invocation is the `run` value of a step
-// that will actually execute.
+// that will actually execute — and since KAN-148 that question is asked over
+// the whole `run:` block rather than one line of it, so a multi-line `if`
+// guard, a heredoc, an uncalled function or a `$( … )` capture around the
+// invocation are reported rather than read as coverage.
 // ---------------------------------------------------------------------------
 
 console.log('\n=== 6. The proof-list audit is still run by CI ===\n');
@@ -488,7 +491,12 @@ const ciText = fs.existsSync(ciYml) ? fs.readFileSync(ciYml, 'utf8') : '';
 const registryCalls = findRunInvocations(ciText, registryRun);
 const registryLive = registryCalls.filter((f) => f.position === 'command' && f.disabled.length === 0);
 const registryOff = registryCalls.filter((f) => f.position === 'command' && f.disabled.length > 0);
+// A real command buried in a construct that decides whether it runs, or that
+// keeps its exit status from getting out (KAN-148).
+const registryBuried = registryCalls.filter((f) => f.position === 'nested');
 const registryMentioned = registryCalls.filter((f) => f.position === 'argument');
+const at = (rows) => `ci.yml:${rows.map((f) => f.line).join(', ci.yml:')}`;
+const LOST = 'A proof can now leave the CI array with nothing left to say so.';
 
 check(
   registryLive.length > 0,
@@ -496,22 +504,26 @@ check(
   registryLive.length
     ? registryLive.map((f) => `ci.yml:${f.line} in job '${f.job}'`).join(', ')
     : registryOff.length
-      ? `the invocation is at ci.yml:${registryOff.map((f) => f.line).join(', ci.yml:')} but does not gate CI — ` +
-        `${registryOff.flatMap((f) => f.disabled).join('; ')}. A proof can now leave the CI array ` +
-        'with nothing left to say so'
-      : registryMentioned.length
-        ? `at ci.yml:${registryMentioned.map((f) => f.line).join(', ci.yml:')} the name appears only as an ` +
-          'ARGUMENT or inside quotes, never as the command the shell runs — a proof can now leave the CI array ' +
-          'with nothing left to say so'
-      : findAnywhere(ciText, registryRun).length
-        ? `the text appears at ci.yml:${findAnywhere(ciText, registryRun).join(', ci.yml:')} but not as a step ` +
-          'at all — a proof can now leave the CI array with nothing left to say so'
-        : 'without this, a proof can leave the CI array with nothing left to say so'
+      ? `the invocation is at ${at(registryOff)} but does not gate CI — ` +
+        `${registryOff.flatMap((f) => f.disabled).join('; ')}. ${LOST}`
+      : registryBuried.length
+        ? `at ${at(registryBuried)} the invocation is BURIED — ${registryBuried.map((f) => f.note).join('; ')}. ` +
+          `It has to begin a command at the top level of the \`run:\` block. ${LOST}`
+        : registryMentioned.length
+          ? `at ${at(registryMentioned)} the name never begins a command — ` +
+            `${registryMentioned.map((f) => f.note).join('; ')}. ${LOST}`
+          : findAnywhere(ciText, registryRun).length
+            ? `the text appears at ci.yml:${findAnywhere(ciText, registryRun).join(', ci.yml:')} but not as a step ` +
+              `at all — commented out, or not a \`run:\` value. ${LOST}`
+            : 'without this, a proof can leave the CI array with nothing left to say so'
 );
 check(
-  registryOff.length === 0,
-  'and nothing switches that step off or swallows its exit status',
-  registryOff.length ? registryOff.map((f) => `ci.yml:${f.line} — ${f.disabled.join('; ')}`).join(' | ') : ''
+  registryOff.length === 0 && registryBuried.length === 0,
+  'and nothing switches that step off, swallows its exit status, or buries it in a construct that may not run',
+  [
+    ...registryOff.map((f) => `ci.yml:${f.line} — ${f.disabled.join('; ')}`),
+    ...registryBuried.map((f) => `ci.yml:${f.line} — ${f.note}`)
+  ].join(' | ')
 );
 
 // ---------------------------------------------------------------------------

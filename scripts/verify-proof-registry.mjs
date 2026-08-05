@@ -380,6 +380,14 @@ for (const e of ciScripts) {
 // the question is now asked structurally, via scripts/ci-workflow.mjs: is
 // this the `run` value of a step that will actually execute?
 //
+// Since KAN-148 that question is asked PER BLOCK rather than per line. The
+// run value is lexed and parsed as shell, and the invocation counts only when
+// it is the command name of a simple command at the top level of the block —
+// so a multi-line `if` guard, a heredoc body, an uncalled function, a
+// `$( … )` capture or a subshell with a `|| true` after its closing paren are
+// each reported as the kind of not-live they are, rather than read as
+// coverage.
+//
 // What this still does not claim: that the job is a REQUIRED context in
 // branch protection. That lives in repository settings, which no check in the
 // tree can read. A live step proves this audit runs and can go red, not that
@@ -393,7 +401,12 @@ const outsideArray = (line) => !arrayRegion || line < arrayRegion.start || line 
 const invocations = findRunInvocations(yaml, invocation).filter((f) => outsideArray(f.line));
 const live = invocations.filter((f) => f.position === 'command' && f.disabled.length === 0);
 const disabled = invocations.filter((f) => f.position === 'command' && f.disabled.length > 0);
-// Mentioned but never executed — `echo "node …"`, `bash -c '…'`, a wrapper.
+// A real command, but buried where it may not run or where its exit status
+// cannot get out: a conditional or loop body, a function body, a `$( … )`
+// capture (KAN-148).
+const buried = invocations.filter((f) => f.position === 'nested');
+// Mentioned but never executed — `echo "node …"`, `bash -c '…'`, a wrapper,
+// a heredoc body.
 const mentioned = invocations.filter((f) => f.position === 'argument');
 
 // Diagnostic for the exact confusion round 1 shipped: the text is there, the
@@ -401,32 +414,38 @@ const mentioned = invocations.filter((f) => f.position === 'argument');
 // sends a reader looking in the wrong place.
 const textAt = findAnywhere(yaml, invocation).filter(outsideArray);
 
+const cite = (rows) => `ci.yml:${rows.map((f) => f.line).join(', ci.yml:')}`;
+
 check(
   live.length > 0,
   `${workflow} runs \`node scripts/${SELF}.mjs\` from a live step of its own`,
   live.length
     ? live.map((f) => `ci.yml:${f.line} in job '${f.job}'`).join(', ')
     : disabled.length
-      ? `the invocation is at ci.yml:${disabled.map((f) => f.line).join(', ci.yml:')} but does not gate CI — ` +
+      ? `the invocation is at ${cite(disabled)} but does not gate CI — ` +
         `${disabled.flatMap((f) => f.disabled).join('; ')}.`
-      : mentioned.length
-        ? `at ci.yml:${mentioned.map((f) => f.line).join(', ci.yml:')} the name appears only as an ARGUMENT or ` +
-          'inside quotes — echoed, passed to another command, or wrapped — never as the command the shell runs. ' +
-          'Nothing in CI executes this audit.'
-      : textAt.length
-        ? `the text appears at ci.yml:${textAt.join(', ci.yml:')} but not as a step at all — ` +
-          'commented out, or not a `run:` value. Nothing in CI executes this audit.'
-        : 'nothing in CI runs this audit — it proves nothing where it matters'
+      : buried.length
+        ? `at ${cite(buried)} the invocation is BURIED — ${buried.map((f) => f.note).join('; ')}. ` +
+          'It has to begin a command at the top level of the `run:` block, so that it runs every ' +
+          'time and its exit status reaches the build. Nothing in CI reliably executes this audit.'
+        : mentioned.length
+          ? `at ${cite(mentioned)} the name never begins a command — ${mentioned.map((f) => f.note).join('; ')}. ` +
+            'Nothing in CI executes this audit.'
+          : textAt.length
+            ? `the text appears at ci.yml:${textAt.join(', ci.yml:')} but not as a step at all — ` +
+              'commented out, or not a `run:` value. Nothing in CI executes this audit.'
+            : 'nothing in CI runs this audit — it proves nothing where it matters'
 );
 
-// A disabled invocation is a distinct failure from an absent one, and a worse
-// one: the file still reads like the audit is wired.
+// A disabled or buried invocation is a distinct failure from an absent one,
+// and a worse one: the file still reads like the audit is wired.
 check(
-  disabled.length === 0,
-  'and nothing switches it off or swallows its exit status',
-  disabled.length
-    ? disabled.map((f) => `ci.yml:${f.line} — ${f.disabled.join('; ')}`).join(' | ')
-    : ''
+  disabled.length === 0 && buried.length === 0,
+  'and nothing switches it off, swallows its exit status, or buries it in a construct that may not run',
+  [
+    ...disabled.map((f) => `ci.yml:${f.line} — ${f.disabled.join('; ')}`),
+    ...buried.map((f) => `ci.yml:${f.line} — ${f.note}`)
+  ].join(' | ')
 );
 
 // And it must NOT be an array entry: that would make the audit droppable by
