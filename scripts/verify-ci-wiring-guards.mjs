@@ -43,18 +43,50 @@
 // from the `verify` array. If the committed workflow ever stopped running the
 // audit, those runs go red whether or not anybody runs this file.
 //
-// IT WRITES A TRACKED FILE, and the cleanup for that is two-layered because
-// one layer is not enough — witnessed, not supposed. It restores ci.yml in a
-// `finally` around every row and again from an `exit`/signal handler, which
-// covers a normal death and a Ctrl-C. It does NOT cover SIGKILL or the
-// machine losing power: this script was interrupted by a reboot mid-row
-// during KAN-148's own development and left ci.yml with the proof-registry
-// step deleted, which is row E's mutation. The backstop is the setup guard
-// at the top: it requires exactly one `- run: node scripts/…` line and one
-// `proof-registry:` line and REFUSES to run otherwise, so the next run reports
-// a workflow nobody wrote instead of quietly measuring against it. If you see
-// that refusal, `git diff .github/workflows/ci.yml` shows what was left
-// behind.
+// IT WRITES A TRACKED FILE, and the cleanup for that is four-layered because
+// each layer covers an ending the one before it cannot — witnessed, not
+// supposed.
+//
+//   1. A `finally` around every row, and an `exit`/signal handler, which cover
+//      a normal death and a Ctrl-C. They do NOT cover SIGKILL or the machine
+//      losing power: this script was interrupted by a reboot mid-row during
+//      KAN-148's own development and left ci.yml with the proof-registry step
+//      deleted, which is row E's mutation.
+//
+//   2. THE MUTATED FILE CARRIES A MARKER SAYING WHAT PUT IT THERE (KAN-172,
+//      item 1). No handler can run after SIGKILL, so the thing that has to
+//      speak is the residue itself. Every write of a mutated workflow puts
+//      {@link MARKER_TAG} at the top of the file naming this script, the row
+//      and the pid, and telling a reader that the run died and how to undo it.
+//      This is not decoration: KAN-138's agent watched ci.yml change under it
+//      during a review, could not attribute the change, and reported it on a
+//      PR as an unattributed actor editing CI — an alarming claim that would
+//      have sent the next reviewer somewhere useless. A tracked file under
+//      review is read as somebody's work; residue that does not say otherwise
+//      IS a false accusation waiting to be made.
+//
+//   3. A RUN THAT FINDS ci.yml ALREADY DIRTY REFUSES (KAN-172, item 2), and
+//      that is the one that was a live defect rather than a nicety. `ORIGINAL`
+//      below is whatever is on disk at startup, so a run begun over a previous
+//      run's residue snapshots the RESIDUE as its baseline, faithfully restores
+//      the residue at the end, and its byte-identical self-check PASSES —
+//      because the file does match what it found. Measured on `main` at
+//      0edd2c1 before this change: seeded with a comment-only residue that run
+//      printed `ALL CHECKS PASSED`, exited 0, and left the corrupted workflow
+//      in the tree. The self-check could not see it by construction; the thing
+//      it compares against was the corrupted baseline.
+//
+//   4. The setup guards below, which require exactly one `- run: node scripts/…`
+//      line and one `proof-registry:` line. They are now the third net rather
+//      than the backstop, and they were never enough alone: they catch a
+//      residue that removed the step, and pass over one that only ADDED to it —
+//      `if: ${{ false }}` on the job, `continue-on-error: true` on the step,
+//      a workflow-level `defaults.run.shell`, or a bare comment.
+//
+// Layers 2 and 3 are proved by `scripts/verify-ci-proof-residue-is-legible.mjs`,
+// which is a separate script for the reason its own header gives: a script
+// cannot meaningfully SIGKILL itself, and it cannot show what a run started
+// over residue does without being a second run.
 //
 // Section 2 is the other half of an honest proof: it reproduces the DEFECT.
 // It loads the pre-fix `scripts/ci-workflow.mjs` out of git and shows the same
@@ -73,7 +105,8 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const workflowPath = path.join(repoRoot, '.github', 'workflows', 'ci.yml');
+const WORKFLOW_REL = path.join('.github', 'workflows', 'ci.yml');
+const workflowPath = path.join(repoRoot, WORKFLOW_REL);
 const REGISTRY = path.join('scripts', 'verify-proof-registry.mjs');
 const PARITY = path.join('scripts', 'verify-cli-parity.mjs');
 const NEEDLE = /node\s+scripts\/verify-proof-registry\.mjs/;
@@ -82,6 +115,111 @@ let failures = 0;
 function check(ok, label, detail = '') {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`);
   if (!ok) failures += 1;
+}
+
+// ---------------------------------------------------------------------------
+// The marker the mutated file carries (KAN-172 item 1).
+//
+// WHAT IT IS FOR: no `exit` handler, no `finally` and no signal handler runs
+// after SIGKILL or a power cut, so the only thing that can explain residue at
+// that point is the residue. The marker is a YAML comment — the guards still
+// fail on the construct underneath it, which is what row g1 and the baseline
+// row check by staying green with the marker in place.
+//
+// IT IS ALSO THE INPUT TO THE REFUSAL BELOW: a marked residue lets the next run
+// name the run that died, its row and its pid, instead of saying only "this
+// file is dirty".
+// ---------------------------------------------------------------------------
+
+/** The one string a reader, and the refusal below, match on. */
+const MARKER_TAG = 'MUTATED BY scripts/verify-ci-wiring-guards.mjs';
+const STARTED = new Date().toISOString();
+
+const markerFor = (id, what) =>
+  [
+    `# ${MARKER_TAG} — row ${id} (${what}), pid ${process.pid}, started ${STARTED}`,
+    '# THIS FILE IS A TEST FIXTURE AT THIS MOMENT. That proof breaks one construct',
+    '# at a time to show the two CI-wiring guards go red, and puts the file back',
+    '# within milliseconds.',
+    '# IF YOU ARE READING THIS IN `git status`, `git diff` OR A REVIEW DIFF, THAT',
+    '# RUN DIED BEFORE IT COULD RESTORE — SIGKILL, a reboot, a power cut. NOBODY',
+    '# EDITED CI: what follows is that run\'s leftovers, not a person\'s work.',
+    `# Take it back out with:  git checkout -- ${WORKFLOW_REL}`,
+    ''
+  ].join('\n');
+
+// ---------------------------------------------------------------------------
+// 0. REFUSE TO RUN OVER A DIRTY ci.yml (KAN-172 item 2).
+//
+// This has to come BEFORE `ORIGINAL` is read, because `ORIGINAL` is the whole
+// defect: it is a snapshot of whatever is on disk, so a run begun over residue
+// adopts the residue as its baseline, restores it, and reports byte-identical.
+// Every assertion below is measured against `ORIGINAL`, so if `ORIGINAL` is not
+// the committed workflow then section 1's sentence — "the committed workflow
+// keeps both guards green" — is false while printing PASS.
+//
+// IT REFUSES RATHER THAN REPAIRING. Running `git checkout` on a file a human
+// may have been editing is not this script's decision to make; the two states
+// "a proof died here" and "somebody is editing CI" are indistinguishable from
+// the porcelain alone, and only one of them is safe to discard.
+//
+// AND IT IS NOT A WAY TO SKIP THE GUARDING: it exits non-zero, so a dirty tree
+// is a red check rather than a quiet pass. The one thing worse than absorbing
+// residue would be a refusal that reported success.
+//
+// A FAILURE TO LOOK IS ALSO A REFUSAL. `git` missing, or a tree that is not a
+// repository, means this cannot tell a clean file from a corrupted one — and
+// "I could not look" reported as "nothing was there" is the shape this epic
+// exists to catch.
+// ---------------------------------------------------------------------------
+
+{
+  let porcelain;
+  try {
+    porcelain = execFileSync('git', ['status', '--porcelain', '--', WORKFLOW_REL], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+  } catch (err) {
+    console.error(`REFUSING TO RUN: could not ask git whether ${WORKFLOW_REL} is clean`);
+    console.error(`  ${err?.message ?? err}`);
+    console.error('  This script mutates that tracked file and restores it from a snapshot taken at');
+    console.error('  startup. Without git it cannot tell a committed workflow from a previous run\'s');
+    console.error('  leftovers, and a snapshot of leftovers is restored AS leftovers by a run that');
+    console.error('  then reports the file byte-identical to how it found it. Not looking is not a pass.');
+    process.exit(1);
+  }
+
+  if (porcelain.trim()) {
+    const onDisk = fs.readFileSync(workflowPath, 'utf8');
+    const marker = onDisk.split('\n').filter((l) => l.includes(MARKER_TAG));
+
+    console.error(`REFUSING TO RUN: ${WORKFLOW_REL} is already modified in the working tree.`);
+    console.error(`  git status --porcelain -- ${WORKFLOW_REL}`);
+    for (const line of porcelain.trimEnd().split('\n')) console.error(`    ${line}`);
+    console.error('');
+    if (marker.length) {
+      console.error('  IT CARRIES THIS SCRIPT\'S OWN MARKER, so this is residue from a run that died');
+      console.error('  before it could restore the file:');
+      for (const line of marker) console.error(`    ${line}`);
+      console.error('');
+      console.error(`  Nobody edited CI. Take it back out with:  git checkout -- ${WORKFLOW_REL}`);
+    } else {
+      console.error('  It carries no marker of this script\'s, so it is either an edit somebody is');
+      console.error('  making to CI, or residue from a version of this script that predates the');
+      console.error(`  marker. \`git diff -- ${WORKFLOW_REL}\` shows which. Commit or stash the edit,`);
+      console.error(`  or discard it with \`git checkout -- ${WORKFLOW_REL}\`, then run this again.`);
+    }
+    console.error('');
+    console.error('  WHY THIS IS A REFUSAL AND NOT A WARNING: the baseline this script measures every');
+    console.error('  row against is read off disk at startup. Started here it would adopt the change');
+    console.error('  above as that baseline, restore it at the end, and PASS its own "byte-identical');
+    console.error('  to how this run found it" check — a corrupted workflow left in the tree by a run');
+    console.error('  that reported an all-clear. Measured on main at 0edd2c1: that run printed ALL');
+    console.error('  CHECKS PASSED and exited 0.');
+    process.exit(1);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -139,8 +277,26 @@ function runGuard(script) {
   };
 }
 
-function runBoth(yaml) {
-  fs.writeFileSync(workflowPath, yaml);
+/**
+ * Put a mutated workflow on disk, marked.
+ *
+ * THE MARKER GOES ON IN THE SAME WRITE as the mutation, deliberately. Written
+ * separately there would be a window — however short — in which the file is
+ * broken and says nothing about why, and the endings this marker exists for are
+ * exactly the ones that arrive without warning. One `writeFileSync` means the
+ * file is never mutated-and-silent on disk at any instant.
+ *
+ * The baseline row goes through here too, with `id` 'baseline'. It is the only
+ * row whose yaml equals ORIGINAL, so it is also the only row whose residue would
+ * be the marker ALONE — a comment-only dirty file, which is the residue the
+ * refusal above catches and nothing else would.
+ */
+function writeMutated(yaml, id, what) {
+  fs.writeFileSync(workflowPath, markerFor(id, what) + yaml);
+}
+
+function runBoth(yaml, id, what) {
+  writeMutated(yaml, id, what);
   try {
     return { reg: runGuard(REGISTRY), par: runGuard(PARITY) };
   } finally {
@@ -335,7 +491,7 @@ const CASES = [
 
 console.log('=== 1. Baseline: the committed workflow keeps both guards green ===\n');
 
-const baseline = runBoth(ORIGINAL);
+const baseline = runBoth(ORIGINAL, 'baseline', 'the committed workflow, unmutated');
 check(baseline.reg.code === 0, 'verify-proof-registry passes on the unmutated ci.yml', `exit ${baseline.reg.code}`);
 check(baseline.par.code === 0, 'verify-cli-parity passes on the unmutated ci.yml', `exit ${baseline.par.code}`);
 
@@ -418,7 +574,7 @@ for (const c of CASES) {
     check(false, `row ${c.id} (${c.what}) actually changed ci.yml`, 'the mutation was a no-op — it measured the baseline');
     continue;
   }
-  const { reg, par } = runBoth(mutated);
+  const { reg, par } = runBoth(mutated, c.id, c.what);
   const got = reg.code === 0 && par.code === 0 ? 'GREEN' : 'RED';
   rows.push({ ...c, reg, par, got });
 
@@ -470,6 +626,16 @@ for (const r of rows.filter((x) => x.gap)) {
 // 4. The tree is exactly as it was found. This script writes a tracked file;
 //    a run that left it mutated would hand the next script in the CI array a
 //    workflow nobody wrote.
+//
+//    TWO ASSERTIONS AND NOT ONE, because the first one alone was the defect
+//    KAN-172 was filed for. "Byte-identical to how this run found it" is only
+//    worth anything once "how this run found it" is known to be the committed
+//    file, and before the refusal at the top of this script that was not known:
+//    a run started over residue restored the residue and passed this check.
+//    The second assertion says what the section's title has always implied —
+//    the file is CLEAN, not merely unchanged since a snapshot of unknown
+//    provenance. The refusal makes the two equivalent; asserting both is what
+//    makes that equivalence a measurement instead of a claim.
 // ---------------------------------------------------------------------------
 
 console.log('=== 4. ci.yml is byte-identical to how this run found it ===\n');
@@ -478,6 +644,22 @@ restore();
 check(
   fs.readFileSync(workflowPath, 'utf8') === ORIGINAL,
   '.github/workflows/ci.yml restored'
+);
+
+let finalPorcelain = null;
+try {
+  finalPorcelain = execFileSync('git', ['status', '--porcelain', '--', WORKFLOW_REL], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe']
+  }).trim();
+} catch { /* reported as the failure below, not swallowed */ }
+check(
+  finalPorcelain === '',
+  '…and git agrees it is clean, so the baseline it was compared against was the committed file',
+  finalPorcelain === null
+    ? 'git could not be asked — this run cannot say whether it left the tree as it found it'
+    : finalPorcelain || ''
 );
 
 console.log('');
