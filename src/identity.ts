@@ -251,5 +251,21 @@ export function paneNameFor(canonical: string): string {
  * rather than in the agent's cwd for exactly that reason.
  */
 export function sidecarDirFor(dataDir: string, canonical: string): string {
-  return path.join(dataDir, 'agents', pathHash(canonical));
+  return path.join(agentsDirFor(dataDir), pathHash(canonical));
+}
+
+/**
+ * The directory every agent's sidecar lives under.
+ *
+ * EXPORTED BECAUSE ONE THING HAS TO ENUMERATE THEM (KAN-140). `forget` may
+ * remove CrabCast's key from the antigravity CLI's GLOBAL MCP config only when
+ * no OTHER agent's provenance still claims it, and answering that means reading
+ * every sibling's `provisioned.json` — which means knowing where the siblings
+ * are. Derived here rather than rebuilt at the call site so the layout has one
+ * definition: a census that looked in `<dataDir>/agent` would find nothing,
+ * report zero claimants, and remove a key a live sibling was using. That is the
+ * one direction the count must never be wrong in.
+ */
+export function agentsDirFor(dataDir: string): string {
+  return path.join(dataDir, 'agents');
 }

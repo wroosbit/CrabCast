@@ -4,7 +4,6 @@ import * as fs from 'fs';
 import { execSync, spawnSync } from 'child_process';
 import {
   PROMPT_FILENAME,
-  agyMcpConfigPath,
   builtinMcpServer,
   launcherDeliversRuntime,
   promptInstruction,
@@ -14,9 +13,10 @@ import type { AgentLauncher } from './launchers.js';
 import { diagnoseSpawnFailure } from './herdr-health.js';
 import { EVIDENCE_TAIL_CHARS, landedCount, messageInComposer } from './delivery.js';
 import type { SendEvidence, SendOutcome, SendVerdict } from './delivery.js';
-import { canonicalizeOrNull, paneNameFor, sidecarDirFor } from './identity.js';
+import { agentsDirFor, canonicalizeOrNull, paneNameFor, sidecarDirFor } from './identity.js';
 import {
   ProvisioningError,
+  noteAgyMcpConfig,
   noteTrustEntry,
   provisionMcpConfig
 } from './provisioning.js';
@@ -532,6 +532,19 @@ export class HerdrBridge {
   }
 
   /**
+   * Where EVERY agent's sidecar lives, which `forget` needs in order to
+   * reference-count the shared agy MCP key (KAN-140).
+   *
+   * Exposed next to `sidecarDirFor` rather than by having the router reach for
+   * `dataDir` itself: the two answers have to come from the same layout, and a
+   * census pointed at the wrong directory finds no claimants and removes a key
+   * a live agent needs.
+   */
+  public agentsDir(): string {
+    return agentsDirFor(this.dataDir);
+  }
+
+  /**
    * A session of ours that is currently attached to this agent's terminal.
    *
    * herdr allows exactly one terminal attach per terminal, so this is the
@@ -947,6 +960,24 @@ export class HerdrBridge {
           // launcher, into the user's GLOBAL config, and neither this bridge
           // nor the router would otherwise know it had happened.
           note: (artifact) => {
+            if (artifact.kind === 'agy-mcp') {
+              // NULL WHEN NOTHING WAS WRITTEN, and that is the whole of the fix
+              // this branch received. The disclosure used to be pushed after
+              // this call unconditionally, from the bridge's own knowledge that
+              // an agy agent had definitions — so an unparseable or unwritable
+              // global config produced an activation response naming a merge
+              // into a file CrabCast had not touched. `configureAgyMcp` reports
+              // the outcome now, and a non-write discloses nothing and records
+              // nothing. The reason is on the daemon's log where the failure is.
+              const agy = noteAgyMcpConfig({
+                agentPath: session.path,
+                sidecarDir,
+                file: artifact.file,
+                keys: artifact.keys
+              });
+              if (agy) disclosures.push(agy);
+              return;
+            }
             disclosures.push(
               noteTrustEntry({
                 agentPath: session.path,
@@ -966,26 +997,23 @@ export class HerdrBridge {
       }
     }
 
-    // The anti-gravity launcher's setup writes the user's GLOBAL agy MCP
-    // config, which is shared by every agent under that launcher. Disclosed
-    // here rather than through `note` because there is no honest reversal to
-    // offer: removing our key when one agent is forgotten would take the
-    // servers away from every other agent still using it. Saying so is the
-    // truthful answer; a `forget` that broke a sibling would not be.
-    if (launcherName === 'anti-gravity' && Object.keys(session.mcpDefinitions ?? {}).length > 0) {
-      disclosures.push({
-        artifact: 'mcp-config',
-        file: agyMcpConfigPath(),
-        detail:
-          `mcpServers.${Object.keys(session.mcpDefinitions ?? {}).join(', mcpServers.')} — this is ` +
-          `your GLOBAL antigravity CLI config, outside ${session.path}`,
-        origin: 'crabcast',
-        reversal:
-          `not removed by \`forget\`: this file is shared by every anti-gravity agent, so ` +
-          `taking the key out when one agent is forgotten would remove it from the others ` +
-          `too. Remove the entry by hand when no anti-gravity agents are left.`
-      });
-    }
+    // WHAT USED TO BE HERE: the anti-gravity global-config disclosure, built
+    // by this bridge from `session.mcpDefinitions` — the servers the agent was
+    // CONFIGURED with — rather than from anything the launcher reported having
+    // written. It was pushed whenever an agy agent had definitions, so it
+    // claimed a merge into the user's global config on every activation where
+    // `configureAgyMcp` had silently declined to write one: an unparseable
+    // config, or a write that failed. The response named a file, keys and a
+    // manual removal for an edit nobody had made.
+    //
+    // Nothing was wrong with `configureAgyMcp` — it was refusing correctly and
+    // logging why. The gap was between it and this block, and no code owned it:
+    // one function knew what happened and the other did the announcing.
+    //
+    // So the announcement moved to where the knowledge is. The launcher's
+    // `setup` reports through `note` above, exactly as the claude launcher's
+    // trust entry does, and `noteAgyMcpConfig` (provisioning.ts) records the
+    // provenance that makes `forget` able to take it back out. See KAN-140.
 
     // A write that fails refuses the activation, on the same spawnError
     // channel as every other provisioning failure here. The agent's first

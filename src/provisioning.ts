@@ -32,6 +32,25 @@ import * as path from 'path';
  *                    alternative to a human accepting a dialog nobody is there
  *                    to accept.
  *
+ * AND A THIRD, which is the awkward one and the reason this file grew a census
+ * (KAN-140):
+ *
+ *   `~/.gemini/antigravity-cli/mcp.json`
+ *                    The antigravity CLI reads MCP config from its GLOBAL
+ *                    config and has no project-scoped equivalent at all — so
+ *                    unlike the two above, this artifact is not merely outside
+ *                    the agent's directory, it is SHARED BY EVERY AGY AGENT
+ *                    THIS DAEMON RUNS. One file, many owners.
+ *
+ * That last property is what made "reversible" hard rather than tedious.
+ * Removing our key when one agent is forgotten would take the servers away from
+ * every sibling still using it, so the reversal is REFERENCE-COUNTED: it reads
+ * every agent's provenance record and removes the key only when nothing else
+ * claims it. The count introduces a claim of its own — "no other agent needs
+ * this" — so every case where that claim cannot be established leaves the key
+ * and says what it could not establish. See {@link countAgyClaims} and
+ * `removeOurAgyKeys`.
+ *
  * So they are written — and the four properties above are what makes that
  * acceptable rather than merely convenient. This file implements all four.
  *
@@ -60,12 +79,25 @@ export const PROVENANCE_FILENAME = 'provisioned.json';
 /** The one filename Claude Code reads project-scoped MCP configuration from. */
 export const MCP_CONFIG_FILENAME = '.mcp.json';
 
+/** Where the antigravity CLI reads MCP configuration, and it is GLOBAL. */
+export const AGY_MCP_ARTIFACT = 'agy-mcp-config';
+
 /**
  * Which artifact a disclosure or a removal is about. A closed set on purpose:
  * a fifth artifact is a decision somebody has to make in this file, not a
  * string a caller can invent.
+ *
+ * THE FIFTH ONE IS HERE, and it is that decision rather than a name somebody
+ * slipped in (KAN-140). `agy-mcp-config` is the antigravity CLI's GLOBAL MCP
+ * config, which used to be disclosed under `mcp-config` — the same kind as the
+ * per-directory `.mcp.json`, from which it differs in the one way that decides
+ * what `forget` may do: it is SHARED between every agy agent, so removing our
+ * key from it is a claim about the whole fleet rather than about one agent. Two
+ * artifacts with opposite removal rules sharing one kind is how a reader — or a
+ * later `filter(a => a.artifact === 'mcp-config')` — comes to the wrong
+ * conclusion about which one they are holding.
  */
-export type ArtifactKind = 'mcp-config' | 'git-exclude' | 'folder-trust';
+export type ArtifactKind = 'mcp-config' | 'git-exclude' | 'folder-trust' | typeof AGY_MCP_ARTIFACT;
 
 /**
  * Who put an artifact there.
@@ -93,6 +125,28 @@ export interface McpConfigProvenance {
   fileCreated: boolean;
 }
 
+/**
+ * What was merged into the antigravity CLI's GLOBAL MCP config for this agent.
+ *
+ * SAME SHAPE AS {@link McpConfigProvenance}, MINUS `fileCreated`, and the
+ * absence is a decision. That flag exists so a `.mcp.json` CrabCast created can
+ * be deleted once the last of its servers goes. This file is the user's global
+ * CLI config: an empty one is not residue anybody has to care about, and
+ * deciding a shared file is "empty enough to delete" from inside one agent's
+ * `forget` is exactly the kind of fleet-wide judgement this record exists to
+ * avoid making. Our keys come out; the file stays.
+ *
+ * PRESENCE OF THIS SECTION IS A CLAIM ON THE KEYS, and it is what the census in
+ * {@link countAgyClaims} counts. So it is written only after the write really
+ * landed — see `AgyMcpResult`.
+ */
+export interface AgyMcpProvenance {
+  /** Absolute path to the global config. */
+  file: string;
+  /** Our keys, each mapped to the EXACT JSON we last wrote for it. */
+  keys: Record<string, string>;
+}
+
 /** The one line added to a repository's private exclude file. */
 export interface GitExcludeProvenance {
   file: string;
@@ -117,6 +171,7 @@ export interface Provenance {
   v: number;
   path: string;
   mcpConfig?: McpConfigProvenance;
+  agyMcp?: AgyMcpProvenance;
   gitExclude?: GitExcludeProvenance;
   trust?: TrustProvenance;
 }
@@ -183,6 +238,50 @@ function provenanceFileIn(sidecarDir: string): string {
 }
 
 /**
+ * Reading one agent's provenance file, with the THREE outcomes distinguished.
+ *
+ * `absent` and `unreadable` are the same answer to "what did this agent write"
+ * — nothing we can act on — and OPPOSITE answers to "did this agent claim the
+ * shared agy key". That distinction did not exist before KAN-140 because
+ * nothing needed it: {@link readProvenance} collapses both to `null`, which is
+ * exactly right when the question is about the agent's OWN artifacts, since a
+ * record we cannot read is a permission we do not have.
+ *
+ * It is exactly wrong when the question is about a SIBLING. A corrupt
+ * `provisioned.json` collapsed to `null` reads as "this agent claims nothing",
+ * which is the dangerous direction: `forget` would then take the key away from
+ * an agy agent that is still using it. So the census below reads through this
+ * and refuses to count rather than counting a record it could not read.
+ */
+type ProvenanceRead =
+  | { provenance: Provenance }
+  /** No record. This agent wrote nothing outside our data directory. */
+  | { absent: true }
+  /** A record exists and could not be believed. Says why. */
+  | { unreadable: string };
+
+function readProvenanceOutcome(sidecarDir: string): ProvenanceRead {
+  const file = provenanceFileIn(sidecarDir);
+  let text: string;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (e: any) {
+    if (e?.code === 'ENOENT') return { absent: true };
+    return { unreadable: `${file} could not be read (${e?.message ?? String(e)})` };
+  }
+  let parsed: any;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e: any) {
+    return { unreadable: `${file} is not valid JSON (${e?.message ?? String(e)})` };
+  }
+  if (!parsed || typeof parsed !== 'object' || typeof parsed.path !== 'string') {
+    return { unreadable: `${file} is not a provenance record (no \`path\`)` };
+  }
+  return { provenance: parsed as Provenance };
+}
+
+/**
  * What we have recorded writing for this agent, or `null` when we have
  * recorded nothing.
  *
@@ -191,15 +290,13 @@ function provenanceFileIn(sidecarDir: string): string {
  * that we wrote this", and every removal below is gated on a positive record.
  * The failure mode is therefore leaving an artifact behind and saying so, not
  * deleting something we cannot account for.
+ *
+ * THAT REASONING HOLDS ONLY FOR OUR OWN RECORD. See {@link ProvenanceRead} for
+ * why a sibling's unreadable record must not be read through this function.
  */
 export function readProvenance(sidecarDir: string): Provenance | null {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(provenanceFileIn(sidecarDir), 'utf8'));
-    if (!parsed || typeof parsed !== 'object' || typeof parsed.path !== 'string') return null;
-    return parsed as Provenance;
-  } catch {
-    return null;
-  }
+  const outcome = readProvenanceOutcome(sidecarDir);
+  return 'provenance' in outcome ? outcome.provenance : null;
 }
 
 /**
@@ -419,6 +516,154 @@ export function provisionMcpConfig(options: {
   }
 
   return disclosures;
+}
+
+// -------------------------------------------------- the global agy config
+
+/**
+ * Record what was merged into the antigravity CLI's global MCP config, and
+ * describe it.
+ *
+ * `keys` is `null` when the write did not happen, and then NOTHING is recorded
+ * and `null` is returned — no provenance, no disclosure. That is the whole
+ * reason `configureAgyMcp` stopped returning `void`: a disclosure for a write
+ * that did not land is a false sentence in the response, and a provenance
+ * record for one would point `forget` at a key CrabCast never wrote.
+ *
+ * REWRITTEN ON EVERY ACTIVATION, like the per-directory keys and for the same
+ * reason: the definitions bake absolute paths, so the recorded bytes have to be
+ * the bytes currently on disk or the removal check below would read every key
+ * as edited-by-somebody-else.
+ */
+export function noteAgyMcpConfig(options: {
+  agentPath: string;
+  sidecarDir: string;
+  file: string;
+  keys: Record<string, string> | null;
+}): ArtifactDisclosure | null {
+  const { agentPath, sidecarDir, file, keys } = options;
+  if (!keys || Object.keys(keys).length === 0) return null;
+
+  const provenance = readProvenance(sidecarDir) ?? emptyProvenance(agentPath);
+  const agyMcp: AgyMcpProvenance = { file, keys };
+  writeProvenance(sidecarDir, { ...provenance, agyMcp });
+
+  const names = Object.keys(keys);
+  return {
+    artifact: AGY_MCP_ARTIFACT,
+    file,
+    detail:
+      `mcpServers.${names.join(', mcpServers.')} — this is your GLOBAL antigravity CLI config, ` +
+      `OUTSIDE ${agentPath}. The antigravity CLI has no project-scoped equivalent, so there is ` +
+      `no per-agent file to put these in. It is therefore SHARED with every other agy agent this ` +
+      `daemon runs.`,
+    origin: 'crabcast',
+    reversal:
+      `crabcast forget ${agentPath} — removes those keys, but ONLY when no other agent's ` +
+      `provisioning record still claims them; the file is shared, so taking the key out while a ` +
+      `sibling is using it would break that agent. When a sibling still claims it, or when the ` +
+      `records cannot be read, \`forget\` LEAVES the key and names what it is waiting on. The ` +
+      `file itself is never deleted — it is yours. By hand: delete the \`mcpServers\` entries ` +
+      `named above from ${file}.`
+  };
+}
+
+/**
+ * Who else still claims CrabCast's keys in the shared agy config.
+ *
+ * THE ONE NEW CLAIM THIS SLICE MAKES is "no other agent needs this key", and
+ * this function is the whole of the evidence for it. So it answers in three
+ * parts rather than with a number: who claims (by path), what could not be read,
+ * and how many records were consulted. A count alone cannot be argued with, and
+ * `forget`'s report has to be able to say what it rested on.
+ *
+ * THE READ IS DELIBERATELY NARROW. It asks one question of each sibling record —
+ * does it claim any of these keys in this file — and reads nothing else out of
+ * them. `forget` does not otherwise reason about other agents, and the ticket
+ * flagged that boundary as the thing to be careful about.
+ *
+ * WHAT IT CANNOT SEE, stated here because a census that is read as complete is
+ * worse than one that is read as partial:
+ *
+ *  - **Another daemon's agents.** The scan is one `dataDir`. Two CrabCast
+ *    daemons with different data directories write the same global agy file and
+ *    are invisible to each other, so the last claimant under THIS daemon can
+ *    remove a key the other daemon's agent is using.
+ *  - **A key written by hand**, or by any agy user who is not CrabCast. Those
+ *    are not claims and are not counted — but the byte comparison at the
+ *    removal site is what actually protects them, not this.
+ *  - **A write whose record never landed.** `configureAgyMcp` writes the file
+ *    and `writeProvenance` records it afterwards; a crash between the two
+ *    leaves a key with no claimant. It is then removable by the next `forget` —
+ *    residue in the other direction, and the same window `provisionMcpConfig`
+ *    already has.
+ *  - **Whether a claimant is RUNNING.** A configured-but-stopped agy agent
+ *    still claims, and that is deliberate: it will need the key when it starts,
+ *    and `forget` is what retires a claim.
+ */
+export interface AgyClaimCensus {
+  /** Paths of OTHER agents whose provenance still claims one of these keys. */
+  claimants: string[];
+  /** Records that exist and could not be believed, with the reason for each. */
+  unreadable: string[];
+  /** How many sibling sidecars were consulted, so "none claim it" has a size. */
+  consulted: number;
+  /** Set when the census could not be taken at all. Nothing may be removed. */
+  failed?: string;
+}
+
+export function countAgyClaims(options: {
+  agentsDir: string | undefined;
+  /** Our own sidecar, excluded — we are the claim being retired. */
+  ownSidecarDir: string;
+  file: string;
+  keys: string[];
+}): AgyClaimCensus {
+  const { agentsDir, ownSidecarDir, file, keys } = options;
+  const empty = { claimants: [], unreadable: [], consulted: 0 };
+
+  if (!agentsDir) {
+    return {
+      ...empty,
+      failed:
+        `no agents directory was supplied, so the other agents' provisioning records could not ` +
+        `be consulted at all`
+    };
+  }
+
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(agentsDir);
+  } catch (e: any) {
+    return {
+      ...empty,
+      failed: `${agentsDir} could not be listed (${e?.message ?? String(e)})`
+    };
+  }
+
+  const own = path.resolve(ownSidecarDir);
+  const claimants: string[] = [];
+  const unreadable: string[] = [];
+  let consulted = 0;
+
+  for (const entry of entries) {
+    const sidecar = path.join(agentsDir, entry);
+    if (path.resolve(sidecar) === own) continue;
+    const outcome = readProvenanceOutcome(sidecar);
+    // No record at all is not a claim, and is not a doubt either: an agent that
+    // wrote nothing outside our data directory has nothing to claim with.
+    if ('absent' in outcome) continue;
+    consulted += 1;
+    if ('unreadable' in outcome) {
+      unreadable.push(outcome.unreadable);
+      continue;
+    }
+    const claim = outcome.provenance.agyMcp;
+    if (!claim || claim.file !== file) continue;
+    if (keys.some((key) => ownKey(claim.keys, key))) claimants.push(outcome.provenance.path);
+  }
+
+  return { claimants, unreadable, consulted };
 }
 
 // ------------------------------------------------------------ git exclude
@@ -642,6 +887,11 @@ export interface RemovalReport {
  *  - **Everything is reported.** What could not be removed is named with its
  *    reason, so residue is a sentence in the response rather than something
  *    found months later.
+ *  - **And a fifth for the one SHARED artifact:** the global agy config's keys
+ *    come out only when no other agent's record claims them, and a count that
+ *    cannot be established is a reason to leave rather than a reason to
+ *    proceed. `removed` says what the removal rested on, not just that it
+ *    happened.
  *
  * Failures do not throw. `forget`'s postcondition is the absence of a record,
  * and refusing the whole call because one file was read-only would leave the
@@ -650,14 +900,27 @@ export interface RemovalReport {
 export function removeProvisionedArtifacts(options: {
   agentPath: string;
   sidecarDir: string;
+  /**
+   * Where every agent's sidecar lives, so the shared agy key can be
+   * reference-counted (KAN-140). OPTIONAL, and its absence is not treated as
+   * "nobody else claims it": a caller that cannot say where the records are
+   * gets the same answer as one whose records are unreadable — the key is LEFT,
+   * with that stated as the reason. `identity.ts`'s `agentsDirFor` is what
+   * produces it.
+   */
+  agentsDir?: string;
 }): RemovalReport {
-  const { agentPath, sidecarDir } = options;
+  const { agentPath, sidecarDir, agentsDir } = options;
   const removed: string[] = [];
   const left: string[] = [];
   const provenance = readProvenance(sidecarDir);
 
   if (provenance?.mcpConfig) {
     removeOurMcpKeys(provenance.mcpConfig, removed, left);
+  }
+
+  if (provenance?.agyMcp) {
+    removeOurAgyKeys(provenance.agyMcp, { agentsDir, ownSidecarDir: sidecarDir }, removed, left);
   }
 
   if (provenance?.gitExclude) {
@@ -761,6 +1024,147 @@ function removeOurMcpKeys(
   } catch (e: any) {
     left.push(`${file}: could not be rewritten (${e?.message ?? String(e)})`);
   }
+}
+
+/**
+ * Take our server keys back out of the SHARED antigravity CLI config — but only
+ * when this agent is the last one recorded as needing them (KAN-140).
+ *
+ * THE ASYMMETRY THAT DECIDES EVERY BRANCH BELOW. An unremoved key is residue,
+ * and it is residue that was disclosed at activation and is named again here.
+ * A wrongly removed key silently breaks a running agy agent — its servers are
+ * simply gone the next time it starts, with nothing anywhere saying why. Those
+ * costs are not comparable, so every case that cannot be established REFUSES TO
+ * REMOVE and says what it was unable to establish.
+ *
+ * Four things are therefore checked, and only the fourth is about our own bytes:
+ *
+ *  1. **The census was takeable at all.** No agents directory, or one that
+ *     cannot be listed, means the question was never asked. Leave everything.
+ *  2. **Every sibling record was readable.** One corrupt `provisioned.json`
+ *     leaves the count unknown in the dangerous direction — an unreadable record
+ *     may be exactly the agent that needs the key — so a single unreadable
+ *     record stops the whole removal rather than being skipped.
+ *  3. **No other agent claims the key.** A claimant is named by PATH in the
+ *     report, because "somebody else needs it" is not actionable and
+ *     "/home/you/code/thing needs it" is.
+ *  4. **The bytes are still ours.** Same rule as the per-directory keys: a value
+ *     that is not the value we recorded is somebody's change and is left.
+ *
+ * THE KNOWN RESIDUE, named rather than discovered later: (4) fires in the
+ * ordinary multi-agent case, not only when a human edits the file. Two agy
+ * agents write the same key with DIFFERENT bytes — `builtinMcpServer` bakes each
+ * agent's own path in — so the second activation overwrites the first's value.
+ * The last claimant to leave then finds bytes its own record does not describe,
+ * and leaves the key. That is the safe direction and it is reported, but it
+ * means the common fleet case ends in disclosed residue rather than a clean
+ * removal. The underlying cause is that a shared file cannot carry per-agent
+ * identity at all, which is a defect in the WRITE rather than in this reversal
+ * — KAN-177, filed with the observation that produced it.
+ */
+function removeOurAgyKeys(
+  provenance: AgyMcpProvenance,
+  where: { agentsDir?: string; ownSidecarDir: string },
+  removed: string[],
+  left: string[]
+): void {
+  const { file, keys } = provenance;
+  const names = Object.keys(keys);
+  const named = names.join(', ');
+  if (!names.length) return;
+
+  const census = countAgyClaims({
+    agentsDir: where.agentsDir,
+    ownSidecarDir: where.ownSidecarDir,
+    file,
+    keys: names
+  });
+
+  // 1. The question was never asked.
+  if (census.failed) {
+    left.push(
+      `${file}: the server key(s) ${named} — LEFT because the claim count could not be ` +
+        `established (${census.failed}). This file is SHARED with every other agy agent, so a ` +
+        `key is removed only when no other agent's provisioning record still claims it; without ` +
+        `that count, removing could take the servers away from an agent that is still using them.`
+    );
+    return;
+  }
+
+  // 2. It was asked and came back partly unreadable.
+  if (census.unreadable.length) {
+    left.push(
+      `${file}: the server key(s) ${named} — LEFT because ${census.unreadable.length} of the ` +
+        `${census.consulted} other provisioning record(s) could not be read, so whether another ` +
+        `agy agent still claims these keys is UNKNOWN: ${census.unreadable.join('; ')}. An ` +
+        `unreadable record may be exactly the agent that needs them, and this file is shared, so ` +
+        `the count is refused rather than guessed.`
+    );
+    return;
+  }
+
+  // 3. Somebody else still needs it.
+  if (census.claimants.length) {
+    left.push(
+      `${file}: the server key(s) ${named} — LEFT because ${census.claimants.length} other agy ` +
+        `agent(s) still claim them: ${census.claimants.join(', ')}. This file is shared and has ` +
+        `no per-agent equivalent, so removing the key now would take those servers away from ` +
+        `agents that are still using them. \`forget\` the last of them and the key goes with it.`
+    );
+    return;
+  }
+
+  let config: any;
+  try {
+    config = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (e: any) {
+    if (e?.code === 'ENOENT') return; // Already gone. Nothing owed.
+    left.push(
+      `${file}: the server key(s) ${named} could not be removed (${e?.message ?? String(e)}) — ` +
+        `it is your global antigravity CLI config and is not rewritten blind`
+    );
+    return;
+  }
+
+  const servers = config?.mcpServers;
+  if (!servers || typeof servers !== 'object') return;
+
+  // 4. Ours by bytes, or not ours to take.
+  const taken: string[] = [];
+  for (const [key, written] of Object.entries(keys)) {
+    if (!ownKey(servers, key)) continue;
+    if (JSON.stringify(servers[key]) !== written) {
+      left.push(
+        `${file}: the server \`${key}\` is not the definition this agent's record accounts for — ` +
+          `either you edited it, or another CrabCast agy agent rewrote it after us — so it was ` +
+          `left in place rather than removed on a record that no longer describes it`
+      );
+      continue;
+    }
+    delete servers[key];
+    taken.push(key);
+  }
+  // Nothing taken, nothing written — the caller's file is not re-serialized on a
+  // removal that removed none of its content. Same rule, same reason, as
+  // `removeOurMcpKeys`.
+  if (!taken.length) return;
+
+  try {
+    fs.writeFileSync(file, JSON.stringify(config, null, 2));
+  } catch (e: any) {
+    left.push(`${file}: could not be rewritten (${e?.message ?? String(e)})`);
+    return;
+  }
+
+  // WHAT IT RESTED ON, not merely what happened. A reader who is told "removed"
+  // cannot tell a reference-counted removal from a blind one, and those differ
+  // by whether a sibling has just been broken.
+  removed.push(
+    `${file}: the server key(s) ${taken.join(', ')} — removed BECAUSE no other agent's ` +
+      `provisioning record claimed them (${census.consulted} other record(s) read under this ` +
+      `daemon's data directory, all readable). The file itself is your global antigravity CLI ` +
+      `config and was left in place.`
+  );
 }
 
 /**

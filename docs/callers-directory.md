@@ -290,6 +290,79 @@ If you had already accepted the dialog yourself, the entry is **yours** —
 disclosed as pre-existing, and `forget` will never touch it. If CrabCast wrote
 it, `forget` removes that key and nothing else in the file.
 
+## The antigravity CLI's global config — the shared one
+
+An agent on the `anti-gravity` launcher gets its MCP servers merged into
+`~/.gemini/antigravity-cli/mcp.json`. The antigravity CLI reads MCP config from
+there and has **no project-scoped equivalent at all**, so unlike everything
+above, this artifact is not merely outside the agent's directory:
+
+> **One file, many owners.** Every agy agent this daemon runs has its servers
+> written into the same file. There is no per-agent version of it to write
+> instead.
+
+That is what made "reversible" hard rather than merely tedious. Removing the key
+when the first agent is forgotten takes the servers away from every sibling still
+using it — so for a while this artifact had three of the four properties and said
+so, on the grounds that a disclosed residue beats a reversal that breaks
+somebody else's agent.
+
+**It is reference-counted now.** `forget` reads every agent's provenance record
+and removes CrabCast's key only when nothing else claims it. That buys the fourth
+property, and it introduces a claim of its own — *"no other agent needs this"* —
+which rests on records that can be incomplete. So the rule is asymmetric on
+purpose:
+
+> **An unremoved key is residue that was disclosed twice. A wrongly removed one
+> silently breaks a running agent.** Those costs are not comparable, so anything
+> the count cannot establish leaves the key and says what it could not establish.
+
+Four things are checked, and only the last is about our own bytes:
+
+| what | if it does not hold |
+| --- | --- |
+| the census could be taken at all | **left** — "I could not look" is not "there is nobody" |
+| every sibling record was readable | **left** — an unreadable record may be exactly the agent that needs it |
+| no other agent claims the key | **left**, naming the claimants **by path** |
+| the value is still the one we recorded | **left** — removing it would destroy a change rather than undo ours |
+
+And when it *does* remove, the response says **what that rested on** — that no
+other agent's record claimed it, and how many records were read to find out. A
+reader told only "removed" cannot tell a reference-counted removal from a blind
+one, and those two differ by whether a sibling has just been broken.
+
+### What the count cannot see
+
+Stated here because a census read as complete is worse than one read as partial.
+
+- **Another daemon's agents.** The scan covers one `dataDir`. Two CrabCast
+  daemons with different data directories write the same global file and are
+  invisible to each other.
+- **Keys written by hand**, or by any agy user who is not CrabCast. Those are not
+  claims and are not counted — the byte comparison is what protects them.
+- **A write whose record never landed.** The file is written and the provenance
+  recorded immediately after; a crash between the two leaves a key with no
+  claimant.
+- **Whether a claimant is running.** A configured-but-stopped agy agent still
+  claims, deliberately: it will need the key when it starts, and `forget` is what
+  retires a claim.
+
+### The residue this leaves in the ordinary case
+
+The `crabcast` builtin's definition carries **the agent's own path**, and this
+file holds one value per key — so a second agy agent's activation overwrites the
+first's definition. When the last remaining agent is finally forgotten, the value
+on disk is often one *another CrabCast agent* wrote, which its own record does not
+describe. It leaves the key, and reports it.
+
+That is the safe direction, and it is disclosed rather than discovered. But it
+means the ordinary multi-agent case ends in reported residue rather than a clean
+removal. The cause is upstream of the reversal — **a shared file cannot carry
+per-agent identity** — and has a second consequence worth knowing about while it
+is open: every agy agent also reads whichever agent's `CRABCAST_AGENT_PATH` was
+written last, so `activatedBy` for an agy fleet is decided by activation order.
+Tracked separately rather than papered over here.
+
 ## `forget` — what comes back out
 
 `forget` is the verb that makes an agent stop existing, and it is where every
@@ -309,6 +382,11 @@ write above is undone. Four rules, each a refusal wearing behaviour's clothes:
 - **Everything is reported.** `removed` and `left` are both in the response, and
   `left` carries the reason. Residue is a sentence you read, not something found
   months later.
+- **And a fifth, for the one artifact that is SHARED.** CrabCast's key in the
+  antigravity CLI's global config comes out only when no other agent's record
+  still claims it, and a count that cannot be established is a reason to leave
+  rather than a reason to proceed. `removed` says what the removal rested on.
+  See above.
 
 ## The resume rule
 
@@ -368,6 +446,21 @@ from a response.
 
 It also proves it can **fail**: the last section mutates the things it guards and
 asserts the checks go red, because a check that cannot fail is not a check.
+
+`scripts/verify-agy-mcp-reversal.mjs`, also in CI, covers the shared global agy
+config: two agy agents really configured and really activated, the key surviving
+the first `forget` with the remaining claimant named by path, the key going with
+the last one, and every way the count can fail to be established leaving it
+instead — each asserted on the diagnostic text as well as on the file, because
+"removed" and "removed because nothing else claimed it" are different claims. Its
+last section backs each behaviour out of a copy of the build and shows the checks
+go red.
+
+**What no proof in this repository covers**, said here rather than left as an
+assumption: nothing runs a real `agy` binary or a real agy fleet. That the
+antigravity CLI reads this file, at this path, in this shape is carried from the
+launcher's original author and is tested nowhere. The bookkeeping has an owner;
+the runtime behaviour does not.
 
 `scripts/verify-activated-by.mjs` covers the `CRABCAST_AGENT_PATH` half, and it
 is deliberately arranged so that it cannot pass without the identity genuinely

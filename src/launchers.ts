@@ -134,47 +134,107 @@ export function builtinMcpServer(
 // which would otherwise replace the user's config with just our entries.
 //
 // GLOBAL, and therefore SHARED between every agent this daemon runs under this
-// launcher. That is why `forget` does not remove our key from it and why
-// nothing here pretends otherwise: two agents both have it written on their
-// behalf, so removing it when the first is forgotten would take the second's
-// servers away. It is disclosed in the activation response with that fact and
-// with how to remove it by hand — disclosure without a reversal we cannot
-// honestly perform, rather than a reversal that would break the other agent.
+// launcher. Two agents both have it written on their behalf, so removing the
+// key when the first is forgotten would take the second's servers away. That
+// used to be the end of the argument: `forget` left the key, and the disclosure
+// said so.
+//
+// IT IS REFERENCE-COUNTED NOW (KAN-140). `forget` removes CrabCast's key only
+// when no OTHER agent's provenance record still claims it, and says which
+// records it read to decide — see `removeOurAgyKeys` in provisioning.ts. What
+// made that possible is the record this function now RETURNS: the exact keys
+// and the exact bytes written, which the caller stores as provenance. A key
+// nobody recorded writing is a key nothing may remove.
+//
 // (The per-directory `.mcp.json` has no such problem: one directory, one agent,
 // so removal is unambiguous. See provisioning.ts.)
 export function agyMcpConfigPath(): string {
   return path.join(os.homedir(), '.gemini', 'antigravity-cli', 'mcp.json');
 }
 
-export function configureAgyMcp(defs: Record<string, unknown>, configPath?: string): void {
+/**
+ * What {@link configureAgyMcp} did, rather than what it was asked to do.
+ *
+ * IT USED TO RETURN `void`, AND THAT WAS A DEFECT WITH A NAME. Every early
+ * return above — nothing asked for, an unparseable config, a failed write — was
+ * indistinguishable from success to the caller, and `herdr.ts` pushed the
+ * activation disclosure UNCONDITIONALLY. So an agy agent activated against an
+ * unparseable global config was told, in the response, that CrabCast had merged
+ * its servers into a file it had not touched.
+ *
+ * That was survivable while nothing could be undone. It is not survivable now:
+ * provenance is what `forget` removes by, so a record written for a write that
+ * never happened would point the reversal at somebody else's key.
+ *
+ * `keys` is `null` for every non-write, with `reason` saying which one.
+ */
+export interface AgyMcpResult {
+  /** The global config this was about, whether or not it was written. */
+  file: string;
+  /**
+   * Our keys mapped to the EXACT JSON written for each, or `null` when nothing
+   * was written. The bytes, not just the names, for the reason
+   * `McpConfigProvenance.keys` keeps them: removal can then tell our own
+   * definition from one somebody has since edited.
+   */
+  keys: Record<string, string> | null;
+  /** Why nothing was written. Present exactly when `keys` is `null`. */
+  reason?: string;
+}
+
+export function configureAgyMcp(
+  defs: Record<string, unknown>,
+  configPath?: string
+): AgyMcpResult {
+  const agyConfigPath = configPath ?? agyMcpConfigPath();
+
   // Nothing to contribute: leave the user's global config alone entirely.
   // Safe here in a way it was NOT safe at the workspace `.mcp.json` (KAN-121):
   // `defs` is the ALREADY-RESOLVED set, so an empty one means the caller asked
   // for nothing rather than that a resolution step dropped what they asked for.
   // The dropping cannot happen any more — a name this daemon cannot supply
   // refuses the activation before reaching here.
-  if (Object.keys(defs).length === 0) return;
+  if (Object.keys(defs).length === 0) {
+    return { file: agyConfigPath, keys: null, reason: 'no MCP servers were configured for this agent' };
+  }
 
-  const agyConfigPath = configPath ?? agyMcpConfigPath();
   const agyConfigDir = path.dirname(agyConfigPath);
   let config: any = {};
   if (fs.existsSync(agyConfigPath)) {
     try {
       config = JSON.parse(fs.readFileSync(agyConfigPath, 'utf8'));
-    } catch (e) {
-      console.error('[Launchers] agy mcp.json exists but is unparseable; refusing to overwrite it', e);
-      return;
+    } catch (e: any) {
+      const reason =
+        `${agyConfigPath} exists but is not valid JSON (${e?.message ?? String(e)}), so ` +
+        `CrabCast's MCP servers were NOT merged into it. It was not replaced: it is your ` +
+        `global antigravity CLI config and replacing it would destroy whatever it holds.`;
+      console.error(`[Launchers] ${reason}`);
+      return { file: agyConfigPath, keys: null, reason };
     }
   }
 
+  // WE MAY BE OVERWRITING A KEY OF THE USER'S, and this is the one property the
+  // per-directory `.mcp.json` has that this file does not: `provisionMcpConfig`
+  // refuses a server key it has no record of writing, because that key is the
+  // caller's. Nothing refuses here, and it is a pre-existing behaviour rather
+  // than one KAN-140 introduced — but reversal makes it sharper, so the removal
+  // side compensates by leaving any key whose bytes are not the bytes we
+  // recorded. See `removeOurAgyKeys`. The refusal itself is KAN-178, filed
+  // rather than smuggled into this ticket: it changes who gets an agent.
   config.mcpServers = { ...config.mcpServers, ...defs };
 
   try {
     fs.mkdirSync(agyConfigDir, { recursive: true });
     fs.writeFileSync(agyConfigPath, JSON.stringify(config, null, 2));
-  } catch (e) {
-    console.error('[Launchers] Failed to write agy mcp.json', e);
+  } catch (e: any) {
+    const reason = `could not write ${agyConfigPath} (${e?.message ?? String(e)})`;
+    console.error(`[Launchers] Failed to write agy mcp.json: ${reason}`);
+    return { file: agyConfigPath, keys: null, reason };
   }
+
+  const keys: Record<string, string> = {};
+  for (const [name, definition] of Object.entries(defs)) keys[name] = JSON.stringify(definition);
+  return { file: agyConfigPath, keys };
 }
 
 // WHAT USED TO BE HERE, AND WHY IT IS NOT
@@ -432,11 +492,27 @@ export interface LauncherSetupContext {
    */
   mcpServers: Record<string, unknown>;
   /**
-   * Called once per artifact this setup wrote or relied on. `wroteIt` is the
-   * difference between an entry CrabCast put there and one that was already
-   * true — which is what decides whether `forget` may take it away again.
+   * Called once per artifact this setup wrote or relied on.
+   *
+   * A DISCRIMINATED UNION RATHER THAN ONE SHAPE, because the two artifacts that
+   * reach it are answered by different questions. For folder trust the question
+   * is WHOSE IT IS — `wroteIt` is the difference between an entry CrabCast put
+   * there and one that was already true, and that is what decides whether
+   * `forget` may take it away again. For the agy config the question is WHETHER
+   * IT HAPPENED AT ALL: `keys: null` means the write did not go through, and the
+   * caller must then disclose nothing rather than disclose a write it did not
+   * make.
+   *
+   * Both are called EVEN WHEN THERE IS NOTHING TO REMOVE. A `note` that fired
+   * only on success would leave the caller unable to tell "no artifact" from
+   * "the launcher never said", which is the ambiguity KAN-121 spent a slice
+   * removing one file over.
    */
-  note?: (artifact: { kind: 'folder-trust'; file: string; trustKey: string; wroteIt: boolean }) => void;
+  note?: (
+    artifact:
+      | { kind: 'folder-trust'; file: string; trustKey: string; wroteIt: boolean }
+      | { kind: 'agy-mcp'; file: string; keys: Record<string, string> | null; reason?: string }
+  ) => void;
 }
 
 export interface AgentLauncher {
@@ -618,7 +694,22 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
       const fresh = `agy${promptCommand ? ' -i ' + shellQuote(promptCommand) : ''}`;
       return mayResume ? `agy --continue || ${fresh}` : fresh;
     },
-    setup: ({ mcpServers }) => configureAgyMcp(mcpServers),
+    // REPORTED THROUGH `note` NOW, like the claude launcher's trust entry, and
+    // for the same reason: the bridge cannot see what this wrote, so anything
+    // it says about the global agy config without being told is a guess. It
+    // used to guess — `herdr.ts` pushed the disclosure whenever an agy agent
+    // had definitions, whether or not `configureAgyMcp` had written anything —
+    // and the guess was wrong for every non-write. `keys: null` now carries the
+    // reason instead, and nothing is disclosed or recorded.
+    //
+    // Still not a refusal when the write fails, deliberately and narrowly: this
+    // slice is about the reversal, and turning a logged failure into a refused
+    // activation changes who gets an agent, which is a different decision from
+    // who gets it back. KAN-178, filed rather than taken.
+    setup: ({ mcpServers, note }) => {
+      const outcome = configureAgyMcp(mcpServers);
+      note?.({ kind: 'agy-mcp', file: outcome.file, keys: outcome.keys, reason: outcome.reason });
+    },
     runtimeComm: 'agy'
     // No restoresConversation, deliberately, despite the `--continue` above:
     // the restore *predictor* (hasRestorableConversation in resume.ts) reads

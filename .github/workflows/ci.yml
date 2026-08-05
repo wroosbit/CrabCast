@@ -590,6 +590,7 @@ jobs:
             verify-restart-survival
             verify-prompt-is-not-a-template
             verify-callers-directory
+            verify-agy-mcp-reversal
             verify-daemon-provenance
             verify-state-read-echoes-config
             verify-activated-by
