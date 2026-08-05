@@ -27,7 +27,13 @@ import {
   ourPaneIn
 } from './herdr.js';
 import { PathError, canonicalPath, canonicalizeOrNull, paneNameFor } from './identity.js';
-import { BUILTIN_MCP_SERVERS, builtinMcpServer, knownLaunchers, resolveLauncher } from './launchers.js';
+import {
+  BUILTIN_MCP_SERVERS,
+  agyMcpConfigPath,
+  builtinMcpServer,
+  knownLaunchers,
+  resolveLauncher
+} from './launchers.js';
 import { readFdUsage, isFdPressureHigh, PTMX_FDS_PER_PANE } from './herdr-health.js';
 import { ResumeCause } from './resume.js';
 import {
@@ -2600,6 +2606,14 @@ export class MessageRouter {
             }
           }
         : {}),
+      // BOTH FILES FOR AN AGY AGENT, and the second one is the point of the
+      // pair. `willWrite` is the disclosure that arrives BEFORE anything is
+      // written, and for the `anti-gravity` launcher one of the things that
+      // will be written is the user's GLOBAL antigravity config — a file
+      // outside the agent's directory entirely. Naming only `.mcp.json` made
+      // this the one disclosure in the chain that was still silent about it:
+      // the activation response says it, `forget` says it, and the call that
+      // could have warned somebody before the fact did not.
       willWrite: willWrite.length
         ? [
             {
@@ -2609,7 +2623,22 @@ export class MessageRouter {
               note:
                 `Merged into your file if you have one; never replacing it. Named again in the ` +
                 `activation response, and removed by \`forget\`.`
-            }
+            },
+            ...(parsed.config.launcher === 'anti-gravity'
+              ? [
+                  {
+                    file: agyMcpConfigPath(),
+                    keys: willWrite,
+                    when: 'at activation',
+                    note:
+                      `Your GLOBAL antigravity CLI config, OUTSIDE this directory — the ` +
+                      `antigravity CLI has no project-scoped equivalent, so it is also SHARED ` +
+                      `with every other agy agent. Merged into; never replaced. \`forget\` ` +
+                      `removes these keys only when no other agy agent's record still claims ` +
+                      `them, and says which agent it is waiting on when one does.`
+                  }
+                ]
+              : [])
           ]
         : [],
       // Advisory, never a refusal. Empty means the census answered and found
@@ -2763,8 +2792,20 @@ export class MessageRouter {
     // provenance that says what may be removed lives in the sidecar this
     // cleanup deletes. Doing it in the other order would be recording that the
     // agent is gone and then discovering we can no longer say what it left.
+    //
+    // `agentsDir` is what lets the cleanup reference-count the ONE artifact
+    // that is shared between agents — CrabCast's key in the antigravity CLI's
+    // global MCP config (KAN-140). It is read to answer one question about each
+    // sibling record ("does it still claim this key") and nothing wider; when it
+    // cannot be read, the key is LEFT and the response says so, because an
+    // unremoved key is disclosed residue and a wrongly removed one silently
+    // breaks a running agent.
     const sidecar = this.deps.herdrBridge.sidecarDirFor(agentPath);
-    const residue = removeProvisionedArtifacts({ agentPath, sidecarDir: sidecar });
+    const residue = removeProvisionedArtifacts({
+      agentPath,
+      sidecarDir: sidecar,
+      agentsDir: this.deps.herdrBridge.agentsDir()
+    });
 
     const durable = this.surfaceRegistryOutcome(
       this.deps.agentRegistry.recordForgotten(existing.record),
