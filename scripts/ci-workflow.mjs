@@ -923,6 +923,48 @@ function commandNameWord(node) {
   return null;
 }
 
+/**
+ * The one simple command a node runs, when it runs exactly one unconditionally:
+ * a list item that is one `and_or` of one un-negated pipeline of one stage.
+ * Anything with an operator in it answers null, because then whether that
+ * command runs depends on something else.
+ */
+function soleCommand(node) {
+  let n = node;
+  if (n && n.type === 'andor') {
+    if (n.parts.length !== 1) return null;
+    n = n.parts[0].node;
+  }
+  if (n && n.type === 'pipeline') {
+    if (n.negated || n.stages.length !== 1) return null;
+    n = n.stages[0];
+  }
+  return n && n.type === 'simple' ? n : null;
+}
+
+/**
+ * A command that cannot finish with status 0, so putting it after `||` leaves
+ * the failure it was reacting to still fatal: `node x || exit 1` REALLY DOES
+ * gate the build, and flagging it would be a false alarm of exactly the kind
+ * KAN-148 was asked to remove from `env FOO=1 node …`.
+ *
+ * `exit` with no argument is admitted for the same reason: in `a || exit` it
+ * exits with `a`'s status, which is non-zero or the branch would not have been
+ * taken. `exit 0` is NOT admitted, and neither is anything whose status this
+ * cannot read off the source — a wrapper, a variable, a function.
+ */
+function cannotSucceed(node) {
+  const cmd = soleCommand(node);
+  if (!cmd) return false;
+  const name = commandNameWord(cmd);
+  if (!name || name.quoted) return false;
+  if (name.text === 'false') return cmd.words.length === 1;
+  if (name.text !== 'exit') return false;
+  const args = cmd.words.filter((w) => w !== name && !ASSIGNMENT_WORD.test(w.raw));
+  if (args.length === 0) return true;                       // `exit` — inherits $?
+  return args.length === 1 && /^[1-9][0-9]*$/.test(args[0].text);
+}
+
 const MAX_RENDER = 48;
 function render(text, node) {
   const s = text.slice(node.start, node.end).replace(/\s+/g, ' ').trim();
@@ -987,7 +1029,8 @@ function walk(text, node, ctx, out) {
       node.parts.forEach((part, k) => {
         const next = node.parts[k + 1];
         let c = ctx;
-        if (next && next.op === '||') {
+        // `|| exit 1` and `|| false` re-raise the failure instead of eating it.
+        if (next && next.op === '||' && !cannotSucceed(next.node)) {
           c = because(
             `the command is followed by \`|| ${render(text, next.node)}\`, which swallows a non-zero exit`
           );
@@ -1112,6 +1155,31 @@ export function analyzeRunBody(text) {
     }
 
     walk(text, tree, { gating: true, reasons: [], construct: null, pipefail }, commands);
+
+    // An unconditional top-level `exit` ENDS THE STEP, so anything written
+    // after it never runs at all. Same family as the eight shapes KAN-148 was
+    // filed for — the thing that stops the invocation lives on another line —
+    // and just as accident-plausible: a debug `exit 0` left at the top of a
+    // block while iterating on CI reads, to every other check here, exactly
+    // like a step that runs the audit.
+    //
+    // Only a SOLE top-level statement counts. `false && exit 0` and
+    // `node x || exit 1` are conditional, and treating them as terminators
+    // would turn the fix above back into a false alarm.
+    for (const item of tree.items) {
+      const cmd = soleCommand(item.node);
+      if (!cmd) continue;
+      const name = commandNameWord(cmd);
+      if (!name || name.quoted || name.text !== 'exit') continue;
+      for (const [offset, v] of commands) {
+        if (offset > cmd.start) {
+          v.reasons.push(
+            `the step runs \`${render(text, cmd)}\` unconditionally earlier in the block, ` +
+              'so this command is never reached'
+          );
+        }
+      }
+    }
 
     // A block whose LAST top-level command is a success makes everything
     // before it advisory. Conservative under `bash -e`, where the failure

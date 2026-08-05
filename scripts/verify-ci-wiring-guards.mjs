@@ -306,7 +306,26 @@ const CASES = [
   { id: 'X4', what: '`run: >` folded scalar, one command', want: 'GREEN',
     mutate: replaceStep('      - run: >', '          node scripts/verify-proof-registry.mjs') },
   { id: 'X5', what: '`run: >` folded onto `|| true`', want: 'RED', expect: '|| true',
-    mutate: replaceStep('      - run: >', '          node scripts/verify-proof-registry.mjs', '          || true') }
+    mutate: replaceStep('      - run: >', '          node scripts/verify-proof-registry.mjs', '          || true') },
+
+  // Found by attacking this parser with shapes the matrix did not yet have,
+  // before review did. Y1 is a HOLE in the dangerous direction — the step
+  // exits before ever reaching the audit, and everything else here read it as
+  // live. Y2/Y3 are the opposite, false alarms of the same kind KAN-148 was
+  // filed to remove from `env FOO=1 node …`: `|| exit 1` re-raises the failure
+  // rather than eating it. Y4 is the boundary between them.
+  { id: 'Y1', what: 'unconditional `exit 0` BEFORE the invocation', want: 'RED', gap: true,
+    expect: 'never reached',
+    mutate: block('exit 0', 'node scripts/verify-proof-registry.mjs') },
+  { id: 'Y2', what: '`|| exit 1` — re-raises, so it still gates', want: 'GREEN',
+    mutate: replaceStep('      - run: node scripts/verify-proof-registry.mjs || exit 1') },
+  { id: 'Y3', what: '`|| false` — re-raises, so it still gates', want: 'GREEN',
+    mutate: replaceStep('      - run: node scripts/verify-proof-registry.mjs || false') },
+  { id: 'Y4', what: '`|| exit 0` — really does swallow', want: 'RED', expect: '|| exit 0',
+    mutate: replaceStep('      - run: node scripts/verify-proof-registry.mjs || exit 0') },
+  { id: 'Y5', what: '`|| exit 1` inside a conditional is still buried', want: 'RED',
+    expect: 'the body of an `if`',
+    mutate: block('if [ "$X" != 1 ]; then', '  node scripts/verify-proof-registry.mjs || exit 1', 'fi') }
 ];
 
 // ---------------------------------------------------------------------------
