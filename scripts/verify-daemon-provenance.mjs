@@ -24,6 +24,35 @@
 // It needs no herdr and no network: `daemon_status` touches neither. Each
 // daemon gets a scratch $HOME and its own dataDir.
 //
+// ---------------------------------------------------------------------------
+// WHAT THIS SCRIPT SUPPLIES ITSELF, AND WHAT THAT LEAVES UNCOVERED (KAN-170).
+//
+// A proof that supplies its own input has not tested that the input arrives.
+// Three sections here construct the situation they then assert on, and each is
+// bounded differently:
+//
+//   §4b (no `git` binary) constructs only the ENVIRONMENT — an empty PATH —
+//   and then runs the REAL `scripts/stamp-build.mjs` against a REAL git
+//   working tree. The stamp it asserts on is one the shipping stamper wrote,
+//   so nothing is faked but the machine. Fully covered.
+//
+//   §5b (a stamp from a future format version) WRITES THE STAMP IT ASSERTS ON,
+//   and it has no choice: `stamp-build.mjs` imports `BUILD_STAMP_VERSION` from
+//   the build it is stamping, so no writer in this tree can emit a version
+//   this reader would reject. What that leaves uncovered is whether any writer
+//   would ever produce one — the real case is a FUTURE daemon's stamp read by
+//   THIS one, which cannot exist at one commit. §5b closes what it can instead:
+//   it asserts that the stamper takes the version from the shared constant
+//   rather than from a literal of its own, so writer and reader cannot drift
+//   apart WITHIN a version. Nobody covers cross-version reading, and nobody
+//   can until there is a version 2.
+//
+//   §6c (the file-times bound) constructs a rebuild that preserves the newest
+//   mtime and the file count, to MEASURE the bound the wording claims rather
+//   than only match the wording. It does not cover a rebuild that happens to
+//   do this by accident in the wild — it arranges one, which is the only way
+//   to observe the property deliberately.
+//
 // Usage:
 //   npm run build
 //   node scripts/verify-daemon-provenance.mjs
@@ -68,7 +97,9 @@ if (!fs.existsSync(path.join(repoRoot, 'node_modules'))) {
   process.exit(1);
 }
 
-const { BUILD_STAMP_FILENAME } = await import(path.join(repoDist, 'provenance.js'));
+const { BUILD_STAMP_FILENAME, BUILD_STAMP_VERSION } = await import(
+  path.join(repoDist, 'provenance.js')
+);
 const { connectToDaemon, onJsonLines, socketPathFor, writeJsonLine } =
   await import(path.join(repoDist, 'ipc.js'));
 
@@ -149,18 +180,27 @@ function makeTree(name, { git }) {
   return { name, dir, dist: path.join(dir, 'dist'), src: path.join(dir, 'src'), dataDir, configPath };
 }
 
-/** Run the real stamper against a fixture's `dist/`, as `npm run build` would. */
-function stamp(tree) {
+/**
+ * Run the real stamper against a fixture's `dist/`, as `npm run build` would.
+ *
+ * `env` is an override rather than a fixed constant so §4b can run the very
+ * same stamper on a machine with no `git` on PATH — the shipping script,
+ * unedited, in the environment that exercises its ENOENT branch. Node itself is
+ * reached through `process.execPath`, an absolute path, so stripping PATH
+ * removes git without also removing the interpreter.
+ */
+function stamp(tree, env = ENV) {
   const out = execFileSync(process.execPath, [stamperJs, tree.dist], {
     encoding: 'utf8',
-    env: ENV,
+    env,
     stdio: ['ignore', 'pipe', 'pipe']
   });
   return out.trimEnd();
 }
 
-const readStamp = (tree) =>
-  JSON.parse(fs.readFileSync(path.join(tree.dist, BUILD_STAMP_FILENAME), 'utf8'));
+const stampPathOf = (tree) => path.join(tree.dist, BUILD_STAMP_FILENAME);
+
+const readStamp = (tree) => JSON.parse(fs.readFileSync(stampPathOf(tree), 'utf8'));
 
 /**
  * Pin the fixture's file times so every comparison below is arranged rather
@@ -511,6 +551,25 @@ check(
   /checkout:\s+UNKNOWN/.test(nogitCli.stdout),
   'and against `checkout` — a blank line there would read as an unremarkable status'
 );
+// KAN-170 item 10. `git root` was the one field in this block rendered with
+// `field()` rather than `knownOrUnknown()`, so a null one did not print
+// UNKNOWN — it VANISHED, between two neighbours that both say the word. Back
+// that render out and this check goes red on a line that is simply not there.
+check(
+  /git root:\s+UNKNOWN/.test(nogitCli.stdout),
+  'and against `git root` — the field that used to disappear instead of saying UNKNOWN',
+  JSON.stringify(
+    (nogitCli.stdout.split('\n').find((l) => /^\s*git root:/.test(l)) ?? '(no line at all)').trim()
+  )
+);
+// An UNKNOWN with no reason underneath it is the blank this block exists to
+// prevent, one indirection later — so the reason has to be there too.
+check(
+  typeof nogitStatus.build?.unknown?.gitRoot === 'string' &&
+    new RegExp(`gitRoot — `).test(nogitCli.stdout),
+  'with a reason for it in the COULD NOT BE ESTABLISHED block, so the new UNKNOWN is answered rather than bare',
+  String(nogitStatus.build?.unknown?.gitRoot).slice(0, 80) + '…'
+);
 check(
   /COULD NOT BE ESTABLISHED/.test(nogitCli.stdout) && /NOT a clean result/.test(nogitCli.stdout),
   'under a heading that refuses to be read as an all-clear'
@@ -571,6 +630,109 @@ check(
 );
 
 // ---------------------------------------------------------------------------
+// 4b. NO `git` BINARY — the third shape of not-knowing, and the one CI never
+//     saw (KAN-170 item 9).
+//
+// `stamp-build.mjs` tells three failure shapes apart because they send a
+// reader to three different places, and until now only two of them were ever
+// exercised here: a real repository (§1) and a tree with no `.git` (§4). The
+// third — `git` is not installed on the machine doing the build — was reachable
+// only by hand, because ENV pins PATH to directories that have git in them.
+//
+// The fixture is a REAL git working tree with a REAL commit in it. That is what
+// makes the section sharp rather than a restatement of §4: the commit is right
+// there on disk, and the build still reports UNKNOWN, because the machine that
+// built it could not ask. A reader that "helpfully" fell back to anything would
+// have every opportunity to.
+// ---------------------------------------------------------------------------
+
+rule('4b. A BUILD MADE ON A MACHINE WITH NO `git` REPORTS UNKNOWN — from inside a real checkout');
+
+const nogitbin = makeTree('t-nogitbin', { git: true });
+const emptyBin = path.join(scratch, 'empty-bin');
+fs.mkdirSync(emptyBin, { recursive: true });
+const NO_GIT_ENV = { ...ENV, PATH: emptyBin };
+
+// PRECONDITIONS. Both halves, because either one failing on its own would make
+// this section pass while measuring nothing: a fixture that is not really a
+// repository would report unknown for §4's reason, and a `git` that is broken
+// under the NORMAL environment too would mean the empty PATH did nothing.
+const gitUnderStripped = spawnSync('git', ['--version'], { env: NO_GIT_ENV, encoding: 'utf8' });
+const gitUnderNormal = spawnSync('git', ['--version'], { env: ENV, encoding: 'utf8' });
+check(
+  gitUnderStripped.error?.code === 'ENOENT',
+  'PRECONDITION: `git` cannot be spawned through the stripped PATH',
+  `PATH=${emptyBin} → ${gitUnderStripped.error?.code ?? `exit ${gitUnderStripped.status}`}`
+);
+check(
+  gitUnderNormal.status === 0,
+  'PRECONDITION: and CAN be through the normal one — so the difference below is the PATH, not a broken git',
+  String(gitUnderNormal.stdout).trim()
+);
+const nogitbinHead = execFileSync('git', ['-C', nogitbin.dir, 'rev-parse', 'HEAD'], {
+  encoding: 'utf8'
+}).trim();
+check(
+  fs.existsSync(path.join(nogitbin.dir, '.git')) && /^[0-9a-f]{40}$/.test(nogitbinHead),
+  'PRECONDITION: the fixture IS a git working tree with a resolvable HEAD — the commit is there to be found',
+  nogitbinHead
+);
+
+show('stamp-build with no `git` on PATH, in a tree that has a commit:', stamp(nogitbin, NO_GIT_ENV));
+const nogitbinStamp = readStamp(nogitbin);
+show(`${BUILD_STAMP_FILENAME}:`, JSON.stringify(nogitbinStamp, null, 2));
+
+check(
+  fs.existsSync(stampPathOf(nogitbin)),
+  'the build was still STAMPED — a machine with no git is a supported case, not a build failure'
+);
+check(
+  nogitbinStamp.commit === null && nogitbinStamp.clean === null && nogitbinStamp.gitRoot === null,
+  'and every git-derived field is null — none of them guessed, with a real HEAD sitting one directory away'
+);
+check(
+  /there is no `git` on PATH/.test(String(nogitbinStamp.unknown.commit)),
+  'the reason names the machine, not the tree',
+  String(nogitbinStamp.unknown.commit).slice(0, 88) + '…'
+);
+// The distinction the stamper goes to the trouble of drawing is worth nothing
+// if nothing ever checks that it draws it. "No git binary" and "not a git
+// repository" send a reader to two different places — one is a machine to fix,
+// the other is an ordinary tarball — and this fixture is emphatically the first.
+check(
+  !/not inside a git working tree/.test(JSON.stringify(nogitbinStamp.unknown)),
+  'and NOT the tarball reason — the two failure shapes stay apart, which is why the stamper tells them apart'
+);
+check(
+  /HEAD did not resolve/.test(String(nogitbinStamp.unknown.clean)),
+  'cleanliness was not asked at all, and says why — an unasked question answered "clean" is the fabrication this file exists to avoid',
+  String(nogitbinStamp.unknown.clean).slice(0, 88) + '…'
+);
+
+// And end to end. The daemon boots with git perfectly available to it, and
+// still reports UNKNOWN — because provenance comes from the stamp the BUILD
+// wrote, never from a git call at boot. This is the rejected alternative in
+// src/provenance.ts's header, measured.
+pinTimes(nogitbin);
+const nogitbinStatus = await startDaemon(nogitbin, 't-nogitbin');
+check(
+  nogitbinStatus.build?.stampPresent === true && nogitbinStatus.build?.stampUsable === true,
+  'the daemon BELIEVES this stamp — it is a perfectly good stamp that happens to know nothing'
+);
+check(
+  nogitbinStatus.build?.commit === null,
+  'and reports commit: null while running inside a checkout whose HEAD it could resolve in one call',
+  `HEAD on disk is ${nogitbinHead}`
+);
+const nogitbinCli = crabcast(nogitbin, ['daemon-status']);
+show('$ crabcast daemon-status   (built where there was no git)',
+  nogitbinCli.stdout.split('freshness:')[0].trimEnd());
+check(
+  /commit:\s+UNKNOWN/.test(nogitbinCli.stdout) && /no `git` on PATH/.test(nogitbinCli.stdout),
+  'and the CLI prints UNKNOWN with the machine named underneath it'
+);
+
+// ---------------------------------------------------------------------------
 // 5. A STAMP THE CODE BESIDE IT HAS OUTLIVED.
 // ---------------------------------------------------------------------------
 
@@ -610,6 +772,107 @@ check(
   /without re-stamping/.test(String(restaleStatus.build?.unknown?.commit)),
   'and says why, naming the file that outlived the stamp',
   String(restaleStatus.build?.unknown?.commit).slice(0, 110) + '…'
+);
+
+// ---------------------------------------------------------------------------
+// 5b. A STAMP FROM A FORMAT THIS DAEMON DOES NOT READ (KAN-170 item 8).
+//
+// `src/provenance.ts` demotes a stamp whose `stampVersion` is not the one it
+// reads, on the grounds that the fields ARE the product and guessing at a shape
+// whose meaning has moved is the same class of error as reporting "clean" for a
+// build nothing was known about. Nothing exercised that branch: the only
+// `stampVersion` in scripts/ is the writer's, and it takes its value from the
+// same constant the reader checks against, so no fixture could produce a
+// mismatch by building.
+//
+// SO THIS SECTION WRITES THE STAMP IT ASSERTS ON, and that is a real bound, not
+// a formality — see the header. The situation it stands in for is a stamp
+// written by a LATER CrabCast and read by this one, which cannot be produced at
+// one commit. What CAN be closed here is the other half: that no writer in this
+// tree could drift from the reader within a version. The last two checks do
+// that, structurally.
+// ---------------------------------------------------------------------------
+
+rule('5b. A STAMP FROM A FORMAT VERSION THIS DAEMON DOES NOT READ IS DISBELIEVED');
+
+const future = makeTree('t-future', { git: true });
+stamp(future);
+const futureOriginal = readStamp(future);
+const futureVersion = BUILD_STAMP_VERSION + 1;
+// Everything else left exactly as the real stamper wrote it: a stamp that is
+// wrong in ONE way, so what the daemon does with it cannot be attributed to
+// anything but the version.
+fs.writeFileSync(
+  stampPathOf(future),
+  JSON.stringify({ ...futureOriginal, stampVersion: futureVersion }, null, 2) + '\n'
+);
+// Pinned so the STALENESS branch — the §5 one, which is checked after this one
+// and would produce the same outward verdict — cannot be what fires. The
+// section has to be able to say which branch answered.
+pinTimes(future);
+show(`${BUILD_STAMP_FILENAME}, rewritten as version ${futureVersion}:`,
+  JSON.stringify(readStamp(future), null, 2));
+
+const futureStatus = await startDaemon(future, 't-future');
+check(
+  futureOriginal.commit !== null && readStamp(future).commit === futureOriginal.commit,
+  'the stamp still names the real commit — a reader that skipped the version check would report it',
+  String(futureOriginal.commit)
+);
+check(
+  futureStatus.build?.commit === null && futureStatus.build?.clean === null,
+  'the daemon reports UNKNOWN instead: a shape whose meaning may have changed is not guessed at'
+);
+check(
+  futureStatus.build?.stampPresent === true && futureStatus.build?.stampUsable === false,
+  'and PRESENT BUT NOT BELIEVED, not absent — there is a file there and whoever is looking at that directory can see it'
+);
+check(
+  new RegExp(`stamp version ${futureVersion}`).test(String(futureStatus.build?.unknown?.commit)) &&
+    new RegExp(`reads version ${BUILD_STAMP_VERSION}`).test(String(futureStatus.build?.unknown?.commit)),
+  'the reason names BOTH versions — the one on disk and the one this daemon reads',
+  String(futureStatus.build?.unknown?.commit).slice(0, 110) + '…'
+);
+// The section's own precondition, in the form that matters here: TWO branches
+// demote a stamp, and without this the mtime branch could be doing the work
+// while the version check sat dead.
+check(
+  !/without re-stamping/.test(String(futureStatus.build?.unknown?.commit)),
+  'PRECONDITION: and it is the VERSION branch answering, not §5\'s staleness branch — the mtimes are pinned consistent',
+);
+const futureCli = crabcast(future, ['daemon-status']);
+check(
+  /PRESENT BUT NOT BELIEVED/.test(futureCli.stdout) && /commit:\s+UNKNOWN/.test(futureCli.stdout),
+  'which is what the CLI prints too'
+);
+show('$ crabcast daemon-status   (a stamp from a format this daemon does not read)',
+  futureCli.stdout.split('freshness:')[0].trimEnd());
+
+// The half that is coverable: writer and reader cannot disagree WITHIN a
+// version, because there is only one definition of the number and the writer
+// imports it out of the build it has just stamped. A sweep rather than a list —
+// any script that grew its own literal would show up here without this check
+// being updated.
+const stampVersionHits = [];
+for (const f of fs.readdirSync(scriptDir)) {
+  if (!f.endsWith('.mjs')) continue;
+  const text = fs.readFileSync(path.join(scriptDir, f), 'utf8');
+  for (const line of text.split('\n')) {
+    if (/\bstampVersion\b/.test(line)) stampVersionHits.push(`${f}: ${line.trim()}`);
+  }
+}
+show('every `stampVersion` in scripts/:', stampVersionHits.join('\n') || '(none)');
+const writerHits = stampVersionHits.filter((h) => h.startsWith('stamp-build.mjs:'));
+check(
+  writerHits.length === 1 && /stampVersion:\s*BUILD_STAMP_VERSION\b/.test(writerHits[0]),
+  'the ONE stampVersion the writer emits is the shared constant, not a literal of its own',
+  writerHits[0] ?? '(no hit in stamp-build.mjs)'
+);
+check(
+  /BUILD_STAMP_VERSION\s*}\s*=\s*await import\(/.test(
+    fs.readFileSync(stamperJs, 'utf8').replace(/\n\s*/g, ' ')
+  ),
+  'and it imports it from the dist/ it is stamping — one definition, so a mismatch needs two CrabCasts'
 );
 
 // ---------------------------------------------------------------------------
@@ -707,6 +970,101 @@ check(
   /this daemon is running the build that is on disk/.test(String(distOnlyStatus.freshness?.summary)) &&
     /could not be read/.test(String(distOnlyStatus.freshness?.summary)),
   'and the summary still reports what WAS established, alongside what was not — unknown is not a shrug'
+);
+
+// ---------------------------------------------------------------------------
+// 6c. THE file-times FALLBACK SAYS WHAT IT CANNOT SEE (KAN-170 item 11).
+//
+// With no usable stamp on either side, `sameBuild()` falls back to newest-mtime
+// equality plus file count. `compared by: file-times` told a reader the basis
+// without telling them the bound, and "running the build on disk: yes" on that
+// basis is a weaker sentence than the same words on a stamped comparison.
+//
+// The decision on KAN-138 was to state the bound in the output as ONE CLAUSE,
+// with no behaviour change — `sameBuild()` keeps its semantics and the fallback
+// stays the fallback. So this section does two things: it checks the clause is
+// there, and then it MEASURES the bound, by performing exactly the rebuild the
+// clause says cannot be distinguished and watching the daemon fail to see it.
+// A string check alone would go green against a sentence that had become false.
+//
+// IF SOMEBODY STRENGTHENS THE FALLBACK — hashes the contents, say — the
+// measurement below goes red, and that is correct: the wording would then be a
+// lie and would have to change with the mechanism.
+// ---------------------------------------------------------------------------
+
+rule('6c. THE file-times FALLBACK NAMES ITS OWN BOUND — and the bound is real');
+
+const ft = makeTree('t-filetimes', { git: true });
+// Unstamped on purpose: the fallback is only reached when neither side has a
+// usable stamp. Times pinned by hand rather than by pinTimes(), which dates
+// everything from a stamp this tree does not have.
+const ftBase = Date.now() - 300_000;
+for (const f of walkFiles(ft.src)) touch(f, ftBase - 60_000);
+for (const f of walkFiles(ft.dist)) touch(f, ftBase);
+
+const ftStatus = await startDaemon(ft, 't-filetimes');
+check(
+  ftStatus.freshness?.basis === 'file-times' && ftStatus.freshness?.state === 'current',
+  'PRECONDITION: an unstamped build reaches the fallback and reads as CURRENT on it',
+  `${ftStatus.freshness?.basis} / ${ftStatus.freshness?.state}`
+);
+show('freshness.summary:', String(ftStatus.freshness?.summary));
+check(
+  /unchanged as far as file times can tell/.test(String(ftStatus.freshness?.summary)) &&
+    /cannot distinguish/.test(String(ftStatus.freshness?.summary)),
+  'the evidence sentence states what mtime-plus-count equality cannot distinguish'
+);
+const ftCli = crabcast(ft, ['daemon-status']);
+const comparedByLine =
+  ftCli.stdout.split('\n').find((l) => /^\s*compared by:/.test(l)) ?? '(no line)';
+check(
+  /mtime and file count only/.test(comparedByLine) &&
+    /reads as unchanged/.test(comparedByLine),
+  'and the CLI line that names the basis carries the same caveat, in one clause',
+  JSON.stringify(comparedByLine.trim())
+);
+
+// Now the measurement. A rebuild that genuinely changes the compiled code and
+// happens to leave the newest mtime and the file count where they were.
+const ftTarget = path.join(ft.dist, 'router.js');
+const ftBefore = fs.readFileSync(ftTarget, 'utf8');
+const ftFilesBefore = walkFiles(ft.dist).length;
+// Read back rather than compared against `ftBase`. `utimesSync` stores
+// nanoseconds and `mtimeMs` converts back, and the round trip has been observed
+// to land on 1785930363095.999 for a value set as …096 — so comparing the
+// restored time to the number we asked for is a flake, while comparing it to
+// what the same statSync path reported a moment earlier is exact. It is also
+// the honest claim: the fallback looks at this number, and this number has not
+// moved. (Caught by watching this section run under item 9's revert, which is
+// the argument for backing each item out rather than trusting a green run.)
+const ftNewestBefore = newestMs(ft.dist);
+fs.writeFileSync(ftTarget, ftBefore + '\n// KAN-170 item 11: this build is not the one that booted.\n');
+for (const f of walkFiles(ft.dist)) touch(f, ftBase);
+
+check(
+  fs.readFileSync(ftTarget, 'utf8') !== ftBefore,
+  'PRECONDITION: dist/router.js really differs from what the daemon booted on',
+  `${ftBefore.length} → ${fs.readFileSync(ftTarget, 'utf8').length} bytes`
+);
+check(
+  newestMs(ft.dist) === ftNewestBefore && walkFiles(ft.dist).length === ftFilesBefore,
+  'PRECONDITION: and the two things the fallback looks at are exactly where they were',
+  `newest ${newestMs(ft.dist)} (was ${ftNewestBefore}), ${ftFilesBefore} file(s)`
+);
+
+const ftAfter = await raw(ft, 'daemon_status');
+check(
+  ftAfter.pid === ftStatus.pid,
+  'the same daemon is still serving',
+  `pid ${ftAfter.pid}`
+);
+check(
+  ftAfter.freshness?.processIsCurrentBuild === true && ftAfter.freshness?.state === 'current',
+  'AND IT STILL SAYS "running the build on disk: yes" — which is the bound, measured rather than asserted about'
+);
+check(
+  /cannot distinguish/.test(String(ftAfter.freshness?.summary)),
+  'with the caveat riding the very reply that is wrong about it — the sentence is on the screen where it is needed'
 );
 
 // ---------------------------------------------------------------------------

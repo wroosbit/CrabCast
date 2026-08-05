@@ -1505,7 +1505,13 @@ function buildBlock(build: any): string | null {
       PROVENANCE_WIDTH
     ),
     knownOrUnknown('built', build.builtAt, PROVENANCE_WIDTH),
-    field('git root', build.gitRoot, PROVENANCE_WIDTH),
+    // `knownOrUnknown`, not `field` (KAN-170 item 10). This line used to be
+    // rendered with `field()`, so a null `gitRoot` DISAPPEARED — sitting
+    // between two neighbours that both print the word UNKNOWN. Benign in that
+    // it could not be misread as "clean", and still the one field in this
+    // block whose absence was itself absent, which is the exact rule the rest
+    // of the block enforces.
+    knownOrUnknown('git root', build.gitRoot, PROVENANCE_WIDTH),
     field('loaded from', build.distDir, PROVENANCE_WIDTH),
     // Three situations, not two: no stamp, a stamp that answered, and a stamp
     // sitting right there that was NOT believed. The last one matters most to
@@ -1539,7 +1545,17 @@ function freshnessBlock(freshness: any): string | null {
     freshness.summary ? indent(String(freshness.summary)) : null,
     knownOrUnknown('running the build on disk', yesNo(freshness.processIsCurrentBuild), 26),
     knownOrUnknown('sources newer than build', yesNo(freshness.sourcesNewerThanBuild), 26),
-    field('compared by', freshness.basis, 26),
+    // The basis, and — when it is the weak one — what that basis cannot see
+    // (KAN-170 item 11). `compared by: file-times` named the evidence without
+    // naming its bound, so a reader took "running the build on disk: yes" as
+    // stronger than it is. One clause, on the line that earns it.
+    field(
+      'compared by',
+      freshness.basis === 'file-times'
+        ? 'file-times — mtime and file count only; a rebuild reproducing both reads as unchanged'
+        : freshness.basis,
+      26
+    ),
     field('build on disk', freshness.onDiskBuiltAt, 26),
     field('newest in dist/', freshness.distNewestAt, 26),
     field('sources', freshness.sourceDir, 26),
