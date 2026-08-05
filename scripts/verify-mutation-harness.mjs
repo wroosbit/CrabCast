@@ -47,6 +47,23 @@
 // WIRING rather than behaviour — that each mutating proof still goes through
 // the helper, not that its particular anchors are good.
 //
+// AND ONE MUTATION-BASED PROOF THIS SWEEP DOES NOT REACH, named here because a
+// boundary nobody writes down is read as coverage. `verify-proof-cleans-up-
+// when-interrupted.mjs:191-206` mutates a SCRIPT rather than a build — it
+// removes the signal-handler block from `verify-send-confirms-delivery.mjs` by
+// exact text and runs the result. It has the exact-count guard and the "Fix the
+// mutation, not this check." sentence already; what it still has is the throw,
+// so a drifted anchor there ends the run at §2 the old way. Section 4 below
+// looks for scripts that copy a BUILD and does not see it.
+//
+// That gap is not hypothetical, and it is how it was found: converting
+// `verify-send-confirms-delivery` for this PR inserted a line INSIDE that
+// handler block, the anchor stopped matching, and CI went red with
+// `expected exactly one cleanup-handler block … found 0`. The guard did its job
+// — it named the file, the count and what to fix — and the failure was mine.
+// Generalising the helper to cover single-file script mutation is real work and
+// is filed rather than done here (KAN-170).
+//
 // It needs no daemon, no herdr and no network. It needs `dist/` to exist,
 // because it copies it.
 //

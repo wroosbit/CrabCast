@@ -588,15 +588,7 @@ function cleanUp() {
 process.on('exit', cleanUp);
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
-    if (mutationsSkipped().length) {
-  // Named next to the verdict, because "N FAILED" reads as N ordinary assertion
-  // failures when what actually happened is that a section never executed.
-  console.log(
-    `\n${mutationsSkipped().length} MUTATION(S) DID NOT APPLY, so their sections did not run: ` +
-      mutationsSkipped().join(', ')
-  );
-}
-cleanUp();
+    cleanUp();
     process.removeAllListeners(signal);
     process.kill(process.pid, signal);
   });
@@ -948,6 +940,15 @@ mutation3: {
 // ===========================================================================
 
 cleanUp();
+
+if (mutationsSkipped().length) {
+  // Named next to the verdict, because "N FAILED" reads as N ordinary assertion
+  // failures when what actually happened is that a section never executed.
+  console.log(
+    `\n${mutationsSkipped().length} MUTATION(S) DID NOT APPLY, so their sections did not run: ` +
+      mutationsSkipped().join(', ')
+  );
+}
 
 console.log(`\n${'='.repeat(78)}`);
 console.log(`${checks - failures}/${checks} checks passed.`);
