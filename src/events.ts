@@ -148,8 +148,19 @@ const SCALARS: FieldShape = { kind: 'array', of: SCALAR };
  * `preemptable`, `launcher`, `prompt`, `mcpServers` or `label` was a declared
  * field of anything before this; they travelled inside a declared field,
  * unexamined.
+ *
+ * EXPORTED, AND THAT IS THE WHOLE OF KAN-166's MECHANISM. The same
+ * `AgentConfig` object also travels on the `list_agents` response, inside every
+ * category's `ConfigEcho` — the half `docs/event-contract.md` §2 makes a
+ * CORRECTNESS requirement — and for one day it travelled there unexamined while
+ * the event path walked it. The poll path now sweeps its echoes against THIS
+ * declaration, imported rather than restated: see {@link undeclaredFields} and
+ * `MessageRouter.handleListAgents`. Two hand-maintained lists of what an
+ * `AgentConfig` contains would be the same drift one surface over, so there is
+ * one list and a knob added to it is picked up by both surfaces with no second
+ * edit.
  */
-const CONFIG_FIELDS: { [K in keyof Required<AgentConfig>]: FieldShape } = {
+export const CONFIG_FIELDS: { [K in keyof Required<AgentConfig>]: FieldShape } = {
   priority: SCALAR,
   refusable: SCALAR,
   chargeable: SCALAR,
@@ -196,7 +207,11 @@ const _optionalConfigKeysAreExact: Exact<
   (typeof OPTIONAL_CONFIG_KEYS)[number]
 > = true;
 
-const CONFIG_SHAPE: FieldShape = {
+/**
+ * {@link AgentConfig} as a declared interior. Exported for the poll path, which
+ * sweeps the same object with the same declaration — see {@link CONFIG_FIELDS}.
+ */
+export const CONFIG_SHAPE: FieldShape = {
   kind: 'object',
   fields: CONFIG_FIELDS,
   optional: OPTIONAL_CONFIG_KEYS
@@ -704,6 +719,38 @@ function projectValue(value: unknown, shape: FieldShape, at: string, drift: Drif
       }
       return value;
   }
+}
+
+/**
+ * Every path inside `value` that `shape` does not declare, and nothing else.
+ *
+ * THE SAME WALK {@link projectEvent} USES, called for one of its two answers.
+ * That reuse is the point rather than a convenience: `list_agents` echoes the
+ * same {@link AgentConfig} object the event path projects, and the failure this
+ * function exists to prevent is the two surfaces disagreeing about what an
+ * `AgentConfig` contains. They cannot, because there is one declaration
+ * ({@link CONFIG_FIELDS}) and one walker ({@link projectValue}), and a knob
+ * added to the first is honoured by both callers with no second edit.
+ *
+ * WHAT THE CALLER DOES WITH THE ANSWER IS THE CALLER'S, AND THE TWO DIFFER ON
+ * PURPOSE. `projectEvent` drops what it names, because an MCP notification has
+ * a declared payload shape. `handleListAgents` REPORTS what it names and
+ * publishes the echo whole, because the echo's promise is that it is the
+ * durable record verbatim. §2 and §4 of `docs/event-contract.md` state both,
+ * beside each other, so a consumer is not left to infer which surface it is
+ * reading.
+ *
+ * The discarded half is `missing` — a DECLARED field the value did not carry.
+ * Nothing here reports it, deliberately: on a response that is a question about
+ * `configure`'s own validation rather than about drift, and it is already
+ * asserted on the event path for the same object (`agent.configured` and
+ * `agent.lost` both declare `config`). A caller that wants it should ask for it
+ * by adding a return value, not by reading a silence.
+ */
+export function undeclaredFields(value: unknown, shape: FieldShape, at: string): string[] {
+  const drift: Drift = { missing: [], undeclared: [] };
+  projectValue(value, shape, at, drift);
+  return drift.undeclared;
 }
 
 /** Name every key under an undeclared interior, so the warning says what was dropped. */

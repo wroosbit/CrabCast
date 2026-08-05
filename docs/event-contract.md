@@ -300,6 +300,81 @@ not return the fleet. `scripts/verify-fleet-enumeration.mjs` is where the fix
 is proven, and it asserts this section names the limit, so the number above and
 `FLEET_CATEGORY_LIMIT` in `src/router.ts` cannot drift apart quietly.
 
+### The `config` on that poll is declared by the same list the events are, and this surface REPORTS where the event path DROPS
+
+Read this beside §4, which says the same thing about the other surface. They
+were **one day apart**, and that gap is the reason this subsection exists rather
+than a footnote in §4.
+
+`list_agents` echoes each agent's frozen `config` on **every** row of **every**
+category — the block `verify-state-read-echoes-config.mjs` exists for, and the
+whole reason a consumer does not have to keep a shadow copy of what it asked
+for. It is the same `AgentConfig` object §1 publishes on `agent.configured` and
+`agent.lost`. KAN-164 made the MCP event projection walk that object's interior;
+for one day the poll response carried it unexamined, which put **the half you
+are told to depend on for correctness** on the wrong side of the guard.
+
+**One declaration, both surfaces.** `CONFIG_FIELDS` in `src/events.ts` is the
+only list of what an `AgentConfig` contains, and both paths import it. A knob
+added there is honoured by the event projection and by the poll sweep with no
+second edit, and a knob added to `AgentConfig` without a line there does not
+compile.
+
+**What the two surfaces do with an undeclared field is deliberately different,
+and the response says which you are reading:**
+
+| | an undeclared field inside `config` |
+| --- | --- |
+| **MCP event notification** | **dropped** before it leaves, and named in the daemon's own log by its path |
+| **`list_agents` response** | **reported and still delivered.** `configEchoContract.drops` is `false` |
+
+```json
+"configEchoContract": {
+  "declared": ["priority", "refusable", "chargeable", "preemptable", "launcher", "prompt", "mcpServers", "label"],
+  "verbatim": ["mcpServers"],
+  "drops": false,
+  "undeclared": ["standbyAgents[2].config.telemetry"],
+  "note": "…"
+}
+```
+
+Three reasons the poll path reports rather than drops, stated because a surface
+behaving one way while a sentence implies another is the failure this project
+keeps filing:
+
+1. **The echo promises the durable record verbatim.** Dropping part of it would
+   make the echo a *projection* of the record while still calling itself the
+   record — the drift detector becoming the drift, which is the exact failure
+   the echo was built to remove.
+2. **A response can be asked again; an event cannot.** An event is at-most-once
+   with no second copy, so what is not on that wire is gone — which is why the
+   projection there is safe. This is the same asymmetry §1 draws for `durable`.
+3. **`list` is the authoritative read.** If it dropped fields it would carry
+   *less* than the latency optimisation over it, inverting the relationship this
+   whole document rests on.
+
+Four things that are contract rather than advice:
+
+* **`undeclared: []` means the sweep ran and found nothing.** The block is on
+  every response, empty or not, so "nothing was there" and "nobody looked" are
+  distinguishable — which they are not from an absent field.
+* **An absent `configEchoContract` is an older daemon**, not a clean one. §2's
+  `bootId` exists because you *will* meet daemons of different vintages.
+* **`verbatim` names what the sweep does not examine.** Today that is
+  `mcpServers` alone, and for the reason §4 gives: its keys and values are your
+  own bytes, written into `.mcp.json` verbatim and never read by this daemon. An
+  undeclared key in there is not drift and is not reported.
+* **Do not key behaviour off an undeclared field**, exactly as §4 says for the
+  socket. It is an internal value that has not been designed for you and can
+  change or vanish without this document changing.
+
+**What is NOT covered, said here rather than left to be found.**
+`crabcast_agent_status` echoes the same `config` for one agent and is **not**
+swept — it carries no `configEchoContract` at all (KAN-168). `list_agents`'s other blocks
+(`capacity`, `provenance`, `pages`, the `*Total`s) are not swept either: they
+are contract by this document and by their own proofs, not by a declared-field
+check. Proven in `scripts/verify-config-echo-contract.mjs`.
+
 ### Across a daemon restart
 
 Subscriptions die with the socket and nothing is replayed. The signal is
@@ -463,6 +538,14 @@ only described.
 Nothing changed on the socket. `broadcast` still filters nothing at any depth,
 which is why the must-ignore clause above is contract rather than advice.
 
+**There is a third surface carrying the same object, and it behaves differently
+on purpose: the `config` echo on `list_agents`.** It is swept against this same
+declaration and **reports without dropping** — see §2, which states the
+behaviour, the reasons and the `configEchoContract` block the response carries.
+It is written there rather than here because it qualifies the polling obligation
+in §2, and the last time a clause about `list` was shipped away from that
+obligation each sentence was true and the composition was false.
+
 Why not project on the socket too, and make both paths exhaustive? Because the
 socket is this daemon's own multiplexed protocol, where `broadcast` filtering
 nothing is a property other things rely on, while an MCP notification has a
@@ -619,6 +702,30 @@ real operations on an unmutated build, where the drift report must be empty —
 and §2 now reads the recursive projector, so a composite that really has grown
 an undeclared field turns §2 red with §7 untouched. Two claims, two sections,
 and neither stands in for the other.
+
+`scripts/verify-config-echo-contract.mjs` — the poll half of §2's config-echo
+subsection. It injects an undeclared knob at the **same real emission site**
+KAN-164's depth proof uses — the place `configure` assembles the config object,
+so the field travels parse → durable record → `list_agents` — and asserts the
+response names it **by its full path** while still delivering it, on the real
+MCP tool and on the socket. Two mutations are run and watched going red: the
+sweep removed (the field travels unexamined and nothing on the response says
+so, which is what `main` did before this) and the sweep left in place while the
+warning is silenced, so the response's own report is shown to be what carries
+the answer.
+
+Its shared-declaration section is the one to read: a **single** edit adding that
+knob to `CONFIG_FIELDS` makes the event path publish it *and* the poll path stop
+reporting it, in the same build, with no second list touched. That is the claim
+"one declaration, both surfaces" as a measurement rather than an assertion.
+
+**What it does not test, because it supplies its own input.** It proves an
+undeclared field in an echoed config *is* reported; it does not prove none
+exists today. Its own no-drift section asserts that on an unmutated build over a
+real fleet with every category populated, which is a different claim about a
+different build. And it says nothing about `agent_status`, which echoes the same
+object for one agent and is **not** swept — that hole is named in §2 and tracked
+as KAN-168, not covered by anything here.
 
 Read that 32s figure against §2's bound, which is **30s plus one census read**
 and not a flat 30s. The script's success line says so in full — "inside the

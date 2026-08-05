@@ -617,6 +617,43 @@ function provenanceBlock(p: any): string | null {
   );
 }
 
+/**
+ * The config echo's declared-field contract, on the surface a human holds
+ * (KAN-166).
+ *
+ * TWO SHAPES, AND THE QUIET ONE IS DELIBERATE. With nothing to report this is a
+ * single line saying the sweep ran and found nothing — an all-clear that says
+ * what was checked, which is the difference between "nothing was there" and "I
+ * did not look". With something to report it names every field by its path and
+ * says, in the same breath, that the field was still delivered: a reader who
+ * saw only the warning would reasonably assume the value had been withheld.
+ *
+ * A block for a response that does not carry one prints NOTHING rather than an
+ * all-clear. An older daemon has no sweep, and rendering its silence as "no
+ * undeclared fields" would be this CLI making the daemon's claim on its behalf.
+ */
+function echoContractBlock(c: any): string | null {
+  if (!c || typeof c !== 'object') return null;
+  const undeclared: string[] = Array.isArray(c.undeclared) ? c.undeclared : [];
+  const declared = Array.isArray(c.declared) ? c.declared.join(', ') : '(not reported)';
+  if (!undeclared.length) {
+    return `\nconfig echo: every knob on every row is declared (${declared})`;
+  }
+  return lines(
+    `\nconfig echo: ${undeclared.length} UNDECLARED field(s) on this response — ` +
+      (c.drops === false
+        ? 'reported and STILL DELIVERED (this response drops nothing)'
+        : 'dropped from this response'),
+    ...undeclared.map((p) => `${INDENT}${p}`),
+    `${INDENT}declared knobs: ${declared}` +
+      (Array.isArray(c.verbatim) && c.verbatim.length
+        ? `; not examined (declared verbatim): ${c.verbatim.join(', ')}`
+        : ''),
+    `${INDENT}Do not key behaviour off one — declare it in CONFIG_FIELDS (src/events.ts) ` +
+      `or stop sending it. The MCP event path DROPS the same field.`
+  );
+}
+
 function agentRow(a: any): string {
   const head =
     `${INDENT}${a.path}  [${a.herdrStatus}]` +
@@ -1043,6 +1080,10 @@ function renderList(reader: ResponseReader, request: Record<string, unknown>): s
     askedLimit: askedPages[category]?.limit
   });
   const provenance = reader.take('provenance');
+  // What the echo's declared-field sweep found on THIS response. Taken (rather
+  // than left to the residue) because it is an answer a reader acts on, and
+  // rendered even when it is empty — see echoContractBlock.
+  const echoContract = reader.take('configEchoContract');
   const capacity = reader.take('capacity');
   const priorities = reader.take('priorities');
   const health = reader.take('herdrHealth');
@@ -1188,6 +1229,7 @@ function renderList(reader: ResponseReader, request: Record<string, unknown>): s
     ),
 
     provenanceBlock(provenance),
+    echoContractBlock(echoContract),
 
     capacity ? lines('\ncapacity:', capacityBlock(capacity)) : null,
     priorityRows(priorities),

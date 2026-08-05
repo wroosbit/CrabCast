@@ -4,11 +4,14 @@ import { CrabcastConfig } from './config.js';
 import { MAX_LINE_CHARS } from './ipc.js';
 import {
   CAPACITY_FIELDS,
+  CONFIG_FIELDS,
+  CONFIG_SHAPE,
   EventFrame,
   Exact,
   PREEMPTION_BY_FIELDS,
   PREEMPTION_FIELDS,
-  events
+  events,
+  undeclaredFields
 } from './events.js';
 import { AgentConfig, DaemonResponse, McpServerSpec } from './types.js';
 import { removeProvisionedArtifacts } from './provisioning.js';
@@ -136,6 +139,167 @@ interface ConfigEcho {
    * is what makes it survive a daemon restart.
    */
   activatedBy: string | null;
+}
+
+/**
+ * ONE UNDECLARED FIELD FOUND INSIDE ONE `config` ECHO, with where it was.
+ *
+ * `path` is the whole address on the response (`agents[3].config.telemetry`) so
+ * a reader can go and look at the row. `field` is the same finding relative to
+ * the declaration (`config.telemetry`), which is what identifies the DEFECT
+ * rather than the sighting: the same undeclared knob shows up on every row of
+ * every category and would otherwise be N different-looking warnings, and its
+ * row index moves whenever the fleet does.
+ */
+interface ConfigEchoFinding {
+  path: string;
+  field: string;
+}
+
+/**
+ * Every `config` echo on a response, swept against the declaration the MCP
+ * event projection enforces.
+ *
+ * WHY THIS WALKS THE RESPONSE RATHER THAN THE CATEGORIES (KAN-166). The
+ * categories are the ones {@link FleetCategories} knows about, and that
+ * interface is exactly what a new category added straight into `respond({…})`
+ * bypasses — the residue `FleetCategories`'s own comment declares and
+ * `verify-activated-by.mjs` §3 covers by sweeping the real payload. This sweep
+ * is written the same way and for the same reason: it applies a rule to the
+ * object that actually goes out, so a category nobody declared is swept the day
+ * it ships rather than the day somebody remembers to add it here.
+ *
+ * IT STOPS AT `config` AND DOES NOT RECURSE PAST IT. Below that key the
+ * declaration is in charge — including the one region it declares VERBATIM,
+ * `config.mcpServers`, whose keys are the caller's own server names. Walking on
+ * generically would report those as drift, which would be this daemon
+ * complaining about bytes it has promised never to read.
+ *
+ * `config: null` is skipped because it is an ANSWER — "no record backs this
+ * row" — rather than a composite with an interior. Anything else non-null is
+ * handed to the declaration even when it is not an object at all: a `config`
+ * that arrived as a string is drift of the loudest kind, and the walker reports
+ * it at its own path.
+ */
+function sweepConfigEchoes(node: unknown, at: string, found: ConfigEchoFinding[]): void {
+  if (Array.isArray(node)) {
+    node.forEach((element, i) => sweepConfigEchoes(element, `${at}[${i}]`, found));
+    return;
+  }
+  if (node === null || typeof node !== 'object') return;
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    const where = at ? `${at}.${key}` : key;
+    if (key === 'config') {
+      if (value === null) continue;
+      for (const field of undeclaredFields(value, CONFIG_SHAPE, 'config')) {
+        found.push({ path: at ? `${at}.${field}` : field, field });
+      }
+      continue;
+    }
+    sweepConfigEchoes(value, where, found);
+  }
+}
+
+/**
+ * The knobs whose interior this contract deliberately does not declare, derived
+ * from the declaration rather than restated beside it.
+ *
+ * Exactly one today (`mcpServers`), and it is published so a consumer reading
+ * `undeclared: []` knows what that sentence does not cover. A hole nobody names
+ * is how "swept" comes to be read as "swept everywhere".
+ */
+const VERBATIM_CONFIG_KNOBS = Object.entries(CONFIG_FIELDS)
+  .filter(([, shape]) => shape.kind === 'verbatim')
+  .map(([knob]) => knob);
+
+/**
+ * THE POLL PATH'S DECLARED-FIELD CONTRACT, on the response that carries the
+ * object it is about (KAN-166).
+ *
+ * WHY IT EXISTS. KAN-164 made the MCP event projection walk composite fields,
+ * so a knob appearing inside `config` on an event is reported and dropped
+ * rather than passed through unexamined. The same `AgentConfig` object rides
+ * every row of `list_agents` inside {@link ConfigEcho}, where nothing looked at
+ * it — so for one day the object was guarded on the surface a consumer is told
+ * is a latency optimisation and unguarded on the surface
+ * `docs/event-contract.md` §2 makes a CORRECTNESS requirement.
+ *
+ * WHAT IT REPORTS AND WHAT IT DOES NOT DO, and the second half is the part to
+ * read: **this path REPORTS and never DROPS.** The undeclared field is named
+ * here and still travels in the echo. Three reasons, all of them stated in §2
+ * of the document as well, because a surface behaving one way while a sentence
+ * implies another is the failure this repository keeps filing:
+ *
+ *  1. {@link ConfigEcho} promises the durable record VERBATIM, and a consumer
+ *     reads it precisely so it does not have to keep a shadow copy. A response
+ *     that quietly dropped part of the record would make the echo a projection
+ *     of the record while still calling itself the record — the drift detector
+ *     becoming the drift, which is the exact failure the echo was built for.
+ *  2. An event is at-most-once with no second copy and no way to re-request it,
+ *     so what is not on the wire is gone. A response answers a call the caller
+ *     can make again, holding a `configVersion` to compare — the same asymmetry
+ *     §1 of the document already draws for `durable`.
+ *  3. `list` is the authoritative read. Dropping fields here would leave the
+ *     authoritative read carrying LESS than the latency optimisation over it,
+ *     which inverts the relationship the whole contract is built on.
+ *
+ * So the answer to "is anything travelling unexamined" is a field on the
+ * response rather than a silence, and acting on it is the reader's.
+ *
+ * WHERE THIS STOPS, so the sentence above is not read wider than it is.
+ * `agent_status` echoes the SAME object for one agent through the same
+ * {@link configEcho} and is NOT swept — no block, no sweep, KAN-168. And on
+ * this response the sweep is the ECHO's, not the payload's: `capacity`,
+ * `provenance`, `pages` and the `*Total`s are contract by
+ * `docs/event-contract.md` and by their own proofs, and nothing here examines
+ * them.
+ */
+interface ConfigEchoContract {
+  /** Every knob {@link CONFIG_FIELDS} declares. The list, not a copy of it. */
+  declared: string[];
+  /**
+   * Knobs declared to travel WHOLE, whose interiors this sweep does not
+   * examine. See {@link VERBATIM_CONFIG_KNOBS} and §4 of the document.
+   */
+  verbatim: string[];
+  /**
+   * Whether an undeclared field is removed from this response. **Always
+   * `false`**, and present as a field rather than as documentation because
+   * "which surface drops and which reports" is the question a consumer holding
+   * one response actually has. The MCP event path's answer is the other one.
+   */
+  drops: boolean;
+  /**
+   * Undeclared fields found on THIS response, by their full path
+   * (`standbyAgents[2].config.telemetry`). Empty means the sweep ran and found
+   * nothing — never that it did not run, which is why the whole block is on
+   * every response rather than only on a response with something to report.
+   */
+  undeclared: string[];
+  note: string;
+}
+
+/**
+ * Describe the contract, given what {@link sweepConfigEchoes} found on the
+ * payload that is about to go out.
+ */
+function configEchoContract(found: readonly ConfigEchoFinding[]): ConfigEchoContract {
+  return {
+    declared: Object.keys(CONFIG_FIELDS),
+    verbatim: VERBATIM_CONFIG_KNOBS,
+    // A LITERAL rather than a computed value, and it has to stay one: this
+    // field is a claim about the code above it, and a `drops` derived from
+    // anything would be able to say `false` while a projection had been added.
+    // If this path ever does drop, this line changes in the same edit.
+    drops: false,
+    undeclared: found.map((f) => f.path),
+    note:
+      'config on every row is the durable record VERBATIM, swept against the same declaration ' +
+      '(CONFIG_FIELDS in src/events.ts) the MCP event projection enforces. Undeclared fields are ' +
+      'REPORTED here and still delivered — this response drops nothing; the MCP event path drops ' +
+      'what it names. Do not key behaviour off an undeclared field: it has not been designed for ' +
+      'you and can change or vanish. See docs/event-contract.md §2 and §4.'
+  };
 }
 
 /**
@@ -1700,6 +1864,15 @@ function durability(outcome: RecordOutcome | undefined): {
 
 export class MessageRouter {
   private activePtyListeners = new Map<string, () => void>();
+
+  /**
+   * Undeclared config knobs this boot has already complained about. See
+   * {@link MessageRouter.warnOnEchoDrift} — in memory, and per boot, like the
+   * missing-agent latch and for the same reason: it damps a log, and nothing
+   * about the ANSWER depends on it. The response reports the drift on every
+   * poll whether or not this set has seen it.
+   */
+  private warnedEchoDrift = new Set<string>();
 
   constructor(private deps: RouterDeps) {}
 
@@ -4259,7 +4432,7 @@ export class MessageRouter {
       unstartedAgents: unstarted
     };
 
-    respond({
+    const payload = {
       action: 'list_agents_response',
       success: true,
       ...categories,
@@ -4345,7 +4518,44 @@ export class MessageRouter {
           } : {})
         }
       } : {})
-    });
+    };
+
+    // THE SWEEP, over the payload that is about to go out rather than over the
+    // categories this method knows it built. See `configEchoContract` for why
+    // the poll path reports and does not drop, and `sweepConfigEchoes` for why
+    // it walks the response.
+    const echoDrift: ConfigEchoFinding[] = [];
+    sweepConfigEchoes(payload, '', echoDrift);
+    this.warnOnEchoDrift(echoDrift);
+
+    respond({ ...payload, configEchoContract: configEchoContract(echoDrift) });
+  }
+
+  /**
+   * Say out loud, on OUR side, that an echo is carrying something nobody
+   * declared — the same complaint the MCP forwarder makes about an event.
+   *
+   * ONCE PER DISTINCT FIELD PER BOOT, and the dedupe is on the field rather
+   * than on the path for a reason worth stating: `list_agents` is polled
+   * continuously by design (§2 of the contract makes it a correctness
+   * requirement), so a per-response warning about a defect that persists until
+   * somebody fixes it would be a log flood, and a per-path one would repeat
+   * every time the same knob appeared on another row or the fleet reordered.
+   * One line per undeclared knob per daemon boot is a bug report; the response
+   * itself is what reports it on every poll.
+   */
+  private warnOnEchoDrift(found: readonly ConfigEchoFinding[]): void {
+    const fresh = [...new Set(found.map((f) => f.field))]
+      .filter((field) => !this.warnedEchoDrift.has(field));
+    if (!fresh.length) return;
+    for (const field of fresh) this.warnedEchoDrift.add(field);
+    console.error(
+      `[MessageRouter] list_agents echoed undeclared config field(s) ${fresh.join(', ')}; ` +
+      `REPORTED on the response as configEchoContract.undeclared and still delivered — the poll ` +
+      `path does not drop (docs/event-contract.md §2). The MCP event path DROPS the same field. ` +
+      `Declare it in CONFIG_FIELDS in src/events.ts or stop putting it on the record. ` +
+      `Said once per field per boot; the response says it every time.`
+    );
   }
 
   /** `capacity`: how many more agents this machine can carry, and why. */

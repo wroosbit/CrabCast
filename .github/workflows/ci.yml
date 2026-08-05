@@ -400,6 +400,54 @@ jobs:
       #                                      consumer holds is a mechanism
       #                                      nobody can use.
       #
+      # And one for the same object on the OTHER surface, whose failure mode is
+      # the one this whole epic keeps re-finding — a guard that exists on the
+      # half nobody was told to depend on:
+      #
+      #   verify-config-echo-contract       the `config` echo on `list_agents`
+      #                                     is swept against the SAME
+      #                                     declaration the event projection
+      #                                     enforces (KAN-166). KAN-164 taught
+      #                                     the event path to walk `config`'s
+      #                                     interior, and for one day the same
+      #                                     AgentConfig rode every row of the
+      #                                     poll response unexamined — the half
+      #                                     §2 of the event contract makes a
+      #                                     CORRECTNESS requirement. It injects
+      #                                     an undeclared knob at the real
+      #                                     emission site (where `configure`
+      #                                     assembles the config, so the field
+      #                                     travels parse → record → echo),
+      #                                     watches it come back named by its
+      #                                     full path on three categories AND
+      #                                     still delivered — this surface
+      #                                     reports where the event path drops,
+      #                                     and both are observed on one daemon.
+      #                                     Its §4 is the shared-declaration
+      #                                     claim as a measurement: ONE edit
+      #                                     adding the knob to CONFIG_FIELDS
+      #                                     moves both surfaces, with no second
+      #                                     list touched. Three mutations run
+      #                                     and are watched going red or going
+      #                                     quiet: the sweep removed (which is
+      #                                     what main did — the field on the
+      #                                     wire and a response that looks
+      #                                     clean), the warning silenced with
+      #                                     the sweep left in (so which artifact
+      #                                     carries the answer is measured), and
+      #                                     a category added straight into
+      #                                     respond(), which no type here can
+      #                                     catch and the sweep finds anyway.
+      #                                     WHAT IT CANNOT SEE: it supplies its
+      #                                     own undeclared field, so it proves
+      #                                     drift WOULD be caught rather than
+      #                                     that none exists — its §1 is the
+      #                                     second claim, over a populated fleet
+      #                                     on an unmutated build. And nothing
+      #                                     in it covers `agent_status`, which
+      #                                     echoes the same object and is not
+      #                                     swept.
+      #
       # verify-daemon-provenance starts daemons but needs no herdr either: it
       # drives `daemon_status`, which touches neither panes nor the herdr
       # binary. It builds its OWN fixture trees under the system temp dir — one
@@ -455,6 +503,7 @@ jobs:
             verify-proof-cleans-up-when-interrupted
             verify-event-durability
             verify-fleet-enumeration
+            verify-config-echo-contract
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,
