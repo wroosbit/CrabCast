@@ -704,14 +704,25 @@ const SCENARIOS = [
  */
 const UNCOVERED = [
   {
-    heading: '### herdr 0.6.4',
+    heading: '### Which herdr releases have actually been run',
     index: 0,
     reason:
-      'The herdr version notice, which is emitted only when the herdr on PATH is not 0.6.x. ' +
+      'The herdr version notice for 0.7.5, emitted only when the herdr on PATH is not 0.6.x. ' +
       'Reproducing it needs a shim pretending to be 0.7.5, which would be a second shim with a ' +
       'second version story running against the same daemon. scripts/verify-herdr-version-notice.mjs ' +
       'already produces this exact string from the real code path; what nobody checks is that the ' +
       'PAGE still shows what that script produces.'
+  },
+  {
+    heading: '### Which herdr releases have actually been run',
+    index: 1,
+    reason:
+      'The same notice for 0.8.0 (KAN-181), and uncovered for the same reason as the 0.7.5 one ' +
+      'above it: it needs a shim reporting a third version. Its section-4 sibling in ' +
+      'scripts/verify-herdr-version-notice.mjs asserts this exact sentence out of checkHerdrVersion ' +
+      'and out of a real daemon’s stderr, so the STRING is covered and only its presence on this ' +
+      'page is not. That is the same gap the entry above declares, now twice — which is the ' +
+      'argument for covering both at once rather than a reason either is fine.'
   },
   {
     heading: "### Changing an agent's knobs never costs it its conversation",

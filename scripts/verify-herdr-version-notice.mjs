@@ -17,11 +17,20 @@
 //      has ever run. Deferring 0.7/0.8 validation was a schedule decision, not
 //      a finding (KAN-59 decision 7).
 //
+//      KAN-181 CLOSED THAT GAP FROM THE OTHER END, and this script moved with
+//      it. 0.8.0 has now been run — `scripts/verify-herdr-release.mjs`, against
+//      a real private herdr 0.8.0 server — and it fails exactly as 0.7.5 does.
+//      So the 0.8.0 verdict is now a FINDING and section 1 requires it to read
+//      like one, while a release nobody has run (0.8.1, 1.2.0) must still not
+//      be predicted. The rule did not change: say what was seen, on the release
+//      it was seen on, and nothing wider.
+//
 // Six sections:
 //
 //   1. bands        — checkHerdrVersion, the one version comparison, across
 //                     every band: 0.6.x silent, 0.7.x specific and evidenced,
-//                     0.8+ untested-not-broken, below 0.6 unchanged
+//                     0.8.0 observed-broken with its evidence, everything else
+//                     above the line untested-not-predicted, below 0.6 unchanged
 //   2. 0.8.0 live   — a shimmed herdr reporting 0.8.0: the notice arrives on a
 //                     normal command, and the activation PROCEEDS (no refusal)
 //   3. 0.6.4 live   — the supported release produces no notice anywhere: not
@@ -289,11 +298,13 @@ rule('1. THE BANDS — one comparison, three verdicts, each carrying its own evi
 const verdicts = [
   ['herdr 0.6.4', 'the verified release'],
   ['herdr 0.6.0', 'the supported line, lower patch'],
+  ['herdr 0.6.10', 'the supported line, the other release that was run'],
   ['herdr 0.6.11', 'the supported line, higher patch'],
   ['herdr 0.7.0', 'the redesign line'],
   ['herdr 0.7.5', 'the redesign line, as observed'],
-  ['herdr 0.8.0', 'above the redesign line'],
-  ['herdr 1.2.0', 'well above it'],
+  ['herdr 0.8.0', 'above the redesign line, and RUN (KAN-181)'],
+  ['herdr 0.8.1', 'next to a release that was run, and not run itself'],
+  ['herdr 1.2.0', 'well above it, untouched'],
   ['herdr 0.5.9', 'below the supported line'],
   ['herdr (unreleased build)', 'unparseable']
 ].map(([version, label]) => ({ version, label, verdict: checkHerdrVersion(version) }));
@@ -305,9 +316,14 @@ for (const { version, label, verdict } of verdicts) {
 const verdictFor = (version) => verdicts.find((v) => v.version === version).verdict;
 
 check(
-  ['herdr 0.6.4', 'herdr 0.6.0', 'herdr 0.6.11'].every((v) => verdictFor(v) === undefined),
+  ['herdr 0.6.4', 'herdr 0.6.0', 'herdr 0.6.10', 'herdr 0.6.11'].every((v) => verdictFor(v) === undefined),
   'every 0.6.x is silent — the supported configuration produces no notice at all'
 );
+// Said out loud because it is the one place this module is deliberately wider
+// than its evidence: 0.6.0 and 0.6.11 are silent and nobody has run either. The
+// README carries that fact where a reader is choosing a version; the daemon
+// does not fire a notice at a user whose herdr is probably fine.
+console.log('        (0.6.4 and 0.6.10 were run; the rest of the line is silent on no evidence either way — README.md is where that is stated)');
 check(
   verdictFor('herdr (unreleased build)') === undefined,
   'an unreadable version is silent too: an unknown is not evidence of a problem'
@@ -320,14 +336,29 @@ check(/agent start/.test(sevenFive) && /--kind/.test(sevenFive), 'naming the mec
 check(verdictFor('herdr 0.7.0') !== undefined, '0.7.0 gets the same band as 0.7.5 — the redesign is the line, not the patch');
 
 const eight = verdictFor('herdr 0.8.0');
-check(/not been tested/.test(eight) && /above the herdr line/.test(eight), '0.8.0 says it is ABOVE the verified line and UNTESTED');
-check(new RegExp(VERIFIED_HERDR_RELEASE.replace(/\./g, '\\.')).test(eight), `and names ${VERIFIED_HERDR_RELEASE} as the tested release`);
+check(/was RUN against CrabCast/.test(eight) && /failed with 'unknown option: --cwd'/.test(eight),
+  '0.8.0 states a FINDING: it was run, and this is what happened');
+check(/KAN-181/.test(eight) && /2026-08-05/.test(eight),
+  'and carries the evidence it rests on — the run, and when');
+check(!/may well work/.test(eight) && !/nobody has (looked|run)/.test(eight),
+  'it no longer calls 0.8.0 an unknown: somebody looked, and saying otherwise would be the KAN-102 defect pointing backwards');
+check(new RegExp(VERIFIED_HERDR_RELEASE.replace(/\./g, '\\.')).test(eight), `and names ${VERIFIED_HERDR_RELEASE} as a release CrabCast was run against`);
+
+// The other side of the same rule, and the one that keeps this honest: a
+// release NOBODY has run must still not be predicted, however strong the prior.
+const untested = verdictFor('herdr 1.2.0');
+check(untested !== undefined, '1.2.0 still gets a verdict — the band is "above 0.7", not "0.8.0 exactly"');
+check(/not been tested/.test(untested) && /above the herdr line/.test(untested),
+  '1.2.0 says it is ABOVE the verified line and UNTESTED');
 check(
-  !/every activation will fail/.test(eight) && !/will fail/.test(eight),
-  'it does NOT assert that activations will fail — nobody has run 0.8, and a prediction nobody checked is not a finding'
+  !/every activation will fail/.test(untested) && !/will fail/.test(untested),
+  'and does NOT assert that its activations will fail — nobody has run it, and a prediction nobody checked is not a finding'
 );
-check(/may well work/.test(eight) || /unknown/.test(eight), 'it says so in as many words: an unknown, not a known breakage');
-check(verdictFor('herdr 1.2.0') !== undefined, '1.2.0 lands in the untested band too — the band is "above 0.7", not "0.8 exactly"');
+check(/may well work/.test(untested), 'it says so in as many words: an unknown, not a known breakage');
+check(/0\.7\.5, 0\.8\.0/.test(untested),
+  'while still handing over the prior — the releases above the line that WERE run, named');
+check(verdictFor('herdr 0.8.1') === untested.replace('1.2.0', '0.8.1'),
+  '0.8.1 gets that same untested verdict: being next to 0.8.0 is not the same as having been run');
 
 const old = verdictFor('herdr 0.5.9');
 check(/older than/.test(old), 'below 0.6 is unchanged: older than the supported line');
@@ -351,7 +382,7 @@ await trackDaemon(eightFx);
 show('the session (both streams as captured, stderr first):', session(eightFx, eightArgs, eightRun));
 
 check(
-  eightRun.stderr.includes('is above the herdr line CrabCast is verified against'),
+  eightRun.stderr.includes('was RUN against CrabCast and every activation failed'),
   'a normal command carries the notice to the terminal — not only to a log file nobody opens'
 );
 check(
@@ -374,7 +405,7 @@ const eightSecondArgs = ['list'];
 const eightSecond = crabcast(eightFx, eightSecondArgs);
 show('a second, read-only command against the daemon that is already up:', session(eightFx, eightSecondArgs, eightSecond));
 check(
-  eightSecond.stderr.includes('is above the herdr line CrabCast is verified against'),
+  eightSecond.stderr.includes('was RUN against CrabCast and every activation failed'),
   'the next command hears it too: the notice rides the first response of every connection, not just the one that started the daemon'
 );
 check(eightSecond.code === EXIT.OK, `and that command works normally (exit ${eightSecond.code})`);
@@ -509,9 +540,9 @@ rule('6. THE LOG DID NOT LOSE IT — surfacing is in addition to logging, not in
 
 const eightLog = readLog(eightFx);
 show('from <dataDir>/daemon.log:', eightLog.split('\n').filter((l) => /herdr version|WARNING: herdr/.test(l)).join('\n'));
-check(/WARNING: herdr 0\.8\.0 is above the herdr line/.test(eightLog), 'the daemon still writes the verdict to its log for whoever is reading it there');
+check(/WARNING: herdr 0\.8\.0 was RUN against CrabCast/.test(eightLog), 'the daemon still writes the verdict to its log for whoever is reading it there');
 check(
-  eightRun.stderr.includes('is above the herdr line CrabCast is verified against') &&
+  eightRun.stderr.includes('was RUN against CrabCast and every activation failed') &&
     /WARNING: herdr 0\.8\.0/.test(eightLog),
   'both channels carry it: the file for the operator, the terminal for the person who just typed a command'
 );
