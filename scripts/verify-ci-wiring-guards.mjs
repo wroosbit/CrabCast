@@ -10,17 +10,24 @@
 // after its closing paren — read by scripts/ci-workflow.mjs as a live,
 // gating invocation, so both guards report exit 0 with the audit dead.
 //
-// WHY IT EXISTS. KAN-141 closed nineteen shapes over four rounds, and every
-// one of them was closed by reasoning about the invocation's OWN LINE plus
-// the block's last line. Eight more shapes therefore stayed green, because
-// what gated them lived on a different line of the same block. Those eight
-// are rows 1–8 of section 3. KAN-148 replaced the per-line scan with a shell
-// lexer and parser that reads the whole block at once.
+// WHY IT EXISTS. KAN-141 closed a long list of shapes over four rounds, and
+// every one of them was closed by reasoning about the invocation's OWN LINE
+// plus the block's last line. Eight more shapes therefore stayed green,
+// because what gated them lived on a different line of the same block. Those
+// eight are rows 1–8 of section 3. KAN-148 replaced the per-line scan with a
+// shell lexer and parser that reads the whole block at once.
 //
-// The nineteen KAN-141 shapes are re-run here alongside them, in the same
-// matrix and by the same mechanism. A regression there would be worse than
-// the bug being fixed, and a proof that only covered the new shapes would not
-// have noticed one.
+// KAN-141's shapes are re-run here alongside them, in the same matrix and by
+// the same mechanism. A regression there would be worse than the bug being
+// fixed, and a proof that only covered the new shapes would not have noticed
+// one.
+//
+// THE ROW LIST BELOW IS THE COUNT — there is deliberately no number in this
+// sentence. An earlier draft said "nineteen", taken from the acceptance
+// criteria's prose; the table actually carries twenty-eight KAN-141-derived
+// rows. A number in a header is a claim that drifts from the mechanism the
+// moment a row is added, and this file exists because of claims that drifted
+// from mechanisms. Read CASES.
 //
 // HOW IT PROVES IT — and what that leaves uncovered, which is the part worth
 // reading. This script MUTATES `.github/workflows/ci.yml` in place, runs both
