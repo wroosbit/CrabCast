@@ -288,6 +288,18 @@ async function bringUp(deps, dir, knobs) {
 
 const CLAUDE = { priority: 1, refusable: true, chargeable: true, preemptable: true, launcher: 'claude' };
 
+/**
+ * A value, indented for reading — and never a throw (KAN-170 item 15).
+ *
+ * `JSON.stringify(undefined)` returns `undefined`, not the string, so the
+ * `.split('\n')` these display lines all end in threw a TypeError on exactly
+ * the reply that had something missing from it. That is the same defect as the
+ * unguarded property chain twenty lines down: a DISPLAY line taking the run out
+ * before the check whose job is to report the absence has run.
+ */
+const block = (value) =>
+  JSON.stringify(value ?? null, null, 2).split('\n').map((l) => `      ${l}`).join('\n');
+
 // ===========================================================================
 section('1. What appears in a caller\'s directory after activation (AC 1)');
 
@@ -395,7 +407,7 @@ console.log('\n  1b. an agent that opted into .mcp.json');
   const after = listing(dir);
   show('AFTER:', after);
   console.log('    the activation response\'s disclosure:');
-  console.log(JSON.stringify(activated.provisioned, null, 2).split('\n').map((l) => `      ${l}`).join('\n'));
+  console.log(block(activated.provisioned));
 
   const added = after.filter((f) => !before.includes(f));
   check('exactly one file appeared, and it is the one that was opted into',
@@ -429,7 +441,7 @@ section('2. An existing .mcp.json is MERGED, not replaced (AC 2)');
   });
   const merged = parseIfPresent(path.join(dir, '.mcp.json')) ?? { mcpServers: {} };
   console.log('    AFTER activation:');
-  console.log(JSON.stringify(merged, null, 2).split('\n').map((l) => `      ${l}`).join('\n'));
+  console.log(block(merged));
 
   check('the activation succeeded', activated.success === true, activated.error);
   check('THEIR server is still there, byte-for-byte',
@@ -484,7 +496,7 @@ section('3. The trust entry is disclosed and reversible (AC 3)');
 
   const disclosure = (activated.provisioned ?? []).find((a) => a.artifact === 'folder-trust');
   console.log('    the activation response, on the trust entry:');
-  console.log(JSON.stringify(disclosure, null, 2).split('\n').map((l) => `      ${l}`).join('\n'));
+  console.log(block(disclosure));
 
   check('the response names the FILE it was written to', disclosure?.file === claudeJson);
   check('and the exact KEY, as a human would look for it',
@@ -956,7 +968,7 @@ section('7. Definitions are written through byte-for-byte (KAN-120)');
     crabcast: 'builtin'
   };
   console.log('    the definition supplied for `atlassian`:');
-  console.log(JSON.stringify(theirDefinition, null, 2).split('\n').map((l) => `      ${l}`).join('\n'));
+  console.log(block(theirDefinition));
 
   const deps = newCase();
   resetShim();
@@ -972,7 +984,7 @@ section('7. Definitions are written through byte-for-byte (KAN-120)');
   const servers = written?.mcpServers ?? {};
   const atlassian = servers.atlassian;
   console.log('    what appeared in .mcp.json for `atlassian`:');
-  console.log(JSON.stringify(atlassian, null, 2).split('\n').map((l) => `      ${l}`).join('\n'));
+  console.log(block(atlassian));
 
   check('the activation succeeded', activated.success === true, activated.error);
   check(

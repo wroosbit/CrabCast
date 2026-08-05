@@ -1209,13 +1209,18 @@ rule('7. `provenance` classifies every key on every row');
   // evidence and the legend must say so rather than implying a clean read.
   setCensus('DOWN');
   const blind = await h.invoke({ action: 'list_agents' });
+  // Guarded for KAN-170 item 19a's reason — it is the same defect, in the same
+  // file, one section along: a reply that carries no legend at all is precisely
+  // what this check exists to notice, and dereferencing straight through it
+  // turned that finding into a TypeError that took sections 8 and 9 with it.
   check(
-    blind.provenance.censusReachable === false,
+    blind?.provenance?.censusReachable === false,
     'when herdr does not answer, the legend says the observed fields are UNREAD rather ' +
-      'than reporting a clean look at an empty machine'
+      'than reporting a clean look at an empty machine',
+    `provenance is ${JSON.stringify(blind?.provenance)}`
   );
   check(
-    blind.unstartedAgents.length > 0 && blind.standbyAgents.length > 0,
+    (blind?.unstartedAgents?.length ?? 0) > 0 && (blind?.standbyAgents?.length ?? 0) > 0,
     'while the durable categories still answer in full — they never needed herdr'
   );
 
