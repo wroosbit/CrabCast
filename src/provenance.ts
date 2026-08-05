@@ -299,7 +299,13 @@ function readStamp(
       stampPath,
       stampPresent: present,
       stampUsable: false,
-      unknown: { commit: reason, clean: reason, builtAt: reason }
+      // `gitRoot` is in this map for the same reason the other three are: the
+      // CLI renders it with `knownOrUnknown` (KAN-170 item 10), so a null one
+      // now prints the word UNKNOWN, and an UNKNOWN with no reason underneath
+      // it is precisely the silent blank this module exists to prevent. It
+      // used to be omitted here, which was invisible only because the CLI
+      // dropped the line entirely.
+      unknown: { commit: reason, clean: reason, builtAt: reason, gitRoot: reason }
     }
   });
 
@@ -368,6 +374,7 @@ function readStamp(
   if (commit === null && !unknown.commit) unknown.commit = unexplained;
   if (clean === null && !unknown.clean) unknown.clean = unexplained;
   if (builtAt === null && !unknown.builtAt) unknown.builtAt = unexplained;
+  if (gitRoot === null && !unknown.gitRoot) unknown.gitRoot = unexplained;
 
   return {
     stamp: { stampVersion: parsed.stampVersion, commit, clean, builtAt, gitRoot, unknown },
@@ -449,6 +456,17 @@ function sameBuild(
     };
   }
 
+  // THE FALLBACK, AND THE BOUND IT CARRIES (KAN-170 item 11). Newest-mtime
+  // equality plus file count is what is left when neither side has a usable
+  // stamp, and it answers a weaker question than the stamped path above: it
+  // cannot tell "nobody rebuilt this" from "somebody rebuilt it and the result
+  // happened to land on the same newest mtime with the same number of files".
+  // A rebuild inside one mtime tick, or one whose output was restored from a
+  // tarball that preserved times, reads as the same build. That is not fixed
+  // here — this is the fallback and it stays the fallback — but the `why`
+  // below says it out loud, so a reader who acts on "same build" knows what
+  // that sentence is resting on. `basis: 'file-times'` was already on the
+  // reply; it named the evidence without naming what the evidence cannot see.
   const bootMs = boot.dist.newestMs;
   const nowMs = now.dist.newestMs;
   const same =
@@ -458,7 +476,9 @@ function sameBuild(
     basis: 'file-times',
     why: same
       ? `no stamp to compare, but ${now.dist.dir} holds the same ${now.dist.files} file(s) with ` +
-        `the same newest write (${now.dist.newestAt}) as at boot`
+        `the same newest write (${now.dist.newestAt}) as at boot — unchanged as far as file times ` +
+        `can tell, which cannot distinguish this from a rebuild that reproduced both the file ` +
+        `count and the newest mtime`
       : `no stamp to compare; ${now.dist.dir} has changed since boot ` +
         `(${boot.dist.files} file(s) newest ${boot.dist.newestAt} → ` +
         `${now.dist.files} file(s) newest ${now.dist.newestAt})`
