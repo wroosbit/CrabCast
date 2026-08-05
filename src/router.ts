@@ -55,6 +55,47 @@ import { BuildSnapshot, buildProvenanceReport } from './provenance.js';
 type Respond = (msg: any) => void;
 
 /**
+ * The extra fields an `activate` REFUSAL may carry — a type, because these two
+ * claims are expressible as one and a claim the compiler holds cannot rot
+ * (KAN-138 item 6).
+ *
+ * `alreadyRunning?: true` — so `false` DOES NOT COMPILE. Intersected with the
+ * index signature the property resolves to `true`, and that is the exact
+ * property, stated more carefully than the ticket that asked for it.
+ *
+ * The ticket asked for "absent on every refusal", and that was true when it was
+ * written and is not true now: KAN-136 added a refusal — an attach that threw
+ * over a pane that IS ours — which reaches the question, answers it, and is
+ * entitled to say `alreadyRunning: true`. Forbidding that outright would have
+ * made the type a lie about the code, so what is forbidden is the value neither
+ * branch can honestly produce:
+ *
+ *   absent  — the refusal never reached the question (bad flag, no record, a
+ *             census that did not answer, a stranger in the directory)
+ *   `true`  — it reached it and the agent is running (the attach failure)
+ *   `false` — REFUSED BY THE COMPILER. It reads as "we looked, and it is not
+ *             running", which no refusal here has established: the occupied
+ *             branch in particular knows only that the pane it found is not
+ *             ours.
+ *
+ * The swallow item 6 is really about — an `occupied` refusal quietly reporting
+ * `alreadyRunning: true` and turning a safety guard into a silent success —
+ * is not expressible as a type, because the same value is correct one branch
+ * over. `verify-idempotent-lifecycle.mjs` §4 asserts its ABSENCE there, and §4a
+ * asserts the `true` at the site that earns it, so the two halves are pinned by
+ * whichever instrument can actually hold them.
+ *
+ * `started?: false` narrows the same way: a refusal may restate that nothing
+ * was started and may not claim that something was.
+ *
+ * See {@link MessageRouter.handleActivate}'s `fail` for the rest of it.
+ */
+type ActivateRefusalFields = Record<string, unknown> & {
+  alreadyRunning?: true;
+  started?: false;
+};
+
+/**
  * WHAT AN AGENT IS, ECHOED BACK — the durable half of every state read.
  *
  * THE PROBLEM THIS FIELD IS THE ANSWER TO. A consumer reconciling desired
@@ -3247,8 +3288,36 @@ export class MessageRouter {
    */
   public async handleActivate(data: any, respond: Respond): Promise<void> {
     const { herdrBridge } = this.deps;
-    const fail = (error: string, extra: Record<string, unknown> = {}) =>
-      respond({ action: 'activate_response', success: false, error, ...extra });
+    /**
+     * EVERY REFUSAL, and the two things it is required to say about `started`
+     * and `alreadyRunning` — stated ONCE, here, rather than remembered at nine
+     * call sites (KAN-138 item 6).
+     *
+     * It was remembered at four of them and forgotten at five. `started: false`
+     * rode the unverifiable, occupied, attach-spawn-error and capacity refusals
+     * and was absent from the address-error, bad-flag, not-configured,
+     * spawn-error and confirm-failure ones — so a caller could not read it
+     * without first knowing which KIND of refusal it had received, which is the
+     * branch-on-absence this daemon refuses everywhere else. Both fields are
+     * decided here now:
+     *
+     *   `started: false` is PRESENT ON EVERY REFUSAL, because it is a fact and
+     *   it is the one the caller most needs: nothing was spawned. Defaulted
+     *   before `extra` spreads, so a site may restate it and none may forget
+     *   it — and a refusal added tomorrow gets it without anyone noticing it
+     *   had to.
+     *
+     *   `alreadyRunning` is NEVER `false` — the compiler holds that one, see
+     *   {@link ActivateRefusalFields}. It is absent where the refusal never
+     *   reached the question and `true` on the one refusal that reached it and
+     *   found the agent running. It is absent in particular on the `occupied`
+     *   refusal, and that absence is asserted rather than typed, because the
+     *   same value is legitimate one branch over. An assertion of `!== true`
+     *   passes on a literal `false`, which is why the proof checks for the key
+     *   rather than for its value.
+     */
+    const fail = (error: string, extra: ActivateRefusalFields = {}) =>
+      respond({ action: 'activate_response', success: false, started: false, error, ...extra });
 
     const address = this.addressOfRequest(data.path, true);
     if ('error' in address) {
@@ -3293,7 +3362,10 @@ export class MessageRouter {
           `census from an unreachable herdr is silence, not evidence — spawning on the ` +
           `strength of it would put a second agent into an occupied directory precisely ` +
           `when we cannot see it. NOTHING WAS STARTED. Bring the herdr server up and retry.`,
-        { path: agentPath, refused: 'unverifiable', verified: false, started: false }
+        // `started: false` comes from `fail` itself now, on this refusal and on
+        // the eight others — see its header for why it stopped being something
+        // each site had to remember.
+        { path: agentPath, refused: 'unverifiable', verified: false }
       );
       return;
     }
@@ -3397,8 +3469,11 @@ export class MessageRouter {
             path: agentPath,
             paneName,
             paneId: occupancy.ours.paneId,
+            // THE ONE REFUSAL ENTITLED TO THIS FIELD, and the reason
+            // `ActivateRefusalFields` types it `true` rather than forbidding
+            // it: the pane is ours and live, so the question was reached and
+            // answered. `started: false` comes from `fail`.
             alreadyRunning: true,
-            started: false,
             // The record was converged above and stays converged: the agent
             // IS running, so `expected()` must contain it whether or not we
             // managed to take its terminal.
@@ -3508,7 +3583,14 @@ export class MessageRouter {
           path: agentPath,
           refused: 'occupied',
           verified: false,
-          started: false,
+          // NO `alreadyRunning` HERE, and its absence is the point rather than
+          // an omission: this branch found a pane that is NOT ours, so it has
+          // established nothing about whether our agent is running. Reporting
+          // `true` is the swallow that turns this safety refusal into a silent
+          // success; reporting `false` claims a look that never happened. The
+          // absence is asserted in verify-idempotent-lifecycle.mjs §4, because
+          // one branch over the same value is correct and no type can tell
+          // them apart. `started: false` comes from `fail`.
           occupiedBy: occupancy.occupants
         }
       );
@@ -3556,7 +3638,7 @@ export class MessageRouter {
           derivation: describeCapacity(gate.capacity),
           capacity: capacityDto(gate.capacity),
           priority: config.priority,
-          started: false,
+          // `started: false` comes from `fail`.
           // Named, so a client can offer a button that says whose work it
           // ends. Absent when there is nothing this activation outranks.
           ...(gate.preemptable ? { preemption: gate.preemptable } : {})

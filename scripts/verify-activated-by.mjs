@@ -71,6 +71,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
+import { makeMutator } from './mutation.mjs';
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(process.argv[2] ?? path.join(scriptDir, '..', 'dist'));
 
@@ -1309,32 +1311,38 @@ try {
  * pass against an UNMUTATED daemon, and the section reads exactly like
  * coverage. So a mutation that did not apply is a hard error, not a warning.
  */
-function mutantDist(name, file, ...edits) {
-  const dir = path.join(tmp, `mutant-${name}`);
-  fs.cpSync(distDir, dir, { recursive: true });
-  const target = path.join(dir, file);
-  let text = fs.readFileSync(target, 'utf8');
-  // EVERY edit is checked, not just the first. A compound mutation whose second
-  // replacement silently found nothing is a mutant missing half its damage, and
-  // the assertion against it would then be measuring the wrong thing while
-  // looking exactly like coverage.
-  for (const [from, to] of edits) {
-    const occurrences = text.split(from).length - 1;
-    if (occurrences !== 1) {
-      throw new Error(
-        `mutation '${name}' expected exactly one occurrence of ${JSON.stringify(from)} in ` +
-          `${file}, found ${occurrences}. THE BUILD WAS NOT MUTATED, so the section using it ` +
-          `would have proved nothing. Fix the mutation, not this check — an un-mutatable check ` +
-          `is an unproven one.`
-      );
-    }
-    text = text.replace(from, to);
+/**
+ * A copy of dist with every edit applied, or NULL when the edit did not apply.
+ *
+ * THIS USED TO THROW. A mutation whose anchor had drifted killed the process,
+ * so every section after it — including the ones whose whole job is proving the
+ * other checks can fail — never ran, and the reader got a stack trace with no
+ * signal that anything had been skipped (KAN-138 item 18). `scripts/mutation.mjs`
+ * keeps the exact-occurrence guard that was already right here and changes only
+ * what happens when it fires: the failure is COUNTED into this script's own
+ * verdict and the call returns null, so the rest of the file still reports.
+ */
+const { mutate, mutationsSkipped } = makeMutator({
+  distDir,
+  scratch: tmp,
+  report: {
+    pass: (label, detail) => check(true, label, detail),
+    fail: (label, detail) => check(false, label, detail)
   }
-  fs.writeFileSync(target, text);
-  return dir;
-}
+});
 
-{
+/**
+ * This file's compound shape — one file, several `[from, to]` pairs — kept, so
+ * the call sites did not have to change. EVERY edit is still checked, not just
+ * the first: a compound mutation whose second replacement silently found
+ * nothing is a mutant missing half its damage, and the assertion against it
+ * would be measuring the wrong thing while looking exactly like coverage.
+ */
+const mutantDist = (name, file, ...edits) =>
+  mutate(name, edits.map(([find, replace]) => ({ file, find, replace })));
+
+
+mutation1: {
   // MUTATION A — THE CUSTOMER'S OWN DEFECT, REPRODUCED. The daemon stops baking
   // the agent's identity into the MCP server definition it writes. Everything
   // else is untouched: the field exists, the router derives it, every category
@@ -1345,6 +1353,9 @@ function mutantDist(name, file, ...edits) {
     ['...(agentPath ? { CRABCAST_AGENT_PATH: agentPath } : {})',
      '...(false ? { CRABCAST_AGENT_PATH: agentPath } : {})']
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation1;
   const { builtinMcpServer: Broken } = await import(path.join(dir, 'launchers.js'));
   const { builtinMcpServer: Real } = await import(path.join(distDir, 'launchers.js'));
 
@@ -1369,7 +1380,7 @@ function mutantDist(name, file, ...edits) {
   );
 }
 
-{
+mutation2: {
   // MUTATION B — the echo stops reading the record. Every category keeps its
   // key and answers null: the always-null field wearing the shape of a working
   // one, which is what §3 asserts VALUES rather than presence to catch.
@@ -1377,6 +1388,9 @@ function mutantDist(name, file, ...edits) {
     'echo-drops-parent', 'router.js',
     ['activatedBy: intent.record.activatedBy', 'activatedBy: null']
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation2;
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
   const h = harness('s3', Broken, BrokenReg);
@@ -1405,7 +1419,7 @@ function mutantDist(name, file, ...edits) {
   );
 }
 
-{
+mutation3: {
   // MUTATION C — `intents()` pulls the parent out of the record, which is the
   // one edit that orphans a whole fleet at the next re-record and at the next
   // compaction. Named in the comment on that destructure.
@@ -1414,6 +1428,9 @@ function mutantDist(name, file, ...edits) {
     ['const { v, event, at, preemption, wasPreempted, everActivated, ...record } = entry;',
      'const { v, event, at, preemption, wasPreempted, everActivated, activatedBy, ...record } = entry;']
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation3;
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
   const h = harness('s7c', Broken, BrokenReg);
@@ -1438,7 +1455,7 @@ function mutantDist(name, file, ...edits) {
   );
 }
 
-{
+mutation4: {
   // MUTATION D — self-parentage, and it takes TWO edits to reach, which is
   // itself the finding.
   //
@@ -1458,6 +1475,9 @@ function mutantDist(name, file, ...edits) {
     ['if (caller !== null && caller !== target)',
      'if (caller !== null && caller !== target || caller !== null)']
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation4;
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
   const h = harness('s8d', Broken, BrokenReg);
@@ -1486,7 +1506,7 @@ function mutantDist(name, file, ...edits) {
   setCensus([]);
 }
 
-{
+mutation5: {
   // MUTATION E — the no-op short-circuit stops comparing the parent. The one
   // call that establishes a supervisor over an agent the record already calls
   // `activated` is exactly the call this would swallow. A quiet one, and it was
@@ -1495,6 +1515,9 @@ function mutantDist(name, file, ...edits) {
     'noop-ignores-new-supervisor', 'router.js',
     ['current.record.activatedBy === toWrite.activatedBy', 'true']
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation5;
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
 
@@ -1550,7 +1573,7 @@ function mutantDist(name, file, ...edits) {
   );
 }
 
-{
+mutation6: {
   // MUTATION F — KAN-145 ITSELF, REINTRODUCED. The converging `activate` branch
   // takes its caller from whoever is calling instead of passing `null`, so an
   // agent re-parents to whoever last attached to it. This is the mutation the
@@ -1560,6 +1583,9 @@ function mutantDist(name, file, ...edits) {
     ['const durable = this.rememberActivated(intent.record, null);',
      'const durable = this.rememberActivated(intent.record, callerIdentity(data));']
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation6;
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
   const h = harness('s8f', Broken, BrokenReg);
@@ -1592,7 +1618,7 @@ function mutantDist(name, file, ...edits) {
   setCensus([]);
 }
 
-{
+mutation7: {
   // MUTATION G — RECONCILE STAMPS ITSELF. The guarantee §2b exists for is that
   // a boot restores parentage rather than minting it, and until this mutation
   // existed that guarantee was true of the code and asserted by NOTHING: a
@@ -1613,6 +1639,9 @@ function mutantDist(name, file, ...edits) {
     ['override: true\n            }, (msg) => {',
      `override: true,\n                agentPath: ${JSON.stringify(stampDir)}\n            }, (msg) => {`]
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation7;
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
   const { reconcileAgents: brokenReconcile } = await import(path.join(dir, 'reconcile.js'));
@@ -1665,6 +1694,14 @@ function mutantDist(name, file, ...edits) {
 
 // ------------------------------------------------------------------- verdict
 
+if (mutationsSkipped().length) {
+  // Named next to the verdict, because "N FAILED" reads as N ordinary assertion
+  // failures when what actually happened is that a section never executed.
+  console.log(
+    `\n${mutationsSkipped().length} MUTATION(S) DID NOT APPLY, so their sections did not run: ` +
+      mutationsSkipped().join(', ')
+  );
+}
 rule(failures.length === 0 ? 'ALL PASS' : `${failures.length} CHECK(S) FAILED`);
 for (const f of failures) console.log(`  FAILED: ${f}`);
 process.exit(failures.length ? 1 : 0);

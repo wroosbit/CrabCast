@@ -91,6 +91,8 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import { makeMutator } from './mutation.mjs';
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(process.argv[2] ?? path.join(scriptDir, '..', 'dist'));
 const repoRoot = path.join(scriptDir, '..');
@@ -246,25 +248,25 @@ try {
   if (e.code !== 'EEXIST') throw e;
 }
 
-function mutatedBuild(name, edits) {
-  const target = path.join(scratch, `dist-${name}`);
-  fs.cpSync(distDir, target, { recursive: true });
-  for (const { file, find, replace } of edits) {
-    const p = path.join(target, file);
-    const before = fs.readFileSync(p, 'utf8');
-    const count = before.split(find).length - 1;
-    if (count !== 1) {
-      throw new Error(
-        `mutation "${name}" expected exactly 1 occurrence of ${JSON.stringify(find)} in ` +
-        `${file}, found ${count}. The build was NOT mutated, so the section using it ` +
-        `would have proved nothing. Fix the mutation, not this check.`
-      );
-    }
-    fs.writeFileSync(p, before.replace(find, replace));
-    console.log(`   mutated ${name}/${file}: ${JSON.stringify(find.slice(0, 60))} → (${replace.length} chars)`);
+/**
+ * A copy of dist with one string replaced, or NULL when the edit did not apply.
+ *
+ * THIS USED TO THROW. A mutation whose anchor had drifted killed the process,
+ * so every section after it — including the ones whose whole job is proving the
+ * other checks can fail — never ran, and the reader got a stack trace with no
+ * signal that anything had been skipped (KAN-138 item 18). `scripts/mutation.mjs`
+ * keeps the exact-occurrence guard that was already right here and changes only
+ * what happens when it fires: the failure is COUNTED into this script's own
+ * verdict and the call returns null, so the rest of the file still reports.
+ */
+const { mutate: mutatedBuild, mutationsSkipped } = makeMutator({
+  distDir,
+  scratch,
+  report: {
+    pass: (label, detail) => verdict(true, `${label}${detail ? ` — ${detail}` : ''}`, ''),
+    fail: (label, detail) => verdict(false, '', `${label} — ${detail}`)
   }
-  return target;
-}
+});
 
 /**
  * THE INJECTION, at the place `configure` assembles the config object.
@@ -613,113 +615,121 @@ rule('2. DRIFT — a knob injected at a REAL emission site, named by its path an
 // answer DIFFERENTLY on purpose. Asserting the poll side by itself would leave
 // "and the event path drops it" as prose, which is the half a consumer reading
 // one response cannot check.
-const driftDist = mutatedBuild('drift', [INJECT_KNOB]);
-const driftCfg = makeConfig('drift');
-const driftStatus = await startDaemon(driftCfg, driftDist, 'drift');
-const driftSub = await new SocketClient(driftCfg, 'drift-sub').ready();
-const driftMcp = new McpClient('drift', { config: driftCfg.configPath });
-await driftMcp.initialize();
-await sleep(500);
+// Hoisted so this section can be SKIPPED WHOLE when an edit does not apply,
+// without changing what anything after it can see. See scripts/mutation.mjs.
+let driftContract, configuredEvent, driftDist;
+mutation1: {
+  driftDist = mutatedBuild('drift', [INJECT_KNOB]);
+  // Already a counted failure. Skip the rest of this section rather
+  // than asserting about a build that was never mutated.
+  if (!driftDist) break mutation1;
+  const driftCfg = makeConfig('drift');
+  const driftStatus = await startDaemon(driftCfg, driftDist, 'drift');
+  const driftSub = await new SocketClient(driftCfg, 'drift-sub').ready();
+  const driftMcp = new McpClient('drift', { config: driftCfg.configPath });
+  await driftMcp.initialize();
+  await sleep(500);
 
-const driftFleet = await buildFleet(driftMcp, 'drift');
-await waitFor(
-  () => driftMcp.eventPayloads().some(
-    (d) => d?.action === 'agent.configured' && d?.path === driftFleet.running),
-  15_000,
-  'agent.configured on the MCP forwarder'
-);
-const driftList = await listAgents(driftMcp);
-const driftContract = driftList.configEchoContract;
-const driftRows = echoRows(driftList);
+  const driftFleet = await buildFleet(driftMcp, 'drift');
+  await waitFor(
+    () => driftMcp.eventPayloads().some(
+      (d) => d?.action === 'agent.configured' && d?.path === driftFleet.running),
+    15_000,
+    'agent.configured on the MCP forwarder'
+  );
+  const driftList = await listAgents(driftMcp);
+  driftContract = driftList.configEchoContract;
+  const driftRows = echoRows(driftList);
 
-const configuredEvent = driftMcp.eventPayloads()
-  .find((d) => d?.action === 'agent.configured' && d?.path === driftFleet.running);
-const socketEvent = driftSub.eventsNamed('agent.configured')
-  .find((e) => e.path === driftFleet.running);
+  configuredEvent = driftMcp.eventPayloads()
+    .find((d) => d?.action === 'agent.configured' && d?.path === driftFleet.running);
+  const socketEvent = driftSub.eventsNamed('agent.configured')
+    .find((e) => e.path === driftFleet.running);
 
-console.log(`\n   injected at the emission site: config.${KNOB} = ${KNOB_VALUE}\n`);
-show('POLL — configEchoContract.undeclared:', driftContract?.undeclared);
-show('POLL — the echo on the running row (the field is STILL THERE):',
-  driftRows.find(({ row }) => row.path === driftFleet.running)?.row?.config);
-show('MCP EVENT — the same config, projected (the field is GONE):', configuredEvent?.config);
-show('SOCKET EVENT — a minimum, so it arrives:', socketEvent?.config?.[KNOB]);
-console.log(`\n   drift the MCP forwarder reported:`);
-console.log(`     ${driftLines(driftMcp).join('\n     ') || '(NONE)'}`);
+  console.log(`\n   injected at the emission site: config.${KNOB} = ${KNOB_VALUE}\n`);
+  show('POLL — configEchoContract.undeclared:', driftContract?.undeclared);
+  show('POLL — the echo on the running row (the field is STILL THERE):',
+    driftRows.find(({ row }) => row.path === driftFleet.running)?.row?.config);
+  show('MCP EVENT — the same config, projected (the field is GONE):', configuredEvent?.config);
+  show('SOCKET EVENT — a minimum, so it arrives:', socketEvent?.config?.[KNOB]);
+  console.log(`\n   drift the MCP forwarder reported:`);
+  console.log(`     ${driftLines(driftMcp).join('\n     ') || '(NONE)'}`);
 
-const daemonLogPath = path.join(driftCfg.dataDir, 'daemon.log');
-const daemonLog = fs.readFileSync(daemonLogPath, 'utf8');
-const daemonWarnings = daemonLog.split('\n')
-  .filter((l) => /echoed undeclared config field/.test(l));
-console.log(`\n   daemon-side warning (${daemonLogPath}):`);
-console.log(`     ${daemonWarnings.join('\n     ') || '(NONE)'}`);
+  const daemonLogPath = path.join(driftCfg.dataDir, 'daemon.log');
+  const daemonLog = fs.readFileSync(daemonLogPath, 'utf8');
+  const daemonWarnings = daemonLog.split('\n')
+    .filter((l) => /echoed undeclared config field/.test(l));
+  console.log(`\n   daemon-side warning (${daemonLogPath}):`);
+  console.log(`     ${daemonWarnings.join('\n     ') || '(NONE)'}`);
 
-// A SECOND POLL, to measure the once-per-boot damping claim rather than assert
-// it. `list_agents` is polled continuously by design, so a per-response warning
-// would be a log flood — and a claim about a log is exactly the kind that is
-// easy to write and never checked.
-await listAgents(driftMcp);
-const secondList = await listAgents(driftMcp);
-const warningsAfter = fs.readFileSync(daemonLogPath, 'utf8').split('\n')
-  .filter((l) => /echoed undeclared config field/.test(l));
+  // A SECOND POLL, to measure the once-per-boot damping claim rather than assert
+  // it. `list_agents` is polled continuously by design, so a per-response warning
+  // would be a log flood — and a claim about a log is exactly the kind that is
+  // easy to write and never checked.
+  await listAgents(driftMcp);
+  const secondList = await listAgents(driftMcp);
+  const warningsAfter = fs.readFileSync(daemonLogPath, 'utf8').split('\n')
+    .filter((l) => /echoed undeclared config field/.test(l));
 
-// BY PATH, not by name: the same knob is on every row, and which row is what
-// the path adds. Both an `agents` row and a `standbyAgents` row are required,
-// so a report that named the field once with no address would fail here.
-const namesPath = (list, prefix) =>
-  (list ?? []).some((p) => new RegExp(`^${prefix}\\[\\d+\\]\\.config\\.${KNOB}$`).test(p));
-const stillDelivered = driftRows.every(({ row }) => !row.config || row.config[KNOB] === KNOB_VALUE);
+  // BY PATH, not by name: the same knob is on every row, and which row is what
+  // the path adds. Both an `agents` row and a `standbyAgents` row are required,
+  // so a report that named the field once with no address would fail here.
+  const namesPath = (list, prefix) =>
+    (list ?? []).some((p) => new RegExp(`^${prefix}\\[\\d+\\]\\.config\\.${KNOB}$`).test(p));
+  const stillDelivered = driftRows.every(({ row }) => !row.config || row.config[KNOB] === KNOB_VALUE);
 
-given(
-  driftRows.filter(({ row }) => row.config).length >= 3,
-  'the mutated fleet carries at least three non-null echoes to sweep',
-  `${driftRows.filter(({ row }) => row.config).length} rows`
-);
+  given(
+    driftRows.filter(({ row }) => row.config).length >= 3,
+    'the mutated fleet carries at least three non-null echoes to sweep',
+    `${driftRows.filter(({ row }) => row.config).length} rows`
+  );
 
-verdict(
-  namesPath(driftContract?.undeclared, 'agents') &&
-    namesPath(driftContract?.undeclared, 'standbyAgents') &&
-    namesPath(driftContract?.undeclared, 'unstartedAgents') &&
-    // REPORTED AND NOT DROPPED, which is this surface's stated behaviour. A
-    // response that reported the field and withheld it would satisfy the line
-    // above and break the echo's own promise to be the record verbatim.
-    driftContract?.drops === false &&
-    stillDelivered &&
-    // The other surface, on the SAME daemon and the same broadcast: dropped and
-    // named. One declaration, two behaviours, both observed.
-    configuredEvent?.config?.[KNOB] === undefined &&
-    driftLines(driftMcp).some((l) => new RegExp(`config\\.${KNOB}`).test(l)) &&
-    // The socket is a minimum and filters nothing — §4 — so it still arrives
-    // there, which is what makes the MCP drop a projection rather than a filter
-    // somewhere upstream.
-    socketEvent?.config?.[KNOB] === KNOB_VALUE &&
-    // Every declared knob survived on both paths. A sweep that "found" the
-    // drift by mangling the echo would pass every line above.
-    driftRows.find(({ row }) => row.path === driftFleet.running)?.row?.config?.launcher === LAUNCHER &&
-    configuredEvent?.config?.launcher === LAUNCHER &&
-    // The daemon says it out loud too, once per field per boot — three polls,
-    // one line.
-    daemonWarnings.length === 1 && warningsAfter.length === 1 &&
-    // …and the RESPONSE says it every time, which is the half that matters.
-    secondList.configEchoContract?.undeclared?.length === driftContract.undeclared.length,
-  `a knob injected where \`configure\` assembles the config travelled to every category and\n` +
-  `    was named by its FULL PATH on each — agents[], standbyAgents[], unstartedAgents[] — and\n` +
-  `    was STILL DELIVERED in the echo, because this surface reports and does not drop. The\n` +
-  `    same daemon's MCP event notification DROPPED it and named it \`config.${KNOB}\`,\n` +
-  `    while the socket subscriber received it, which is §4's asymmetry. Every declared knob\n` +
-  `    survived on both paths. The daemon warned ONCE across three polls; the response\n` +
-  `    reported on all three`,
-  `drift not proven: undeclared=${JSON.stringify(driftContract?.undeclared)}, ` +
-  `drops=${driftContract?.drops}, stillDelivered=${stillDelivered}, ` +
-  `event=${JSON.stringify(configuredEvent?.config?.[KNOB])}, ` +
-  `mcpDrift=[${driftLines(driftMcp).join(' | ')}], ` +
-  `socket=${JSON.stringify(socketEvent?.config?.[KNOB])}, ` +
-  `daemonWarnings=${daemonWarnings.length}/${warningsAfter.length}`
-);
+  verdict(
+    namesPath(driftContract?.undeclared, 'agents') &&
+      namesPath(driftContract?.undeclared, 'standbyAgents') &&
+      namesPath(driftContract?.undeclared, 'unstartedAgents') &&
+      // REPORTED AND NOT DROPPED, which is this surface's stated behaviour. A
+      // response that reported the field and withheld it would satisfy the line
+      // above and break the echo's own promise to be the record verbatim.
+      driftContract?.drops === false &&
+      stillDelivered &&
+      // The other surface, on the SAME daemon and the same broadcast: dropped and
+      // named. One declaration, two behaviours, both observed.
+      configuredEvent?.config?.[KNOB] === undefined &&
+      driftLines(driftMcp).some((l) => new RegExp(`config\\.${KNOB}`).test(l)) &&
+      // The socket is a minimum and filters nothing — §4 — so it still arrives
+      // there, which is what makes the MCP drop a projection rather than a filter
+      // somewhere upstream.
+      socketEvent?.config?.[KNOB] === KNOB_VALUE &&
+      // Every declared knob survived on both paths. A sweep that "found" the
+      // drift by mangling the echo would pass every line above.
+      driftRows.find(({ row }) => row.path === driftFleet.running)?.row?.config?.launcher === LAUNCHER &&
+      configuredEvent?.config?.launcher === LAUNCHER &&
+      // The daemon says it out loud too, once per field per boot — three polls,
+      // one line.
+      daemonWarnings.length === 1 && warningsAfter.length === 1 &&
+      // …and the RESPONSE says it every time, which is the half that matters.
+      secondList.configEchoContract?.undeclared?.length === driftContract.undeclared.length,
+    `a knob injected where \`configure\` assembles the config travelled to every category and\n` +
+    `    was named by its FULL PATH on each — agents[], standbyAgents[], unstartedAgents[] — and\n` +
+    `    was STILL DELIVERED in the echo, because this surface reports and does not drop. The\n` +
+    `    same daemon's MCP event notification DROPPED it and named it \`config.${KNOB}\`,\n` +
+    `    while the socket subscriber received it, which is §4's asymmetry. Every declared knob\n` +
+    `    survived on both paths. The daemon warned ONCE across three polls; the response\n` +
+    `    reported on all three`,
+    `drift not proven: undeclared=${JSON.stringify(driftContract?.undeclared)}, ` +
+    `drops=${driftContract?.drops}, stillDelivered=${stillDelivered}, ` +
+    `event=${JSON.stringify(configuredEvent?.config?.[KNOB])}, ` +
+    `mcpDrift=[${driftLines(driftMcp).join(' | ')}], ` +
+    `socket=${JSON.stringify(socketEvent?.config?.[KNOB])}, ` +
+    `daemonWarnings=${daemonWarnings.length}/${warningsAfter.length}`
+  );
 
-driftMcp.kill();
-driftSub.close();
-stopDaemon(driftStatus.pid);
+  driftMcp.kill();
+  driftSub.close();
+  stopDaemon(driftStatus.pid);
 
+}
 // ============================================ 3. THE RED HALF — two mutations --
 
 rule('3. THE RED HALF — the sweep removed, and the warning silenced');
@@ -728,85 +738,96 @@ rule('3. THE RED HALF — the sweep removed, and the warning silenced');
 // an invented breakage: `sweepConfigEchoes` doing nothing IS what `main` did
 // before this change — the echo went out whole with nothing examining it — so
 // what section 2 asserts is measured against the behaviour it replaced.
-const noSweepDist = mutatedBuild('no-sweep', [
-  INJECT_KNOB,
-  {
-    file: 'router.js',
-    find: "sweepConfigEchoes(payload, '', echoDrift);",
-    replace: "/* KAN-166 section 3: the sweep removed — what main did before this change */;"
-  }
-]);
-const noSweepCfg = makeConfig('no-sweep');
-const noSweepStatus = await startDaemon(noSweepCfg, noSweepDist, 'no-sweep');
-const noSweepMcp = new McpClient('no-sweep', { config: noSweepCfg.configPath });
-await noSweepMcp.initialize();
-await buildFleet(noSweepMcp, 'no-sweep');
-const noSweepList = await listAgents(noSweepMcp);
-const noSweepRows = echoRows(noSweepList);
-const noSweepWarnings = fs.readFileSync(path.join(noSweepCfg.dataDir, 'daemon.log'), 'utf8')
-  .split('\n').filter((l) => /echoed undeclared config field/.test(l));
+// Hoisted so this section can be SKIPPED WHOLE when an edit does not apply,
+// without changing what anything after it can see. See scripts/mutation.mjs.
+let noSweepDist, quietDist;
+mutation2: {
+  noSweepDist = mutatedBuild('no-sweep', [
+    INJECT_KNOB,
+    {
+      file: 'router.js',
+      find: "sweepConfigEchoes(payload, '', echoDrift);",
+      replace: "/* KAN-166 section 3: the sweep removed — what main did before this change */;"
+    }
+  ]);
+  // Already a counted failure. Skip the rest of this section rather
+  // than asserting about a build that was never mutated.
+  if (!noSweepDist) break mutation2;
+  const noSweepCfg = makeConfig('no-sweep');
+  const noSweepStatus = await startDaemon(noSweepCfg, noSweepDist, 'no-sweep');
+  const noSweepMcp = new McpClient('no-sweep', { config: noSweepCfg.configPath });
+  await noSweepMcp.initialize();
+  await buildFleet(noSweepMcp, 'no-sweep');
+  const noSweepList = await listAgents(noSweepMcp);
+  const noSweepRows = echoRows(noSweepList);
+  const noSweepWarnings = fs.readFileSync(path.join(noSweepCfg.dataDir, 'daemon.log'), 'utf8')
+    .split('\n').filter((l) => /echoed undeclared config field/.test(l));
 
-show('with the sweep removed — configEchoContract:', noSweepList.configEchoContract);
-show('…and the field on the wire anyway:',
-  noSweepRows.find(({ row }) => row.config)?.row?.config?.[KNOB]);
+  show('with the sweep removed — configEchoContract:', noSweepList.configEchoContract);
+  show('…and the field on the wire anyway:',
+    noSweepRows.find(({ row }) => row.config)?.row?.config?.[KNOB]);
 
-// The second mutation separates the two artifacts. KAN-152's framing — WHICH
-// ARTIFACT CARRIES WHICH GUARANTEE — is the thing this ticket exists to adopt,
-// and a log line is not a contract: a consumer never reads our daemon.log.
-const quietDist = mutatedBuild('quiet', [
-  INJECT_KNOB,
-  {
-    file: 'router.js',
-    find: 'this.warnOnEchoDrift(echoDrift);',
-    replace: '/* KAN-166 section 3: the warning silenced, the sweep left alone */;'
-  }
-]);
-const quietCfg = makeConfig('quiet');
-const quietStatus = await startDaemon(quietCfg, quietDist, 'quiet');
-const quietMcp = new McpClient('quiet', { config: quietCfg.configPath });
-await quietMcp.initialize();
-await buildFleet(quietMcp, 'quiet');
-const quietList = await listAgents(quietMcp);
-const quietWarnings = fs.readFileSync(path.join(quietCfg.dataDir, 'daemon.log'), 'utf8')
-  .split('\n').filter((l) => /echoed undeclared config field/.test(l));
+  // The second mutation separates the two artifacts. KAN-152's framing — WHICH
+  // ARTIFACT CARRIES WHICH GUARANTEE — is the thing this ticket exists to adopt,
+  // and a log line is not a contract: a consumer never reads our daemon.log.
+  quietDist = mutatedBuild('quiet', [
+    INJECT_KNOB,
+    {
+      file: 'router.js',
+      find: 'this.warnOnEchoDrift(echoDrift);',
+      replace: '/* KAN-166 section 3: the warning silenced, the sweep left alone */;'
+    }
+  ]);
+  // Already a counted failure. Skip the rest of this section rather
+  // than asserting about a build that was never mutated.
+  if (!quietDist) break mutation2;
+  const quietCfg = makeConfig('quiet');
+  const quietStatus = await startDaemon(quietCfg, quietDist, 'quiet');
+  const quietMcp = new McpClient('quiet', { config: quietCfg.configPath });
+  await quietMcp.initialize();
+  await buildFleet(quietMcp, 'quiet');
+  const quietList = await listAgents(quietMcp);
+  const quietWarnings = fs.readFileSync(path.join(quietCfg.dataDir, 'daemon.log'), 'utf8')
+    .split('\n').filter((l) => /echoed undeclared config field/.test(l));
 
-show('with only the WARNING silenced — configEchoContract.undeclared:',
-  quietList.configEchoContract?.undeclared);
-console.log(`   daemon.log lines: ${quietWarnings.length}`);
+  show('with only the WARNING silenced — configEchoContract.undeclared:',
+    quietList.configEchoContract?.undeclared);
+  console.log(`   daemon.log lines: ${quietWarnings.length}`);
 
-const noSweepEchoes = noSweepRows.filter(({ row }) => row.config).length;
-given(noSweepEchoes >= 3,
-  'the sweep-removed build produced echoes to miss — an empty fleet would report ' +
-    'no drift for the wrong reason',
-  `${noSweepEchoes} rows`);
+  const noSweepEchoes = noSweepRows.filter(({ row }) => row.config).length;
+  given(noSweepEchoes >= 3,
+    'the sweep-removed build produced echoes to miss — an empty fleet would report ' +
+      'no drift for the wrong reason',
+    `${noSweepEchoes} rows`);
 
-verdict(
-  // MUTATION 1: the response is green while the field is on the wire. That is
-  // section 2's assertion going red, and it is the shipped defect exactly.
-  noSweepList.configEchoContract?.undeclared?.length === 0 &&
-    noSweepRows.some(({ row }) => row.config?.[KNOB] === KNOB_VALUE) &&
-    noSweepWarnings.length === 0 &&
-    // MUTATION 2: the log goes quiet and the RESPONSE still answers. Which is
-    // what makes the response the contract and the log a convenience.
-    quietWarnings.length === 0 &&
-    (quietList.configEchoContract?.undeclared ?? []).some((p) => p.endsWith(`.config.${KNOB}`)),
-  `removing the sweep turned section 2 red exactly as it must: the injected field reached\n` +
-  `    ${noSweepEchoes} echoes and \`undeclared\` came back EMPTY, with nothing in daemon.log —\n` +
-  `    a response that looks identical to a clean fleet, which is what main shipped. And with\n` +
-  `    only the WARNING removed the response still named the field, so the answer is carried by\n` +
-  `    the response rather than by a log nobody downstream reads`,
-  `the red half did not go red: noSweep.undeclared=` +
-  `${JSON.stringify(noSweepList.configEchoContract?.undeclared)}, ` +
-  `fieldOnWire=${noSweepRows.some(({ row }) => row.config?.[KNOB] === KNOB_VALUE)}, ` +
-  `noSweepWarnings=${noSweepWarnings.length}, quietWarnings=${quietWarnings.length}, ` +
-  `quiet.undeclared=${JSON.stringify(quietList.configEchoContract?.undeclared)}`
-);
+  verdict(
+    // MUTATION 1: the response is green while the field is on the wire. That is
+    // section 2's assertion going red, and it is the shipped defect exactly.
+    noSweepList.configEchoContract?.undeclared?.length === 0 &&
+      noSweepRows.some(({ row }) => row.config?.[KNOB] === KNOB_VALUE) &&
+      noSweepWarnings.length === 0 &&
+      // MUTATION 2: the log goes quiet and the RESPONSE still answers. Which is
+      // what makes the response the contract and the log a convenience.
+      quietWarnings.length === 0 &&
+      (quietList.configEchoContract?.undeclared ?? []).some((p) => p.endsWith(`.config.${KNOB}`)),
+    `removing the sweep turned section 2 red exactly as it must: the injected field reached\n` +
+    `    ${noSweepEchoes} echoes and \`undeclared\` came back EMPTY, with nothing in daemon.log —\n` +
+    `    a response that looks identical to a clean fleet, which is what main shipped. And with\n` +
+    `    only the WARNING removed the response still named the field, so the answer is carried by\n` +
+    `    the response rather than by a log nobody downstream reads`,
+    `the red half did not go red: noSweep.undeclared=` +
+    `${JSON.stringify(noSweepList.configEchoContract?.undeclared)}, ` +
+    `fieldOnWire=${noSweepRows.some(({ row }) => row.config?.[KNOB] === KNOB_VALUE)}, ` +
+    `noSweepWarnings=${noSweepWarnings.length}, quietWarnings=${quietWarnings.length}, ` +
+    `quiet.undeclared=${JSON.stringify(quietList.configEchoContract?.undeclared)}`
+  );
 
-noSweepMcp.kill();
-stopDaemon(noSweepStatus.pid);
-quietMcp.kill();
-stopDaemon(quietStatus.pid);
+  noSweepMcp.kill();
+  stopDaemon(noSweepStatus.pid);
+  quietMcp.kill();
+  stopDaemon(quietStatus.pid);
 
+}
 // =========================== 4. ONE DECLARATION — one edit moves both surfaces --
 
 rule('4. ONE DECLARATION — one edit to CONFIG_FIELDS, and BOTH surfaces move');
@@ -822,69 +843,77 @@ rule('4. ONE DECLARATION — one edit to CONFIG_FIELDS, and BOTH surfaces move')
 // declaration. What this section measures is that no THIRD edit is needed for
 // the poll path to honour it, which is what "do not duplicate the field list"
 // means in practice.
-const sharedDist = mutatedBuild('shared', [
-  INJECT_KNOB,
-  {
-    file: 'events.js',
-    find: 'export const CONFIG_FIELDS = {',
-    replace:
-      `export const CONFIG_FIELDS = {\n` +
-      `    /* KAN-166 section 4: THE ONE EDIT — the knob, declared */\n` +
-      `    ${KNOB}: SCALAR,`
-  }
-]);
-const sharedCfg = makeConfig('shared');
-const sharedStatus = await startDaemon(sharedCfg, sharedDist, 'shared');
-const sharedMcp = new McpClient('shared', { dist: sharedDist, config: sharedCfg.configPath });
-await sharedMcp.initialize();
-await sleep(500);
-const sharedFleet = await buildFleet(sharedMcp, 'shared');
-await waitFor(
-  () => sharedMcp.eventPayloads().some(
-    (d) => d?.action === 'agent.configured' && d?.path === sharedFleet.running),
-  15_000,
-  'agent.configured on the MCP forwarder'
-);
-const sharedList = await listAgents(sharedMcp);
-const sharedEvent = sharedMcp.eventPayloads()
-  .find((d) => d?.action === 'agent.configured' && d?.path === sharedFleet.running);
-const sharedRow = echoRows(sharedList).find(({ row }) => row.path === sharedFleet.running)?.row;
+// Hoisted so this section can be SKIPPED WHOLE when an edit does not apply,
+// without changing what anything after it can see. See scripts/mutation.mjs.
+let sharedDist;
+mutation3: {
+  sharedDist = mutatedBuild('shared', [
+    INJECT_KNOB,
+    {
+      file: 'events.js',
+      find: 'export const CONFIG_FIELDS = {',
+      replace:
+        `export const CONFIG_FIELDS = {\n` +
+        `    /* KAN-166 section 4: THE ONE EDIT — the knob, declared */\n` +
+        `    ${KNOB}: SCALAR,`
+    }
+  ]);
+  // Already a counted failure. Skip the rest of this section rather
+  // than asserting about a build that was never mutated.
+  if (!sharedDist) break mutation3;
+  const sharedCfg = makeConfig('shared');
+  const sharedStatus = await startDaemon(sharedCfg, sharedDist, 'shared');
+  const sharedMcp = new McpClient('shared', { dist: sharedDist, config: sharedCfg.configPath });
+  await sharedMcp.initialize();
+  await sleep(500);
+  const sharedFleet = await buildFleet(sharedMcp, 'shared');
+  await waitFor(
+    () => sharedMcp.eventPayloads().some(
+      (d) => d?.action === 'agent.configured' && d?.path === sharedFleet.running),
+    15_000,
+    'agent.configured on the MCP forwarder'
+  );
+  const sharedList = await listAgents(sharedMcp);
+  const sharedEvent = sharedMcp.eventPayloads()
+    .find((d) => d?.action === 'agent.configured' && d?.path === sharedFleet.running);
+  const sharedRow = echoRows(sharedList).find(({ row }) => row.path === sharedFleet.running)?.row;
 
-console.log(`\n   the ONE edit: ${KNOB} added to CONFIG_FIELDS in events.js. Nothing else moved.\n`);
-show('EVENT path — the notification now PUBLISHES it:', sharedEvent?.config);
-show('POLL path — declared, so no longer reported:', sharedList.configEchoContract);
-console.log(`\n   MCP forwarder drift lines: ${driftLines(sharedMcp).join(' | ') || '(NONE)'}`);
+  console.log(`\n   the ONE edit: ${KNOB} added to CONFIG_FIELDS in events.js. Nothing else moved.\n`);
+  show('EVENT path — the notification now PUBLISHES it:', sharedEvent?.config);
+  show('POLL path — declared, so no longer reported:', sharedList.configEchoContract);
+  console.log(`\n   MCP forwarder drift lines: ${driftLines(sharedMcp).join(' | ') || '(NONE)'}`);
 
-verdict(
-  // The event path: published rather than dropped, and it stopped warning.
-  sharedEvent?.config?.[KNOB] === KNOB_VALUE &&
-    !driftLines(sharedMcp).some((l) => new RegExp(`config\\.${KNOB}`).test(l)) &&
-    // The poll path: the knob is in `declared`, and `undeclared` is empty —
-    // from the same edit, with nothing on this path touched.
-    (sharedList.configEchoContract?.declared ?? []).includes(KNOB) &&
-    sharedList.configEchoContract?.undeclared?.length === 0 &&
-    // And it is still on the wire, so "no longer reported" is not "no longer
-    // there" — the field is present and declared rather than absent.
-    sharedRow?.config?.[KNOB] === KNOB_VALUE &&
-    // The comparison that makes this a measurement: section 2's build carried
-    // the SAME injected knob and both surfaces answered the other way.
-    driftContract?.undeclared?.length > 0 &&
-    configuredEvent?.config?.[KNOB] === undefined,
-  `ONE edit — the knob added to CONFIG_FIELDS — and both surfaces moved together: the MCP\n` +
-  `    event notification now publishes config.${KNOB} and stopped reporting drift, and the\n` +
-  `    poll response lists it under \`declared\` with \`undeclared\` empty. Section 2's build\n` +
-  `    carried the identical injected knob and answered the opposite way on BOTH, so the\n` +
-  `    declaration is genuinely shared rather than two lists that happen to agree`,
-  `shared declaration not proven: event=${JSON.stringify(sharedEvent?.config?.[KNOB])}, ` +
-  `declared=${JSON.stringify(sharedList.configEchoContract?.declared)}, ` +
-  `undeclared=${JSON.stringify(sharedList.configEchoContract?.undeclared)}, ` +
-  `row=${JSON.stringify(sharedRow?.config?.[KNOB])}, ` +
-  `mcpDrift=[${driftLines(sharedMcp).join(' | ')}]`
-);
+  verdict(
+    // The event path: published rather than dropped, and it stopped warning.
+    sharedEvent?.config?.[KNOB] === KNOB_VALUE &&
+      !driftLines(sharedMcp).some((l) => new RegExp(`config\\.${KNOB}`).test(l)) &&
+      // The poll path: the knob is in `declared`, and `undeclared` is empty —
+      // from the same edit, with nothing on this path touched.
+      (sharedList.configEchoContract?.declared ?? []).includes(KNOB) &&
+      sharedList.configEchoContract?.undeclared?.length === 0 &&
+      // And it is still on the wire, so "no longer reported" is not "no longer
+      // there" — the field is present and declared rather than absent.
+      sharedRow?.config?.[KNOB] === KNOB_VALUE &&
+      // The comparison that makes this a measurement: section 2's build carried
+      // the SAME injected knob and both surfaces answered the other way.
+      driftContract?.undeclared?.length > 0 &&
+      configuredEvent?.config?.[KNOB] === undefined,
+    `ONE edit — the knob added to CONFIG_FIELDS — and both surfaces moved together: the MCP\n` +
+    `    event notification now publishes config.${KNOB} and stopped reporting drift, and the\n` +
+    `    poll response lists it under \`declared\` with \`undeclared\` empty. Section 2's build\n` +
+    `    carried the identical injected knob and answered the opposite way on BOTH, so the\n` +
+    `    declaration is genuinely shared rather than two lists that happen to agree`,
+    `shared declaration not proven: event=${JSON.stringify(sharedEvent?.config?.[KNOB])}, ` +
+    `declared=${JSON.stringify(sharedList.configEchoContract?.declared)}, ` +
+    `undeclared=${JSON.stringify(sharedList.configEchoContract?.undeclared)}, ` +
+    `row=${JSON.stringify(sharedRow?.config?.[KNOB])}, ` +
+    `mcpDrift=[${driftLines(sharedMcp).join(' | ')}]`
+  );
 
-sharedMcp.kill();
-stopDaemon(sharedStatus.pid);
+  sharedMcp.kill();
+  stopDaemon(sharedStatus.pid);
 
+}
 // ================= 5. THE RESIDUE — a category no type system can see is swept --
 
 rule('5. THE RESIDUE — a category added straight into respond() is swept anyway');
@@ -896,55 +925,64 @@ rule('5. THE RESIDUE — a category added straight into respond() is swept anywa
 // the reason this sweep walks the RESPONSE rather than the six categories this
 // method knows it built — and "walks the response" is a claim worth producing
 // rather than asserting.
-const rogueDist = mutatedBuild('rogue', [{
-  file: 'router.js',
-  find: "const payload = {\n            action: 'list_agents_response',\n            success: true,",
-  replace:
-    "const payload = {\n            action: 'list_agents_response',\n            success: true,\n" +
-    "            /* KAN-166 section 5: a category nobody declared, added straight to the payload */\n" +
-    "            shadowAgents: [{ path: '/tmp/kan166-shadow', config: { priority: 1, " +
-    "refusable: true, chargeable: true, preemptable: true, launcher: 'shell', " +
-    `shadowKnob: '${KNOB_VALUE}' } }],`
-}]);
-const rogueCfg = makeConfig('rogue');
-const rogueStatus = await startDaemon(rogueCfg, rogueDist, 'rogue');
-const rogueMcp = new McpClient('rogue', { config: rogueCfg.configPath });
-await rogueMcp.initialize();
-await buildFleet(rogueMcp, 'rogue');
-const rogueList = await listAgents(rogueMcp);
+// Hoisted so this section can be SKIPPED WHOLE when an edit does not apply,
+// without changing what anything after it can see. See scripts/mutation.mjs.
+let rogueDist;
+mutation4: {
+  rogueDist = mutatedBuild('rogue', [{
+    file: 'router.js',
+    find: "const payload = {\n            action: 'list_agents_response',\n            success: true,",
+    replace:
+      "const payload = {\n            action: 'list_agents_response',\n            success: true,\n" +
+      "            /* KAN-166 section 5: a category nobody declared, added straight to the payload */\n" +
+      "            shadowAgents: [{ path: '/tmp/kan166-shadow', config: { priority: 1, " +
+      "refusable: true, chargeable: true, preemptable: true, launcher: 'shell', " +
+      `shadowKnob: '${KNOB_VALUE}' } }],`
+  }]);
+  // Already a counted failure. Skip the rest of this section rather
+  // than asserting about a build that was never mutated.
+  if (!rogueDist) break mutation4;
+  const rogueCfg = makeConfig('rogue');
+  const rogueStatus = await startDaemon(rogueCfg, rogueDist, 'rogue');
+  const rogueMcp = new McpClient('rogue', { config: rogueCfg.configPath });
+  await rogueMcp.initialize();
+  await buildFleet(rogueMcp, 'rogue');
+  const rogueList = await listAgents(rogueMcp);
 
-show('the undeclared category, on the response:', rogueList.shadowAgents);
-show('what the sweep found:', rogueList.configEchoContract?.undeclared);
+  show('the undeclared category, on the response:', rogueList.shadowAgents);
+  show('what the sweep found:', rogueList.configEchoContract?.undeclared);
 
-given(
-  Array.isArray(rogueList.shadowAgents) && rogueList.shadowAgents.length === 1,
-  'the rogue category really is on the response — a mutation that did not take ' +
-    'would leave nothing to find',
-);
+  given(
+    Array.isArray(rogueList.shadowAgents) && rogueList.shadowAgents.length === 1,
+    'the rogue category really is on the response — a mutation that did not take ' +
+      'would leave nothing to find',
+  );
 
-verdict(
-  (rogueList.configEchoContract?.undeclared ?? []).includes('shadowAgents[0].config.shadowKnob') &&
-    // And the rest of the fleet is swept in the same pass, so this is the sweep
-    // widening rather than a special case for one key.
-    (rogueList.configEchoContract?.undeclared ?? []).length === 1,
-  `a category added straight into respond() — which no type in this codebase can catch, and\n` +
-  `    FleetCategories says so — was swept the moment it shipped: its undeclared knob came\n` +
-  `    back as \`shadowAgents[0].config.shadowKnob\`, with the six real categories reporting\n` +
-  `    nothing, because the sweep walks the payload that goes out rather than a list of names`,
-  `the residue is not covered: undeclared=${JSON.stringify(rogueList.configEchoContract?.undeclared)}`
-);
+  verdict(
+    (rogueList.configEchoContract?.undeclared ?? []).includes('shadowAgents[0].config.shadowKnob') &&
+      // And the rest of the fleet is swept in the same pass, so this is the sweep
+      // widening rather than a special case for one key.
+      (rogueList.configEchoContract?.undeclared ?? []).length === 1,
+    `a category added straight into respond() — which no type in this codebase can catch, and\n` +
+    `    FleetCategories says so — was swept the moment it shipped: its undeclared knob came\n` +
+    `    back as \`shadowAgents[0].config.shadowKnob\`, with the six real categories reporting\n` +
+    `    nothing, because the sweep walks the payload that goes out rather than a list of names`,
+    `the residue is not covered: undeclared=${JSON.stringify(rogueList.configEchoContract?.undeclared)}`
+  );
 
-rogueMcp.kill();
-stopDaemon(rogueStatus.pid);
+  rogueMcp.kill();
+  stopDaemon(rogueStatus.pid);
 
-// ------------------------------------------------------------------ verdict --
+  // ------------------------------------------------------------------ verdict --
 
-console.log(`\n${'='.repeat(78)}`);
-if (failures > 0) {
-  console.log(`${failures} CHECK(S) FAILED`);
-} else {
-  console.log('all sections passed');
+  console.log(`\n${'='.repeat(78)}`);
+  if (failures > 0) {
+    console.log(`${failures} CHECK(S) FAILED`);
+  } else {
+    console.log('all sections passed');
+  }
+  console.log('='.repeat(78));
+
+  process.exit(failures ? 1 : 0);
+
 }
-console.log('='.repeat(78));
-
-process.exit(failures ? 1 : 0);

@@ -86,6 +86,8 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import { makeMutator } from './mutation.mjs';
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(process.argv[2] ?? path.join(scriptDir, '..', 'dist'));
 const repoRoot = path.join(scriptDir, '..');
@@ -268,25 +270,25 @@ try {
   if (e.code !== 'EEXIST') throw e;
 }
 
-function mutatedBuild(name, edits) {
-  const target = path.join(scratch, `dist-${name}`);
-  fs.cpSync(distDir, target, { recursive: true });
-  for (const { file, find, replace } of edits) {
-    const p = path.join(target, file);
-    const before = fs.readFileSync(p, 'utf8');
-    const count = before.split(find).length - 1;
-    if (count !== 1) {
-      throw new Error(
-        `mutation "${name}" expected exactly 1 occurrence of ${JSON.stringify(find)} in ` +
-        `${file}, found ${count}. The build was NOT mutated, so the section using it ` +
-        `would have proved nothing. Fix the mutation, not this check.`
-      );
-    }
-    fs.writeFileSync(p, before.replace(find, replace));
-    console.log(`   mutated ${name}/${file}: ${JSON.stringify(find)} → (${replace.length} chars)`);
+/**
+ * A copy of dist with one string replaced, or NULL when the edit did not apply.
+ *
+ * THIS USED TO THROW. A mutation whose anchor had drifted killed the process,
+ * so every section after it — including the ones whose whole job is proving the
+ * other checks can fail — never ran, and the reader got a stack trace with no
+ * signal that anything had been skipped (KAN-138 item 18). `scripts/mutation.mjs`
+ * keeps the exact-occurrence guard that was already right here and changes only
+ * what happens when it fires: the failure is COUNTED into this script's own
+ * verdict and the call returns null, so the rest of the file still reports.
+ */
+const { mutate: mutatedBuild, mutationsSkipped } = makeMutator({
+  distDir,
+  scratch,
+  report: {
+    pass: (label, detail) => verdict(true, `${label}${detail ? ` — ${detail}` : ''}`, ''),
+    fail: (label, detail) => verdict(false, '', `${label} — ${detail}`)
   }
-  return target;
-}
+});
 
 // -------------------------------------------------------- daemons & clients --
 
@@ -1077,59 +1079,70 @@ rule('3. THE REGRESSION — the old endsWith(\'_event\') forwarder, rebuilt and 
 
 // THE RED HALF. Not a description of the old filter: the old filter, compiled,
 // pointed at the SAME daemon that just delivered nine events to the current
-// build. If this section's mutation ever stops applying, mutatedBuild throws
-// rather than passing.
-const oldForwarderDist = mutatedBuild('old-filter', [{
-  file: 'mcp.js',
-  find: 'forwardEvent(msg);',
-  replace:
-    `{ /* KAN-128 section 3: the pre-contract forwarder, restored verbatim */\n` +
-    `            if (typeof msg?.action === 'string' && msg.action.endsWith('_event')) {\n` +
-    `                const subject = msg.path ?? msg.what ?? '(no subject)';\n` +
-    `                server.notification({ method: "notifications/message", params: {\n` +
-    `                    level: "info", data: \`[CrabCast Event] \${msg.action} - \${subject}\`\n` +
-    `                } }).catch(() => {});\n` +
-    `            } }`
-}]);
+// build. If this section's mutation ever stops applying, `mutatedBuild` records
+// a NAMED, COUNTED failure and returns null — the section below skips on it and
+// the run finishes red rather than passing. It used to throw, which is what the
+// sentence here said until KAN-138; a reader who went looking for a stack trace
+// on a drifted anchor would now find a FAIL line instead.
+// Hoisted so this section can be SKIPPED WHOLE when an edit does not apply,
+// without changing what anything after it can see. See scripts/mutation.mjs.
+let oldForwarderDist;
+mutation1: {
+  oldForwarderDist = mutatedBuild('old-filter', [{
+    file: 'mcp.js',
+    find: 'forwardEvent(msg);',
+    replace:
+      `{ /* KAN-128 section 3: the pre-contract forwarder, restored verbatim */\n` +
+      `            if (typeof msg?.action === 'string' && msg.action.endsWith('_event')) {\n` +
+      `                const subject = msg.path ?? msg.what ?? '(no subject)';\n` +
+      `                server.notification({ method: "notifications/message", params: {\n` +
+      `                    level: "info", data: \`[CrabCast Event] \${msg.action} - \${subject}\`\n` +
+      `                } }).catch(() => {});\n` +
+      `            } }`
+  }]);
+  // Already a counted failure. Skip the rest of this section rather
+  // than asserting about a build that was never mutated.
+  if (!oldForwarderDist) break mutation1;
 
-const oldClient = new McpClient('old-filter', { dist: oldForwarderDist, config: main.configPath });
-await oldClient.initialize();
-const freshClient = new McpClient('current', { config: main.configPath });
-await freshClient.initialize();
-await sleep(600);
+  const oldClient = new McpClient('old-filter', { dist: oldForwarderDist, config: main.configPath });
+  await oldClient.initialize();
+  const freshClient = new McpClient('current', { config: main.configPath });
+  await freshClient.initialize();
+  await sleep(600);
 
-// One activation, seen by both forwarders at once.
-const PROBE = owned('regression-probe');
-await call('crabcast_configure_agent', { path: PROBE, priority: 1, launcher: LAUNCHER });
-await call('crabcast_activate_agent', { path: PROBE, override: true });
-await waitFor(() => freshClient.eventPayloads().some((d) => d?.action === 'agent.activated'),
-  8000, 'the activation on the current forwarder');
-await sleep(1000); // give the old forwarder the same chance to say something
+  // One activation, seen by both forwarders at once.
+  const PROBE = owned('regression-probe');
+  await call('crabcast_configure_agent', { path: PROBE, priority: 1, launcher: LAUNCHER });
+  await call('crabcast_activate_agent', { path: PROBE, override: true });
+  await waitFor(() => freshClient.eventPayloads().some((d) => d?.action === 'agent.activated'),
+    8000, 'the activation on the current forwarder');
+  await sleep(1000); // give the old forwarder the same chance to say something
 
-const oldNotes = oldClient.eventPayloads();
-const freshNotes = freshClient.eventPayloads();
+  const oldNotes = oldClient.eventPayloads();
+  const freshNotes = freshClient.eventPayloads();
 
-console.log(`\n   the SAME daemon, the SAME activation, two forwarders:\n`);
-console.log(`   OLD  endsWith('_event')  → ${oldNotes.length} notification(s)`);
-show('old forwarder received:', oldNotes);
-console.log(`\n   NEW  positive allowlist → ${freshNotes.length} notification(s)`);
-show('new forwarder received (first three):', freshNotes.slice(0, 3));
+  console.log(`\n   the SAME daemon, the SAME activation, two forwarders:\n`);
+  console.log(`   OLD  endsWith('_event')  → ${oldNotes.length} notification(s)`);
+  show('old forwarder received:', oldNotes);
+  console.log(`\n   NEW  positive allowlist → ${freshNotes.length} notification(s)`);
+  show('new forwarder received (first three):', freshNotes.slice(0, 3));
 
-console.log(`\n   why: no published name ends in '_event' any more —`);
-console.log(`   ${EVENT_NAMES.map((n) => `${n}: ${n.endsWith('_event')}`).join('\n   ')}`);
+  console.log(`\n   why: no published name ends in '_event' any more —`);
+  console.log(`   ${EVENT_NAMES.map((n) => `${n}: ${n.endsWith('_event')}`).join('\n   ')}`);
 
-verdict(
-  oldNotes.length === 0 && freshNotes.length > 0 &&
-    freshNotes.some((d) => d?.action === 'agent.activated' && d?.path === PROBE) &&
-    EVENT_NAMES.every((n) => !n.endsWith('_event')),
-  'the retired filter received NOTHING while the allowlist received every event — the\n' +
-  '    MCP surface would have gone silent entirely, on all nine events, with no error on\n' +
-  '    either side. Both halves are here because either one alone proves nothing.',
-  `the regression is not demonstrated: old=${oldNotes.length}, new=${freshNotes.length}`
-);
-oldClient.kill();
-freshClient.kill();
+  verdict(
+    oldNotes.length === 0 && freshNotes.length > 0 &&
+      freshNotes.some((d) => d?.action === 'agent.activated' && d?.path === PROBE) &&
+      EVENT_NAMES.every((n) => !n.endsWith('_event')),
+    'the retired filter received NOTHING while the allowlist received every event — the\n' +
+    '    MCP surface would have gone silent entirely, on all nine events, with no error on\n' +
+    '    either side. Both halves are here because either one alone proves nothing.',
+    `the regression is not demonstrated: old=${oldNotes.length}, new=${freshNotes.length}`
+  );
+  oldClient.kill();
+  freshClient.kill();
 
+}
 // =============================================== 4. an off-allowlist action --
 
 rule('4. OFF-ALLOWLIST — dropped on the MCP path, logged on both sides, never malformed');
@@ -1137,59 +1150,67 @@ rule('4. OFF-ALLOWLIST — dropped on the MCP path, logged on both sides, never 
 // A daemon that broadcasts an action nobody published. This is what a future
 // event added without updating the contract looks like, and the whole point of
 // an allowlist over a suffix test is that this case is loud.
-const rogueDist = mutatedBuild('rogue-action', [{
-  file: 'router.js',
-  find: `action: 'agent.configured',`,
-  replace: `action: 'agent.teleported',`
-}]);
+// Hoisted so this section can be SKIPPED WHOLE when an edit does not apply,
+// without changing what anything after it can see. See scripts/mutation.mjs.
+let rogueDist;
+mutation2: {
+  rogueDist = mutatedBuild('rogue-action', [{
+    file: 'router.js',
+    find: `action: 'agent.configured',`,
+    replace: `action: 'agent.teleported',`
+  }]);
+  // Already a counted failure. Skip the rest of this section rather
+  // than asserting about a build that was never mutated.
+  if (!rogueDist) break mutation2;
 
-const rogueCfg = makeConfig('rogue');
-const rogueStatus = await startDaemon(rogueCfg, rogueDist, 'rogue');
-const rogueSub = await new SocketClient(rogueCfg, 'rogue-sub').ready();
-const rogueMcp = new McpClient('rogue-mcp', { config: rogueCfg.configPath });
-await rogueMcp.initialize();
-await sleep(500);
+  const rogueCfg = makeConfig('rogue');
+  const rogueStatus = await startDaemon(rogueCfg, rogueDist, 'rogue');
+  const rogueSub = await new SocketClient(rogueCfg, 'rogue-sub').ready();
+  const rogueMcp = new McpClient('rogue-mcp', { config: rogueCfg.configPath });
+  await rogueMcp.initialize();
+  await sleep(500);
 
-const ROGUE_PATH = owned('rogue-subject');
-await parsedText(await rogueMcp.callTool('crabcast_configure_agent', {
-  path: ROGUE_PATH, priority: 1, launcher: LAUNCHER
-}));
-await sleep(1200);
+  const ROGUE_PATH = owned('rogue-subject');
+  await parsedText(await rogueMcp.callTool('crabcast_configure_agent', {
+    path: ROGUE_PATH, priority: 1, launcher: LAUNCHER
+  }));
+  await sleep(1200);
 
-const daemonLog = fs.readFileSync(path.join(rogueCfg.dataDir, 'daemon.log'), 'utf8');
-const daemonWarning = daemonLog.split('\n').find((l) => l.includes('not on the event contract'));
-const mcpWarning = rogueMcp.stderr.split('\n').find((l) => l.includes('not on the event contract'));
-const rogueOnSocket = rogueSub.events.find((e) => e.action === 'agent.teleported');
-const rogueOnMcp = rogueMcp.eventPayloads().filter((d) => d?.action === 'agent.teleported');
+  const daemonLog = fs.readFileSync(path.join(rogueCfg.dataDir, 'daemon.log'), 'utf8');
+  const daemonWarning = daemonLog.split('\n').find((l) => l.includes('not on the event contract'));
+  const mcpWarning = rogueMcp.stderr.split('\n').find((l) => l.includes('not on the event contract'));
+  const rogueOnSocket = rogueSub.events.find((e) => e.action === 'agent.teleported');
+  const rogueOnMcp = rogueMcp.eventPayloads().filter((d) => d?.action === 'agent.teleported');
 
-console.log(`\n   daemon-side log line (${path.join(rogueCfg.dataDir, 'daemon.log')}):\n`);
-console.log(`     ${daemonWarning ?? '(NONE)'}`);
-console.log(`\n   MCP-server-side log line (its stderr):\n`);
-console.log(`     ${mcpWarning ?? '(NONE)'}`);
-console.log(`\n   what the MCP client received for it: ${rogueOnMcp.length} notification(s)`);
-show('what the SOCKET subscriber received for it:', rogueOnSocket ?? '(nothing)');
+  console.log(`\n   daemon-side log line (${path.join(rogueCfg.dataDir, 'daemon.log')}):\n`);
+  console.log(`     ${daemonWarning ?? '(NONE)'}`);
+  console.log(`\n   MCP-server-side log line (its stderr):\n`);
+  console.log(`     ${mcpWarning ?? '(NONE)'}`);
+  console.log(`\n   what the MCP client received for it: ${rogueOnMcp.length} notification(s)`);
+  show('what the SOCKET subscriber received for it:', rogueOnSocket ?? '(nothing)');
 
-verdict(
-  Boolean(daemonWarning) && /agent\.teleported/.test(daemonWarning ?? '') &&
-    Boolean(mcpWarning) && /agent\.teleported/.test(mcpWarning ?? '') &&
-    rogueOnMcp.length === 0 &&
-    // The socket half of the contract: broadcast filters nothing, matching is
-    // the subscriber's, and an unrecognised action must be ignored rather than
-    // errored on. It arrives UNSEQUENCED — no seq, no bootId — because
-    // burning a sequence number on something no subscriber recognises would
-    // put a gap in the sequence that means nothing.
-    Boolean(rogueOnSocket) && rogueOnSocket.seq === undefined && rogueOnSocket.bootId === undefined,
-  'the off-contract action was DROPPED on the MCP path and named in a warning on both\n' +
-  '    sides of the boundary; on the socket it arrived unsequenced, where the contract\n' +
-  '    says a subscriber must ignore what it does not recognise. Nothing reached a\n' +
-  '    subscriber malformed.',
-  `daemonWarning=${Boolean(daemonWarning)} mcpWarning=${Boolean(mcpWarning)} ` +
-  `mcpNotifications=${rogueOnMcp.length} socketFrame=${Boolean(rogueOnSocket)}`
-);
-rogueMcp.kill();
-rogueSub.close();
-stopDaemon(rogueStatus.pid);
+  verdict(
+    Boolean(daemonWarning) && /agent\.teleported/.test(daemonWarning ?? '') &&
+      Boolean(mcpWarning) && /agent\.teleported/.test(mcpWarning ?? '') &&
+      rogueOnMcp.length === 0 &&
+      // The socket half of the contract: broadcast filters nothing, matching is
+      // the subscriber's, and an unrecognised action must be ignored rather than
+      // errored on. It arrives UNSEQUENCED — no seq, no bootId — because
+      // burning a sequence number on something no subscriber recognises would
+      // put a gap in the sequence that means nothing.
+      Boolean(rogueOnSocket) && rogueOnSocket.seq === undefined && rogueOnSocket.bootId === undefined,
+    'the off-contract action was DROPPED on the MCP path and named in a warning on both\n' +
+    '    sides of the boundary; on the socket it arrived unsequenced, where the contract\n' +
+    '    says a subscriber must ignore what it does not recognise. Nothing reached a\n' +
+    '    subscriber malformed.',
+    `daemonWarning=${Boolean(daemonWarning)} mcpWarning=${Boolean(mcpWarning)} ` +
+    `mcpNotifications=${rogueOnMcp.length} socketFrame=${Boolean(rogueOnSocket)}`
+  );
+  rogueMcp.kill();
+  rogueSub.close();
+  stopDaemon(rogueStatus.pid);
 
+}
 // ============================================ 5. status_changed and latency --
 
 rule('5. agent.status_changed — a real transition, timed against the documented bound');
@@ -1359,194 +1380,209 @@ rule('7. DEPTH — a field added INSIDE `config`, at a real emission site (KAN-1
 // fail also still passes. So the same build grows a field at the top level and
 // a field inside `config`, and the current forwarder has to name BOTH. The
 // depth that already worked is measured, not assumed.
-const driftDist = mutatedBuild('config-drift', [
-  {
-    file: 'router.js',
-    find: 'launcher: launcher.trim(),',
+// Hoisted so this section can be SKIPPED WHOLE when an edit does not apply,
+// without changing what anything after it can see. See scripts/mutation.mjs.
+let driftDist, depth1Dist, noShapeDist;
+mutation3: {
+  driftDist = mutatedBuild('config-drift', [
+    {
+      file: 'router.js',
+      find: 'launcher: launcher.trim(),',
+      replace:
+        `launcher: launcher.trim(),\n` +
+        `            /* KAN-164 section 7: a knob a future slice added and forgot to declare */\n` +
+        `            telemetryToken: 'sk-live-UNDECLARED',`
+    },
+    {
+      file: 'router.js',
+      find: "action: 'agent.configured',",
+      replace:
+        `action: 'agent.configured',\n` +
+        `            /* KAN-164 section 7: the activatedBy-shaped catch, at the top level */\n` +
+        `            sessionCookie: 'TOP-LEVEL-UNDECLARED',`
+    }
+  ]);
+  // Already a counted failure. Skip the rest of this section rather
+  // than asserting about a build that was never mutated.
+  if (!driftDist) break mutation3;
+
+  // THE RED HALF, and it is the pre-fix mechanism rather than a description of
+  // it: `projectValue` returning its argument untouched IS
+  // `payload[field] = msg[field]`, with no nested walk and nothing appended to
+  // `undeclared`. Built from the CURRENT dist, so the only difference between
+  // this forwarder and the one beside it is the fix under test.
+  depth1Dist = mutatedBuild('depth-1', [{
+    file: 'events.js',
+    find: 'function projectValue(value, shape, at, drift) {',
     replace:
-      `launcher: launcher.trim(),\n` +
-      `            /* KAN-164 section 7: a knob a future slice added and forgot to declare */\n` +
-      `            telemetryToken: 'sk-live-UNDECLARED',`
-  },
-  {
-    file: 'router.js',
-    find: "action: 'agent.configured',",
-    replace:
-      `action: 'agent.configured',\n` +
-      `            /* KAN-164 section 7: the activatedBy-shaped catch, at the top level */\n` +
-      `            sessionCookie: 'TOP-LEVEL-UNDECLARED',`
+      `function projectValue(value, shape, at, drift) {\n` +
+      `    /* KAN-164 section 7: the pre-fix depth-1 projection, restored */\n` +
+      `    return value;`
+  }]);
+  // Already a counted failure. Skip the rest of this section rather
+  // than asserting about a build that was never mutated.
+  if (!depth1Dist) break mutation3;
+
+  // A THIRD BUILD for the other half of the design: a declared field with no
+  // interior written down is a SCALAR, and a composite that reaches one is
+  // reported and dropped rather than passed through. This is what makes
+  // forgetting to declare an interior loud instead of quiet, and it is the
+  // property the whole scheme rests on — without it, a composite added later
+  // silently reacquires the depth-1 behaviour.
+  noShapeDist = mutatedBuild('config-unshaped', [{
+    file: 'events.js',
+    find: 'shapes: { config: CONFIG_SHAPE, changed: SCALARS, outcomes: OUTCOMES_SHAPE },',
+    replace: 'shapes: { changed: SCALARS, outcomes: OUTCOMES_SHAPE }, /* KAN-164 §7: config undeclared */'
+  }]);
+  // Already a counted failure. Skip the rest of this section rather
+  // than asserting about a build that was never mutated.
+  if (!noShapeDist) break mutation3;
+
+  const driftCfg = makeConfig('config-drift');
+  const driftStatus = await startDaemon(driftCfg, driftDist, 'config-drift');
+  const driftSub = await new SocketClient(driftCfg, 'drift-sub').ready();
+  const fixedMcp = new McpClient('fixed', { config: driftCfg.configPath });
+  const depth1Mcp = new McpClient('depth-1', { dist: depth1Dist, config: driftCfg.configPath });
+  const noShapeMcp = new McpClient('unshaped', { dist: noShapeDist, config: driftCfg.configPath });
+  await fixedMcp.initialize();
+  await depth1Mcp.initialize();
+  await noShapeMcp.initialize();
+  await sleep(700);
+
+  // The caller's own MCP server definition, which the contract promises is
+  // written verbatim and never read. It rides along so the ONE deliberate hole
+  // in the recursion is observed rather than only asserted in prose.
+  const CALLER_SERVERS = { 'consumer-private': { command: 'true', args: ['--their-flag'] } };
+
+  const DEPTH_PATH = owned('depth-subject');
+  await parsedText(await fixedMcp.callTool('crabcast_configure_agent', {
+    path: DEPTH_PATH, priority: 1, launcher: LAUNCHER, mcpServers: CALLER_SERVERS
+  }));
+  await waitFor(
+    () => driftSub.eventsNamed('agent.configured').some((e) => e.path === DEPTH_PATH) &&
+      [fixedMcp, depth1Mcp, noShapeMcp].every((c) =>
+        c.eventPayloads().some((d) => d?.action === 'agent.configured' && d?.path === DEPTH_PATH)),
+    15_000,
+    'agent.configured on the socket and all three forwarders'
+  );
+
+  const configuredOn = (client) => client.eventPayloads()
+    .find((d) => d?.action === 'agent.configured' && d?.path === DEPTH_PATH);
+  const socketFrame = driftSub.eventsNamed('agent.configured').find((e) => e.path === DEPTH_PATH);
+  const fixedFrame = configuredOn(fixedMcp);
+  const depth1Frame = configuredOn(depth1Mcp);
+  const noShapeFrame = configuredOn(noShapeMcp);
+
+  const driftNamed = (client) => client.stderr.split('\n')
+    .filter((l) => /carried undeclared field/.test(l));
+  const fixedDrift = driftNamed(fixedMcp);
+  const depth1Drift = driftNamed(depth1Mcp);
+  const noShapeDrift = driftNamed(noShapeMcp);
+
+  console.log(`\n   two fields injected at the emission site, one at each depth:`);
+  console.log(`     sessionCookie          — top level, the shape the activatedBy catch had`);
+  console.log(`     config.telemetryToken  — one level down, invisible before this change\n`);
+  show('SOCKET subscriber — a MINIMUM, so it arrives (§4):', socketFrame?.config);
+  show('MCP, CURRENT forwarder — EXACTLY the declared fields:', fixedFrame?.config);
+  show('MCP, pre-fix depth-1 forwarder — the defect:', depth1Frame?.config);
+  console.log(`\n   drift reported by the current forwarder:`);
+  console.log(`     ${fixedDrift.join('\n     ') || '(NONE)'}`);
+  console.log(`\n   drift reported by the pre-fix depth-1 forwarder:`);
+  console.log(`     ${depth1Drift.join('\n     ') || '(NONE — it could not see inside `config`)'}`);
+  console.log(`\n   the one deliberate hole, observed rather than asserted: config.mcpServers is`);
+  console.log(`   the caller's own bytes and travels WHOLE.`);
+  show('   sent by the caller:', CALLER_SERVERS);
+  show('   received on the MCP path:', fixedFrame?.config?.mcpServers);
+  console.log(`\n   a composite whose interior is NOT declared (the shapes entry removed):`);
+  show('   config, as the unshaped forwarder published it:', noShapeFrame?.config ?? '(dropped entirely)');
+  console.log(`   drift it reported: ${noShapeDrift.length ? '\n     ' + noShapeDrift.join('\n     ') : '(NONE)'}`);
+
+  const namesTheKnob = (lines) => lines.some((l) => /config\.telemetryToken/.test(l));
+  // The top-level catch, named as a BARE field rather than a path — the same
+  // report `activatedBy` produced. Anchored so `config.sessionCookie` could not
+  // satisfy it: what is being asserted is that the shallow check still fires,
+  // not that the string appears somewhere.
+  const namesTheTopLevel = (lines) =>
+    lines.some((l) => /field\(s\)[^;]*(?:^|[\s,])sessionCookie(?:,|;|\s)/.test(l));
+  // Every knob of the config that WAS declared still went out. A projector that
+  // dropped the undeclared field by dropping the whole composite would pass the
+  // assertion above and destroy the payload, which is the failure this line is
+  // here to exclude.
+  const declaredKnobsSurvived =
+    fixedFrame?.config?.launcher === LAUNCHER &&
+    fixedFrame?.config?.priority === 1 &&
+    fixedFrame?.config?.refusable === true &&
+    Object.keys(fixedFrame?.outcomes ?? {}).length === 8 &&
+    Array.isArray(fixedFrame?.changed) && fixedFrame.changed.includes('launcher');
+
+  verdict(
+    // The socket half is unchanged: broadcast filters nothing, so the injected
+    // field reaches a socket subscriber. §4 says so, and the asymmetry is the
+    // reason that clause is contract rather than advice.
+    socketFrame?.config?.telemetryToken === 'sk-live-UNDECLARED' &&
+      // The fix: dropped on the MCP path, and NAMED by its path rather than
+      // silently absent.
+      fixedFrame?.config?.telemetryToken === undefined &&
+      namesTheKnob(fixedDrift) &&
+      declaredKnobsSurvived &&
+      // CRITERION 3, as evidence rather than inference: the top-level catch is
+      // not merely still green, it still FIRES — the undeclared field at depth 0
+      // is dropped and named as a bare field, exactly as `activatedBy` was.
+      fixedFrame?.sessionCookie === undefined &&
+      namesTheTopLevel(fixedDrift) &&
+      // And the pre-fix forwarder catches THAT one too — which is what makes the
+      // comparison beneath it a measurement of depth rather than of two
+      // different builds: the only thing the old projector missed was the field
+      // one level down.
+      depth1Frame?.sessionCookie === undefined &&
+      namesTheTopLevel(depth1Drift) &&
+      // The deliberate exception, observed on the wire.
+      JSON.stringify(fixedFrame?.config?.mcpServers) === JSON.stringify(CALLER_SERVERS) &&
+      // THE RED HALF: the pre-fix forwarder, against the SAME broadcast, both
+      // delivers the undeclared field and reports nothing. Without this the
+      // section above proves only that a green check is green.
+      depth1Frame?.config?.telemetryToken === 'sk-live-UNDECLARED' &&
+      !namesTheKnob(depth1Drift) &&
+      // A composite with no declared interior is reported and dropped, so
+      // forgetting to declare one cannot quietly restore depth-1 behaviour.
+      noShapeFrame?.config === undefined &&
+      namesTheKnob(noShapeDrift),
+    'a field injected INSIDE `config` at a real emission site reached a socket subscriber\n' +
+    '    and was DROPPED from the MCP notification and named as `config.telemetryToken` —\n' +
+    '    while every declared knob, `changed[]` and all eight `outcomes` went out intact.\n' +
+    '    The pre-fix depth-1 forwarder, rebuilt and pointed at the SAME daemon, delivered\n' +
+    '    that field and reported nothing, which is the defect. BOTH forwarders caught the\n' +
+    '    field injected at the TOP level, so the activatedBy-shaped catch still fires and\n' +
+    '    the difference between them is depth and nothing else. `config.mcpServers` — the\n' +
+    "    caller's own bytes — travelled whole, which is the one hole §4 declares; and a\n" +
+    '    composite whose interior is undeclared was dropped and named rather than passed',
+    `depth not proven: socket=${JSON.stringify(socketFrame?.config?.telemetryToken)}, ` +
+    `fixed=${JSON.stringify(fixedFrame?.config?.telemetryToken)}, ` +
+    `topLevelCaught=${namesTheTopLevel(fixedDrift)}/${namesTheTopLevel(depth1Drift)}, ` +
+    `fixedDrift=[${fixedDrift.join(' | ')}], declaredKnobsSurvived=${declaredKnobsSurvived}, ` +
+    `mcpServers=${JSON.stringify(fixedFrame?.config?.mcpServers)}, ` +
+    `depth1=${JSON.stringify(depth1Frame?.config?.telemetryToken)}, ` +
+    `depth1Drift=[${depth1Drift.join(' | ')}], ` +
+    `unshapedConfig=${JSON.stringify(noShapeFrame?.config)}, ` +
+    `unshapedDrift=[${noShapeDrift.join(' | ')}]`
+  );
+
+  fixedMcp.kill();
+  depth1Mcp.kill();
+  noShapeMcp.kill();
+  driftSub.close();
+  stopDaemon(driftStatus.pid);
+
+  // ------------------------------------------------------------------ verdict --
+
+  console.log(`\n${'='.repeat(78)}`);
+  if (failures > 0) {
+    console.log(`${failures} SECTION(S) FAILED`);
+  } else {
+    console.log('all sections passed');
   }
-]);
+  console.log('='.repeat(78));
 
-// THE RED HALF, and it is the pre-fix mechanism rather than a description of
-// it: `projectValue` returning its argument untouched IS
-// `payload[field] = msg[field]`, with no nested walk and nothing appended to
-// `undeclared`. Built from the CURRENT dist, so the only difference between
-// this forwarder and the one beside it is the fix under test.
-const depth1Dist = mutatedBuild('depth-1', [{
-  file: 'events.js',
-  find: 'function projectValue(value, shape, at, drift) {',
-  replace:
-    `function projectValue(value, shape, at, drift) {\n` +
-    `    /* KAN-164 section 7: the pre-fix depth-1 projection, restored */\n` +
-    `    return value;`
-}]);
+  process.exit(failures ? 1 : 0);
 
-// A THIRD BUILD for the other half of the design: a declared field with no
-// interior written down is a SCALAR, and a composite that reaches one is
-// reported and dropped rather than passed through. This is what makes
-// forgetting to declare an interior loud instead of quiet, and it is the
-// property the whole scheme rests on — without it, a composite added later
-// silently reacquires the depth-1 behaviour.
-const noShapeDist = mutatedBuild('config-unshaped', [{
-  file: 'events.js',
-  find: 'shapes: { config: CONFIG_SHAPE, changed: SCALARS, outcomes: OUTCOMES_SHAPE },',
-  replace: 'shapes: { changed: SCALARS, outcomes: OUTCOMES_SHAPE }, /* KAN-164 §7: config undeclared */'
-}]);
-
-const driftCfg = makeConfig('config-drift');
-const driftStatus = await startDaemon(driftCfg, driftDist, 'config-drift');
-const driftSub = await new SocketClient(driftCfg, 'drift-sub').ready();
-const fixedMcp = new McpClient('fixed', { config: driftCfg.configPath });
-const depth1Mcp = new McpClient('depth-1', { dist: depth1Dist, config: driftCfg.configPath });
-const noShapeMcp = new McpClient('unshaped', { dist: noShapeDist, config: driftCfg.configPath });
-await fixedMcp.initialize();
-await depth1Mcp.initialize();
-await noShapeMcp.initialize();
-await sleep(700);
-
-// The caller's own MCP server definition, which the contract promises is
-// written verbatim and never read. It rides along so the ONE deliberate hole
-// in the recursion is observed rather than only asserted in prose.
-const CALLER_SERVERS = { 'consumer-private': { command: 'true', args: ['--their-flag'] } };
-
-const DEPTH_PATH = owned('depth-subject');
-await parsedText(await fixedMcp.callTool('crabcast_configure_agent', {
-  path: DEPTH_PATH, priority: 1, launcher: LAUNCHER, mcpServers: CALLER_SERVERS
-}));
-await waitFor(
-  () => driftSub.eventsNamed('agent.configured').some((e) => e.path === DEPTH_PATH) &&
-    [fixedMcp, depth1Mcp, noShapeMcp].every((c) =>
-      c.eventPayloads().some((d) => d?.action === 'agent.configured' && d?.path === DEPTH_PATH)),
-  15_000,
-  'agent.configured on the socket and all three forwarders'
-);
-
-const configuredOn = (client) => client.eventPayloads()
-  .find((d) => d?.action === 'agent.configured' && d?.path === DEPTH_PATH);
-const socketFrame = driftSub.eventsNamed('agent.configured').find((e) => e.path === DEPTH_PATH);
-const fixedFrame = configuredOn(fixedMcp);
-const depth1Frame = configuredOn(depth1Mcp);
-const noShapeFrame = configuredOn(noShapeMcp);
-
-const driftNamed = (client) => client.stderr.split('\n')
-  .filter((l) => /carried undeclared field/.test(l));
-const fixedDrift = driftNamed(fixedMcp);
-const depth1Drift = driftNamed(depth1Mcp);
-const noShapeDrift = driftNamed(noShapeMcp);
-
-console.log(`\n   two fields injected at the emission site, one at each depth:`);
-console.log(`     sessionCookie          — top level, the shape the activatedBy catch had`);
-console.log(`     config.telemetryToken  — one level down, invisible before this change\n`);
-show('SOCKET subscriber — a MINIMUM, so it arrives (§4):', socketFrame?.config);
-show('MCP, CURRENT forwarder — EXACTLY the declared fields:', fixedFrame?.config);
-show('MCP, pre-fix depth-1 forwarder — the defect:', depth1Frame?.config);
-console.log(`\n   drift reported by the current forwarder:`);
-console.log(`     ${fixedDrift.join('\n     ') || '(NONE)'}`);
-console.log(`\n   drift reported by the pre-fix depth-1 forwarder:`);
-console.log(`     ${depth1Drift.join('\n     ') || '(NONE — it could not see inside `config`)'}`);
-console.log(`\n   the one deliberate hole, observed rather than asserted: config.mcpServers is`);
-console.log(`   the caller's own bytes and travels WHOLE.`);
-show('   sent by the caller:', CALLER_SERVERS);
-show('   received on the MCP path:', fixedFrame?.config?.mcpServers);
-console.log(`\n   a composite whose interior is NOT declared (the shapes entry removed):`);
-show('   config, as the unshaped forwarder published it:', noShapeFrame?.config ?? '(dropped entirely)');
-console.log(`   drift it reported: ${noShapeDrift.length ? '\n     ' + noShapeDrift.join('\n     ') : '(NONE)'}`);
-
-const namesTheKnob = (lines) => lines.some((l) => /config\.telemetryToken/.test(l));
-// The top-level catch, named as a BARE field rather than a path — the same
-// report `activatedBy` produced. Anchored so `config.sessionCookie` could not
-// satisfy it: what is being asserted is that the shallow check still fires,
-// not that the string appears somewhere.
-const namesTheTopLevel = (lines) =>
-  lines.some((l) => /field\(s\)[^;]*(?:^|[\s,])sessionCookie(?:,|;|\s)/.test(l));
-// Every knob of the config that WAS declared still went out. A projector that
-// dropped the undeclared field by dropping the whole composite would pass the
-// assertion above and destroy the payload, which is the failure this line is
-// here to exclude.
-const declaredKnobsSurvived =
-  fixedFrame?.config?.launcher === LAUNCHER &&
-  fixedFrame?.config?.priority === 1 &&
-  fixedFrame?.config?.refusable === true &&
-  Object.keys(fixedFrame?.outcomes ?? {}).length === 8 &&
-  Array.isArray(fixedFrame?.changed) && fixedFrame.changed.includes('launcher');
-
-verdict(
-  // The socket half is unchanged: broadcast filters nothing, so the injected
-  // field reaches a socket subscriber. §4 says so, and the asymmetry is the
-  // reason that clause is contract rather than advice.
-  socketFrame?.config?.telemetryToken === 'sk-live-UNDECLARED' &&
-    // The fix: dropped on the MCP path, and NAMED by its path rather than
-    // silently absent.
-    fixedFrame?.config?.telemetryToken === undefined &&
-    namesTheKnob(fixedDrift) &&
-    declaredKnobsSurvived &&
-    // CRITERION 3, as evidence rather than inference: the top-level catch is
-    // not merely still green, it still FIRES — the undeclared field at depth 0
-    // is dropped and named as a bare field, exactly as `activatedBy` was.
-    fixedFrame?.sessionCookie === undefined &&
-    namesTheTopLevel(fixedDrift) &&
-    // And the pre-fix forwarder catches THAT one too — which is what makes the
-    // comparison beneath it a measurement of depth rather than of two
-    // different builds: the only thing the old projector missed was the field
-    // one level down.
-    depth1Frame?.sessionCookie === undefined &&
-    namesTheTopLevel(depth1Drift) &&
-    // The deliberate exception, observed on the wire.
-    JSON.stringify(fixedFrame?.config?.mcpServers) === JSON.stringify(CALLER_SERVERS) &&
-    // THE RED HALF: the pre-fix forwarder, against the SAME broadcast, both
-    // delivers the undeclared field and reports nothing. Without this the
-    // section above proves only that a green check is green.
-    depth1Frame?.config?.telemetryToken === 'sk-live-UNDECLARED' &&
-    !namesTheKnob(depth1Drift) &&
-    // A composite with no declared interior is reported and dropped, so
-    // forgetting to declare one cannot quietly restore depth-1 behaviour.
-    noShapeFrame?.config === undefined &&
-    namesTheKnob(noShapeDrift),
-  'a field injected INSIDE `config` at a real emission site reached a socket subscriber\n' +
-  '    and was DROPPED from the MCP notification and named as `config.telemetryToken` —\n' +
-  '    while every declared knob, `changed[]` and all eight `outcomes` went out intact.\n' +
-  '    The pre-fix depth-1 forwarder, rebuilt and pointed at the SAME daemon, delivered\n' +
-  '    that field and reported nothing, which is the defect. BOTH forwarders caught the\n' +
-  '    field injected at the TOP level, so the activatedBy-shaped catch still fires and\n' +
-  '    the difference between them is depth and nothing else. `config.mcpServers` — the\n' +
-  "    caller's own bytes — travelled whole, which is the one hole §4 declares; and a\n" +
-  '    composite whose interior is undeclared was dropped and named rather than passed',
-  `depth not proven: socket=${JSON.stringify(socketFrame?.config?.telemetryToken)}, ` +
-  `fixed=${JSON.stringify(fixedFrame?.config?.telemetryToken)}, ` +
-  `topLevelCaught=${namesTheTopLevel(fixedDrift)}/${namesTheTopLevel(depth1Drift)}, ` +
-  `fixedDrift=[${fixedDrift.join(' | ')}], declaredKnobsSurvived=${declaredKnobsSurvived}, ` +
-  `mcpServers=${JSON.stringify(fixedFrame?.config?.mcpServers)}, ` +
-  `depth1=${JSON.stringify(depth1Frame?.config?.telemetryToken)}, ` +
-  `depth1Drift=[${depth1Drift.join(' | ')}], ` +
-  `unshapedConfig=${JSON.stringify(noShapeFrame?.config)}, ` +
-  `unshapedDrift=[${noShapeDrift.join(' | ')}]`
-);
-
-fixedMcp.kill();
-depth1Mcp.kill();
-noShapeMcp.kill();
-driftSub.close();
-stopDaemon(driftStatus.pid);
-
-// ------------------------------------------------------------------ verdict --
-
-console.log(`\n${'='.repeat(78)}`);
-if (failures > 0) {
-  console.log(`${failures} SECTION(S) FAILED`);
-} else {
-  console.log('all sections passed');
 }
-console.log('='.repeat(78));
-
-process.exit(failures ? 1 : 0);

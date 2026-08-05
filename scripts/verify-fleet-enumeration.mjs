@@ -74,6 +74,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
+import { makeMutator } from './mutation.mjs';
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
 const distDir = path.resolve(process.argv[2] ?? path.join(repoRoot, 'dist'));
@@ -607,14 +609,21 @@ try {
  * Run one mutation section, and turn a missing anchor into a RED CHECK rather
  * than into a dead run.
  *
- * The sibling scripts throw here, deliberately: an anchor that no longer
- * matches means the mutation target moved and the section is unproven, which
- * must not read as a pass. That is right, and it has one consequence this
- * script cannot afford — a throw takes the sections after it down with it, and
- * §9 and §10 are where the contract and the two consumer surfaces are checked.
- * So the failure is recorded with the same weight and the run continues, which
- * is also what makes this script legible when it is pointed at a build that
- * has no paging in it at all.
+ * An anchor that no longer matches means the mutation target moved and the
+ * section is unproven, which must not read as a pass — and it must not take the
+ * sections after it down either, since §9 and §10 are where the contract and the
+ * two consumer surfaces are checked.
+ *
+ * THE SIBLING SCRIPTS USED TO THROW HERE, and this comment used to say so as a
+ * live fact. Since KAN-138 none of them does: every mutating proof goes through
+ * `scripts/mutation.mjs`, which records a counted failure and returns null, and
+ * this file's own disposal is the one the others were changed to match.
+ *
+ * This wrapper stays anyway, and not out of caution: `mutate` covers the edit
+ * not applying, and nothing else. A mutant that imports, spawns or answers
+ * wrongly can still throw from inside a section body, and that is what this
+ * catches. It is also what makes this script legible when it is pointed at a
+ * build with no paging in it at all.
  */
 async function mutationSection(name, body) {
   try {
@@ -628,26 +637,34 @@ async function mutationSection(name, body) {
 }
 
 /** A copy of dist with one string replaced. Returns the mutated module dir. */
-function mutantDist(name, file, from, to) {
-  const dir = path.join(tmp, `mutant-${name}`);
-  fs.cpSync(distDir, dir, { recursive: true });
-  const target = path.join(dir, file);
-  const before = fs.readFileSync(target, 'utf8');
-  const occurrences = before.split(from).length - 1;
-  if (occurrences !== 1) {
-    throw new Error(
-      `mutation '${name}' expected exactly one occurrence of ${JSON.stringify(from)} in ` +
-        `${file}, found ${occurrences}. The mutation target moved; fix this script rather ` +
-        `than deleting the section — an un-mutatable check is an unproven one.`
-    );
+/**
+ * A copy of dist with one string replaced, or NULL when the edit did not apply.
+ *
+ * THIS FILE ALREADY HAD THE HARD HALF RIGHT — `mutationSection` below caught the
+ * throw, counted it as a failure and let the run continue, which is exactly the
+ * property KAN-138 went looking for and found missing in the other seven copies.
+ * What it gains from the shared helper is that the failure now arrives as a
+ * NAMED verdict from the mutation itself rather than as a stringified exception,
+ * and that this file no longer carries a private implementation that can drift
+ * from the other eight. `mutationSection` stays: it is a second net under any
+ * OTHER throw a mutant section can produce, which is not what `mutate` covers.
+ */
+const { mutate: mutantDist, mutationsSkipped } = makeMutator({
+  distDir,
+  scratch: tmp,
+  report: {
+    pass: (label, detail) => check(true, label, detail),
+    fail: (label, detail) => check(false, label, detail)
   }
-  fs.writeFileSync(target, before.replace(from, to));
-  return dir;
-}
+});
 
 /** The same 40-agent fleet, against a broken build. */
 async function mutantFleet(name, file, from, to, logName) {
   const dir = mutantDist(name, file, from, to);
+  // The mutation did not apply and is already a counted failure. Null rather
+  // than a harness built over a build that was never mutated: the caller skips
+  // its section, and the sections after it still run.
+  if (!dir) return null;
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
   const h = harness(logName, Broken, BrokenReg);
@@ -664,12 +681,17 @@ await mutationSection('no-cursor', async () => {
   // MUTATION 1: THE SHIPPED DEFECT, RESTORED. The response still carries 25
   // rows and an honest total, and no handle to the rest — which is exactly
   // what `sorted.slice(0, FLEET_CATEGORY_LIMIT)` with a `*Total` alongside was.
-  const { h, dirs } = await mutantFleet(
+  const fleet = await mutantFleet(
     'no-cursor', 'router.js',
     'nextCursor: remaining > 0 && page.length > 0 ? encodeFleetCursor(page[page.length - 1].at) : null',
     'nextCursor: null',
     's8a'
   );
+  // The mutation did not apply and is already a counted failure — asserting
+  // about a build that was never mutated would prove the opposite of this
+  // section. Return, and let the sections after it run.
+  if (!fleet) return;
+  const { h, dirs } = fleet;
   const walked = await walk(h.invoke, 'standbyAgents');
   const listed = await h.invoke({ action: 'list_agents' });
   console.log(`   the mutant answers ${walked.rows.length} of ${listed.standbyTotal} rows and stops`);
@@ -691,12 +713,17 @@ await mutationSection('cursor-ignored', async () => {
   // MUTATION 2: the cursor is accepted and ignored — every page is page one.
   // This is the plausible wrong implementation, and its signature is not a
   // wrong answer but a walk that never ends.
-  const { h, dirs } = await mutantFleet(
+  const fleet = await mutantFleet(
     'cursor-ignored', 'router.js',
     'const start = from === null ? 0 : ordered.findIndex((r) => compareFleetRows(r.at, from) > 0);',
     'const start = 0;',
     's8b'
   );
+  // The mutation did not apply and is already a counted failure — asserting
+  // about a build that was never mutated would prove the opposite of this
+  // section. Return, and let the sections after it run.
+  if (!fleet) return;
+  const { h, dirs } = fleet;
   const walked = await walk(h.invoke, 'standbyAgents', { budget: 12 });
   console.log(`   the mutant returned ${walked.pages.length} pages before the budget stopped it, ` +
     `${new Set(paths(walked.rows)).size} distinct rows among ${walked.rows.length}`);
@@ -717,6 +744,10 @@ await mutationSection('no-tiebreak', async () => {
     'return byTime !== 0 ? byTime : a.k.localeCompare(b.k);',
     'return byTime;'
   );
+  // The mutation did not apply and is already a counted failure — asserting
+  // about a build that was never mutated would prove the opposite of this
+  // section. Return, and let the sections after it run.
+  if (!dir) return;
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
   const h = harness('s8c', Broken, BrokenReg);
@@ -750,6 +781,10 @@ await mutationSection('cursor-silently-resets', async () => {
     "if (typeof after !== 'string' || (from = decodeFleetCursor(after)) === null) {",
     "if ((typeof after !== 'string' || (from = decodeFleetCursor(after)) === null) && false) {"
   );
+  // The mutation did not apply and is already a counted failure — asserting
+  // about a build that was never mutated would prove the opposite of this
+  // section. Return, and let the sections after it run.
+  if (!dir) return;
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
   const h = harness('s8d', Broken, BrokenReg);
@@ -1074,6 +1109,14 @@ const waitFor = async (fn, ms, what) => {
 }
 
 // ---------------------------------------------------------------------------
+if (mutationsSkipped().length) {
+  // Named next to the verdict, because "N FAILED" reads as N ordinary assertion
+  // failures when what actually happened is that a section never executed.
+  console.log(
+    `\n${mutationsSkipped().length} MUTATION(S) DID NOT APPLY, so their sections did not run: ` +
+      mutationsSkipped().join(', ')
+  );
+}
 console.log(
   failures.length
     ? `\n${failures.length} CHECK(S) FAILED:\n${failures.map((f) => `  - ${f}`).join('\n')}`

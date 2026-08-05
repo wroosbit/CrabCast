@@ -50,6 +50,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
+import { makeMutator } from './mutation.mjs';
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(process.argv[2] ?? path.join(scriptDir, '..', 'dist'));
 
@@ -1084,28 +1086,34 @@ try {
 }
 
 /** A copy of dist with one string replaced. Returns the mutated module dir. */
-function mutantDist(name, file, from, to) {
-  const dir = path.join(tmp, `mutant-${name}`);
-  fs.cpSync(distDir, dir, { recursive: true });
-  const target = path.join(dir, file);
-  const before = fs.readFileSync(target, 'utf8');
-  const occurrences = before.split(from).length - 1;
-  if (occurrences !== 1) {
-    throw new Error(
-      `mutation '${name}' expected exactly one occurrence of ${JSON.stringify(from)} in ` +
-        `${file}, found ${occurrences}. The mutation target moved; fix this script rather ` +
-        `than deleting the section — an un-mutatable check is an unproven one.`
-    );
+/**
+ * A copy of dist with one string replaced, or NULL when the edit did not apply.
+ *
+ * THIS USED TO THROW. A mutation whose anchor had drifted killed the process,
+ * so every section after it — including the ones whose whole job is proving the
+ * other checks can fail — never ran, and the reader got a stack trace with no
+ * signal that anything had been skipped (KAN-138 item 18). `scripts/mutation.mjs`
+ * keeps the exact-occurrence guard that was already right here and changes only
+ * what happens when it fires: the failure is COUNTED into this script's own
+ * verdict and the call returns null, so the rest of the file still reports.
+ */
+const { mutate: mutantDist, mutationsSkipped } = makeMutator({
+  distDir,
+  scratch: tmp,
+  report: {
+    pass: (label, detail) => check(true, label, detail),
+    fail: (label, detail) => check(false, label, detail)
   }
-  fs.writeFileSync(target, before.replace(from, to));
-  return dir;
-}
+});
 
-{
+mutation1: {
   // MUTATION 1: the echo itself. `configEcho` stops reading the record.
   const dir = mutantDist(
     'no-echo', 'router.js', 'config: intent.record.config,', 'config: null,'
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation1;
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
   const h = harness('s2', Broken, BrokenReg);
@@ -1125,7 +1133,7 @@ function mutantDist(name, file, from, to) {
   );
 }
 
-{
+mutation2: {
   // MUTATION 1b: the record loses its provenance on the way to the disk.
   //
   // This is what T5's converging `activate` did before these slices met: it
@@ -1153,6 +1161,9 @@ function mutantDist(name, file, from, to) {
     'rememberActivated(record, caller) {\n        const current',
     'rememberActivated(record, caller) {\n        record = { path: record.path, config: record.config };\n        const current'
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation2;
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
   const behind = ownedDir('s8', 'record-behind');
@@ -1173,7 +1184,7 @@ function mutantDist(name, file, from, to) {
   );
 }
 
-{
+mutation3: {
   // MUTATION 1c: the refusal bumps the token it is supposed to leave alone.
   //
   // This is the mutation that found the gap: it was applied to the shipping
@@ -1185,6 +1196,9 @@ function mutantDist(name, file, from, to) {
     'configVersion: existing.configVersion,',
     'configVersion: existing.configVersion + 1,'
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation3;
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
   const refused = ownedDir('s8', 'refusal-bumps');
@@ -1211,7 +1225,7 @@ function mutantDist(name, file, from, to) {
   setCensus([]);
 }
 
-{
+mutation4: {
   // MUTATION 1d: a durable field inferred from liveness — the round-1 blocker,
   // restored so the new classification check is provably the thing that finds
   // it. `everActivated` reverts to `record || live`, which the completeness
@@ -1225,6 +1239,9 @@ function mutantDist(name, file, from, to) {
     'everActivated: intent.everActivated,',
     'everActivated: intent.everActivated || globalThis.__kan125_live === true,'
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation4;
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
   const behind = ownedDir('s8', 'liveness-leak');
@@ -1252,7 +1269,7 @@ function mutantDist(name, file, from, to) {
   setCensus([]);
 }
 
-{
+mutation5: {
   // MUTATION 2: the category test. `everActivated` is derived the plausible
   // wrong way — from the row's own last event instead of from the log — which
   // is precisely the implementation section 4 exists to rule out.
@@ -1261,6 +1278,9 @@ function mutantDist(name, file, from, to) {
     'everActivated: ran,',
     "everActivated: event === 'activated',"
   );
+  // Already a counted failure. Skip the section rather than
+  // asserting about a build that was never mutated.
+  if (!dir) break mutation5;
   const { MessageRouter: Broken } = await import(path.join(dir, 'router.js'));
   const { AgentRegistry: BrokenReg } = await import(path.join(dir, 'agent-registry.js'));
   const h = harness('s3', Broken, BrokenReg);
@@ -1623,6 +1643,14 @@ const CONFIGURE_ARGV = [
 }
 
 // ---------------------------------------------------------------------------
+if (mutationsSkipped().length) {
+  // Named next to the verdict, because "N FAILED" reads as N ordinary assertion
+  // failures when what actually happened is that a section never executed.
+  console.log(
+    `\n${mutationsSkipped().length} MUTATION(S) DID NOT APPLY, so their sections did not run: ` +
+      mutationsSkipped().join(', ')
+  );
+}
 console.log(
   failures.length
     ? `\n${failures.length} CHECK(S) FAILED:\n${failures.map((f) => `  - ${f}`).join('\n')}`

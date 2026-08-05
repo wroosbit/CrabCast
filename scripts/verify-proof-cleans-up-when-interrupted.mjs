@@ -209,6 +209,18 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   const mutantPath = path.join(root, 'mutant-verify-send-confirms-delivery.mjs');
   fs.writeFileSync(mutantPath, source.replace(HANDLER, '/* handler removed by the mutation */'));
 
+  // THE MUTANT RUNS FROM THIS RUN'S OWN SCRATCH ROOT, not from `scripts/`, so
+  // every relative import in the target has to be satisfied here too. The target
+  // imports `./mutation.mjs` (KAN-138), and without this the mutant dies on an
+  // unresolved import a few milliseconds after spawning — which does not fail
+  // loudly, it fails as "the mutant leaked nothing", i.e. as the section PASSING
+  // its subject and failing its own precondition. That precondition is what
+  // caught it; this is the fix. Copied rather than symlinked so the mutant is a
+  // self-contained thing on disk, and so the copy goes when `root` goes.
+  for (const dep of ['mutation.mjs']) {
+    fs.copyFileSync(path.join(scriptDir, dep), path.join(root, dep));
+  }
+
   const mutant = await interruptMidRun(mutantPath, 'mutant');
   console.log(`   mutant: daemons while running: ${mutant.during.length} ${JSON.stringify(mutant.during)}`);
   console.log(`   mutant: daemons after SIGINT:  ${mutant.after.length} ${JSON.stringify(mutant.after)}`);
