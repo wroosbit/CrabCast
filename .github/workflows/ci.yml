@@ -273,10 +273,21 @@ jobs:
       #                                      than restate an intent; that is
       #                                      what the `fetch-depth: 0` above is
       #                                      for. It restores ci.yml in a
-      #                                      finally and on signals, and its
-      #                                      last section asserts the file is
-      #                                      byte-identical to how it was
-      #                                      found. WHAT IT CANNOT SEE: it
+      #                                      finally and on signals; it MARKS
+      #                                      the file while it is mutated, so
+      #                                      residue from a run that was
+      #                                      SIGKILLed says what put it there
+      #                                      rather than reading as somebody
+      #                                      editing CI; it REFUSES to start
+      #                                      over a dirty ci.yml, because the
+      #                                      baseline it restores is whatever
+      #                                      it found and a run begun over
+      #                                      residue restored the residue and
+      #                                      passed its own check; and its last
+      #                                      section asserts the file is
+      #                                      byte-identical to how it was found
+      #                                      AND that git agrees it is clean
+      #                                      (KAN-172). WHAT IT CANNOT SEE: it
       #                                      supplies its own workflow, so it
       #                                      does not prove that the workflow
       #                                      COMMITTED here keeps the audit
@@ -284,6 +295,41 @@ jobs:
       #                                      this array cover that by running
       #                                      the guards on the real file
       #                                      (KAN-148).
+      #
+      #   verify-ci-proof-residue-is-legible
+      #                                      the proof of those last three, and
+      #                                      a separate script for the same
+      #                                      reason the interrupt one above is:
+      #                                      a script cannot SIGKILL itself, and
+      #                                      cannot show what a SECOND run does
+      #                                      over the first's leftovers without
+      #                                      being that second run. It kills the
+      #                                      target mid-row and reads the
+      #                                      residue; strips the marker and
+      #                                      kills again, so the residue goes
+      #                                      anonymous and the first measurement
+      #                                      is shown to be measuring the
+      #                                      marker; seeds residue and watches
+      #                                      the target refuse and name the dead
+      #                                      run; and — the half that makes it a
+      #                                      fix rather than an improvement —
+      #                                      runs the version `origin/main`
+      #                                      carries over the same residue and
+      #                                      shows it print ALL CHECKS PASSED,
+      #                                      exit 0, and leave the corrupted
+      #                                      workflow in the tree. Its last
+      #                                      section backs the refusal out of
+      #                                      the CURRENT code and gets the same
+      #                                      absorption, so it keeps proving
+      #                                      something after this merges and
+      #                                      `origin/main` stops being pre-fix.
+      #                                      IT NEVER TOUCHES THIS FILE: the
+      #                                      whole thing happens in a throwaway
+      #                                      git clone under TMPDIR, because a
+      #                                      proof about corrupting a tracked
+      #                                      file that corrupted the real one
+      #                                      when IT was killed would be the
+      #                                      defect wearing the fix's clothes.
       #
       # And one whose subject is the instrument every "the checks can fail"
       # section in this suite is built on:
@@ -648,6 +694,7 @@ jobs:
             verify-fleet-enumeration
             verify-config-echo-contract
             verify-ci-wiring-guards
+            verify-ci-proof-residue-is-legible
             verify-mutation-harness
             verify-readme-is-current
           )
