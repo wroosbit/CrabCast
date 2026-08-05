@@ -515,19 +515,50 @@ console.log('\n-- 4a. and every proof that mutates a SCRIPT goes through it too'
 const READS_A_SIBLING_SOURCE =
   /readFileSync\(\s*(TARGET\b|[^)]*scriptDir|[^)]*verify-[a-z0-9-]+\.mjs)/;
 
+/**
+ * Scripts allowed to read a sibling's source without going through the helper,
+ * because what they are doing is not mutation.
+ *
+ * The same shape as `COPIES_BUT_DOES_NOT_MUTATE` above, for the same reason,
+ * and the first entry arrived the same way that one's did: KAN-170's group A
+ * gave `verify-daemon-provenance` a structural assertion over the stamper's
+ * source, main moved, and this sweep named it the first time the two slices met.
+ * That is the sweep working — it is supposed to ask about anything that reaches
+ * for a sibling's text — and the answer is an entry with a reason, not a
+ * loosened detector.
+ */
+const READS_BUT_DOES_NOT_MUTATE = [
+  {
+    script: 'scripts/verify-daemon-provenance.mjs',
+    reason:
+      'It reads scripts/stamp-build.mjs to ASSERT ON ITS TEXT — that the one `stampVersion` the ' +
+      'writer emits is the shared constant imported from the build it has just stamped, rather ' +
+      'than a literal of its own. It never writes a copy and never runs one: the read is the ' +
+      'assertion, which is the opposite of the practice this sweep is about.',
+    evidence: 'scripts/verify-daemon-provenance.mjs — `fs.readFileSync(stamperJs, ...)` inside the §5b writer/reader agreement check'
+  }
+];
+
+const readRegistered = new Set(READS_BUT_DOES_NOT_MUTATE.map((e) => e.script));
 const scriptMutators = [];
 const scriptOffenders = [];
 for (const rel of tracked) {
   const text = fs.readFileSync(path.join(repoRoot, rel), 'utf8');
   if (!READS_A_SIBLING_SOURCE.test(text)) continue;
   scriptMutators.push(rel);
-  if (!USES_HELPER.test(text)) scriptOffenders.push(rel);
+  if (USES_HELPER.test(text) || readRegistered.has(rel)) continue;
+  scriptOffenders.push(rel);
 }
 
 console.log(`\n   ${scriptMutators.length} proof(s) read a sibling script's source:`);
 for (const m of scriptMutators) {
   const self = m.endsWith('verify-mutation-harness.mjs') ? '   (this file, matching on its own fixture text below)' : '';
-  console.log(`     ${m}${self}${USES_HELPER.test(fs.readFileSync(path.join(repoRoot, m), 'utf8')) ? '' : '   <-- went around mutation.mjs'}`);
+  const why = readRegistered.has(m)
+    ? '   (registered: reads to assert, not to mutate)'
+    : scriptOffenders.includes(m)
+      ? '   <-- went around mutation.mjs'
+      : '';
+  console.log(`     ${m}${self}${why}`);
 }
 
 // A NOTE THE READER NEEDS, because the obvious question about this sweep has an
@@ -591,6 +622,28 @@ check(
   check(
     'while a proof that reads no sibling source is not swept up at all',
     !READS_A_SIBLING_SOURCE.test("const cfg = fs.readFileSync(configPath, 'utf8');\n")
+  );
+}
+
+// And 4a's register is held to 4b's standard, for 4b's reason: an entry that
+// has gone stale is a hole nobody is watching.
+for (const entry of READS_BUT_DOES_NOT_MUTATE) {
+  const abs = path.join(repoRoot, entry.script);
+  const exists = fs.existsSync(abs);
+  check(
+    `read-register: ${entry.script} still exists`,
+    exists,
+    exists ? '' : 'an entry naming a script that is gone is a hole nobody is watching'
+  );
+  check(
+    `read-register: ${entry.script} still reads a sibling source — otherwise this entry is ` +
+      `stale and should go`,
+    exists && READS_A_SIBLING_SOURCE.test(fs.readFileSync(abs, 'utf8'))
+  );
+  check(
+    `read-register: ${entry.script} carries a reason and a citation a reader can act on`,
+    entry.reason.length > 120 && entry.evidence.includes(entry.script),
+    entry.evidence
   );
 }
 
