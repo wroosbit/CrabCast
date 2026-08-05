@@ -18,60 +18,83 @@
 // somebody reaches for to skip a job once. A guard that survives only
 // well-intentioned edits is not a guard.
 //
-// Round 2 fixed those and then made the same mistake in prose: it said
-// `continue-on-error` was covered "because it is the same one-line green
-// disable as the other two", while nothing looked at the shell text at all.
-// Two more one-liners went green:
+// Rounds 2, 3 and 4 of KAN-141 then closed `continue-on-error`, the shell's
+// exit-code laundering (`|| true`, `set +e`, `; true`, a bare pipe, a trailing
+// `exit 0`, backgrounding) and the six MENTION shapes (`echo "node …"`,
+// `bash -c '…'`, a `timeout` wrapper) where the needle appeared inside a
+// command rather than as one.
 //
-//     - run: node scripts/verify-proof-registry.mjs || true
-//     - run: true  # node scripts/verify-proof-registry.mjs
+// FOUR TIMES IN THAT ONE CHANGE THE CODE FIXED A MEMBER AND THE PROSE
+// ASSERTED THE CATEGORY — the fourth introduced as the correction to the
+// third. The lesson, which is this file's reason for being this long: THE
+// SENTENCE DESCRIBING WHAT A GUARD COVERS IS ITSELF A CLAIM, and it needs the
+// same standard of proof as the guard. WHEN YOU WRITE "SO X CAN NO LONGER
+// HAPPEN," GO AND MAKE X HAPPEN. If it still can, the sentence describes your
+// intent rather than your code.
 //
-// `|| true` is the likeliest of all of these to happen by accident. Nobody
-// comments out a CI step to be clever; plenty of people add `|| true` to get
-// past a red check while iterating and forget to take it off.
+// And the reason it is worth prose that changes no behaviour: A GUARD THAT
+// DOCUMENTS A PROTECTION IT DOES NOT HAVE IS WORSE THAN ONE THAT STAYS QUIET.
+// Silence makes a reader check; a false assurance makes them not bother, and
+// the construct they would then ship is the exact one the sentence exonerated.
 //
-// Round 3 then fixed one member of a category and described the category:
-// "cuts a trailing shell comment before matching, SO THE INVOCATION HAS TO BE
-// THE COMMAND rather than a comment beside one." Cutting the comment does not
-// make it the command. The match still only had to appear SOMEWHERE in the
-// surviving text, so six more shapes ran nothing and stayed green:
+// WHAT KAN-148 CHANGED: PER-BLOCK, NOT PER-LINE.
 //
-//     echo "node scripts/verify-proof-registry.mjs"
-//     echo node scripts/verify-proof-registry.mjs
-//     : node scripts/verify-proof-registry.mjs
-//     bash -c 'node scripts/verify-proof-registry.mjs' || true
+// Every round above reasoned about the invocation's OWN LINE, plus the run
+// block's last line. So any shell construct whose gating context lived on
+// another line of the block was invisible, and eight shapes ran nothing while
+// both guards reported exit 0:
 //
-// commandStarts is what makes that sentence true, and it is asserted now.
+//     if [ "$SKIP_AUDIT" != 1 ]; then      (                       cat <<EOF
+//       node scripts/…                       node scripts/…          node scripts/…
+//     fi                                   ) || true               EOF
 //
-// Round 4 then did it a FOURTH time, in the sentence correcting the third:
-// it observed that the one-line `if node x.mjs; then …; fi` is caught (true,
-// via the `;` operator) and generalised to "conditionals are caught" (false —
-// the multi-line form every block scalar actually uses is green). The
-// correction inherited the defect it was correcting.
+//     node scripts/… \        echo $(node scripts/…)      out=$(node scripts/…)
+//       || true               audit() { node scripts/…; } # never called
+//                             trap "exit 0" EXIT; node scripts/…
 //
-// The lesson, and it is the same one this suite keeps relearning one level
-// up: THE SENTENCE DESCRIBING WHAT A GUARD COVERS IS ITSELF A CLAIM, and it
-// needs the same standard of proof as the guard. Four times in this one
-// change the code fixed a member and the prose asserted the category. The
-// habit that catches all four: WHEN YOU WRITE "SO X CAN NO LONGER HAPPEN,"
-// GO AND MAKE X HAPPEN. If it still can, the sentence describes your intent
-// rather than your code. Write the assertion first, then the sentence.
+// The multi-line `if` is the worst of them, and not because it is clever: a
+// `SKIP_AUDIT` guard added while iterating on CI and then forgotten is the
+// same species of edit as `|| true`, which everything above calls the likeliest
+// to happen by accident. Every shape KAN-141 closed was a deliberate evasion.
+// That one is a Tuesday afternoon. The multi-line subshell is worse in a
+// different way: the ONE-LINE `(node …) || true` was caught and the same
+// construct across three lines was not, so re-formatting — what a linter does —
+// was enough to open it.
 //
-// And the reason it is worth a fifth pass over prose that changes no
-// behaviour: A GUARD THAT DOCUMENTS A PROTECTION IT DOES NOT HAVE IS WORSE
-// THAN ONE THAT STAYS QUIET. Silence makes a reader check; a false assurance
-// makes them not bother, and the construct they would then ship is the exact
-// one the sentence exonerated.
+// Patching those two shapes would have produced a ninth. So the run value is
+// now LEXED AND PARSED AS SHELL, once, as a whole block: quotes, escapes, line
+// continuations, comments, heredocs, command substitutions, pipelines,
+// `&&`/`||` lists, `if`/`while`/`until`/`for`/`case`, brace groups, subshells
+// and function definitions. A match counts as LIVE only when it is the command
+// name of a simple command that sits at the TOP LEVEL of the block — inside no
+// construct whose execution is conditional and no context whose exit status is
+// discarded — in a step and job that carry no `if:` and no
+// `continue-on-error: true`.
 //
-// So this answers the question the regex only appeared to: is that command run
-// by a step that will actually execute, and will its failure fail the build? A
-// match counts only when it is the `run` value of a real step — found by
-// walking jobs and steps structurally, not by pattern — where the invocation
-// is the command rather than a comment beside one, the job and step carry no
-// `if:` and no `continue-on-error: true`, and the shell does not throw the
-// exit code away.
+// Everything else is reported as WHICH kind of not-live it is, because those
+// are each more misleading than an absent invocation and a reader who is told
+// "not found" over a file that visibly contains the string goes looking in the
+// wrong place:
 //
-// WHAT IT DELIBERATELY DOES NOT ANSWER — three boundaries, on the record:
+//   position 'command'  — the command name of a top-level simple command.
+//                         `disabled` then holds the reasons its exit status
+//                         still does not reach the build, if any.
+//   position 'nested'   — a real command, but buried: a conditional or loop
+//                         body, an `if` condition, a `case` arm, a function
+//                         body, a `$( … )` substitution. `note` names which.
+//   position 'argument' — not a command at all: quoted, an argument to
+//                         something else, or a heredoc body. `note` names
+//                         which.
+//
+// A caller wanting proof that something runs must require position 'command'
+// AND an empty `disabled`. A new not-live shape therefore fails closed by
+// construction: it cannot become position 'command', so it cannot read as
+// coverage.
+//
+// WHAT IT DELIBERATELY DOES NOT ANSWER — the boundaries, on the record. These
+// are decisions, not oversights, and the point of writing them down is that a
+// gap a reader is warned about is a boundary while an undisclosed one is a
+// defect.
 //
 //   1. Whether the job is a REQUIRED context in branch protection. That lives
 //      in repository settings rather than in the tree; nothing in here can see
@@ -87,44 +110,60 @@
 //      trigger would be the weaker of the two controls, and duplicating a
 //      control that already works is how the weaker one comes to be trusted.
 //
-//   3. ANYTHING THAT GATES THE INVOCATION FROM ANOTHER LINE. This reads each
-//      line of a `run:` block on its own, plus the block's last line. It has
-//      no model of block structure, so every one of these is green while the
-//      audit never runs (verified, not supposed — KAN-148):
+//   3. THINGS THAT READ AS NOT-LIVE THOUGH THEY GENUINELY RUN. Every one of
+//      these fails CLOSED — it turns the guards red and makes somebody edit
+//      the workflow or this file — and every one is a place where the answer
+//      is "that should be a reviewed edit, not an inference":
 //
-//        - run: |                     - run: |
-//            if [ "$SKIP" != 1 ]; then    cat <<EOF
-//              node scripts/…             node scripts/…
-//            fi                           EOF
+//        `out=$(node x.mjs)`     Under `set -e` an assignment DOES take the
+//                                substitution's exit status, so this really
+//                                can gate. It is still refused: capturing a
+//                                proof's output is a deliberate shape and the
+//                                reader should have to say so.
+//        a called function       A function body is not live where it is
+//                                defined. Whether it is called is a question
+//                                this does not ask, so `audit() { node …; }`
+//                                followed by `audit` reads as not-live.
+//        `timeout 60 node x`     A wrapper on the command line is not at
+//        `xvfb-run node x`       command position, so it reads as ABSENT. A
+//        `bash -c 'node x'`      wrapper changes what the exit status means.
+//        `env -i node x`         `env` is admitted only when what follows it
+//                                is assignments and then the command.
+//        an unparsable block     A run value this lexer cannot parse yields no
+//                                live commands at all, and says so by name.
+//        `shell:` other than     Only `bash` and `sh` are read as shell.
+//        bash/sh                 Anything else is reported, not guessed at —
+//                                from the step's own `shell:`, and from a
+//                                `defaults: { run: { shell: … } }` on the job
+//                                or the workflow, which sets it for steps that
+//                                do not say. Reading only the step's own key
+//                                would have believed a `defaults:` shell to be
+//                                bash.
 //
-//      A function body that is never called is green the same way. The
-//      one-line `if node x.mjs; then …; fi` IS caught, via the `;` operator —
-//      but that is the form nobody writes in a block, and round 4's
-//      correction generalised from it to "conditionals are caught", which is
-//      false. This entry is the third correction of that same mistake and was
-//      introduced as the fix to the second; see the header note above.
+//      ADMITTED, and new with KAN-148 because the old false alarm was noise
+//      and a guard that cries wolf is a guard someone eventually weakens:
+//      leading assignments (`FOO=1 node x`), and the transparent prefixes
+//      `time`, `env`, `exec` and `command`, all of which pass the exit status
+//      straight through.
 //
-//      Command substitution is in the same gap and inverts safely-wrong:
-//      `echo $(node x.mjs)` is green, while `echo "$(node x.mjs)"` is caught —
-//      the quotes suppress the `(` that would otherwise open a command
-//      position. The sloppier form is the one that gets through.
+//   4. THINGS FLAGGED THOUGH THEY MAY WELL GATE — conservative in the loud
+//      direction, and inherited deliberately from KAN-141 rather than quietly
+//      relaxed. GitHub's default shell is `bash -e {0}`, under which a failure
+//      aborts the step immediately, so a later `; true` or a trailing `exit 0`
+//      never runs and swallows nothing. They are still reported, because the
+//      step reads like its result is being discarded and that is worth an
+//      edit. Likewise `set +e` anywhere in the block flags every command in
+//      it, even one before a later `set -e`; and a `trap … EXIT` that runs
+//      `exit 0` flags commands that precede its registration.
 //
-//      Also here: shapes of exit-code laundering beyond shellDisablers — a
-//      `trap` that exits 0, or a wrapper SCRIPT whose own exit code is 0
-//      whatever it ran. A wrapper on the COMMAND LINE (`timeout 60 node
-//      x.mjs`, `bash -c '…'`) is NOT in this gap: it is not at command
-//      position, so it reads as absent and fails closed.
-//
-//      One known FALSE ALARM, in the safe direction: `FOO=1 node x.mjs` and
-//      `env FOO=1 node x.mjs` read as not-live though they genuinely run, so
-//      they fail closed. `time` is admitted as a leading keyword and `env` is
-//      not — an inconsistency rather than a hole. This repo uses neither
-//      shape. Folded into KAN-148.
-//
-//      What IS asserted is enumerated in shellDisablers and commandStarts and
-//      demonstrated by mutation on the PR. Nothing here claims the set is
-//      exhaustive, and per-block shell reasoning — the one fix that closes
-//      this whole class — is deliberately NOT attempted here.
+//   5. EXIT-CODE LAUNDERING THIS STILL CANNOT SEE. A `trap` whose action does
+//      not literally contain `exit 0` — `trap cleanup EXIT` where `cleanup`
+//      exits 0 — is not flagged. Neither is a wrapper SCRIPT (`./audit.sh`)
+//      whose own exit code is 0 whatever it ran, nor anything a composite
+//      `uses:` action does inside itself. Nothing here claims the set is
+//      exhaustive; what IS asserted is enumerated in this file and
+//      demonstrated by mutation in scripts/verify-ci-wiring-guards.mjs, which
+//      breaks each one deliberately and watches both guards go red.
 //
 // This is not a YAML parser and does not want to be. It reads the two levels
 // of structure these checks depend on and is honest about a shape it does not
@@ -212,6 +251,8 @@ export function readJobs(text) {
     jobs.push({
       id: m[1],
       line: i + 1,
+      from: i + 1,
+      to: end,
       keys: keysAt(lines, i + 1, end, 4),
       steps: readSteps(lines, i + 1, end)
     });
@@ -237,132 +278,38 @@ export const BENIGN_IF = [];
 /** How a reader is told to get out of a red `if:` check, quoted in the message. */
 const IF_ESCAPE = 'if this `if:` is legitimate, add its exact text to BENIGN_IF in scripts/ci-workflow.mjs';
 
+/** Shells whose text the lexer below is a reader for. Anything else is refused. */
+const KNOWN_SHELLS = new Set(['bash', 'sh', "'bash'", '"bash"', "'sh'", '"sh"']);
+
 /**
- * Cut a trailing shell comment, respecting quotes.
+ * `defaults: { run: { shell: … } }`, which sets the shell for every step that
+ * does not name one. Read at both the workflow and the job level, because a
+ * check that looked only at the step's own `shell:` would read a `defaults:`
+ * of `pwsh` as bash and then lex PowerShell as if it were a POSIX shell.
  *
- * `run: true  # node scripts/x.mjs` is a step that runs `true`. Round 2 tested
- * the needle against the whole run value, so the comment satisfied it while
- * the step did nothing.
+ * `from`/`to` bound the mapping this belongs to and `indent` is that mapping's
+ * key indent: 0 for the workflow, 4 for a job.
  */
-export function stripShellComment(text) {
-  let out = '';
-  let quote = null;
-  for (let i = 0; i < text.length; i += 1) {
-    const c = text[i];
-    if (quote) {
-      if (c === '\\' && quote === '"') { out += c + (text[i + 1] ?? ''); i += 1; continue; }
-      if (c === quote) quote = null;
-      out += c;
-      continue;
-    }
-    if (c === "'" || c === '"') { quote = c; out += c; continue; }
-    if (c === '\\') { out += c + (text[i + 1] ?? ''); i += 1; continue; }
-    if (c === '#' && (i === 0 || /\s/.test(text[i - 1]))) break;
-    out += c;
-  }
-  return out.trim();
+function defaultsRunShell(lines, from, to, indent) {
+  const defaults = keysAt(lines, from, to, indent).get('defaults');
+  if (!defaults) return undefined;
+  const defaultsEnd = blockEnd(lines, defaults.idx, indent, to);
+  const run = keysAt(lines, defaults.idx + 1, defaultsEnd, indent + 2).get('run');
+  if (!run) return undefined;
+  const runEnd = blockEnd(lines, run.idx, indent + 2, defaultsEnd);
+  return keysAt(lines, run.idx + 1, runEnd, indent + 4).get('shell');
 }
 
 /**
- * Shell keywords that precede a command without consuming its position: after
- * `if`, the next word is still a command being run.
+ * The reasons a command that textually exists will not fail the build, taken
+ * from the step's and the job's own YAML keys.
+ *
+ *   NEVER RUNS   — `if:` or `continue-on-error:` on the job or the step.
+ *   NOT READ     — a `shell:` this file does not model. Reading a `python`
+ *                  step as bash would be guessing, and a wrong guess here
+ *                  reads as coverage.
  */
-const LEADING_KEYWORDS = new Set(['if', 'then', 'elif', 'else', 'do', 'while', 'until', 'time', '!', 'exec', 'command']);
-
-/**
- * Offsets in `text` at which a COMMAND begins — outside quotes, at the start
- * or just past a `;`, `&&`, `||`, `|`, `&`, newline, `(` or `{`.
- *
- * This is what round 3 was missing. `re.exec(command)` matched anywhere, so
- * every one of these read as a live invocation while running nothing:
- *
- *     echo "node scripts/verify-proof-registry.mjs"
- *     echo node scripts/verify-proof-registry.mjs
- *     : node scripts/verify-proof-registry.mjs
- *     bash -c 'node scripts/verify-proof-registry.mjs' || true
- *
- * The last compounded: the match landed mid-string, so the text after it began
- * with an unbalanced quote, `firstOperator` entered quote mode and never left,
- * and the trailing `|| true` went unseen too. One defect defeated both the
- * mention check and the swallowed-exit check.
- *
- * Requiring command position closes all of them at once, and closes the quote
- * bug by construction rather than by patch: a position inside quotes is never
- * a command start, so the text after a match never begins mid-quote.
- *
- * A wrapper — `timeout 60 node x.mjs`, `xvfb-run node x.mjs` — is NOT a
- * command position and reads as absent. That is a deliberate fail-closed: a
- * wrapper changes what the exit status means, and admitting one should be a
- * reviewed edit rather than an inference. The message says which case it is.
- */
-export function commandStarts(text) {
-  const starts = [];
-  let quote = null;
-  let atStart = true;
-  for (let i = 0; i < text.length; i += 1) {
-    const c = text[i];
-    if (quote) {
-      if (c === '\\' && quote === '"') { i += 1; continue; }
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === '\\') { atStart = false; i += 1; continue; }
-    if (c === "'" || c === '"') { quote = c; atStart = false; continue; }
-    if (atStart && !/\s/.test(c)) { starts.push(i); atStart = false; }
-    const two = text.slice(i, i + 2);
-    if (two === '&&' || two === '||') { atStart = true; i += 1; continue; }
-    if (c === ';' || c === '|' || c === '&' || c === '\n' || c === '(' || c === '{') { atStart = true; continue; }
-  }
-
-  // `if node x.mjs` runs `node`: step past a leading keyword and count the
-  // word after it as a command start too.
-  for (let n = 0; n < starts.length; n += 1) {
-    const rest = text.slice(starts[n]);
-    const word = /^(\S+)\s+/.exec(rest);
-    if (!word || !LEADING_KEYWORDS.has(word[1])) continue;
-    const next = starts[n] + word[0].length;
-    if (next < text.length && !starts.includes(next)) starts.push(next);
-  }
-  return starts.sort((a, b) => a - b);
-}
-
-/** The first unquoted shell control operator in `text`, if any. */
-function firstOperator(text) {
-  let quote = null;
-  for (let i = 0; i < text.length; i += 1) {
-    const c = text[i];
-    if (quote) {
-      if (c === '\\' && quote === '"') { i += 1; continue; }
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === "'" || c === '"') { quote = c; continue; }
-    if (c === '\\') { i += 1; continue; }
-    const two = text.slice(i, i + 2);
-    if (two === '||' || two === '&&') return { op: two, rest: text.slice(i + 2).trim() };
-    if (c === ';' || c === '|' || c === '&') return { op: c, rest: text.slice(i + 1).trim() };
-  }
-  return null;
-}
-
-/**
- * The reasons a command that textually exists will not fail the build.
- *
- * Two kinds, and the second is the one round 2 claimed without asserting:
- *
- *   NEVER RUNS      — `if:` or `continue-on-error:` on the job or the step.
- *   RUNS, IGNORED   — the shell throws the exit code away: `|| true`,
- *                     `set +e`, a trailing `; something`, a background `&`,
- *                     an unguarded pipe, or a block ending `exit 0`.
- *
- * `|| true` is the likeliest of any of these to happen by accident. Nobody
- * comments out a CI step to be clever; plenty of people add `|| true` to get
- * past a red check while iterating and forget to take it off.
- *
- * `&&` is deliberately NOT a disabler: it short-circuits, so a failure still
- * surfaces.
- */
-function keyDisablers(jobId, jobKeys, keys) {
+function keyDisablers(jobId, jobKeys, keys, inheritedShell) {
   const out = [];
   const truthy = (v) => v !== undefined && /^(true|'true'|"true")$/i.test(String(v.value));
   const benign = (v) => BENIGN_IF.includes(String(v.value).trim());
@@ -374,123 +321,981 @@ function keyDisablers(jobId, jobKeys, keys) {
     out.push(`the step carries \`if: ${keys.get('if').value}\` — ${IF_ESCAPE}`);
   }
   if (truthy(keys.get('continue-on-error'))) out.push('the step carries `continue-on-error: true`');
+  // The step's own `shell:` wins; otherwise the nearest `defaults.run.shell`.
+  const own = keys.get('shell');
+  const shell = own ?? inheritedShell;
+  if (shell && !KNOWN_SHELLS.has(String(shell.value).trim())) {
+    out.push(
+      `the step ${own ? 'declares' : 'inherits'} \`shell: ${shell.value}\`, which this reader does not ` +
+        'model — it reads `bash` and `sh` only, and will not guess at anything else'
+    );
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// The run value, as one block of shell text.
+//
+// Two YAML forms, and the difference between them is load-bearing for the line
+// continuation in KAN-148's shape 3:
+//
+//   BLOCK SCALAR (`run: |`)   lines are joined with newlines, so a trailing
+//                             `\` really is a shell line continuation.
+//   PLAIN SCALAR (`run: x`)   a multi-line plain scalar is FOLDED by YAML —
+//                             the newline becomes a space before bash ever
+//                             sees it. `node x \` + `|| true` therefore
+//                             reaches bash as `node x \ || true`, where `\ `
+//                             is an escaped space that becomes a stray
+//                             argument and the `|| true` is still a real
+//                             operator. Either way the exit status is
+//                             swallowed, and the lexer below reports it
+//                             from the text it was actually given.
+//
+// Block scalars are dedented by their common indent rather than per-line
+// trimmed, because a heredoc terminator has to sit at column 0 of the block
+// and `<<-` strips tabs relative to it.
+// ---------------------------------------------------------------------------
+
+function readRunBody(lines, step, run) {
+  const pieces = [];
+  const isBlock = !run.value || /^[|>]/.test(run.value);
+  // `|` keeps its newlines; `>` FOLDS them into spaces before bash sees them,
+  // which is the same thing a multi-line plain scalar does. Reading a folded
+  // block as if it were literal would put a newline where YAML puts a space
+  // and turn `node x` / `|| true` into two commands, the second of which does
+  // not parse — fail-closed, but for the wrong reason and with a message
+  // about unparsable shell rather than about a swallowed exit.
+  const folded = !isBlock || /^>/.test(run.value);
+
+  const bodyLines = [];
+  if (!isBlock) bodyLines.push({ idx: run.idx, raw: run.value });
+  for (let i = run.idx + 1; i < step.end; i += 1) {
+    if (isBlank(lines[i])) {
+      if (bodyLines.length) bodyLines.push({ idx: i, raw: '' });
+      continue;
+    }
+    if (indentOf(lines[i]) <= step.indent + 2) break;
+    bodyLines.push({ idx: i, raw: lines[i] });
+  }
+  while (bodyLines.length && bodyLines[bodyLines.length - 1].raw.trim() === '') bodyLines.pop();
+
+  let text = '';
+  if (isBlock && !folded) {
+    const indents = bodyLines.filter((l) => l.raw.trim() !== '').map((l) => indentOf(l.raw));
+    const base = indents.length ? Math.min(...indents) : 0;
+    for (const l of bodyLines) {
+      const body = l.raw.trim() === '' ? '' : l.raw.slice(base);
+      pieces.push({ line: l.idx + 1, start: text.length, end: text.length + body.length });
+      text += `${body}\n`;
+    }
+  } else if (isBlock) {
+    // `run: >` — folded. Each line contributes its trimmed text, joined by the
+    // single space YAML folds the newline into.
+    bodyLines.forEach((l, n) => {
+      const body = l.raw.trim();
+      if (n > 0) text += ' ';
+      pieces.push({ line: l.idx + 1, start: text.length, end: text.length + body.length });
+      text += body;
+    });
+  } else {
+    // A plain scalar: its first line is the value after `run:`, and any
+    // continuation lines are folded onto it with a single space.
+    bodyLines.forEach((l, n) => {
+      const body = n === 0 ? l.raw : l.raw.trim();
+      if (n > 0) text += ' ';
+      pieces.push({ line: l.idx + 1, start: text.length, end: text.length + body.length });
+      text += body;
+    });
+  }
+
+  const lineFor = (offset) => {
+    let best = pieces.length ? pieces[0].line : run.idx + 1;
+    for (const p of pieces) {
+      if (offset >= p.start) best = p.line;
+      else break;
+    }
+    return best;
+  };
+  return { text, lineFor };
+}
+
+// ---------------------------------------------------------------------------
+// The shell lexer.
+//
+// It produces three things the classifier needs: a token stream for the
+// parser, and the byte ranges of the regions that are not shell commands at
+// all — comments, heredoc bodies, command substitutions and quoted text. A
+// needle landing in one of those is reported as that kind of not-live rather
+// than as "absent", because "not found" over a file that visibly contains the
+// string sends a reader looking in the wrong place.
+// ---------------------------------------------------------------------------
+
+class ShellParseError extends Error {}
+
+/** Index just past the `(…)` region opened by the `(` at `i`. */
+function skipParens(text, i) {
+  let depth = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '\\') { i += 2; continue; }
+    if (c === "'") { const e = text.indexOf("'", i + 1); i = e < 0 ? text.length : e + 1; continue; }
+    if (c === '"') { i = skipDoubleQuote(text, i); continue; }
+    if (c === '(') { depth += 1; i += 1; continue; }
+    if (c === ')') { depth -= 1; i += 1; if (depth === 0) return i; continue; }
+    i += 1;
+  }
+  return text.length;
+}
+
+/** Index just past the `"…"` opened at `i`. */
+function skipDoubleQuote(text, i) {
+  i += 1;
+  while (i < text.length) {
+    if (text[i] === '\\') { i += 2; continue; }
+    if (text[i] === '"') return i + 1;
+    if (text[i] === '$' && text[i + 1] === '(') { i = skipParens(text, i + 1); continue; }
+    if (text[i] === '`') { i = skipBackticks(text, i); continue; }
+    i += 1;
+  }
+  return text.length;
+}
+
+/** Index just past the backtick substitution opened at `i`. */
+function skipBackticks(text, i) {
+  i += 1;
+  while (i < text.length) {
+    if (text[i] === '\\') { i += 2; continue; }
+    if (text[i] === '`') return i + 1;
+    i += 1;
+  }
+  return text.length;
+}
+
+/** Index just past the `${…}` opened by the `{` at `i`. */
+function skipBraces(text, i) {
+  let depth = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '\\') { i += 2; continue; }
+    if (c === '{') { depth += 1; i += 1; continue; }
+    if (c === '}') { depth -= 1; i += 1; if (depth === 0) return i; continue; }
+    i += 1;
+  }
+  return text.length;
+}
+
+const TWO_CHAR_OPS = ['&&', '||', ';;', '|&', '>>', '>&', '<&', '&>'];
+
+function lexShell(text) {
+  const tokens = [];
+  const comments = [];
+  const heredocs = [];
+  const substitutions = [];
+  const quotes = [];
+  const pending = [];
+  let i = 0;
+  let word = null;
+
+  const endWord = () => {
+    if (!word) return;
+    word.end = i;
+    word.raw = text.slice(word.start, i);
+    tokens.push(word);
+    word = null;
+  };
+  const ensureWord = () => {
+    if (!word) word = { type: 'word', start: i, text: '', quoted: false };
+  };
+  const pushOp = (op, len) => {
+    endWord();
+    tokens.push({ type: 'op', op, start: i, end: i + len });
+    i += len;
+  };
+
+  while (i < text.length) {
+    const c = text[i];
+
+    if (c === '\\' && text[i + 1] === '\n') { i += 2; continue; }
+    if (c === '\\') { ensureWord(); word.text += text[i + 1] ?? ''; i += 2; continue; }
+
+    if (c === '\n') {
+      pushOp('\n', 1);
+      while (pending.length) {
+        const h = pending.shift();
+        const bodyStart = i;
+        let bodyEnd = text.length;
+        let j = i;
+        for (;;) {
+          if (j >= text.length) { bodyEnd = text.length; i = text.length; break; }
+          const nl = text.indexOf('\n', j);
+          const lineEnd = nl < 0 ? text.length : nl;
+          let line = text.slice(j, lineEnd);
+          if (h.strip) line = line.replace(/^\t+/, '');
+          if (line.trimEnd() === h.delim) { bodyEnd = j; i = nl < 0 ? text.length : nl + 1; break; }
+          if (nl < 0) { bodyEnd = text.length; i = text.length; break; }
+          j = nl + 1;
+        }
+        heredocs.push([bodyStart, bodyEnd]);
+      }
+      continue;
+    }
+
+    if (/\s/.test(c)) { endWord(); i += 1; continue; }
+
+    // A `#` begins a comment only where a word could begin.
+    if (c === '#' && !word) {
+      const nl = text.indexOf('\n', i);
+      const end = nl < 0 ? text.length : nl;
+      comments.push([i, end]);
+      i = end;
+      continue;
+    }
+
+    if (text.startsWith('<<<', i)) { pushOp('<<<', 3); continue; }
+    if (text.startsWith('<<', i)) {
+      const strip = text[i + 2] === '-';
+      let k = i + (strip ? 3 : 2);
+      while (text[k] === ' ' || text[k] === '\t') k += 1;
+      let delim = '';
+      while (k < text.length && !/[\s;&|<>()]/.test(text[k])) {
+        const ch = text[k];
+        if (ch === "'" || ch === '"') {
+          const e = ch === '"' ? skipDoubleQuote(text, k) : (text.indexOf("'", k + 1) < 0 ? text.length : text.indexOf("'", k + 1) + 1);
+          delim += text.slice(k + 1, e - 1);
+          k = e;
+          continue;
+        }
+        if (ch === '\\') { delim += text[k + 1] ?? ''; k += 2; continue; }
+        delim += ch;
+        k += 1;
+      }
+      endWord();
+      tokens.push({ type: 'op', op: '<<', start: i, end: k });
+      pending.push({ delim, strip });
+      i = k;
+      continue;
+    }
+
+    const two = text.slice(i, i + 2);
+    if (TWO_CHAR_OPS.includes(two)) { pushOp(two, 2); continue; }
+    if ('();&|<>'.includes(c)) { pushOp(c, 1); continue; }
+
+    if (c === "'") {
+      ensureWord();
+      word.quoted = true;
+      const close = text.indexOf("'", i + 1);
+      const end = close < 0 ? text.length : close;
+      quotes.push([i, close < 0 ? text.length : close + 1]);
+      word.text += text.slice(i + 1, end);
+      i = close < 0 ? text.length : close + 1;
+      continue;
+    }
+
+    if (c === '"') {
+      ensureWord();
+      word.quoted = true;
+      const qStart = i;
+      i += 1;
+      while (i < text.length && text[i] !== '"') {
+        if (text[i] === '\\') { word.text += text[i + 1] ?? ''; i += 2; continue; }
+        if (text[i] === '$' && text[i + 1] === '(') {
+          const e = skipParens(text, i + 1);
+          substitutions.push([i, e]);
+          word.text += text.slice(i, e);
+          i = e;
+          continue;
+        }
+        if (text[i] === '`') {
+          const e = skipBackticks(text, i);
+          substitutions.push([i, e]);
+          word.text += text.slice(i, e);
+          i = e;
+          continue;
+        }
+        word.text += text[i];
+        i += 1;
+      }
+      quotes.push([qStart, Math.min(i + 1, text.length)]);
+      i += 1;
+      continue;
+    }
+
+    if (c === '$' && text[i + 1] === '(') {
+      ensureWord();
+      if (text[i + 2] === '(') {                       // $(( … )) is arithmetic, not a command
+        const e = skipParens(text, i + 2);
+        word.text += text.slice(i, e);
+        i = e;
+        continue;
+      }
+      const e = skipParens(text, i + 1);
+      substitutions.push([i, e]);
+      word.text += text.slice(i, e);
+      i = e;
+      continue;
+    }
+    if (c === '`') {
+      ensureWord();
+      const e = skipBackticks(text, i);
+      substitutions.push([i, e]);
+      word.text += text.slice(i, e);
+      i = e;
+      continue;
+    }
+    if (c === '$' && text[i + 1] === '{') {
+      ensureWord();
+      const e = skipBraces(text, i + 1);
+      word.text += text.slice(i, e);
+      i = e;
+      continue;
+    }
+
+    ensureWord();
+    word.text += c;
+    i += 1;
+  }
+  endWord();
+  return { tokens, comments, heredocs, substitutions, quotes };
+}
+
+// ---------------------------------------------------------------------------
+// The parser: a shell grammar deep enough to answer "does this command's exit
+// status reach the step, on every run?".
+//
+//   list      := and_or ( (';' | '&' | newline | ';;') and_or )*
+//   and_or    := pipeline ( ('&&' | '||') pipeline )*
+//   pipeline  := ['!'] command ('|' command)*
+//   command   := simple | if | while | until | for | select | case
+//              | brace_group | subshell | function_def
+// ---------------------------------------------------------------------------
+
+const REDIRECT_OPS = new Set(['<', '>', '>>', '<<', '<<<', '>&', '<&', '&>']);
+const SEPARATORS = new Set([';', '&', '\n', ';;']);
+
+function parseShell(tokens) {
+  let p = 0;
+
+  const at = () => tokens[p];
+  const done = () => p >= tokens.length;
+  const isOp = (t, ...ops) => Boolean(t) && t.type === 'op' && ops.includes(t.op);
+  const isWord = (t, w) => Boolean(t) && t.type === 'word' && !t.quoted && t.text === w;
+  const span = (from, to) => ({
+    start: tokens[from] ? tokens[from].start : 0,
+    end: tokens[Math.max(from, to - 1)] ? tokens[Math.max(from, to - 1)].end : 0
+  });
+
+  const skipNewlines = () => { while (isOp(at(), '\n')) p += 1; };
+  const expectWord = (w) => {
+    skipNewlines();
+    if (!isWord(at(), w)) throw new ShellParseError(`expected \`${w}\``);
+    p += 1;
+  };
+  const eatRedirects = () => {
+    while (!done() && at().type === 'op' && REDIRECT_OPS.has(at().op)) {
+      p += 1;
+      if (!done() && at().type === 'word') p += 1;
+    }
+  };
+
+  function parseList(terms, stopAtDoubleSemi = false) {
+    const from = p;
+    const items = [];
+    for (;;) {
+      while (isOp(at(), '\n') || isOp(at(), ';')) p += 1;
+      if (done()) break;
+      const t = at();
+      if (isOp(t, ')')) break;
+      if (t.type === 'word' && !t.quoted && terms.has(t.text)) break;
+      if (isOp(t, ';;')) break;
+
+      const before = p;
+      const node = parseAndOr(terms);
+      if (p === before) throw new ShellParseError(`made no progress at \`${t.text ?? t.op}\``);
+
+      let sep = null;
+      if (!done() && at().type === 'op' && SEPARATORS.has(at().op)) {
+        sep = at().op;
+        p += 1;
+      }
+      items.push({ node, sep });
+      if (sep === null) break;
+      if (sep === ';;' && stopAtDoubleSemi) break;
+    }
+    return { type: 'list', items, ...span(from, p) };
+  }
+
+  function parseAndOr(terms) {
+    const from = p;
+    const parts = [{ op: null, node: parsePipeline(terms) }];
+    while (isOp(at(), '&&') || isOp(at(), '||')) {
+      const op = at().op;
+      p += 1;
+      skipNewlines();
+      parts.push({ op, node: parsePipeline(terms) });
+    }
+    return { type: 'andor', parts, ...span(from, p) };
+  }
+
+  function parsePipeline(terms) {
+    const from = p;
+    let negated = false;
+    while (isWord(at(), '!')) { negated = true; p += 1; skipNewlines(); }
+    const stages = [parseCommand(terms)];
+    while (isOp(at(), '|') || isOp(at(), '|&')) {
+      p += 1;
+      skipNewlines();
+      stages.push(parseCommand(terms));
+    }
+    return { type: 'pipeline', negated, stages, ...span(from, p) };
+  }
+
+  function parseCommand(terms) {
+    const from = p;
+    const t = at();
+    if (!t) throw new ShellParseError('unexpected end of block');
+
+    if (isOp(t, '(')) {
+      p += 1;
+      const body = parseList(new Set());
+      if (!isOp(at(), ')')) throw new ShellParseError('unterminated subshell');
+      p += 1;
+      eatRedirects();
+      return { type: 'subshell', body, ...span(from, p) };
+    }
+    if (isWord(t, '{')) {
+      p += 1;
+      const body = parseList(new Set(['}']));
+      expectWord('}');
+      eatRedirects();
+      return { type: 'group', body, ...span(from, p) };
+    }
+    if (isWord(t, 'if')) return parseIf(from);
+    if (isWord(t, 'while') || isWord(t, 'until')) return parseLoop(from, t.text);
+    if (isWord(t, 'for') || isWord(t, 'select')) return parseFor(from, t.text);
+    if (isWord(t, 'case')) return parseCase(from);
+    if (isWord(t, 'function')) {
+      p += 1;
+      if (at() && at().type === 'word') p += 1;
+      if (isOp(at(), '(')) { p += 1; if (isOp(at(), ')')) p += 1; }
+      skipNewlines();
+      const body = parseCommand(terms);
+      return { type: 'function', body, ...span(from, p) };
+    }
+    return parseSimple(from);
+  }
+
+  function parseIf(from) {
+    p += 1;
+    const branches = [];
+    for (;;) {
+      const cond = parseList(new Set(['then']));
+      expectWord('then');
+      const body = parseList(new Set(['elif', 'else', 'fi']));
+      branches.push({ cond, body });
+      skipNewlines();
+      if (isWord(at(), 'elif')) { p += 1; continue; }
+      break;
+    }
+    let otherwise = null;
+    skipNewlines();
+    if (isWord(at(), 'else')) { p += 1; otherwise = parseList(new Set(['fi'])); }
+    expectWord('fi');
+    eatRedirects();
+    return { type: 'if', branches, otherwise, ...span(from, p) };
+  }
+
+  function parseLoop(from, keyword) {
+    p += 1;
+    const cond = parseList(new Set(['do']));
+    expectWord('do');
+    const body = parseList(new Set(['done']));
+    expectWord('done');
+    eatRedirects();
+    return { type: 'loop', keyword, cond, body, ...span(from, p) };
+  }
+
+  function parseFor(from, keyword) {
+    p += 1;
+    while (!done() && !isWord(at(), 'do')) {
+      if (isOp(at(), ';') || isOp(at(), '\n')) { p += 1; continue; }
+      if (isOp(at(), '(')) { p += 1; continue; }
+      if (isOp(at(), ')')) { p += 1; continue; }
+      p += 1;
+    }
+    expectWord('do');
+    const body = parseList(new Set(['done']));
+    expectWord('done');
+    eatRedirects();
+    return { type: 'loop', keyword, cond: null, body, ...span(from, p) };
+  }
+
+  function parseCase(from) {
+    p += 1;
+    if (at() && at().type === 'word') p += 1;              // the word being matched
+    skipNewlines();
+    if (isWord(at(), 'in')) p += 1;
+    const arms = [];
+    for (;;) {
+      while (isOp(at(), '\n') || isOp(at(), ';;')) p += 1;
+      if (done()) throw new ShellParseError('unterminated `case`');
+      if (isWord(at(), 'esac')) { p += 1; break; }
+      if (isOp(at(), '(')) p += 1;
+      while (!done() && !isOp(at(), ')')) p += 1;
+      if (done()) throw new ShellParseError('unterminated `case` pattern');
+      p += 1;
+      arms.push(parseList(new Set(['esac']), true));
+    }
+    eatRedirects();
+    return { type: 'case', arms, ...span(from, p) };
+  }
+
+  const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=/;
+
+  function parseSimple(from) {
+    // `name ( )` followed by a body is a definition, and a definition runs
+    // nothing where it stands. The name test is what keeps `failed=()` — an
+    // empty array assignment, which ci.yml's own verify job uses — from being
+    // read as a function whose body swallows everything after it.
+    if (
+      at() && at().type === 'word' && !at().quoted && /^[A-Za-z_][A-Za-z0-9_-]*$/.test(at().text) &&
+      isOp(tokens[p + 1], '(') && isOp(tokens[p + 2], ')')
+    ) {
+      p += 3;
+      skipNewlines();
+      const body = parseCommand(new Set());
+      return { type: 'function', body, ...span(from, p) };
+    }
+
+    const words = [];
+    while (!done()) {
+      const t = at();
+      if (t.type === 'op') {
+        if (REDIRECT_OPS.has(t.op)) { eatRedirects(); continue; }
+        // `name=( … )` is an array assignment, not a subshell.
+        if (t.op === '(' && words.length && ASSIGNMENT.test(words[words.length - 1].raw) &&
+            words[words.length - 1].raw.endsWith('=')) {
+          let depth = 0;
+          while (!done()) {
+            if (isOp(at(), '(')) depth += 1;
+            else if (isOp(at(), ')')) { depth -= 1; if (depth === 0) { p += 1; break; } }
+            p += 1;
+          }
+          continue;
+        }
+        break;
+      }
+      words.push(t);
+      p += 1;
+    }
+    if (!words.length) throw new ShellParseError(`unexpected \`${at() ? at().op : 'end of block'}\``);
+    return { type: 'simple', words, ...span(from, p) };
+  }
+
+  const program = parseList(new Set());
+  while (isOp(at(), '\n') || isOp(at(), ';')) p += 1;
+  if (!done()) throw new ShellParseError(`unexpected \`${at().type === 'op' ? at().op : at().text}\``);
+  return program;
+}
+
+// ---------------------------------------------------------------------------
+// From the tree to a verdict per command.
+// ---------------------------------------------------------------------------
+
+/**
+ * Words that stand in front of a command without taking its place: the exit
+ * status of what follows passes straight through them.
+ *
+ * `env` and leading `FOO=1` assignments are new with KAN-148. They used to
+ * read as not-live — a false alarm in the safe direction, but a guard that
+ * cries wolf is a guard someone eventually weakens. `env -i node x` is still
+ * refused, because only assignments may sit between `env` and the command.
+ */
+const TRANSPARENT_PREFIXES = new Set(['time', 'env', 'exec', 'command']);
+const ASSIGNMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=/;
+
+/** The word that names what a simple command runs, past assignments and prefixes. */
+function commandNameWord(node) {
+  for (const w of node.words) {
+    if (ASSIGNMENT_WORD.test(w.raw)) continue;
+    if (!w.quoted && TRANSPARENT_PREFIXES.has(w.text)) continue;
+    return w;
+  }
+  return null;
+}
+
+/**
+ * The one simple command a node runs, when it runs exactly one unconditionally:
+ * a list item that is one `and_or` of one un-negated pipeline of one stage.
+ * Anything with an operator in it answers null, because then whether that
+ * command runs depends on something else.
+ */
+function soleCommand(node) {
+  let n = node;
+  if (n && n.type === 'andor') {
+    if (n.parts.length !== 1) return null;
+    n = n.parts[0].node;
+  }
+  if (n && n.type === 'pipeline') {
+    if (n.negated || n.stages.length !== 1) return null;
+    n = n.stages[0];
+  }
+  return n && n.type === 'simple' ? n : null;
+}
+
+/**
+ * A command that cannot finish with status 0, so putting it after `||` leaves
+ * the failure it was reacting to still fatal: `node x || exit 1` REALLY DOES
+ * gate the build, and flagging it would be a false alarm of exactly the kind
+ * KAN-148 was asked to remove from `env FOO=1 node …`.
+ *
+ * `exit` with no argument is admitted for the same reason: in `a || exit` it
+ * exits with `a`'s status, which is non-zero or the branch would not have been
+ * taken. `exit 0` is NOT admitted, and neither is anything whose status this
+ * cannot read off the source — a wrapper, a variable, a function.
+ */
+function cannotSucceed(node) {
+  const cmd = soleCommand(node);
+  if (!cmd) return false;
+  const name = commandNameWord(cmd);
+  if (!name || name.quoted) return false;
+  if (name.text === 'false') return cmd.words.length === 1;
+  if (name.text !== 'exit') return false;
+  const args = cmd.words.filter((w) => w !== name && !ASSIGNMENT_WORD.test(w.raw));
+  if (args.length === 0) return true;                       // `exit` — inherits $?
+  return args.length === 1 && /^[1-9][0-9]*$/.test(args[0].text);
+}
+
+const MAX_RENDER = 48;
+function render(text, node) {
+  const s = text.slice(node.start, node.end).replace(/\s+/g, ' ').trim();
+  return s.length > MAX_RENDER ? `${s.slice(0, MAX_RENDER - 1)}…` : s;
+}
+
+/**
+ * Every simple command in the tree, in source order, with the words it runs.
+ * Used for the block-wide questions — `set +e`, `set -o pipefail`, a `trap`
+ * that exits 0 — which are properties of the whole step rather than of one
+ * command's position in it.
+ */
+function allSimpleCommands(node, out = []) {
+  if (!node || typeof node !== 'object') return out;
+  if (node.type === 'simple') { out.push(node); return out; }
+  for (const key of ['items', 'parts', 'stages', 'arms', 'branches']) {
+    if (Array.isArray(node[key])) {
+      for (const child of node[key]) {
+        allSimpleCommands(child.node ?? child, out);
+        if (child.cond) allSimpleCommands(child.cond, out);
+        if (child.body) allSimpleCommands(child.body, out);
+      }
+    }
+  }
+  for (const key of ['body', 'cond', 'otherwise']) if (node[key]) allSimpleCommands(node[key], out);
   return out;
 }
 
 /**
- * Ways the step's shell discards this command's exit status.
+ * Walk the tree recording, for the command name of every simple command:
  *
- * `runLines` is the whole run value; `at` is the index within it of the line
- * holding the invocation, and `after` is what follows the invocation on that
- * line with any comment already cut.
+ *   gating    — it runs on every run of this step and its exit status is
+ *               structurally able to reach the build.
+ *   reasons   — why that exit status is nonetheless thrown away.
+ *   construct — when not gating, the construct it is buried in.
  */
-function shellDisablers(runLines, at, after) {
-  const out = [];
-  const body = runLines.map((l) => stripShellComment(l.text)).join('\n');
+function walk(text, node, ctx, out) {
+  const nested = (label) => ({ ...ctx, gating: false, construct: ctx.construct ?? label });
+  const because = (reason) => ({ ...ctx, reasons: [...ctx.reasons, reason] });
 
-  if (/(^|\s|;)set\s+\+e\b/.test(body) || /(^|\s|;)set\s+\+o\s+errexit\b/.test(body)) {
-    out.push('the step runs `set +e`, so a failure does not stop it');
+  switch (node.type) {
+    case 'list':
+      node.items.forEach((item, k) => {
+        let c = ctx;
+        if (item.sep === '&') {
+          c = { ...c, reasons: [...c.reasons, 'the command is backgrounded with `&`, so its exit status is never waited on'] };
+        } else if (item.sep === ';' && k < node.items.length - 1) {
+          c = {
+            ...c,
+            reasons: [
+              ...c.reasons,
+              `the command is followed by \`; ${render(text, node.items[k + 1].node)}\` — ` +
+                "the step reports THAT command's exit status"
+            ]
+          };
+        }
+        walk(text, item.node, c, out);
+      });
+      return;
+
+    case 'andor':
+      node.parts.forEach((part, k) => {
+        const next = node.parts[k + 1];
+        let c = ctx;
+        // `|| exit 1` and `|| false` re-raise the failure instead of eating it.
+        if (next && next.op === '||' && !cannotSucceed(next.node)) {
+          c = because(
+            `the command is followed by \`|| ${render(text, next.node)}\`, which swallows a non-zero exit`
+          );
+        }
+        walk(text, part.node, c, out);
+      });
+      return;
+
+    case 'pipeline': {
+      let c = ctx;
+      if (node.negated) {
+        c = { ...c, reasons: [...c.reasons, 'the pipeline is negated with `!`, so a non-zero exit is reported as success'] };
+      }
+      node.stages.forEach((stage, k) => {
+        let sc = c;
+        if (k < node.stages.length - 1 && !ctx.pipefail) {
+          sc = {
+            ...c,
+            reasons: [
+              ...c.reasons,
+              `the command is piped into \`${render(text, node.stages[k + 1])}\` without ` +
+                '`set -o pipefail`, so the pipeline reports the last stage'
+            ]
+          };
+        }
+        walk(text, stage, sc, out);
+      });
+      return;
+    }
+
+    case 'subshell':
+    case 'group':
+      // Transparent: `( … )` and `{ …; }` hand their exit status up. What is
+      // written AROUND them — a trailing `|| true` — is already in ctx.
+      walk(text, node.body, ctx, out);
+      return;
+
+    case 'if':
+      for (const b of node.branches) {
+        walk(text, b.cond, nested('the condition of an `if`, where a non-zero exit only chooses a branch'), out);
+        walk(text, b.body, nested('the body of an `if`, which runs only when that condition holds'), out);
+      }
+      if (node.otherwise) walk(text, node.otherwise, nested('the `else` body of an `if`, which runs only when that condition fails'), out);
+      return;
+
+    case 'loop':
+      if (node.cond) walk(text, node.cond, nested(`the condition of a \`${node.keyword}\` loop, where a non-zero exit only ends the loop`), out);
+      walk(text, node.body, nested(`the body of a \`${node.keyword}\` loop, which may run no times at all`), out);
+      return;
+
+    case 'case':
+      for (const arm of node.arms) walk(text, arm, nested('a `case` arm, which runs only when its pattern matches'), out);
+      return;
+
+    case 'function':
+      walk(text, node.body, nested('a function body, which runs nothing where it is defined'), out);
+      return;
+
+    case 'simple': {
+      const name = commandNameWord(node);
+      if (!name) return;
+      out.set(name.start, {
+        gating: ctx.gating,
+        reasons: [...ctx.reasons],
+        construct: ctx.construct,
+        node
+      });
+      return;
+    }
+
+    default:
+      return;
+  }
+}
+
+const within = (ranges, offset) => ranges.some(([s, e]) => offset >= s && offset < e);
+
+/**
+ * Read one `run:` block and answer, for any offset in it, what that offset is:
+ * the command name of a live command, a command buried in something, or not a
+ * command at all.
+ */
+export function analyzeRunBody(text) {
+  const { tokens, comments, heredocs, substitutions, quotes } = lexShell(text);
+
+  let tree = null;
+  let parseError = null;
+  try {
+    tree = parseShell(tokens);
+  } catch (err) {
+    parseError = err instanceof ShellParseError ? err.message : String(err && err.message);
   }
 
-  const op = firstOperator(after);
-  if (op) {
-    if (op.op === '||') out.push(`the command is followed by \`|| ${op.rest || '…'}\`, which swallows a non-zero exit`);
-    else if (op.op === ';' && op.rest) out.push(`the command is followed by \`; ${op.rest}\` — the step reports THAT command's exit status`);
-    else if (op.op === '&') out.push('the command is backgrounded with `&`, so its exit status is never waited on');
-    else if (op.op === '|' && !/set\s+-[a-z]*o\s+pipefail|set\s+-o\s+pipefail/.test(body)) {
-      out.push(`the command is piped into \`${op.rest}\` without \`set -o pipefail\`, so the pipeline reports the last stage`);
+  const commands = new Map();
+  const blockReasons = [];
+
+  if (tree) {
+    const simples = allSimpleCommands(tree);
+    const argsOf = (n) => n.words.filter((w) => !ASSIGNMENT_WORD.test(w.raw));
+    const named = (n, name) => {
+      const w = commandNameWord(n);
+      return Boolean(w) && !w.quoted && w.text === name;
+    };
+
+    const pipefail = simples.some(
+      (n) => named(n, 'set') && argsOf(n).slice(1).some((w) => w.text === 'pipefail')
+    );
+    if (simples.some((n) => named(n, 'set') && argsOf(n).slice(1).some((w) => /^\+[a-z]*e[a-z]*$/.test(w.text)))) {
+      blockReasons.push('the step runs `set +e`, so a failure does not stop it');
+    }
+    for (const n of simples) {
+      if (!named(n, 'trap')) continue;
+      const args = argsOf(n).slice(1);
+      const action = args[0];
+      const targets = args.slice(1).map((w) => w.text.toUpperCase());
+      if (action && /(^|[;&|\s])exit\s+0\b/.test(` ${action.text}`) && targets.some((t) => t === 'EXIT' || t === 'ERR')) {
+        blockReasons.push(
+          `the step registers \`trap ${render(text, { start: action.start, end: action.end })} ${targets.join(' ')}\`, ` +
+            'so it exits 0 whatever this command did'
+        );
+      }
+    }
+
+    walk(text, tree, { gating: true, reasons: [], construct: null, pipefail }, commands);
+
+    // An unconditional top-level `exit` ENDS THE STEP, so anything written
+    // after it never runs at all. Same family as the eight shapes KAN-148 was
+    // filed for — the thing that stops the invocation lives on another line —
+    // and just as accident-plausible: a debug `exit 0` left at the top of a
+    // block while iterating on CI reads, to every other check here, exactly
+    // like a step that runs the audit.
+    //
+    // Only a SOLE top-level statement counts. `false && exit 0` and
+    // `node x || exit 1` are conditional, and treating them as terminators
+    // would turn the fix above back into a false alarm.
+    for (const item of tree.items) {
+      const cmd = soleCommand(item.node);
+      if (!cmd) continue;
+      const name = commandNameWord(cmd);
+      if (!name || name.quoted || name.text !== 'exit') continue;
+      for (const [offset, v] of commands) {
+        if (offset > cmd.start) {
+          v.reasons.push(
+            `the step runs \`${render(text, cmd)}\` unconditionally earlier in the block, ` +
+              'so this command is never reached'
+          );
+        }
+      }
+    }
+
+    // A block whose LAST top-level command is a success makes everything
+    // before it advisory. Conservative under `bash -e`, where the failure
+    // would have aborted the step before reaching it — see boundary 4.
+    const top = tree.items.filter((it) => it.node.type === 'andor' && it.node.parts.length === 1);
+    const last = top.length ? top[top.length - 1].node.parts[0].node : null;
+    const lastSimple =
+      last && last.type === 'pipeline' && last.stages.length === 1 && last.stages[0].type === 'simple'
+        ? last.stages[0]
+        : null;
+    if (lastSimple) {
+      const rendered = render(text, lastSimple);
+      if (/^(exit\s+0|true|:)$/.test(rendered)) {
+        for (const [offset, v] of commands) {
+          if (offset < lastSimple.start) {
+            v.reasons.push(`the step ends with \`${rendered}\`, so it exits 0 whatever this command did`);
+          }
+        }
+      }
     }
   }
 
-  // A block scalar whose last command is a success: everything before it is
-  // advisory. Only meaningful when something follows the invocation.
-  const tail = runLines.slice(at + 1).map((l) => stripShellComment(l.text)).filter(Boolean).pop();
-  if (tail !== undefined && /^(exit\s+0|true|:)$/.test(tail)) {
-    out.push(`the step ends with \`${tail}\`, so it exits 0 whatever this command did`);
-  }
-
-  return out;
+  return {
+    parseError,
+    classify(offset) {
+      if (within(comments, offset)) return { kind: 'comment' };
+      if (within(heredocs, offset)) {
+        return { kind: 'argument', note: 'inside a heredoc body — that is data handed to a command, not a command' };
+      }
+      if (within(substitutions, offset)) {
+        return {
+          kind: 'nested',
+          note: 'inside a `$( … )` command substitution, whose exit status does not reach the step'
+        };
+      }
+      if (parseError) {
+        return {
+          kind: 'nested',
+          note: `this \`run:\` block could not be read as shell (${parseError}), so nothing in it counts as a live command`
+        };
+      }
+      const cmd = commands.get(offset);
+      if (cmd) {
+        if (!cmd.gating) return { kind: 'nested', note: cmd.construct ?? 'a construct whose exit status does not reach the step' };
+        return { kind: 'command', reasons: [...cmd.reasons, ...blockReasons] };
+      }
+      if (within(quotes, offset)) return { kind: 'argument', note: 'inside quotes' };
+      return { kind: 'argument', note: 'an argument to another command, not the command itself' };
+    }
+  };
 }
 
 /**
  * Every place `needle` appears in the `run` value of a real step.
  *
- * Each result is `{ line, job, position, disabled }`.
+ * Each result is `{ line, job, position, disabled, note }`.
  *
- *   position 'command'  — the needle begins a command ON ITS OWN LINE. NOT
- *                         "a command the shell will run": this reasons per
- *                         line, so it cannot see that the line sits in a
- *                         conditional body, a heredoc, or an uncalled
- *                         function, none of which run. See boundary 3 and
- *                         KAN-148.
- *   position 'argument' — it appears only as an argument or inside quotes:
- *                         `echo "node x.mjs"`, `bash -c '…'`, `timeout 60
- *                         node x.mjs`. Mentioned, not executed.
+ *   position 'command'  — the command name of a simple command at the TOP
+ *                         LEVEL of the block: it runs on every run of the
+ *                         step. `disabled` then holds the reasons its exit
+ *                         status still does not reach the build.
+ *   position 'nested'   — a real command inside something that decides
+ *                         whether or with what status it runs: a conditional
+ *                         or loop body, an `if` condition, a `case` arm, a
+ *                         function body, a `$( … )` substitution, or a block
+ *                         this reader could not parse. `note` says which.
+ *   position 'argument' — not a command: quoted, an argument to something
+ *                         else, or a heredoc body. `note` says which.
  *
- * `disabled` is empty for a step that will genuinely execute and otherwise
- * holds the reasons it will not. A caller wanting proof that something runs
- * must require a result with position 'command' AND an empty `disabled` —
- * mentioned-only and switched-off are each a distinct, and more misleading,
- * failure than an absent one, so they are reported separately rather than
- * folded into "not found".
+ * A caller wanting proof that something runs must require position 'command'
+ * AND an empty `disabled`. Buried, mentioned and switched-off are each a
+ * distinct, and more misleading, failure than an absent one, so they are
+ * reported separately rather than folded into "not found".
  *
- * What is NOT a result: a commented-out line (a YAML comment is not a step, a
- * `#` in a block scalar is not a command), and a comment beside a command —
- * the needle is matched against the run text with any trailing shell comment
- * already cut, so `run: true  # node scripts/x.mjs` finds nothing.
+ * What is NOT a result at all: a commented-out line — a YAML comment is not a
+ * step, and a `#` comment in a block scalar is not a command — so a caller can
+ * still tell "the text is here but it is a comment" from "the text is here as
+ * an argument".
  */
 export function findRunInvocations(text, needle) {
   const re = new RegExp(needle.source ?? needle, (needle.flags ?? '').replace('g', ''));
   const { lines, jobs } = readJobs(text);
   const found = [];
+  const seen = new Set();
+  const workflowShell = defaultsRunShell(lines, 0, lines.length, 0);
+
   for (const job of jobs) {
+    const inheritedShell = defaultsRunShell(lines, job.from, job.to, 4) ?? workflowShell;
     for (const step of job.steps) {
       const keys = stepKeys(lines, step);
       const run = keys.get('run');
       if (!run) continue;
 
-      // Inline (`run: node x.mjs`) or a block scalar whose body is the script.
-      const runLines = [];
-      if (run.value && !/^[|>]/.test(run.value)) {
-        runLines.push({ idx: run.idx, text: run.value });
-      } else {
-        for (let i = run.idx + 1; i < step.end; i += 1) {
-          if (isBlank(lines[i])) continue;
-          if (indentOf(lines[i]) <= step.indent + 2) break;
-          runLines.push({ idx: i, text: lines[i].trim() });
-        }
-      }
+      const body = readRunBody(lines, step, run);
+      const analysis = analyzeRunBody(body.text);
+      const keyReasons = keyDisablers(job.id, job.keys, keys, inheritedShell);
 
-      const keyReasons = keyDisablers(job.id, job.keys, keys);
-      for (let at = 0; at < runLines.length; at += 1) {
-        const command = stripShellComment(runLines[at].text);
-        const starts = new Set(commandStarts(command));
+      const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+      let m;
+      while ((m = scan.exec(body.text)) !== null) {
+        if (m[0] === '') { scan.lastIndex += 1; continue; }
+        const cls = analysis.classify(m.index);
+        if (cls.kind === 'comment') continue;
 
-        // Every match on the line, not just the first: `echo node x.mjs && node
-        // x.mjs` mentions it once and runs it once, and the run is what counts.
-        const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
-        let m;
-        let executed = false;
-        const mentions = [];
-        while ((m = scan.exec(command)) !== null) {
-          if (m[0] === '') { scan.lastIndex += 1; continue; }
-          if (!starts.has(m.index)) { mentions.push(m.index); continue; }
-          executed = true;
-          found.push({
-            line: runLines[at].idx + 1,
-            job: job.id,
-            position: 'command',
-            disabled: [...keyReasons, ...shellDisablers(runLines, at, command.slice(m.index + m[0].length))]
-          });
-        }
-
-        // Mentioned but never run: `echo "node x.mjs"`, `bash -c '…'`, or a
-        // wrapper like `timeout 60 node x.mjs`. Reported so the caller can say
-        // WHICH of "absent" it is, instead of leaving a reader staring at a
-        // line that plainly contains the string.
-        if (!executed && mentions.length) {
-          found.push({ line: runLines[at].idx + 1, job: job.id, position: 'argument', disabled: keyReasons });
-        }
+        const finding = {
+          line: body.lineFor(m.index),
+          job: job.id,
+          position: cls.kind,
+          disabled: cls.kind === 'command' ? [...keyReasons, ...cls.reasons] : [...keyReasons],
+          note: cls.note ?? null
+        };
+        // Two mentions on one line are one diagnostic, not two.
+        const key = `${finding.line}|${finding.position}|${finding.note}|${finding.disabled.join('|')}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        found.push(finding);
       }
     }
   }
