@@ -1079,8 +1079,11 @@ rule('3. THE REGRESSION — the old endsWith(\'_event\') forwarder, rebuilt and 
 
 // THE RED HALF. Not a description of the old filter: the old filter, compiled,
 // pointed at the SAME daemon that just delivered nine events to the current
-// build. If this section's mutation ever stops applying, mutatedBuild throws
-// rather than passing.
+// build. If this section's mutation ever stops applying, `mutatedBuild` records
+// a NAMED, COUNTED failure and returns null — the section below skips on it and
+// the run finishes red rather than passing. It used to throw, which is what the
+// sentence here said until KAN-138; a reader who went looking for a stack trace
+// on a drifted anchor would now find a FAIL line instead.
 // Hoisted so this section can be SKIPPED WHOLE when an edit does not apply,
 // without changing what anything after it can see. See scripts/mutation.mjs.
 let oldForwarderDist;

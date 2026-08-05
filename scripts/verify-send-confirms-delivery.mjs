@@ -537,10 +537,15 @@ const daemonPids = new Set();
  *
  * REGISTERED AS A HANDLER RATHER THAN ONLY CALLED AT THE END, because a
  * cleanup that lives on the happy path is not a cleanup. This script's ran
- * after section 7, so ANY abnormal exit before that — a mutation whose anchor
- * had drifted (`mutantDist` throws, deliberately), a crash in a handler, a
- * Ctrl+C — left a real daemon running against a scratch dataDir that the
- * process then never removed. Measured rather than reasoned about: two orphans
+ * after section 7, so ANY abnormal exit before that — a crash in a handler, a
+ * Ctrl+C, a kill — left a real daemon running against a scratch dataDir that
+ * the process then never removed.
+ *
+ * A DRIFTED MUTATION ANCHOR USED TO BE ON THAT LIST AND NO LONGER IS. It was
+ * the first item here, because `mutantDist` threw; since KAN-138 it goes
+ * through `makeMutator` (below), which records a counted failure and returns
+ * null, so the run reaches its normal end. The handler stays — the other three
+ * reasons are untouched and none of them is hypothetical. Measured rather than reasoned about: two orphans
  * were still up afterwards, holding sockets in `/tmp/crabcast-kan114-…`
  * directories that no longer existed.
  *

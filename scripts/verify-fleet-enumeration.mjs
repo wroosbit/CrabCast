@@ -609,14 +609,21 @@ try {
  * Run one mutation section, and turn a missing anchor into a RED CHECK rather
  * than into a dead run.
  *
- * The sibling scripts throw here, deliberately: an anchor that no longer
- * matches means the mutation target moved and the section is unproven, which
- * must not read as a pass. That is right, and it has one consequence this
- * script cannot afford — a throw takes the sections after it down with it, and
- * §9 and §10 are where the contract and the two consumer surfaces are checked.
- * So the failure is recorded with the same weight and the run continues, which
- * is also what makes this script legible when it is pointed at a build that
- * has no paging in it at all.
+ * An anchor that no longer matches means the mutation target moved and the
+ * section is unproven, which must not read as a pass — and it must not take the
+ * sections after it down either, since §9 and §10 are where the contract and the
+ * two consumer surfaces are checked.
+ *
+ * THE SIBLING SCRIPTS USED TO THROW HERE, and this comment used to say so as a
+ * live fact. Since KAN-138 none of them does: every mutating proof goes through
+ * `scripts/mutation.mjs`, which records a counted failure and returns null, and
+ * this file's own disposal is the one the others were changed to match.
+ *
+ * This wrapper stays anyway, and not out of caution: `mutate` covers the edit
+ * not applying, and nothing else. A mutant that imports, spawns or answers
+ * wrongly can still throw from inside a section body, and that is what this
+ * catches. It is also what makes this script legible when it is pointed at a
+ * build with no paging in it at all.
  */
 async function mutationSection(name, body) {
   try {
