@@ -877,8 +877,26 @@ export class AgentRegistry {
    * guard — one of which would eventually be missed.
    */
   public intents(): Map<string, AgentIntent> {
+    return AgentRegistry.intentsFrom(this.readLog());
+  }
+
+  /**
+   * {@link intents}, from a log the caller has already read.
+   *
+   * The same split as {@link preemptedFrom} and for the same reason: reading
+   * the log is a whole-file read and parse, and the paths that ask it several
+   * questions at once should pay for one. `intents()` above is the one-caller
+   * convenience; every path that already holds the rows calls this and passes
+   * them.
+   *
+   * `static` is load-bearing rather than stylistic. A method with no `this`
+   * cannot quietly re-read the file, which is exactly how the four passes this
+   * function exists to remove got there: three helpers that each took no
+   * argument and each called `intents()`.
+   */
+  public static intentsFrom(entries: AgentLogEntry[]): Map<string, AgentIntent> {
     const intents = new Map<string, AgentIntent>();
-    for (const entry of this.readLog()) {
+    for (const entry of entries) {
       if (entry.event === 'forgotten') {
         intents.delete(entry.path);
         continue;
@@ -1044,10 +1062,13 @@ export class AgentRegistry {
    * The expected agents compaction carries across, each with the `at` of the
    * activation that put it there rather than the time of the compaction. See
    * {@link compact} for why that timestamp is load-bearing.
+   *
+   * Takes the intent map rather than reading one, and is `static` so it cannot
+   * go back to reading one. See {@link AgentRegistry.intentsFrom}.
    */
-  private activatedToPreserve(): AgentLogEntry[] {
+  private static activatedToPreserve(intents: Map<string, AgentIntent>): AgentLogEntry[] {
     const out: AgentLogEntry[] = [];
-    for (const intent of this.intents().values()) {
+    for (const intent of intents.values()) {
       if (intent.event !== 'activated') continue;
       // `everActivated` is redundant on an `activated` row — the event itself
       // says it — and is written anyway so every carried row states the fact
@@ -1095,14 +1116,17 @@ export class AgentRegistry {
    * rewritten file, because "it rides on the spread" is a sentence and the log
    * on disk is the fact.
    *
+   * Takes the intent map rather than reading one; see
+   * {@link AgentRegistry.activatedToPreserve}.
+   *
    * Unbounded on purpose, unlike {@link standbyToPreserve}: a standby row is a
    * control offering a way back to work that still exists, and an old one is
    * history rather than a control. A `configured` row is the agent. Clipping it
    * would delete agents.
    */
-  private configuredToPreserve(): AgentLogEntry[] {
+  private static configuredToPreserve(intents: Map<string, AgentIntent>): AgentLogEntry[] {
     const out: AgentLogEntry[] = [];
-    for (const intent of this.intents().values()) {
+    for (const intent of intents.values()) {
       if (intent.event !== 'configured') continue;
       // A `configured`-last row is NOT always a never-run agent: reconfiguring
       // a stopped agent writes one, and that agent has a conversation on disk.
@@ -1161,10 +1185,13 @@ export class AgentRegistry {
    * OFFERED as a way back is a reporting question, and `standbyAgents`
    * (router.ts) still answers it with exactly that `existsSync` — which is
    * where a question about what to show a person belongs.
+   *
+   * Takes the intent map rather than reading one; see
+   * {@link AgentRegistry.activatedToPreserve}.
    */
-  private standbyToPreserve(): AgentLogEntry[] {
+  private static standbyToPreserve(intents: Map<string, AgentIntent>): AgentLogEntry[] {
     const out: AgentLogEntry[] = [];
-    for (const intent of this.intents().values()) {
+    for (const intent of intents.values()) {
       if (intent.event !== 'deactivated') continue;
       // A preempted agent is carried too, but as a plain stand-down: `record`
       // is the configuration with the annotation already pulled out by
@@ -1227,12 +1254,31 @@ export class AgentRegistry {
    * claim about these timestamps, and a page ordered by path is not the
    * ordering this daemon publishes. The guarantee only exists if the times are
    * real, and only the log knows them.
+   *
+   * ONE WHOLE-LOG READ, AND WHERE THAT MATTERS (KAN-96). This used to be four:
+   * {@link compactIfLarge} read the log to decide whether to compact, and then
+   * each of the three preserve sets called `intents()`, which reads and parses
+   * the whole file again. Four passes, and — because compaction happens inside
+   * {@link record} — four passes on the path an activation is blocked on. The
+   * caller now passes the map it already built, and the preserve sets are
+   * `static` so they have no `this` to re-read it through. Compaction from
+   * `record()` therefore costs the one read `compactIfLarge` was taking
+   * anyway; a direct `compact()` with no argument costs exactly one.
+   *
+   * The optional argument is not a micro-optimisation knob — it is the same
+   * consistency argument {@link preemptedFrom} makes one file over: four reads
+   * are also four *different* reads, and a compaction that decided what to
+   * keep from a later parse than the one it sized the file with would be
+   * rewriting the log against two disagreeing pictures of it.
+   *
+   * @param intents the reduction of the log this compaction should preserve.
+   *        Defaults to reading the log once, for callers that do not have one.
    */
-  public compact(): RecordOutcome {
+  public compact(intents: Map<string, AgentIntent> = this.intents()): RecordOutcome {
     const kept: AgentLogEntry[] = [
-      ...this.configuredToPreserve(),
-      ...this.activatedToPreserve(),
-      ...this.standbyToPreserve()
+      ...AgentRegistry.configuredToPreserve(intents),
+      ...AgentRegistry.activatedToPreserve(intents),
+      ...AgentRegistry.standbyToPreserve(intents)
     ];
     const body = kept.map((entry) => JSON.stringify(entry)).join('\n');
 
@@ -1292,12 +1338,18 @@ export class AgentRegistry {
    */
   private retryCompactionAt: number | null = null;
 
+  /**
+   * THE ONE READ. Every record written pays this, and the 501st also pays a
+   * compaction — so the rows are read here and handed on rather than re-read
+   * by whatever decides what to keep. See {@link compact}.
+   */
   private compactIfLarge(): void {
     try {
-      const size = this.readLog().length;
+      const entries = this.readLog();
+      const size = entries.length;
       if (size <= COMPACT_AFTER_RECORDS) return;
       if (this.retryCompactionAt !== null && size < this.retryCompactionAt) return;
-      const outcome = this.compact();
+      const outcome = this.compact(AgentRegistry.intentsFrom(entries));
       this.retryCompactionAt = outcome.ok ? null : size + COMPACT_AFTER_RECORDS;
     } catch {
       // Compaction is housekeeping; failing it must not fail an activation.
