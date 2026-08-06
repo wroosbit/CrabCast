@@ -300,9 +300,10 @@ fs.mkdirSync(fakeHome, { recursive: true });
  * scratch dataDir for `daemon.pid`, and this daemon has never written one — grep
  * the repository, there is no such file — so every read threw ENOENT into an
  * empty `catch {}` and not one daemon was ever signalled. A teardown that has
- * never once run, silent by construction: after eighty runs on this machine there
- * were 433 orphaned daemons holding 24 GiB of RSS between them, each still
- * serving a socket in a directory that had been deleted out from under it.
+ * never once run, silent by construction: measured on this machine at 433
+ * orphaned daemons holding 24 GiB of RSS between them, accumulated over every
+ * run of this script it had ever been given, each still serving a socket in a
+ * directory that had been deleted out from under it. Seven per run.
  *
  * That is not merely untidy, and it is why this sits in the KAN-191 change
  * rather than in a tidy-up ticket: the walkthrough's `activate` is refused when
@@ -333,8 +334,9 @@ function stopDaemons() {
     try { process.kill(pid, 'SIGTERM'); } catch {}
     // Asked and answered, rather than assumed: a SIGTERM that was SENT is not a
     // process that DIED, and "we sent it" is the claim the old pidfile loop
-    // would have made if anyone had thought to make one. This runs at exit, so
-    // the wait is synchronous by construction.
+    // would have made if anyone had thought to make one. The wait is
+    // synchronous because this is also the exit hook, and an exit hook has no
+    // await to reach for.
     const gone = () => { try { process.kill(pid, 0); return false; } catch { return true; } };
     const until = Date.now() + 5000;
     while (!gone() && Date.now() < until) sleepSync(100);
