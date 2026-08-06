@@ -377,7 +377,7 @@ const PROOF_DEFENCES = [
     central:
       "everything CrabCast puts in the CALLER's directory is opted into, merged rather than " +
       'replaced, named in the activation response, and reversible.',
-    anchor: '9. The checks above can actually fail (mutation)',
+    anchor: 'the resume check goes RED against the command the pre-fix launcher built',
     note:
       'It mutates ARTIFACTS rather than a build: §9 reconstructs the state the pre-fix code would ' +
       'have produced — the old unconditional `--continue` command, a real written file without ' +
@@ -389,7 +389,7 @@ const PROOF_DEFENCES = [
     central:
       'the two CI-wiring guards go red for every shape that stops the proof-list audit running, ' +
       'and stay green for every shape that genuinely runs it.',
-    anchor: '=== 3. Every shape, through both guards ===',
+    anchor: 'both guards fail by name',
     note:
       'It mutates the TRACKED `.github/workflows/ci.yml` one shape at a time and runs both guards ' +
       'against it as real processes. It also refuses to start over a dirty ci.yml, which is a ' +
@@ -401,7 +401,7 @@ const PROOF_DEFENCES = [
     central:
       "the README's pasted blocks still show what the program prints, per command, and every " +
       'fenced block of program output is covered or registered as uncovered with a reason.',
-    anchor: '3. The detector is a measurement, not a constant',
+    anchor: 'got === canary.expect',
     note:
       'It mutates the PAGE: six canaries, four that must be caught and two that must NOT be, ' +
       'because a mask wide enough to pass against anything is this check\'s own way of ' +
@@ -417,7 +417,7 @@ const PROOF_DEFENCES = [
     central:
       'activation starts the launcher that was declared and never a silent shell; an unknown ' +
       'launcher refuses at configure, naming the valid ones.',
-    anchor: "3. launcher: 'shell' — explicit shell still works, and only explicit",
+    anchor: "asking for 'shell' by name still gets one — the fixture path verify scripts use is intact",
     note:
       'NEGATIVE CASE, both directions on one predicate: §2 requires an unknown launcher to be ' +
       'refused and §3 requires an explicit `shell` to still work, so a refusal that had widened to ' +
@@ -430,7 +430,7 @@ const PROOF_DEFENCES = [
     central:
       '`activate` reports success only for an agent that verifiably exists, and keeps ' +
       '"herdr said no", "herdr did not answer" and "the agent is not there" apart.',
-    anchor: '2. injected failure — herdr reports the start succeeded and starts nothing',
+    anchor: 'success: false, naming the agent that is not there',
     note:
       'NEGATIVE CASE on the central predicate: §1 requires `verified: true` from a real ' +
       'activation and §2 injects a herdr that reports success and starts nothing, requiring the ' +
@@ -442,7 +442,7 @@ const PROOF_DEFENCES = [
     central:
       'the concurrent-agent cap is derived from the hardware with reproducible arithmetic, moves ' +
       'with load, honours the gate triple, and refuses with the constraint that actually bound.',
-    anchor: 'what sampleFromMeasurement makes of windows that prove nothing',
+    anchor: 'every bad window rejects to null',
     note:
       'NEGATIVE FIXTURES: §12 drives five measurement windows that must each be REJECTED (zero ' +
       'agent trees, negative cores, zero cores, absurd rss, zero-length window), so a sampler that ' +
@@ -455,7 +455,7 @@ const PROOF_DEFENCES = [
     central:
       'a higher-priority agent can take a lower-priority one\'s slot — visibly, reversibly, and ' +
       'never automatically.',
-    anchor: '6. TOP-OF-SCALE SAFETY — the highest priority cannot be touched',
+    anchor: 'topOfScale === null &&',
     note:
       'NEGATIVE CASES on `selectVictim`: §6 requires it to choose NOTHING at the top of the scale ' +
       'and §7 requires a low-priority unpreemptable agent never to be offered, against §2 where it ' +
@@ -491,7 +491,7 @@ const PROOF_DEFENCES = [
     central:
       'a CLI refusal is legible and non-zero, `--json` is the daemon\'s response and nothing else, ' +
       'and the exit codes mean what `--help` says they mean.',
-    anchor: 'The premise, measured rather than assumed',
+    anchor: "the daemon's own cwd IS ${daemonCwd} — so a daemon-side resolve would land on its victim",
     note:
       'PRECONDITION on §9: the daemon\'s inherited cwd is measured before the relative-path ' +
       'refusals are asserted, because every check below it would otherwise pass for the wrong ' +
@@ -504,7 +504,7 @@ const PROOF_DEFENCES = [
     central:
       'the daemon REFUSES a config it cannot honour rather than repairing it, and exactly one ' +
       'daemon owns the socket.',
-    anchor: '=== 2. Daemon starts from config; daemon_status round-trips ===',
+    anchor: 'daemon came up and owns the socket',
     note:
       'NEGATIVE/POSITIVE PAIR on the loader: §1 requires four bad configs to exit 1 with the field ' +
       'named, §2 requires a good one to start and round-trip. A loader that refused everything ' +
@@ -529,7 +529,7 @@ const PROOF_DEFENCES = [
     central:
       'against a real herdr, `herdr agent list` agrees that an agent came up, went down, and came ' +
       'back across a daemon SIGKILL — a census taken from something other than the daemon under test.',
-    anchor: '1. BASELINE — what herdr says is running before anything happens',
+    anchor: '!baseline.includes(PROBE_AGENT)',
     note:
       'BASELINE: the machine is measured before anything is spawned and again at teardown, so §2\'s ' +
       '"a pane that was not there, and then is" is a difference rather than a presence, and a leak ' +
@@ -541,7 +541,7 @@ const PROOF_DEFENCES = [
     central:
       'what CrabCast does against ONE named herdr release, run out-of-place — so each version in ' +
       "the README's table is a version somebody actually ran.",
-    anchor: '1. The release under test is the one that ran, and the live herdr is not it',
+    anchor: 'and it is NOT the file the caller has installed',
     note:
       'PRECONDITION, and it is the whole proof: the binary under test must not BE the installed ' +
       'one, asserted before the lifecycle runs. Without it the script would report on the herdr ' +
@@ -594,7 +594,7 @@ const PROOF_DEFENCES = [
     central:
       'the CrabCast MCP server serves the daemon\'s socket API as tools over real stdio against a ' +
       'really-running daemon, and a failure arrives FLAGGED rather than as ordinary text.',
-    anchor: '6. failures arrive flagged — isError mappings',
+    anchor: 'a failed deactivation is flagged isError',
     note:
       'NEGATIVE CASE on the isError mapping: §3 requires a successful round trip to come back ' +
       'unflagged and §6 requires a failed deactivation to come back `isError: true` with ' +
@@ -606,7 +606,7 @@ const PROOF_DEFENCES = [
     central:
       'a second activation of one agent returns the SAME session rather than opening a takeover ' +
       'attach that evicts the first client.',
-    anchor: 'THE RESPONSIVENESS CANARY',
+    anchor: 'APPEARED in the census — the census reacts to this machine changing',
     note:
       'CANARY, and it is the model this register points other scripts at: the census is required ' +
       'to REACT to a pane this run created before §4 is allowed to conclude anything from the ' +
