@@ -184,6 +184,60 @@ export async function reconcileAgents(opts: {
   // At boot the session map is empty, so this reduces to "re-attach
   // everything", which is the intent. It stays meaningful for any later caller
   // — an agent we are already carrying is genuinely nothing to do.
+  //
+  // WHY BOTH PROPERTIES, RATHER THAN A CHOICE BETWEEN THEM (KAN-134). That
+  // ticket found `verify-fleet-switch-live` section 3 red on `main` and framed
+  // two defensible readings, saying they needed deciding rather than patching:
+  // either not spawning a second copy is the whole point and the script's
+  // assertion is out of date, or a daemon that holds no attach to an agent it
+  // supervises is a different fleet from the one that script was written
+  // against. BOTH are right about what they defend and NEITHER is the fix,
+  // because they are answers to the two different questions named above. The
+  // decision is to hold both: recognise the survivor — nothing is spawned,
+  // unchanged — and then attach to it.
+  //
+  // The `shell` launcher is where this surfaced, and not by coincidence. T1
+  // widened `ourPaneIn` so a bare prompt counts as its own agent, which is
+  // correct — for that launcher the prompt IS the delivered product. The
+  // consequence was that a surviving `shell` pane became recognisable for the
+  // first time, so ownership alone started answering "leave it alone" for the
+  // case it had previously answered by accident. KAN-134 records that account:
+  // before T1 a `shell` probe had no runtime, failed the ownership test, was
+  // therefore not in this set, and got restored through `activate` — which
+  // re-attached. The re-attach was real and nothing in the design had asked for
+  // it, so widening ownership took it away without touching anything that named
+  // it. Stating it is this conjunct.
+  //
+  // WHAT MAKES ATTACHING HERE SAFE, rather than a smaller version of "restore
+  // it through `activate`" — which is the verb that accident used and the wrong
+  // one, because it can spawn: `attachSession` performs no provisioning. No
+  // prompt file is rewritten, no `launcher.setup` runs, no `.mcp.json` is
+  // touched. That is asserted as FILES rather than as calls, by
+  // `verify-restart-survival` section 6 (KAN-170 item 12), and the assertion is
+  // load-bearing rather than defensive: a re-attach that re-provisioned would
+  // rewrite the working directory of an agent that has been in it for an hour,
+  // and doing so idempotently is exactly what would keep it invisible.
+  //
+  // WHAT HOLDS THIS, and the seam between the two, because neither proof covers
+  // the other's half and no third thing covers the gap:
+  //
+  //   * `verify-restart-survival` — in the CI array. Runs BOTH launchers
+  //     through the whole sequence, counts panes and counts `agent start` from
+  //     a stub's argv log. It proves this daemon's half exhaustively, and the
+  //     herdr it proves it against is one this suite wrote.
+  //   * `verify-fleet-switch-live` section 3 — hand-run, deliberately excluded
+  //     from CI. SIGKILLs a real daemon and takes `herdr agent list` as ground
+  //     truth, so it is the only thing that establishes a real herdr 0.6.x
+  //     honours `agent attach --takeover` over the attach slot a dead daemon's
+  //     PTY still holds. Nothing on a runner can establish that.
+  //
+  // Deleting the `getSessionByPath` conjunct below reproduces KAN-134 in both,
+  // and the recipe is written here rather than left to be rediscovered: the
+  // first fails every assertion in its section 2 for BOTH launchers (15 in
+  // total the run this was written from), the second prints
+  // `row=false panes=1 missing=0` — the line the ticket was filed with — under
+  // a reconcile log reading `is already running; leaving it alone.` That has
+  // been run, on herdr 0.6.4, rather than reasoned about.
   const census = herdrBridge.listHerdrAgentsChecked();
   const alive = new Set(
     expected
