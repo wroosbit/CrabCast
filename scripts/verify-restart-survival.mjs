@@ -875,7 +875,29 @@ function linkRuntimeDepsInto(mutantDir) {
   }
   const real = entry.slice(0, at + marker.length - 1);
   fs.symlinkSync(real, link, 'dir');
-  return { ok: true, link, real, detail: `${link} -> ${real}` };
+  // READ BACK THROUGH THE LINK, rather than reporting the path handed to
+  // `symlinkSync`. The two differ whenever anything is wrong, and this function
+  // is the setup step a whole section is skipped on — a report of what was
+  // INTENDED would say "resolvable" about a link pointing at nothing, and the
+  // reader would then go looking for the failure in the daemon.
+  const resolved = fs.existsSync(path.join(link, 'node-pty'));
+  // `readlinkSync`, not `real`: on the failing path the two are the interesting
+  // pair, and printing the one we asked for would hide the one we got.
+  const pointsAt = (() => {
+    try {
+      return fs.readlinkSync(link);
+    } catch (err) {
+      return `unreadable (${err?.message ?? err})`;
+    }
+  })();
+  return {
+    ok: resolved,
+    link,
+    real,
+    detail: resolved
+      ? `${link} -> ${pointsAt}`
+      : `${link} was created but node-pty is not readable through it — it points at ${pointsAt}`
+  };
 }
 
 mutation: {
