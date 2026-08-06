@@ -315,34 +315,98 @@ fs.mkdirSync(fakeHome, { recursive: true });
  *
  * The pid comes from `daemon-status`, which is where the daemon actually
  * publishes it — the same road verify-activated-by.mjs takes.
+ *
+ * AND FROM A CENSUS, BECAUSE ASKING IS NOT LOOKING. The first version of this
+ * only asked, and skipped any world that did not answer — so a daemon that was
+ * running but unreachable was never signalled and never counted, while the
+ * comment here claimed the survivor check told that case apart. It could not:
+ * the survivor check needs a pid, and a world with no pid never reached it.
+ * That is this ticket's own defect one level down — a sentence wider than the
+ * mechanism under it — and it was caught in review of the fix for it.
+ *
+ * So every live process whose argv names this world's config is enumerated from
+ * `/proc`, whether or not anything answered. An unreachable daemon is now found
+ * by looking at the process table rather than by being asked politely, and the
+ * one platform where that census is impossible reports itself rather than
+ * passing quietly — see `censusAvailable` and section 8.
  */
 function stopDaemons() {
   const survivors = [];
+  let found = 0;
+  let censusAvailable = true;
   for (const { dataDir, configPath, env } of daemonDataDirs) {
-    let pid = null;
+    const pids = new Set();
     try {
       const r = spawnSync(process.execPath, [cliJs, 'daemon-status', '--json', '--config', configPath], {
         env, encoding: 'utf8', timeout: 20_000
       });
-      pid = Number(JSON.parse(r.stdout).pid);
+      const answered = Number(JSON.parse(r.stdout).pid);
+      if (Number.isInteger(answered) && answered > 0) pids.add(answered);
     } catch {
-      // No daemon answered. Either none was ever started for this world — which
-      // several scenarios never do — or one is running and unreachable, and the
-      // survivor check below is what tells those apart.
+      // Nothing answered. That is NOT the same as nothing running, which is
+      // exactly the confusion this function used to be built on, so it decides
+      // nothing here — the census below is what looks.
     }
-    if (!Number.isInteger(pid) || pid <= 0) continue;
-    try { process.kill(pid, 'SIGTERM'); } catch {}
-    // Asked and answered, rather than assumed: a SIGTERM that was SENT is not a
-    // process that DIED, and "we sent it" is the claim the old pidfile loop
-    // would have made if anyone had thought to make one. The wait is
-    // synchronous because this is also the exit hook, and an exit hook has no
-    // await to reach for.
-    const gone = () => { try { process.kill(pid, 0); return false; } catch { return true; } };
-    const until = Date.now() + 5000;
-    while (!gone() && Date.now() < until) sleepSync(100);
-    if (!gone()) survivors.push({ dataDir, pid });
+    const seen = daemonsNaming(configPath);
+    if (seen === null) censusAvailable = false;
+    for (const p of seen ?? []) pids.add(p);
+
+    for (const pid of pids) {
+      found += 1;
+      try { process.kill(pid, 'SIGTERM'); } catch {}
+      // Asked and answered, rather than assumed: a SIGTERM that was SENT is not
+      // a process that DIED, and "we sent it" is the claim the old pidfile loop
+      // would have made if anyone had thought to make one. The wait is
+      // synchronous because this is also the exit hook, and an exit hook has no
+      // await to reach for.
+      const gone = () => { try { process.kill(pid, 0); return false; } catch { return true; } };
+      const until = Date.now() + 5000;
+      while (!gone() && Date.now() < until) sleepSync(100);
+      if (!gone()) survivors.push({ dataDir, pid });
+    }
   }
-  return survivors;
+  return { survivors, found, censusAvailable };
+}
+
+/**
+ * Every live process whose argv names `configPath`, or `null` where the process
+ * table cannot be read at all.
+ *
+ * `null` rather than `[]`, and the difference is the whole reason this exists:
+ * an empty list is a measurement saying "none", and a platform with no `/proc`
+ * has not measured anything. Section 8 refuses to claim a clean teardown on the
+ * second.
+ *
+ * `/proc` is already this repository's way of asking about a process —
+ * src/herdr-health.ts reads `/proc/<pid>/fd` — so this adds no new assumption
+ * about the platform, only a new place the same one is made.
+ *
+ * SELF-MATCH IS RULED OUT rather than hoped away: `configPath` appears in this
+ * script's own argv nowhere, and the `daemon.js` requirement excludes the CLI
+ * processes that DO carry it on their command lines. A matcher that counted
+ * itself would report a survivor that is the thing doing the counting.
+ */
+function daemonsNaming(configPath) {
+  let entries;
+  try {
+    entries = fs.readdirSync('/proc');
+  } catch {
+    return null;
+  }
+  const found = [];
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    const pid = Number(entry);
+    if (pid === process.pid) continue;
+    let argv;
+    try {
+      argv = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8');
+    } catch {
+      continue;   // it exited between the listing and the read
+    }
+    if (argv.includes('daemon.js') && argv.includes(configPath)) found.push(pid);
+  }
+  return found;
 }
 
 /** A synchronous pause. There is no await to be had on the exit path. */
@@ -1672,13 +1736,25 @@ rule('8. Nothing this run started is still running');
  * with it, which is why the count below comes out at zero, but nothing here
  * asserts that second step and a change to the shim could break it silently.
  */
-const survivors = stopDaemons();
-check(survivors.length === 0,
-  `every daemon this run started was asked for its pid, signalled, and seen to exit`,
-  survivors.length
-    ? `${survivors.length} still running after SIGTERM: ` +
-      survivors.map((s) => `pid ${s.pid} in ${s.dataDir}`).join('; ')
-    : `${daemonDataDirs.size} world(s), none left behind`);
+const teardown = stopDaemons();
+if (!teardown.censusAvailable) {
+  // The claim below rests on enumerating the process table. Where that cannot
+  // be done, the honest answer is that nothing was measured — a daemon that did
+  // not answer `daemon-status` would be invisible, and a zero produced by not
+  // looking is the shape of failure this whole ticket is about.
+  check(false, 'the teardown was measured rather than assumed',
+    'NOT VERIFIED — /proc could not be read, so a running daemon that did not answer ' +
+    'daemon-status cannot be seen at all on this platform. Nothing here is a statement ' +
+    'about whether anything survived.');
+} else {
+  check(teardown.survivors.length === 0,
+    'every process whose argv names one of this run\'s configs was signalled and seen to exit — ' +
+    'found by census, not only by asking',
+    teardown.survivors.length
+      ? `${teardown.survivors.length} still running after SIGTERM: ` +
+        teardown.survivors.map((s) => `pid ${s.pid} in ${s.dataDir}`).join('; ')
+      : `${daemonDataDirs.size} world(s), ${teardown.found} daemon(s) found, none left behind`);
+}
 
 // ---------------------------------------------------------------------------
 
