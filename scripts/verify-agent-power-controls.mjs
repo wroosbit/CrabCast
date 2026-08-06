@@ -39,6 +39,14 @@
 //  13. collision    — two agents that would have collided on a shared key
 //                     coexist, and the ambiguity that used to decide between
 //                     them is GONE rather than merely unreached (AC 3)
+//  14. one read     — one whole-log read per COMPACTION, which happens inside
+//                     record() and therefore on the path an activation waits
+//                     on; 14b: the pre-fix shape restored, and the count goes
+//                     to four (KAN-96 AC 1)
+//  15. what "newest — `missingAgents` is ordered by the ACTIVATION timestamp,
+//      first" means    and nothing on the row records when the agent went
+//                      missing, which is why that order is not a neglect
+//                      ranking and is not flipped (KAN-96 AC 2)
 //
 // Every section drives the real MessageRouter, a real config through the real
 // loader, and a real on-disk AgentRegistry, so what it prints is what a caller
@@ -105,6 +113,35 @@ const { loadConfig } = await import(path.join(distDir, 'config.js'));
 const { paneNameFor, canonicalizeOrNull } = await import(path.join(distDir, 'identity.js'));
 
 const config = loadConfig(configPath);
+
+// §14b mutates a copy of the compiled build. Through the shared helper, so a
+// drifted anchor is a counted failure that names itself rather than a throw
+// that takes every later section with it (KAN-138).
+const { makeMutator } = await import('./mutation.mjs');
+const MUTANTS = path.join(TMP, 'mutants');
+// A mutant is a copy of dist/ under a scratch directory, so a bare import in it
+// — `node-pty`, out of herdr.js, which router.js pulls in — resolves by walking
+// up from HERE and finds nothing. Without this the mutant dies on startup, and
+// a mutant that died on startup produces the same observation as one that
+// behaved well. verify-fleet-enumeration.mjs §8 does the same thing for the
+// same reason.
+fs.mkdirSync(MUTANTS, { recursive: true });
+try {
+  fs.symlinkSync(path.join(distDir, '..', 'node_modules'), path.join(MUTANTS, 'node_modules'), 'dir');
+} catch (e) {
+  if (e?.code !== 'EEXIST') throw e;
+}
+const { mutate } = makeMutator({
+  distDir,
+  scratch: MUTANTS,
+  report: {
+    // The helper composes its own label and diagnosis; this adapter passes
+    // them through rather than re-wrapping them, so the sentence a reader sees
+    // is the one mutation.mjs pins ("Fix the mutation, not this check.").
+    pass: (label, detail) => console.log(`  ${label}${detail ? `\n    ${detail}` : ''}`),
+    fail: (label, detail) => verdict(false, '', `${label}\n    ${detail}`)
+  }
+});
 
 /** A directory the caller already owns. Every address in this file is one. */
 function owned(...parts) {
@@ -1579,8 +1616,16 @@ rule('12. ONE REGISTRY READ PER POLL, AND EVERY CATEGORY CAPPED');
     descending(sent12.missingAgents, 'since') &&
       descending(sent12.preemptedAgents, 'at') &&
       descending(sent12.standbyAgents, 'since'),
+    // The claim is about ORDER, and it stops there deliberately. It used to end
+    // "clipping a newest-first one hides the least urgent", which is true of
+    // standby — its `since` is when somebody switched the agent off — and is
+    // NOT true of missingAgents, whose `since` is when the agent was last
+    // ACTIVATED and therefore ranks lifetime rather than neglect. Section 15
+    // is that distinction, measured. A page ordered by nothing hides an
+    // arbitrary subset, which is what this verdict is here to exclude.
     'and what is kept is the newest of each — clipping an unordered list would hide an\n' +
-    '    arbitrary subset; clipping a newest-first one hides the least urgent.',
+    '    arbitrary subset, which is a page nobody can reason about at all. What "newest"\n' +
+    '    MEANS differs by category, and §15 is where that is pinned down.',
     'a clipped category was not ordered newest-first'
   );
 
@@ -1683,6 +1728,330 @@ rule('13. THE KEY COLLISION IS GONE, NOT MERELY UNREACHED (AC 3)');
     '    ambiguous`, and no function anywhere that builds or parses an agent name.',
     `the name-parsing machinery survives in: ${offenders.join(', ')}`
   );
+}
+
+// ------------------------------------------ 14. one read per compaction --
+rule('14. ONE WHOLE-LOG READ PER COMPACTION, ON THE ACTIVATION PATH (KAN-96 AC 1)');
+
+{
+  console.log('Section 12 is the same defect one file over: `list_agents` asked the registry');
+  console.log('four separate times per poll. Compaction had it too, and in a worse place.');
+  console.log('`compactIfLarge()` read the log to decide whether to compact, and `compact()`');
+  console.log('then called three preserve sets that each called `intents()` — a whole-file');
+  console.log('read and parse each. Four passes over a 500-record file, INSIDE `record()`,');
+  console.log('which is on the path an activation is blocked on.\n');
+  console.log('Four reads are also four DIFFERENT reads: a compaction that decided what to');
+  console.log('keep from a later parse than the one it sized the file with would be rewriting');
+  console.log('the log against two disagreeing pictures of it.\n');
+
+  // WHAT THIS MEASURES, AND HOW. `readLog()` is the only function in
+  // agent-registry.ts that opens the log — `fs.readFileSync(this.file)` appears
+  // there once and nowhere else in the class — so counting calls to it counts
+  // passes over the file.
+  //
+  // Counted by SUBCLASS rather than by the Proxy §12 uses, for a mechanical
+  // reason worth stating: the reads under test are the registry's own internal
+  // `this.readLog()` calls, and a Proxy wrapping the instance never sees those
+  // — an internal call goes through `this`, not through the wrapper. A subclass
+  // does see them, because the call dispatches virtually. A Proxy here would
+  // have counted zero and this section would have passed against anything.
+  const counting = (Registry) => {
+    const reads = { readLog: 0, intents: 0 };
+    class Counting extends Registry {
+      readLog() { reads.readLog++; return super.readLog(); }
+      intents() { reads.intents++; return super.intents(); }
+    }
+    return { Counting, reads };
+  };
+
+  // A log of `rows` records over `agents` distinct paths, written as the daemon
+  // writes them: ONE genuine `record()` supplies the line, and the copies vary
+  // only the path. Hand-built JSON here would be this proof asserting against
+  // its own idea of the format rather than against the daemon's.
+  //
+  // Seeded rather than driven, because 640 real `record()` calls are 640
+  // fsyncs. What that leaves uncovered is the THRESHOLD — whether the daemon
+  // really compacts at 500 records rather than at some other number — and this
+  // section does not cover it: it seeds past whatever the threshold is and
+  // asserts a compaction happened. §9 drives compaction through the real
+  // `compact()`; §9d and verify-activated-by.mjs §6 drive a real log past the
+  // real threshold. This one owns the READ COUNT and nothing else.
+  const seedLog = (file, rows, agents) => {
+    const template = path.join(TMP, `seed-${path.basename(file)}`);
+    new AgentRegistry(template).recordActivated({
+      path: owned('reads', 'template'), config: knobs()
+    });
+    const row = JSON.parse(fs.readFileSync(template, 'utf8').trim());
+    const lines = [];
+    for (let i = 0; i < rows; i++) {
+      lines.push(JSON.stringify({ ...row, path: path.join(OWNED, 'reads', `agent-${i % agents}`) }));
+    }
+    fs.writeFileSync(file, lines.join('\n') + '\n');
+  };
+
+  const AGENTS = 8;
+  const ROWS = 640;
+
+  /**
+   * One activation's worth of registry work, measured.
+   *
+   * Returns the reads that activation paid for, and — the part that makes the
+   * number mean anything — what the log looked like either side of it.
+   */
+  const activationCost = (Registry, file) => {
+    seedLog(file, ROWS, AGENTS);
+    const { Counting, reads } = counting(Registry);
+    const reg = new Counting(file);
+    const before = reg.readLog().length;
+    reads.readLog = 0;
+    reads.intents = 0;
+    const outcome = reg.recordActivated({
+      path: path.join(OWNED, 'reads', 'the-activation'), config: knobs()
+    });
+    const cost = { ...reads };
+    return { before, after: reg.readLog().length, cost, outcome, reg };
+  };
+
+  const fixed = activationCost(AgentRegistry, path.join(TMP, 'compaction-reads.jsonl'));
+  const keptRows = fixed.reg.readLog().map((e) => `${e.event} ${path.basename(e.path)}`).sort();
+
+  console.log(`  seeded ${fixed.before} records over ${AGENTS} agents, then ONE recordActivated():`);
+  console.log(`    log after that call: ${fixed.after} records (${AGENTS} agents + the new one)`);
+  console.log(`    whole-log reads that call paid for: ${fixed.cost.readLog} ${JSON.stringify(fixed.cost)}`);
+  console.log(`    durable: ${JSON.stringify(fixed.outcome)}`);
+
+  // THE PRECONDITION, and it is not decoration. "One read" is trivially true of
+  // a `record()` that compacted nothing — the size check alone is one read — so
+  // without evidence that the compaction really ran inside this call, the
+  // verdict below would pass just as green against a daemon that had stopped
+  // compacting altogether.
+  verdict(
+    fixed.before === ROWS && fixed.after === AGENTS + 1,
+    `the compaction really happened inside that recordActivated(): ${ROWS} records became\n` +
+    `    ${AGENTS + 1}. Without this the read count below would be a claim about a call that\n` +
+    '    did no compacting.',
+    `no compaction ran: ${fixed.before} records → ${fixed.after}`
+  );
+  verdict(
+    fixed.cost.readLog === 1,
+    'and it cost ONE whole-log read — the one `compactIfLarge` was taking anyway to decide\n' +
+    '    whether to compact. The rows it read are handed to the preserve sets rather than\n' +
+    '    re-read by each of them, so an activation waiting on a compaction waits for one\n' +
+    '    parse instead of four.',
+    `the activation paid for ${fixed.cost.readLog} whole-log read(s): ${JSON.stringify(fixed.cost)}`
+  );
+
+  // The contrast, so the "1" above is legible as "the size check and nothing
+  // else" rather than as a number with no scale.
+  const smallFile = path.join(TMP, 'no-compaction-reads.jsonl');
+  const { Counting: SmallCounting, reads: smallReads } = counting(AgentRegistry);
+  const small = new SmallCounting(smallFile);
+  small.recordActivated({ path: owned('reads', 'small'), config: knobs() });
+  smallReads.readLog = 0;
+  smallReads.intents = 0;
+  small.recordActivated({ path: owned('reads', 'small-2'), config: knobs() });
+  console.log(`\n  a record() BELOW the threshold: ${smallReads.readLog} read(s) — the size check`);
+
+  const directFile = path.join(TMP, 'direct-compact-reads.jsonl');
+  seedLog(directFile, ROWS, AGENTS);
+  const { Counting: DirectCounting, reads: directReads } = counting(AgentRegistry);
+  const direct = new DirectCounting(directFile);
+  directReads.readLog = 0;
+  const directOutcome = direct.compact();
+  // Captured before anything else touches the registry — the console.log below
+  // reads the log to say how many records are left, and counting that would be
+  // this section measuring itself.
+  const directCost = directReads.readLog;
+  console.log(`  a direct compact() with no argument: ${directCost} read(s), ` +
+    `ok=${directOutcome.ok}, ${direct.readLog().length} records left`);
+
+  verdict(
+    smallReads.readLog === 1 && directCost === 1 && directOutcome.ok === true,
+    'a record() that does NOT compact pays the same one read, and a direct compact() with\n' +
+    '    no map to hand it reads once for itself — so the argument is a way to share a read\n' +
+    '    the caller already paid for, not a second code path with its own answer.',
+    `off-path reads disagree: below-threshold ${smallReads.readLog}, direct compact ` +
+    `${directCost}`
+  );
+
+  // -- 14b. the assertion can fail: the pre-fix shape, restored --------------
+  //
+  // WHAT WOULD HAVE TO BE TRUE for §14 to pass while the defect is back: the
+  // preserve sets would have to be re-reading the log and the counter not
+  // seeing it. So put the re-reads back and watch the number go to four. The
+  // mutation is exactly the pre-fix shape the ticket describes — three helpers
+  // that each call `intents()` — rather than an invented breakage.
+  mutation14: {
+    console.log('\n  14b. and the count is a measurement rather than a formality:\n');
+    const mutantDir = mutate('compact-re-reads-the-log', [
+      { file: 'agent-registry.js',
+        find: 'AgentRegistry.configuredToPreserve(intents)',
+        replace: 'AgentRegistry.configuredToPreserve(this.intents())' },
+      { file: 'agent-registry.js',
+        find: 'AgentRegistry.activatedToPreserve(intents)',
+        replace: 'AgentRegistry.activatedToPreserve(this.intents())' },
+      { file: 'agent-registry.js',
+        find: 'AgentRegistry.standbyToPreserve(intents)',
+        replace: 'AgentRegistry.standbyToPreserve(this.intents())' }
+    ]);
+    if (!mutantDir) break mutation14;
+
+    const { AgentRegistry: PreFix } = await import(path.join(mutantDir, 'agent-registry.js'));
+    const mutant = activationCost(PreFix, path.join(TMP, 'compaction-reads-prefix.jsonl'));
+    const mutantRows = mutant.reg.readLog().map((e) => `${e.event} ${path.basename(e.path)}`).sort();
+
+    console.log(`  the pre-fix build, same fixture: ${mutant.cost.readLog} whole-log reads ` +
+      `${JSON.stringify(mutant.cost)}`);
+    console.log(`    and it compacted identically: ${mutant.before} records → ${mutant.after}`);
+
+    verdict(
+      mutant.cost.readLog === 4,
+      'restoring the three `intents()` calls takes the same activation from ONE whole-log\n' +
+      '    read to FOUR — the count in §14 is measuring the code and would have gone red on\n' +
+      '    the build this change replaces.',
+      `the pre-fix build did not cost four reads (${mutant.cost.readLog}) — either the mutation\n` +
+      `    missed the call sites or the counter is not seeing what it claims to`
+    );
+    verdict(
+      JSON.stringify(mutantRows) === JSON.stringify(keptRows) && mutant.after === fixed.after,
+      'and the two builds keep the SAME rows — so what changed is how many times the log is\n' +
+      '    read, not what compaction decides. A read-count fix that also moved a row would be\n' +
+      '    a behaviour change wearing a performance fix\'s clothes.',
+      `the mutant compacted to something else: ${JSON.stringify(mutantRows)} vs ` +
+      `${JSON.stringify(keptRows)}`
+    );
+  }
+}
+
+// --------------------------------------- 15. what missingAgents is ordered by --
+rule('15. THE missingAgents ORDER RANKS ACTIVATION, NOT NEGLECT (KAN-96 AC 2)');
+
+{
+  console.log('The open question this closes: `missingAgents` is paged newest-first, on the');
+  console.log('reasoning that the oldest rows are the least urgent. That is right for');
+  console.log('standbyAgents — the thing you just switched off is the thing you want back —');
+  console.log('and it was argued to be BACKWARDS for a loss, because an agent nobody has');
+  console.log('restored in three days is the MOST neglected, not the least.\n');
+  console.log('It is a good argument about a field this row does not have. What is measured');
+  console.log('below is what `since` actually is, because the decision rests on it.\n');
+
+  const longLived = owned('order', 'long-lived');
+  const justStarted = owned('order', 'just-started');
+  const reg = new AgentRegistry(path.join(TMP, 'ordering.jsonl'));
+
+  // One agent activated years ago, one activated a moment ago. herdr reports
+  // NEITHER — so both are discovered missing by the same census, in the same
+  // instant. Whatever separates these two rows, it is not when they went.
+  const LONG_AGO = '2020-01-01T00:00:00.000Z';
+  reg.recordActivated({ path: longLived, config: knobs({ label: 'up since 2020' }) }, LONG_AGO);
+  reg.recordActivated({ path: justStarted, config: knobs({ label: 'started just now' }) });
+
+  const bridge15 = stubHerdr([]);
+  let sent15;
+  const router15 = new MessageRouter({
+    config, herdrBridge: bridge15,
+    daemonStartedAt: new Date(), agentRegistry: reg,
+    send: (msg) => { sent15 = msg; }, broadcast: () => {}
+  });
+  router15.handle({ action: 'list_agents' });
+
+  const rows = sent15.missingAgents;
+  const observedAt = sent15.provenance?.observedAt;
+  console.log(`  one census at ${observedAt} found both agents absent:\n`);
+  for (const row of rows) {
+    console.log(`    ${row.label.padEnd(18)} since ${row.since}  ${path.basename(row.path)}`);
+  }
+
+  // Every timestamp-shaped field on the row, so "there is no missing-since" is
+  // read off the payload rather than asserted from memory.
+  const timeFields = Object.entries(rows[0])
+    .filter(([, v]) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(v))
+    .map(([k]) => k);
+  console.log(`\n  timestamp fields on a missingAgents row: ${JSON.stringify(timeFields)}`);
+
+  const older = rows.find((r) => r.path === longLived);
+  const newer = rows.find((r) => r.path === justStarted);
+  const spreadYears =
+    (new Date(newer.since) - new Date(older.since)) / (365 * 24 * 60 * 60 * 1000);
+  console.log(`  the two rows' \`since\` values are ${spreadYears.toFixed(1)} years apart, and both`);
+  console.log(`  losses were observed in the same call.`);
+
+  verdict(
+    older.since === LONG_AGO && timeFields.length === 1 && timeFields[0] === 'since',
+    '`since` is the ACTIVATION timestamp — 2020, for an agent this daemon noticed was gone\n' +
+    '    seconds ago — and it is the row\'s ONLY timestamp. Nothing here records when the\n' +
+    '    agent went missing, because nothing in this daemon knows: a loss is a comparison\n' +
+    '    against a census taken now, and the sweep\'s latch is a Set of paths with no time\n' +
+    '    on it that a restart forgets.',
+    `the row's timestamps were ${JSON.stringify(timeFields)} with since=${older.since}`
+  );
+  verdict(
+    rows.length === 2 && rows[0].path === justStarted && rows[1].path === longLived &&
+      spreadYears > 1,
+    'so the newest-first order ranks these two by how long ago they were ACTIVATED, while\n' +
+    '    they were lost in the same instant. Flipping it would not rank by neglect — it\n' +
+    '    would put the fleet\'s longest-lived agents first while reading as a claim about\n' +
+    '    down-time the data cannot support. The order stays newest-first, the reason is in\n' +
+    '    router.ts beside the decision, and KAN-189 holds what would have to exist first.',
+    `the category was not newest-first over activation times: ${JSON.stringify(
+      rows.map((r) => [path.basename(r.path), r.since])
+    )}`
+  );
+  verdict(
+    sent15.missingTotal === 2 && sent15.pages?.missingAgents?.nextCursor === null,
+    'and the half of the original complaint that WAS about reachability is answered rather\n' +
+    '    than argued: the category is paged, `total` states its size and `nextCursor` says\n' +
+    '    whether anything is past this page — null here because both rows fit. No row is\n' +
+    '    unreachable at any position, whatever the order.',
+    `the paging handle is missing from the response: ${JSON.stringify(sent15.pages?.missingAgents)}`
+  );
+
+  // -- 15b. the decision is enforced, not merely written down ----------------
+  //
+  // The honest thing to say about the section above is that it would pass just
+  // as green against the build this change replaces: nothing about the ordering
+  // BEHAVIOUR changed here, only the reasoning, and a comment cannot be
+  // asserted on without pinning prose. What CAN be pinned is the decision — so
+  // flip the comparator and watch the verdict above go red. That is the
+  // difference between a decision recorded in a file and a decision a later
+  // slice cannot quietly reverse.
+  mutation15: {
+    console.log('\n  15b. and the ordering above is enforced rather than merely described:\n');
+    const mutantDir = mutate(
+      'missing-agents-oldest-first',
+      'router.js',
+      'const byTime = b.w.localeCompare(a.w);',
+      'const byTime = a.w.localeCompare(b.w);'
+    );
+    if (!mutantDir) break mutation15;
+
+    // The ROUTER comes from the mutant; the bridge and the registry are the
+    // ones every other section uses. That is the same wiring
+    // verify-fleet-enumeration's mutant sections use, and it is deliberate:
+    // only the comparator is different between this run and the one above, so
+    // a change in the order is attributable to it and to nothing else.
+    const { MessageRouter: Flipped } = await import(path.join(mutantDir, 'router.js'));
+    let sent15b;
+    const flipped = new Flipped({
+      config, herdrBridge: stubHerdr([]),
+      daemonStartedAt: new Date(), agentRegistry: reg,
+      send: (msg) => { sent15b = msg; }, broadcast: () => {}
+    });
+    flipped.handle({ action: 'list_agents' });
+    const flippedRows = sent15b.missingAgents;
+    console.log(`  with the comparator flipped: ` +
+      `${flippedRows.map((r) => path.basename(r.path)).join(', ')}`);
+
+    verdict(
+      flippedRows.length === 2 && flippedRows[0].path === longLived,
+      'reversing the sort really does reverse this category, so the verdict above is a\n' +
+      '    measurement of the order rather than a restatement of it — a later slice that\n' +
+      '    flips it, for the reason this ticket weighed and rejected, turns §15 red and has\n' +
+      '    to come here and say why.',
+      `the flipped build produced the same order (${flippedRows.map((r) => path.basename(r.path)).join(', ')}) —\n` +
+      `    which means §15's ordering verdict is not sensitive to the comparator and proves nothing`
+    );
+  }
 }
 
 fs.rmSync(TMP, { recursive: true, force: true });
