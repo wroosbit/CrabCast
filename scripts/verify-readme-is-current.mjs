@@ -43,6 +43,87 @@
 // else on the page is not the same fact as a block that shows it.
 //
 // ---------------------------------------------------------------------------
+// WHY A BUSY MACHINE MAKES THIS RUN SAY "NOT RUN" INSTEAD OF FAILING (KAN-194)
+//
+// WHAT FAILURE THIS WOULD CATCH: a REQUIRED check whose verdict is a function
+// of how busy the machine is. The walkthrough's `crabcast activate` passes no
+// `--override`, so the daemon refuses it whenever headroom by load is zero —
+// `floor((cores − humanReserveCores(cores) − load1) ÷ per-agent cores)`,
+// src/capacity.ts. PINNED_CAPACITY pins the cap and the per-agent cost and
+// CANNOT pin the load average; with a 0.001-core charge the divisor stops
+// mattering, so the line is `load1 ≥ cores − reserve` — 3.0 on a 4-core
+// desktop, which a fleet of agents passes routinely and a quiet GitHub runner
+// does not. KAN-191 measured it over 40 sequential runs with no crossover.
+// Before this change the result was a RED RUN THAT WAS NOT ABOUT THE README:
+// no spawn, no sidecar, the walkthrough truncated, and sections 3, 4 and 5 NOT
+// RUN behind it. Four failures a reader could do nothing with.
+//
+// KAN-194 named four ways out. Option 3 was taken; the other three are not
+// runners-up, and each is out for its own reason.
+//
+//   1. Pass `--override` in the walkthrough's `activate`. RULED OUT BY A
+//      RECORDED PRODUCT DECISION, not by taste: "the README shows the refusal,
+//      never the bypass". The walkthrough is the page's introduction, so this
+//      puts a bypass in the first block a new reader meets — and a proof's
+//      convenience is not a reason to reopen a product decision.
+//   2. Give the daemon a knob that pins `load1` out of the calculation. Out on
+//      two grounds. It is production surface added for a test's convenience:
+//      `src/capacity.ts` reads `os.loadavg()[0]` directly and nothing overrides
+//      it, so this is a daemon change, not a script change. Worse, a knob that
+//      lets a caller misreport the machine's load is a footgun aimed at the
+//      capacity gate — the one mechanism standing between this fleet and an
+//      unusable desktop — and a third pin beside PINNED_CAPACITY's two makes
+//      this proof's world progressively less like the real one.
+//   4. Leave it and write it down. Out as a PRIMARY answer by the design doc's
+//      own line: a misdirecting red is worse than a silent green, because a
+//      required check that goes red for a reason the reader cannot act on
+//      trains people to ignore red. It survives INSIDE option 3 — this comment
+//      is option 4's half, so the intermittency stops being re-found every few
+//      weeks. It is the third ticket about it.
+//
+// Option 3, then: the walkthrough reports NOT RUN rather than failing. It is
+// this repository's existing idiom rather than a new one — section 4 already
+// answers NOT RUN to a git revision it cannot reach, and KAN-191 made sections
+// 3/4/5 answer it when the captures are incomplete — and it matches invariant
+// 2 directly: "I could not look" and "nothing was there" are different
+// answers. A load-refused activation is the first, and this check used to
+// report it as the second.
+//
+// DECIDED BY OBSERVATION, NOT BY PREDICTION, and that is the load-bearing
+// choice in this implementation. The obvious shape is to read `os.loadavg()[0]`
+// here, compare it against `cores − reserve`, and skip before starting a
+// daemon. That would put a SECOND COPY of src/capacity.ts's arithmetic in this
+// file, free to drift from the copy that actually refuses — and this file's own
+// register of what it cannot see exists because a sentence wider than its
+// mechanism is the defect this epic keeps re-finding. So nothing here computes
+// the threshold. The walkthrough runs, the daemon applies its own gate, and the
+// skip fires only on the daemon's own words: the `load too high` headline, a
+// `bound by load` derivation, and `started: false`. See `loadRefusal`.
+//
+// HOW IT DEGRADES, said here because a fail-open skip is the thing to be
+// afraid of: if those words are ever reworded, `loadRefusal` stops matching and
+// a load-refused run goes back to being the four-failure red it was before this
+// change. The wrong answer it can give is the OLD answer, never a green.
+//
+// AND IT IS A FAILURE UNDER CI (`process.env.CI`), where it is a fact about the
+// runner rather than an honest local skip. This is the constraint that decides
+// whether option 3 is worth doing at all: NOT RUN must not become an escape
+// hatch by which a permanently busy machine quietly stops covering this block.
+// CI is the one place the walkthrough must actually run, so a runner that has
+// drifted above the line is worth a red.
+//
+// WHAT NOBODY COVERS, and it is two things. (a) No single run can exercise both
+// paths: a run below the line never reaches the skip, and a run above it has no
+// walkthrough to compare. The branch was watched firing under a load held above
+// 3.0 with niced busy loops and watched not firing below it — both pasted into
+// the KAN-194 pull request, which is where that evidence lives, because no
+// assertion in this file can hold it. (b) The CI half is exercised by setting
+// `CI=1` on this machine, which is this script supplying its own input: it
+// shows the branch IS a failure under CI, never that CI reaches it. Nothing
+// covers that second claim and nothing needs to — if the runner ever does reach
+// the line, this check goes red and says so, which is the whole point of it.
+//
+// ---------------------------------------------------------------------------
 // WHAT THIS DOES NOT COVER. Read this before citing it green.
 //
 // * IT CANNOT TELL A REAL CAPTURED SESSION FROM A FABRICATED ONE. It proves
@@ -111,6 +192,13 @@
 // history and reports NOT RUN (a failure) rather than a pass if the revisions
 // are unreachable, e.g. in a shallow clone.
 //
+// NEEDS A MACHINE UNDER THE LOAD LINE, and says so rather than failing about
+// the README when it is not: above `load1 ≈ cores − humanReserveCores(cores)`
+// the daemon refuses the walkthrough's activation, and this run then reports
+// NOT RUN for the walkthrough and for sections 3, 4 and 5, names them in the
+// verdict, and exits 0. Under CI that same state is a FAILURE. See "WHY A BUSY
+// MACHINE MAKES THIS RUN SAY NOT RUN" above.
+//
 // Usage:
 //   npm run build
 //   node scripts/verify-readme-is-current.mjs [distDir]
@@ -135,6 +223,44 @@ const check = (ok, claim, detail = '') => {
   return ok;
 };
 const rule = (title) => console.log(`\n${'='.repeat(78)}\n${title}\n${'='.repeat(78)}\n`);
+
+/**
+ * Where this is running, which is the whole difference between an honest skip
+ * and an escape hatch.
+ *
+ * GitHub Actions sets both of these; `CI` alone is the near-universal
+ * convention and is what the job in .github/workflows/ci.yml runs under. Read
+ * once, at the top, so a run cannot change its mind halfway down.
+ */
+const UNDER_CI = Boolean(process.env.CI || process.env.GITHUB_ACTIONS);
+
+/**
+ * Something this run could not measure, on a machine where not measuring it is
+ * the honest answer — and a FAILURE anywhere it is not.
+ *
+ * There is exactly one such thing today: a walkthrough the daemon refused
+ * because the machine's load average is above the line. Locally that is a fact
+ * about the desktop and a red would point at the README, which is not what went
+ * wrong. Under CI it is a fact about the RUNNER, and the runner is the one
+ * place this block must actually be covered — so there `skip` is `check(false)`
+ * and nothing about the wording softens it.
+ *
+ * Every skip is recorded rather than only printed, because the verdict has to
+ * be able to say what stopped being covered. A reader who sees a clean summary
+ * and a quiet note four screens up has been told the wrong thing.
+ */
+const skipped = [];
+const skip = (claim, detail = '') => {
+  if (UNDER_CI) {
+    return check(false, `${claim} — AND THIS IS CI, WHERE A SKIP IS A FAILURE`,
+      `${detail}${detail ? '. ' : ''}CI is the one place this must actually run: a runner above ` +
+      `the load line is a fact about the runner, and coverage that quietly stops is what this ` +
+      `branch exists to prevent`);
+  }
+  console.log(`  SKIP  ${claim}${detail ? ` — ${detail}` : ''}`);
+  skipped.push(claim);
+  return false;
+};
 
 // ===========================================================================
 // The page, parsed.
@@ -693,6 +819,43 @@ function listing(dir) {
 }
 
 /**
+ * The daemon's own load-bound refusal in a scenario's captures, or `null`.
+ *
+ * KAN-194. This is the ONLY thing that turns a truncated walkthrough into a
+ * skip instead of a failure, so what it matches matters more than it looks.
+ *
+ * NOTHING HERE COMPUTES THE THRESHOLD. The obvious implementation reads
+ * `os.loadavg()[0]` and compares it to `cores − humanReserveCores(cores)`,
+ * which is a second copy of src/capacity.ts's arithmetic living in a proof and
+ * free to drift from the copy that did the refusing. The daemon has already
+ * made this decision and printed its terms; this reads that answer.
+ *
+ * Three signals, all of them the daemon's words, because any one alone is
+ * weaker than it appears:
+ *
+ *   - the headline, which `capacityHeadline` says only when `headroomBoundBy`
+ *     is 'load' — a cap-bound or memory-bound refusal produces a different
+ *     sentence and is NOT skippable, which is what stops this from being a
+ *     hatch for any truncated walkthrough at all;
+ *   - `bound by load` in the derivation, which is the same fact from the
+ *     arithmetic rather than from the prose;
+ *   - `started: false`, which is what makes the absent sidecar a consequence of
+ *     this refusal rather than a coincidence beside it.
+ *
+ * It returns the headline rather than `true` so the skip line and the verdict
+ * can quote the figures that refused, rather than asserting them.
+ */
+function loadRefusal(captured) {
+  const activate = captured.find((c) => c.command.startsWith('crabcast activate'));
+  if (!activate) return null;
+  const headline = activate.output.find((l) => /^Refusing to activate .*: load too high — /.test(l));
+  if (!headline) return null;
+  if (!activate.output.some((l) => /; bound by load$/.test(l))) return null;
+  if (!activate.output.some((l) => /^ {2}started: +false\b/.test(l))) return null;
+  return headline.trim();
+}
+
+/**
  * Why there is no sidecar, in enough detail that the NEXT occurrence arrives
  * with its diagnosis attached.
  *
@@ -815,8 +978,18 @@ const SCENARIOS = [
       const sidecar = path.join(w.dataDir, 'agents');
       const digest = firstEntry(sidecar);
       if (digest === null) {
+        // AND WHY THERE IS NO SIDECAR IS ASKED, NOT ASSUMED (KAN-194). One
+        // cause is a fact about this desktop rather than about the page: above
+        // `load1 ≈ cores − reserve` the daemon refuses every activation, so the
+        // walkthrough cannot run and a red here would point at the README. That
+        // case reports NOT RUN; every other cause is still the failure it was.
+        const refusal = loadRefusal(out);
         out.incomplete = {
-          what: 'the activation left no sidecar, so the four commands from `send` on could not be run',
+          what: refusal
+            ? 'the daemon refused the activation on this machine’s load average, so nothing ' +
+              'was spawned and there is no sidecar to read'
+            : 'the activation left no sidecar, so the four commands from `send` on could not be run',
+          loadRefusal: refusal,
           skipped: ['crabcast send …', 'crabcast tail …', 'crabcast deactivate …', 'crabcast forget …'],
           lines: sidecarDiagnosis(w, sidecar, out)
         };
@@ -1231,7 +1404,13 @@ for (const s of SCENARIOS) {
   console.log(`  captured ${s.id}: ${captures[s.id].length} command(s), ${lines} line(s) of output`);
   const inc = captures[s.id].incomplete;
   if (!inc) continue;
-  check(false, `${s.id}: the scenario ran every command it is written to run`, inc.what);
+  if (inc.loadRefusal) {
+    // KAN-194: the machine, not the page. Under CI `skip` is `check(false)`.
+    skip(`${s.id}: NOT RUN — this machine is above the threshold at which the daemon refuses ` +
+      `every activation`, inc.loadRefusal);
+  } else {
+    check(false, `${s.id}: the scenario ran every command it is written to run`, inc.what);
+  }
   console.log(`      NOT RUN, AND SO NOT CHECKED BY ANYTHING THIS RUN: ${inc.skipped.join(', ')}`);
   for (const l of inc.lines) console.log(`      ${l}`);
 }
@@ -1274,10 +1453,25 @@ if (!reportIsClean(live)) {
 // could not measure the detector has not measured it.
 const incompleteScenarios = SCENARIOS.filter((s) => captures[s.id].incomplete).map((s) => s.id);
 const capturesAreComplete = incompleteScenarios.length === 0;
-const notRun = (section) =>
-  check(false, `section ${section}: NOT RUN`,
+// KAN-194: NOT RUN keeps its meaning and changes what it COSTS. Where every
+// scenario that stopped was stopped by the daemon's load gate, these three
+// sections could not be measured for a reason that is about the machine, and a
+// failure would be pointing at the page. Where ANY of them stopped for another
+// reason, nothing is softened — one unexplained casualty and all of this is red
+// again, because a run that could not measure the detector has not measured it.
+const loadSkippedScenarios = SCENARIOS
+  .filter((s) => captures[s.id].incomplete?.loadRefusal)
+  .map((s) => s.id);
+const everyCasualtyIsTheLoad =
+  incompleteScenarios.length > 0 && loadSkippedScenarios.length === incompleteScenarios.length;
+const notRun = (section) => {
+  const detail =
     `${incompleteScenarios.join(', ')} did not finish, so this run's captures are not the complete ` +
-    `session these comparisons are written against — the diagnosis is in section 2`);
+    `session these comparisons are written against — the diagnosis is in section 2`;
+  return everyCasualtyIsTheLoad
+    ? skip(`section ${section}: NOT RUN`, detail)
+    : check(false, `section ${section}: NOT RUN`, detail);
+};
 
 // ===========================================================================
 // Editing a copy of the page, for the canaries and for section 5.
@@ -1759,12 +1953,38 @@ if (!teardown.censusAvailable) {
 // ---------------------------------------------------------------------------
 
 console.log('='.repeat(78));
-console.log(
-  failures
-    ? `\n${failures} CHECK(S) FAILED`
-    : '\nALL CHECKS PASSED — every line the six covered blocks’ commands printed is on the page,\n' +
-      'and the check that says so has been shown able to say otherwise.'
-);
+// THREE VERDICTS, NOT TWO (KAN-194). A run that skipped the walkthrough checked
+// less than this script claims to check, and the ONE line a reader looks for is
+// where that has to be said — a green summary with a quiet note four screens up
+// is how coverage goes missing without anyone deciding to lose it. So the skips
+// are named here, individually, and the verdict word is neither PASSED nor
+// FAILED. Under CI there is no third verdict: `skip` counted them as failures.
+if (failures) {
+  console.log(`\n${failures} CHECK(S) FAILED`);
+} else if (skipped.length) {
+  const refusal = SCENARIOS
+    .map((s) => captures[s.id]?.incomplete?.loadRefusal)
+    .find(Boolean);
+  console.log(
+    `\nNOT RUN — ${skipped.length} CHECK(S) SKIPPED. Everything this run could measure passed,\n` +
+    'and this run measured less than this script is for.\n\n' +
+    'This machine is above the load average at which the daemon refuses every activation, so\n' +
+    'the walkthrough’s `crabcast activate` was refused and nothing was spawned. The daemon’s\n' +
+    'own words for it:\n\n' +
+    `    ${refusal ?? '(no refusal was captured, which should not be reachable — see loadRefusal)'}\n\n` +
+    'THAT IS A FACT ABOUT THIS DESKTOP AND NOT ABOUT THE README. What went unchecked by\n' +
+    'anything at all this run:\n\n' +
+    skipped.map((s) => `  - ${s}`).join('\n') + '\n\n' +
+    'Re-run when the machine is quieter for a verdict on the walkthrough and on the detector.\n' +
+    'UNDER CI THIS IS A FAILURE AND NOT A SKIP: the runner is the one place this block must\n' +
+    'actually be covered, and a runner above the line is worth knowing about.'
+  );
+} else {
+  console.log(
+    '\nALL CHECKS PASSED — every line the six covered blocks’ commands printed is on the page,\n' +
+    'and the check that says so has been shown able to say otherwise.'
+  );
+}
 console.log(
   '\nRemember what a green run does NOT say: that the pasted sessions are real, that the\n' +
   'page’s prose is true, or anything at all about the seven blocks in the UNCOVERED\n' +
