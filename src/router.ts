@@ -666,6 +666,55 @@ export interface MissingAgent extends ConfigEcho {
    * last Tuesday, exactly like one that died last Tuesday. Reading this field
    * as "how long it has been down" is wrong for every row it is not accidental
    * on.
+   *
+   * AND THERE IS NOT GOING TO BE A SECOND TIMESTAMP HERE. KAN-189 asked
+   * whether to record a durable first-observed-missing time so this category
+   * could be ranked by neglect. **The answer is no, and the question is CLOSED
+   * rather than deferred.** Four grounds, in the order they would change the
+   * answer back:
+   *
+   * 1. IT WOULD BE THIS DAEMON'S ONLY DURABLE MEMORY OF AN OBSERVATION, and
+   *    the sweep's other memory was decided the opposite way twenty lines from
+   *    where this one would live. `lastObservedStatus` in `daemon.ts` — the
+   *    status half of the same sweep, off the same census — is in memory on
+   *    purpose, because "inventing a `from` out of a durable copy would be
+   *    claiming to have witnessed a change nobody watched". A `missingSince`
+   *    read back after a restart makes exactly that claim: the number's whole
+   *    value is the DURATION between two observations, and this daemon was
+   *    not watching between them. One sweep would then hold two opposite
+   *    policies about its own memory, and the field whose reading is a
+   *    duration would be the one that kept it.
+   * 2. THE REGISTRY IS A LOG OF WHAT A CALLER COMMANDED, AND THIS IS NOT
+   *    THAT. `configured` / `activated` / `deactivated` / `forgotten` are
+   *    intents somebody expressed, and anyone reading the log can check them.
+   *    "I noticed this was gone at 14:02" is a fact about a watcher. (The
+   *    reason KAN-189 expected to be the hard one — two daemons over one
+   *    dataDir holding different true values — does not arise: the socket
+   *    lives in the dataDir, so the second daemon meets `EADDRINUSE`, probes
+   *    the socket, finds a live owner and exits. What survives is not
+   *    concurrency, it is KIND.)
+   * 3. THE FIELD WOULD BE PERMANENT AND THE BENEFIT IS BOUNDED. This row is
+   *    spread whole onto `agent.lost` (`docs/event-contract.md` §1), so a
+   *    field here is a field on the event contract, the MCP projection and
+   *    every consumer's reader — and everything published is treated as API.
+   *    What it buys is the ORDER OF THE FIRST PAGE of a category, which only
+   *    matters once more than {@link FLEET_CATEGORY_LIMIT} agents are missing
+   *    at once, and every row is already reachable by cursor at any position
+   *    (KAN-163).
+   * 4. WHAT A READER WANTS IS ALREADY PUBLISHED, ONCE PER LOSS, WITH A TIME ON
+   *    IT. `agent.lost` is latched per path and carries the envelope's `at`,
+   *    and a consumer of these events is already REQUIRED to poll `list` on a
+   *    timer (`docs/event-contract.md` §2) — so it holds both halves, and its
+   *    own observation window is the only window in which a down-time figure
+   *    is true anyway. Keeping that history here instead would be the "replay
+   *    log beside the registry" §2 declines, narrowed to one field.
+   *
+   * WHAT THIS COSTS, recorded rather than left to be discovered: a consumer
+   * that connects to a long-running daemon cannot learn how old an EXISTING
+   * loss is. This daemon observed it and does not say. That is a real loss of
+   * information and it is accepted, not denied — it is the same cost §2
+   * already takes for every other event, and if it ever bites, the remedy is a
+   * decision made with the consumer rather than a field added quietly.
    */
   since: string;
   reason: string;
@@ -4513,12 +4562,12 @@ export class MessageRouter {
       // the list is built from, so the two can never disagree about what is
       // running.
       //
-      // NEWEST-FIRST HERE IS A DECISION, NOT AN INHERITANCE (KAN-96). The
-      // argument against it was: newest-first says "the oldest rows are the
-      // least urgent", which is right for standby — the thing you just
-      // switched off is the thing you want back — and backwards for a loss,
-      // because an agent nobody has restored in three days is the MOST
-      // neglected, not the least.
+      // NEWEST-FIRST HERE IS A DECISION, NOT AN INHERITANCE (KAN-96), AND THE
+      // QUESTION UNDER IT IS SETTLED (KAN-189). The argument against it was:
+      // newest-first says "the oldest rows are the least urgent", which is
+      // right for standby — the thing you just switched off is the thing you
+      // want back — and backwards for a loss, because an agent nobody has
+      // restored in three days is the MOST neglected, not the least.
       //
       // It is a good argument about a field this row does not have. `since` is
       // when the agent was last recorded ACTIVATED, not when it went missing
@@ -4533,12 +4582,20 @@ export class MessageRouter {
       //
       // What made the old ordering harmful was reachability, and that is gone:
       // the cap is a page size now, so the rows past it are reachable by
-      // walking `nextCursor` rather than lost (KAN-163). Ranking by neglect
-      // needs a first-observed-missing timestamp that survives a restart —
-      // filed as KAN-189 — and until such a field exists there is nothing to
-      // sort by. Meanwhile one order across all five categories is one cursor
-      // contract, and a per-category direction is a second thing every
-      // consumer of `pages.*` would have to know.
+      // walking `nextCursor` rather than lost (KAN-163). Meanwhile one order
+      // across all five categories is one cursor contract, and a per-category
+      // direction is a second thing every consumer of `pages.*` would have to
+      // know.
+      //
+      // AND THE FIELD THAT WOULD HAVE REOPENED THIS IS NOT COMING. Ranking by
+      // neglect needs a durable first-observed-missing timestamp; KAN-189
+      // asked whether to record one and answered NO, for reasons written out
+      // on {@link MissingAgent.since} — beside the field they are about rather
+      // than here, because that is where a reader meets the problem. So this
+      // is a closed question and not a placeholder: reopening it means
+      // answering those four grounds, and `verify-agent-power-controls.mjs`
+      // §15 goes red on a build that quietly flips the order or grows the row
+      // a second timestamp.
       ['missingAgents', this.missingAgents(agents, staleSessions, intents),
         (r: any) => r.since, (r: any) => r.path],
       // Work taken off the machine to make room, still owed a decision.

@@ -46,7 +46,13 @@
 //  15. what "newest — `missingAgents` is ordered by the ACTIVATION timestamp,
 //      first" means    and nothing on the row records when the agent went
 //                      missing, which is why that order is not a neglect
-//                      ranking and is not flipped (KAN-96 AC 2)
+//                      ranking and is not flipped (KAN-96 AC 2); 15b: the
+//                      comparator flipped, and §15 going red; 15c: the durable
+//                      first-observed-missing field BUILT as a mutant — it
+//                      works, it survives a restart, deleting its store breaks
+//                      that survival, and the shipped build keeps nothing.
+//                      That is what makes "no" a decision rather than a
+//                      limitation (KAN-189)
 //
 // Every section drives the real MessageRouter, a real config through the real
 // loader, and a real on-disk AgentRegistry, so what it prints is what a caller
@@ -1992,7 +1998,8 @@ rule('15. THE missingAgents ORDER RANKS ACTIVATION, NOT NEGLECT (KAN-96 AC 2)');
     '    they were lost in the same instant. Flipping it would not rank by neglect — it\n' +
     '    would put the fleet\'s longest-lived agents first while reading as a claim about\n' +
     '    down-time the data cannot support. The order stays newest-first, the reason is in\n' +
-    '    router.ts beside the decision, and KAN-189 holds what would have to exist first.',
+    '    router.ts beside the decision, and the field that would have reopened it was weighed\n' +
+    '    and declined by KAN-189 — measured in 15c below, not merely asserted here.',
     `the category was not newest-first over activation times: ${JSON.stringify(
       rows.map((r) => [path.basename(r.path), r.since])
     )}`
@@ -2050,6 +2057,254 @@ rule('15. THE missingAgents ORDER RANKS ACTIVATION, NOT NEGLECT (KAN-96 AC 2)');
       '    to come here and say why.',
       `the flipped build produced the same order (${flippedRows.map((r) => path.basename(r.path)).join(', ')}) —\n` +
       `    which means §15's ordering verdict is not sensitive to the comparator and proves nothing`
+    );
+  }
+
+  // -- 15c. the field that would have reopened this, BUILT and declined ------
+  //
+  // WHAT §15 LEAVES OPEN, and it is the whole reason this sub-section exists.
+  // §15 measures that the row has one timestamp and that it is the activation
+  // time. It says nothing about whether the row COULD have a second one, and a
+  // reader is entitled to suspect that "nothing records when it went missing"
+  // is a limitation being reported as a decision. KAN-189 asked the question
+  // properly — record a durable first-observed-missing time, or not — and
+  // answered NO. This section is what makes that answer legible as a choice.
+  //
+  // SO THE MUTANT IS THE REJECTED DESIGN, in its cheapest honest form: seven
+  // lines in the row builder that stamp the first observation, keep it in a
+  // file beside the registry, and hand it back as `missingSince`. It is not a
+  // synthetic break. It works. Three things are then measured, and only the
+  // third is about the mutant at all:
+  //
+  //   1. THE SHIPPED BUILD KEEPS NOTHING. Two producers compute this category
+  //      — a request (`list_agents`) and the sweep (`findMissingAgents`) — and
+  //      they return identical rows on a router that has never swept, because
+  //      neither remembers anything. A "restart" (a second router over the
+  //      same registry file) reports the same row, and not one byte appears
+  //      under the registry's directory or the dataDir in the process.
+  //   2. THE MUTANT KEEPS IT, AND KEEPING IT IS WHAT MAKES IT SURVIVE. Its
+  //      `missingSince` is unchanged across the same restart — and when the
+  //      file it lives in is DELETED, the next observation stamps a new one.
+  //      That is the restart-survival claim shown able to fail, in the only
+  //      way it can fail: with the persistence taken away.
+  //   3. §15's OWN SHAPE VERDICT GOES RED under it. The row grows a second
+  //      timestamp and the check three verdicts up stops passing. So a later
+  //      slice that lands this field cannot land it quietly — it turns this
+  //      script red and has to come here and answer the four grounds on
+  //      `MissingAgent.since`.
+  //
+  // THE PRECONDITION. A mutant that died on startup produces "no second
+  // timestamp appeared", which is exactly what a well-behaved SHIPPED build
+  // produces — the observation would be the same and the conclusion inverted.
+  // So the mutant is caught doing two things only the mutant does, asserted as
+  // positive facts before anything below is read: a row carrying an ISO
+  // `missingSince`, and a file on disk naming the missing agent's path.
+  //
+  // WHAT THIS SECTION DOES NOT COVER, marked because a section about an
+  // artifact outrunning its mechanism is the worst possible place to do it:
+  //
+  //   * IT SUPPLIES ITS OWN INPUT. The registry rows are written here and the
+  //     herdr is this file's stub, so nothing about a REAL restart of a REAL
+  //     daemon is established by it. It does not need to be: the claims are
+  //     about the shape of a payload and the absence of a store, both of which
+  //     are properties of the compiled build. Real restart behaviour is
+  //     `verify-restart-survival.mjs` (CI) and `verify-fleet-switch-live.mjs`
+  //     §3 (live, by hand), and neither of those covers this.
+  //   * IT DOES NOT SHOW THE DECISION WAS RIGHT. It shows it was a decision.
+  //     The grounds are prose on `MissingAgent.since` and prose cannot be
+  //     asserted on; what can be, and is, is that the alternative was reachable
+  //     and that the shipped build does not take it.
+  console.log('\n  15c. the durable first-observed-missing field, built and declined (KAN-189):\n');
+
+  /** Every file under a root, sorted — so "nothing was written" is a diff. */
+  const treeOf = (root) => {
+    const out = [];
+    const walk = (dir) => {
+      let entries;
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        const child = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(child);
+        else out.push(child);
+      }
+    };
+    walk(root);
+    return out.sort();
+  };
+
+  /**
+   * One observation of one loss, through both producers.
+   *
+   * `Router` is a parameter because this runs against the shipped build and
+   * against the mutant, and the two must be measured by the SAME code — a
+   * second copy of this function for the mutant is how a difference in the
+   * harness gets reported as a difference in the daemon.
+   */
+  const observeLoss = (Router, registry, targetPath) => {
+    let sent;
+    const router = new Router({
+      config,
+      herdrBridge: stubHerdr([]),
+      daemonStartedAt: new Date(),
+      agentRegistry: registry,
+      send: (msg) => { sent = msg; },
+      broadcast: () => {}
+    });
+    router.handle({ action: 'list_agents' });
+    return {
+      requested: sent.missingAgents.find((row) => row.path === targetPath),
+      swept: router.findMissingAgents().find((row) => row.path === targetPath)
+    };
+  };
+
+  const stamps = (row) =>
+    Object.entries(row ?? {})
+      .filter(([, v]) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(v))
+      .map(([k]) => k)
+      .sort();
+
+  // ---- 1. the shipped build keeps nothing -----------------------------------
+  const shippedDir = owned('closure', 'shipped');
+  const shippedRegistryFile = path.join(TMP, 'closure-shipped.jsonl');
+  const shippedReg = new AgentRegistry(shippedRegistryFile);
+  shippedReg.recordActivated({ path: shippedDir, config: knobs({ label: 'lost, and stays lost' }) });
+
+  const before = [...treeOf(TMP), ...treeOf(dataDir)];
+  const firstLook = observeLoss(MessageRouter, shippedReg, shippedDir);
+  // THE RESTART: a new registry object over the same file and a new router,
+  // which is all a daemon restart is to this computation — the file survives,
+  // every in-memory latch does not.
+  const afterRestart = observeLoss(
+    MessageRouter, new AgentRegistry(shippedRegistryFile), shippedDir
+  );
+  const written = [...treeOf(TMP), ...treeOf(dataDir)].filter((f) => !before.includes(f));
+
+  console.log(`  request row timestamps:            ${JSON.stringify(stamps(firstLook.requested))}`);
+  console.log(`  sweep row identical to it:         ${JSON.stringify(firstLook.swept) === JSON.stringify(firstLook.requested)}`);
+  console.log(`  same row after a restart:          ${JSON.stringify(afterRestart.requested) === JSON.stringify(firstLook.requested)}`);
+  console.log(`  files written by observing a loss: ${written.length ? JSON.stringify(written) : '(none)'}`);
+
+  verdict(
+    firstLook.requested !== undefined &&
+      JSON.stringify(firstLook.swept) === JSON.stringify(firstLook.requested) &&
+      JSON.stringify(afterRestart.requested) === JSON.stringify(firstLook.requested) &&
+      stamps(firstLook.requested).join(',') === 'since' &&
+      written.length === 0,
+    'the shipped build OBSERVES a loss and REMEMBERS nothing: the request and the sweep\n' +
+    '    return the identical row from one computation each, a restart reproduces it byte for\n' +
+    '    byte, and observing it twice writes nothing to disk. There is no store to order this\n' +
+    '    category by, and that is the state KAN-189 chose to leave in place.',
+    `requested=${JSON.stringify(firstLook.requested)}\n` +
+    `    swept-matches=${JSON.stringify(firstLook.swept) === JSON.stringify(firstLook.requested)} ` +
+    `restart-matches=${JSON.stringify(afterRestart.requested) === JSON.stringify(firstLook.requested)} ` +
+    `stamps=${JSON.stringify(stamps(firstLook.requested))} written=${JSON.stringify(written)}`
+  );
+
+  // ---- 2 and 3. the rejected design, running ---------------------------------
+  mutation15c: {
+    const mutantDir = mutate(
+      'durable-missing-since',
+      'router.js',
+      '                ...configEcho(intent),\n' +
+      '                since: intent.at,\n' +
+      '                // Both cases are',
+      '                ...configEcho(intent),\n' +
+      '                since: intent.at,\n' +
+      '                missingSince: (() => {\n' +
+      "                    const store = this.deps.agentRegistry.path + '.missing-observations.json';\n" +
+      '                    let seen = {};\n' +
+      "                    try { seen = JSON.parse(fs.readFileSync(store, 'utf8')); } catch { }\n" +
+      '                    if (!seen[agentPath]) {\n' +
+      '                        seen[agentPath] = new Date().toISOString();\n' +
+      '                        fs.writeFileSync(store, JSON.stringify(seen));\n' +
+      '                    }\n' +
+      '                    return seen[agentPath];\n' +
+      '                })(),\n' +
+      '                // Both cases are'
+    );
+    // Already a counted failure. Skip rather than assert about an unmutated build.
+    if (!mutantDir) break mutation15c;
+
+    let Recording = null;
+    let importError = null;
+    try {
+      ({ MessageRouter: Recording } = await import(path.join(mutantDir, 'router.js')));
+    } catch (err) {
+      importError = err?.message ?? String(err);
+    }
+    verdict(
+      typeof Recording === 'function',
+      '(setup) the mutated build imports — a mutant that died on startup would produce\n' +
+      '    exactly the observations below and prove the opposite of what they say',
+      `the mutant did not import: ${importError ?? 'MessageRouter was not a constructor'}`
+    );
+    if (typeof Recording !== 'function') break mutation15c;
+
+    const recDir = owned('closure', 'recording');
+    const recRegistryFile = path.join(TMP, 'closure-recording.jsonl');
+    const recReg = new AgentRegistry(recRegistryFile);
+    recReg.recordActivated({ path: recDir, config: knobs({ label: 'lost, and timed' }) });
+    const store = `${recRegistryFile}.missing-observations.json`;
+
+    const stamped = observeLoss(Recording, recReg, recDir);
+    const storeAfter = fs.existsSync(store) ? fs.readFileSync(store, 'utf8') : null;
+
+    console.log(`\n  under the mutant — row timestamps: ${JSON.stringify(stamps(stamped.requested))}`);
+    console.log(`  the store it wrote:                ${storeAfter ?? '(no file)'}`);
+
+    // THE FINGERPRINT: two things only this build produces. Asserted before
+    // anything is concluded from the mutant's behaviour.
+    const fingerprint =
+      typeof stamped.requested?.missingSince === 'string' &&
+      /^\d{4}-\d{2}-\d{2}T/.test(stamped.requested.missingSince) &&
+      storeAfter !== null &&
+      storeAfter.includes(recDir);
+    verdict(
+      fingerprint,
+      '(setup) the mutant really ran: the row carries an ISO `missingSince` the shipped build\n' +
+      '    has never produced, and a file beside the registry names the missing directory',
+      `missingSince=${JSON.stringify(stamped.requested?.missingSince)} store=${storeAfter ?? '(no file)'}`
+    );
+    if (!fingerprint) break mutation15c;
+
+    // The restart, and then the same restart with the persistence removed.
+    // Five milliseconds so a re-stamp cannot land in the same millisecond and
+    // be mistaken for a survival.
+    await new Promise((r) => setTimeout(r, 5));
+    const survived = observeLoss(Recording, new AgentRegistry(recRegistryFile), recDir);
+    fs.rmSync(store, { force: true });
+    await new Promise((r) => setTimeout(r, 5));
+    const withoutStore = observeLoss(Recording, new AgentRegistry(recRegistryFile), recDir);
+
+    console.log(`  first observation:                 ${stamped.requested.missingSince}`);
+    console.log(`  after a restart (store intact):    ${survived.requested.missingSince}`);
+    console.log(`  after a restart (store deleted):   ${withoutStore.requested.missingSince}`);
+
+    verdict(
+      survived.requested.missingSince === stamped.requested.missingSince &&
+        withoutStore.requested.missingSince !== stamped.requested.missingSince,
+      'the rejected design WORKS, and its restart survival is carried by the file and by\n' +
+      '    nothing else: the timestamp is unchanged across a restart, and deleting the store\n' +
+      '    makes the next observation stamp a new one. So "it survives a restart" is a claim\n' +
+      '    this suite can turn red, and KAN-189 declined the field on worth and on kind rather\n' +
+      '    than on feasibility — the grounds are on `MissingAgent.since`.',
+      `first=${stamped.requested.missingSince} restart=${survived.requested.missingSince} ` +
+      `store-deleted=${withoutStore.requested.missingSince}`
+    );
+
+    verdict(
+      stamps(stamped.requested).join(',') === 'missingSince,since' &&
+        stamps(firstLook.requested).join(',') === 'since',
+      "and §15's shape verdict is a MEASUREMENT of the shipped row rather than a restatement\n" +
+      '    of it: the same test that reads one timestamp off the shipped build reads two off\n' +
+      '    this one. A later slice that lands `missingSince` turns §15 red and has to come\n' +
+      '    here and answer the four grounds instead of adding a field nobody notices.',
+      `mutant stamps=${JSON.stringify(stamps(stamped.requested))} ` +
+      `shipped stamps=${JSON.stringify(stamps(firstLook.requested))}`
     );
   }
 }
