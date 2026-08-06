@@ -2,6 +2,14 @@
 // Proof for KAN-175: the README's pasted output is still what the program
 // prints.
 //
+// WHAT FAILURE THIS WOULD CATCH (section 7, added by KAN-191): the walkthrough
+// scenario reaching for a sidecar directory the daemon never wrote, and dying
+// of an uncaught ENOENT instead of reporting it — which is how this script
+// failed intermittently on `main`, killing section 2 mid-sentence and taking
+// sections 3-6 and the verdict line with it. Section 7 refuses a real
+// activation, watches the sidecar not appear, and requires the diagnosis to
+// name the path, the parents, and what `activate` said.
+//
 // WHAT FAILURE THIS WOULD CATCH: a renderer grows a line — `config vN frozen`,
 // `next activate:`, a whole `capacity:` block — and the README's pasted session
 // stops showing it, so the page becomes a strict SUBSET of what a reader
@@ -65,13 +73,23 @@
 //   list, so the coverage cannot silently shrink — but it is coverage of six,
 //   and a green run is not a statement about the other seven.
 //
+// * A SCENARIO THAT STOPS EARLY TAKES SECTIONS 2 TO 5 WITH IT, and this run
+//   says so rather than passing over them. Since KAN-191 a scenario that cannot
+//   finish is a counted failure carrying a diagnosis instead of an uncaught
+//   throw — but the commands it did not reach were not run, so nothing in this
+//   file has an opinion about them that run. Its own audit line is replaced by
+//   NO VERDICT, and sections 3, 4 and 5 — which all compare a page against
+//   these same captures — report NOT RUN, which is a failure here and not a
+//   pass. A run in that state is red, and red for a stated reason; what it is
+//   not is a run that quietly checked less than it claims to.
+//
 // * IT RUNS AGAINST A SHIM. Under CI there is no herdr, so the pane text a
 //   `send` or `tail` quotes back is the shim's, not an agent's. Those lines
 //   are excluded per scenario by `verbatimFrom`, which names the label they
 //   start after; everything above the label is the renderer's and is checked.
 //
 // ---------------------------------------------------------------------------
-// SIX SECTIONS
+// EIGHT SECTIONS
 //
 //   1. every fenced block of program output on the page is covered here or
 //      registered as uncovered with a reason
@@ -83,6 +101,11 @@
 //      asks for, wired in rather than pasted once
 //   5. the rejected option 3, built and shown green on a page this one catches
 //   6. the mask register: every rule, and what it costs
+//   7. the KAN-191 diagnosis path, produced by the mechanism that produces it
+//      in the wild — a genuinely refused activation — and read for the facts
+//      the stack trace it replaces did not carry
+//   8. every daemon this run started is stopped, and the survivors are counted
+//      rather than assumed to be none
 //
 // Needs no herdr and no network. Needs `npm run build`. Section 4 needs git
 // history and reports NOT RUN (a failure) rather than a pass if the revisions
@@ -269,19 +292,67 @@ const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kan175-re
 const fakeHome = path.join(scratch, 'home');
 fs.mkdirSync(fakeHome, { recursive: true });
 
-function cleanup() {
-  // Every daemon this script started lives in a scratch dataDir; ask each to
-  // stop through its own pidfile rather than leaving one holding a socket in a
-  // directory that is about to vanish.
-  for (const dataDir of daemonDataDirs) {
-    const pidFile = path.join(dataDir, 'daemon.pid');
+/**
+ * Stop every daemon this run started, and answer with the ones that would not
+ * go.
+ *
+ * IT USED TO READ A PIDFILE NOTHING WRITES (KAN-191). The loop here asked each
+ * scratch dataDir for `daemon.pid`, and this daemon has never written one — grep
+ * the repository, there is no such file — so every read threw ENOENT into an
+ * empty `catch {}` and not one daemon was ever signalled. A teardown that has
+ * never once run, silent by construction: after eighty runs on this machine there
+ * were 433 orphaned daemons holding 24 GiB of RSS between them, each still
+ * serving a socket in a directory that had been deleted out from under it.
+ *
+ * That is not merely untidy, and it is why this sits in the KAN-191 change
+ * rather than in a tidy-up ticket: the walkthrough's `activate` is refused when
+ * the machine's 1-minute load average reaches `cores − humanReserveCores(cores)`
+ * (src/capacity.ts), which on a 4-core desktop is 3. A proof that leaks a fleet
+ * of daemons every time it runs is a proof that walks its own machine towards
+ * the threshold that makes its next run fail. The intermittency this ticket was
+ * filed for had this in its causal chain.
+ *
+ * The pid comes from `daemon-status`, which is where the daemon actually
+ * publishes it — the same road verify-activated-by.mjs takes.
+ */
+function stopDaemons() {
+  const survivors = [];
+  for (const { dataDir, configPath, env } of daemonDataDirs) {
+    let pid = null;
     try {
-      const pid = Number(fs.readFileSync(pidFile, 'utf8').trim());
-      if (Number.isInteger(pid) && pid > 0) process.kill(pid, 'SIGTERM');
-    } catch {}
+      const r = spawnSync(process.execPath, [cliJs, 'daemon-status', '--json', '--config', configPath], {
+        env, encoding: 'utf8', timeout: 20_000
+      });
+      pid = Number(JSON.parse(r.stdout).pid);
+    } catch {
+      // No daemon answered. Either none was ever started for this world — which
+      // several scenarios never do — or one is running and unreachable, and the
+      // survivor check below is what tells those apart.
+    }
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+    // Asked and answered, rather than assumed: a SIGTERM that was SENT is not a
+    // process that DIED, and "we sent it" is the claim the old pidfile loop
+    // would have made if anyone had thought to make one. This runs at exit, so
+    // the wait is synchronous by construction.
+    const gone = () => { try { process.kill(pid, 0); return false; } catch { return true; } };
+    const until = Date.now() + 5000;
+    while (!gone() && Date.now() < until) sleepSync(100);
+    if (!gone()) survivors.push({ dataDir, pid });
   }
+  return survivors;
+}
+
+/** A synchronous pause. There is no await to be had on the exit path. */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function cleanup() {
+  stopDaemons();
   fs.rmSync(scratch, { recursive: true, force: true });
 }
+/** Every world's daemon, by the config that addresses it. */
 const daemonDataDirs = new Set();
 process.on('exit', cleanup);
 for (const sig of ['SIGINT', 'SIGTERM']) {
@@ -425,7 +496,7 @@ let scenarioSeq = 0;
  * real scratch prefix rewritten to it before comparison — a substitution, not
  * a mask, so a path the renderer got WRONG still shows up as a difference.
  */
-function world(pagePath, env = {}) {
+function world(pagePath, overrides = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(scratch, `w${++scenarioSeq}-`)));
   const state = path.join(root, 'shim-state');
   fs.mkdirSync(state, { recursive: true });
@@ -436,9 +507,24 @@ function world(pagePath, env = {}) {
   const demo = path.join(root, path.basename(pagePath));
   fs.mkdirSync(demo, { recursive: true });
   const dataDir = path.join(demo, '.crabcast');
-  daemonDataDirs.add(dataDir);
   const configPath = path.join(demo, 'crabcast.config.json');
   fs.writeFileSync(configPath, '{ "dataDir": ".crabcast" }\n');
+  const env = {
+    ...process.env,
+    HOME: fakeHome,
+    SHELL: '/bin/bash',
+    PATH: `${shimDir}:/usr/local/bin:/usr/bin:/bin`,
+    CRABCAST_README_SHIM_STATE: state,
+    CRABCAST_CONFIG: undefined,
+    CRABCAST_MAX_AGENTS: undefined,
+    CRABCAST_AGENT_CORES: undefined,
+    CRABCAST_AGENT_MEMORY_MB: undefined,
+    ...overrides
+  };
+  // The config path and the environment, not just the directory: stopping this
+  // world's daemon means ASKING it for its pid, and asking means addressing the
+  // same daemon the scenario addressed. See stopDaemons.
+  daemonDataDirs.add({ dataDir, configPath, env });
   return {
     demo,
     dataDir,
@@ -448,18 +534,7 @@ function world(pagePath, env = {}) {
     setForeign(panes) {
       fs.writeFileSync(path.join(state, 'foreign.json'), JSON.stringify(panes, null, 2));
     },
-    env: {
-      ...process.env,
-      HOME: fakeHome,
-      SHELL: '/bin/bash',
-      PATH: `${shimDir}:/usr/local/bin:/usr/bin:/bin`,
-      CRABCAST_README_SHIM_STATE: state,
-      CRABCAST_CONFIG: undefined,
-      CRABCAST_MAX_AGENTS: undefined,
-      CRABCAST_AGENT_CORES: undefined,
-      CRABCAST_AGENT_MEMORY_MB: undefined,
-      ...env
-    },
+    env,
     /** Rewrite this world's real paths to the ones the page shows. */
     toPage(text) {
       return text.split(demo).join(pagePath);
@@ -519,6 +594,97 @@ function splitArgs(line) {
 }
 
 // ===========================================================================
+// Reading the filesystem a scenario built, without taking the run with you.
+// ===========================================================================
+
+/**
+ * The first entry in a directory, or `null` — never a throw, and the two ways
+ * of having no entry are deliberately the same answer.
+ *
+ * "Missing" and "there but empty" differ in what went wrong and not in what
+ * the caller can do next, so the caller gets one branch and
+ * {@link sidecarDiagnosis} gets the distinction: it prints the listing, and a
+ * directory that exists says so.
+ */
+function firstEntry(dir) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return null;
+  }
+  return entries.length ? entries.sort()[0] : null;
+}
+
+/** What a directory holds, why it could not be read, or that it is not there. */
+function listing(dir) {
+  try {
+    const e = fs.readdirSync(dir).sort();
+    return e.length ? `${e.length} entr${e.length === 1 ? 'y' : 'ies'} — ${e.join(', ')}` : 'EXISTS AND IS EMPTY';
+  } catch (e) {
+    return `unreadable — ${e.code ?? e.message}`;
+  }
+}
+
+/**
+ * Why there is no sidecar, in enough detail that the NEXT occurrence arrives
+ * with its diagnosis attached.
+ *
+ * This is the whole of KAN-191's point. The failure it replaces was
+ * intermittent, was reproduced on a clean `main`, and left nothing behind but
+ * `ENOENT: scandir` and a path — so the agent who found it could say it
+ * happens and could not say when. What a reader needs, and what a stack trace
+ * cannot give them:
+ *
+ *   - the path looked for, in BOTH forms, because the page's `/tmp/ac1-demo`
+ *     prefix is a substitution and the real directory is somewhere else;
+ *   - whether the parents exist and what is in them, which separates "the
+ *     daemon never wrote it" from "something removed it afterwards";
+ *   - what `activate` printed, because the sidecar is written by the daemon
+ *     during activation (`writeSidecarPrompt`, src/herdr.ts) and a refused
+ *     activation is the one state that produces exactly this and says why in
+ *     its own output;
+ *   - the machine's load, because the refusal this repository can actually
+ *     produce on demand is the capacity one: `headroom by load` is
+ *     `floor((cores − humanReserveCores(cores) − load1) ÷ per-agent cores)`
+ *     (src/capacity.ts), and PINNED_CAPACITY pins the cap and the per-agent
+ *     cost but CANNOT pin the load average. With its 0.001-core charge the
+ *     divisor stops mattering and the term is zero as soon as load1 reaches
+ *     `cores − reserve` — 3 on a 4-core desktop, a number a fleet of agents
+ *     passes routinely and a quiet CI runner does not. That is the shape of an
+ *     intermittency that reproduces on a developer's machine and never on the
+ *     runner, which is exactly what KAN-191 describes.
+ */
+function sidecarDiagnosis(w, sidecar, captured) {
+  const activate = captured.find((c) => c.command.startsWith('crabcast activate'));
+  const cores = os.cpus().length;
+  const reserved = Math.max(1, Math.floor(cores / 8));
+  return [
+    `looked for: one identity-digest directory under the agent sidecar root`,
+    `            as the page writes it:  ${w.toPage(sidecar)}`,
+    `            where it really is:     ${sidecar}`,
+    `found:      ${listing(sidecar)}`,
+    `            its parent ${w.dataDir}`,
+    `              → ${listing(w.dataDir)}`,
+    `            its parent ${w.demo}`,
+    `              → ${listing(w.demo)}`,
+    `why it can be absent: the sidecar is written by the daemon while it spawns`,
+    `            the agent (writeSidecarPrompt, src/herdr.ts), so an activation that`,
+    `            refused or never spawned leaves this directory unwritten. What this`,
+    `            run's activate printed:`,
+    ...(activate
+      ? activate.output.map((l) => `              | ${l}`)
+      : ['              | NO activate COMMAND WAS CAPTURED AT ALL — the scenario did not reach it']),
+    `machine now: ${cores} cores, ${reserved} reserved for the human, 1-minute load ` +
+      `${os.loadavg()[0].toFixed(2)}. Headroom by load is ` +
+      `floor((${cores} − ${reserved} − load1) ÷ per-agent cores), so it reaches zero as the load ` +
+      `average approaches ${cores - reserved} — and at zero headroom an activate without ` +
+      `--override is refused. This scenario does not pass --override. The activate output above ` +
+      `prints the terms as the daemon computed them, which is the arithmetic that actually ran.`
+  ];
+}
+
+// ===========================================================================
 // The scenarios: one per covered block, each reproducing that block's commands.
 // ===========================================================================
 
@@ -573,8 +739,23 @@ const SCENARIOS = [
       out.push(ran(w, `crabcast status ${N}`));
       // The sidecar path carries the identity digest, which is a function of
       // the directory — so this one command is built rather than substituted.
+      //
+      // AND IT IS READ THROUGH A DIAGNOSIS, NOT A BARE readdirSync (KAN-191).
+      // The sidecar exists only if the activation above actually spawned; when
+      // it did not, this directory is absent and the `fs.readdirSync` that used
+      // to be here threw an uncaught ENOENT out of `run()` and killed the
+      // process — section 2 unfinished, sections 3-6 never run, no verdict
+      // line, and a Node stack trace in place of every one of them.
       const sidecar = path.join(w.dataDir, 'agents');
-      const digest = fs.readdirSync(sidecar)[0];
+      const digest = firstEntry(sidecar);
+      if (digest === null) {
+        out.incomplete = {
+          what: 'the activation left no sidecar, so the four commands from `send` on could not be run',
+          skipped: ['crabcast send …', 'crabcast tail …', 'crabcast deactivate …', 'crabcast forget …'],
+          lines: sidecarDiagnosis(w, sidecar, out)
+        };
+        return out;
+      }
       out.push(ran(w,
         `crabcast send ${N} cat /tmp/ac1-demo/.crabcast/agents/31e31d1b7540dabf/prompt.md`,
         { argv: ['send', notes, 'cat', path.join(sidecar, digest, 'prompt.md')],
@@ -953,23 +1134,84 @@ for (const u of UNCOVERED) {
 rule('2. Every line the program printed has a counterpart on the page');
 // ---------------------------------------------------------------------------
 
+// A SCENARIO THAT CANNOT FINISH IS A FAILURE THIS RUN REPORTS, NOT AN EXIT
+// (KAN-191). Every scenario drives a real daemon over a real filesystem, so
+// every one of them can meet a state it was not written for. When that used to
+// escape as an exception it took the process with it: this loop stopped at the
+// first casualty, sections 3-6 never ran, and the verdict line — the one thing
+// a reader looks for — was replaced by a stack trace that said nothing about
+// what had been skipped. `scripts/mutation.mjs` was written to end exactly that
+// failure and its lesson never reached here.
+//
+// So the scenario is caught, its captures are whatever it managed, and the run
+// continues to the verdict. The cost is stated rather than hidden: a scenario
+// that stopped early has commands NOTHING CHECKED THIS RUN, which is reported
+// below per scenario and again on its audit line, and it is why an incomplete
+// scenario can never be counted green.
 const captures = {};
 for (const s of SCENARIOS) {
-  captures[s.id] = await s.run();
+  try {
+    captures[s.id] = await s.run();
+  } catch (e) {
+    const nothing = [];
+    nothing.incomplete = {
+      what: 'the scenario threw where it should have reported',
+      skipped: ['every command it had not yet run'],
+      lines: String(e?.stack ?? e).split('\n').map((l) => `  | ${l}`)
+    };
+    captures[s.id] = nothing;
+  }
   const lines = captures[s.id].reduce((n, c) => n + c.output.length, 0);
   console.log(`  captured ${s.id}: ${captures[s.id].length} command(s), ${lines} line(s) of output`);
+  const inc = captures[s.id].incomplete;
+  if (!inc) continue;
+  check(false, `${s.id}: the scenario ran every command it is written to run`, inc.what);
+  console.log(`      NOT RUN, AND SO NOT CHECKED BY ANYTHING THIS RUN: ${inc.skipped.join(', ')}`);
+  for (const l of inc.lines) console.log(`      ${l}`);
 }
 console.log('');
 
 const live = auditPage(readme, captures);
 for (const r of live) {
+  // An incomplete scenario gets no verdict line at all. Its audit is over the
+  // handful of commands that did run, so "the page shows every line this run
+  // printed" would be TRUE and would read as coverage of a block most of which
+  // was never exercised. The failure is already counted above; what must not
+  // happen is a second line reporting a pass next to it.
+  if (captures[r.scenario].incomplete) {
+    console.log(`  ----  ${r.scenario}: NO VERDICT — the scenario did not finish (see above), so this ` +
+      `run's audit covers only the ${captures[r.scenario].length} command(s) it did run`);
+    continue;
+  }
   check(!r.blockMissing && !r.missing.length && !r.unmatched.length,
     `${r.scenario}: the page shows every line this run printed`,
     r.blockMissing
       ? 'the block is not on the page'
       : `${r.missing.length} missing line(s), ${r.unmatched.length} missing command(s)`);
 }
-if (!reportIsClean(live)) { console.log(''); printReport(live, { limit: 40 }); }
+if (!reportIsClean(live)) {
+  console.log('');
+  printReport(live.filter((r) => !captures[r.scenario].incomplete), { limit: 40 });
+}
+
+// SECTIONS 3, 4 AND 5 ALL AUDIT A PAGE AGAINST THIS RUN'S CAPTURES, and every
+// one of them assumes those captures are a complete session. An incomplete
+// scenario does not make them fail honestly — it changes what they measure
+// while they go on reporting what they were written to report. A canary that
+// must stay GREEN goes red because the truncated scenario's own output (a
+// refusal, say) is nowhere on the page; section 4's `walkthrough is GREEN at
+// e7ffb58` fails and blames the calendar. Neither red is about the page, and a
+// reader cannot tell that from the line.
+//
+// So they are NOT RUN — which in this file is a failure and not a pass, the
+// same answer section 4 already gives a revision it cannot reach. A run that
+// could not measure the detector has not measured it.
+const incompleteScenarios = SCENARIOS.filter((s) => captures[s.id].incomplete).map((s) => s.id);
+const capturesAreComplete = incompleteScenarios.length === 0;
+const notRun = (section) =>
+  check(false, `section ${section}: NOT RUN`,
+    `${incompleteScenarios.join(', ')} did not finish, so this run's captures are not the complete ` +
+    `session these comparisons are written against — the diagnosis is in section 2`);
 
 // ===========================================================================
 // Editing a copy of the page, for the canaries and for section 5.
@@ -1111,7 +1353,8 @@ const CANARIES = [
 rule('3. The detector is a measurement, not a constant');
 // ---------------------------------------------------------------------------
 
-for (const canary of CANARIES) {
+if (!capturesAreComplete) notRun('3, the canaries');
+for (const canary of capturesAreComplete ? CANARIES : []) {
   const page = canary.page(readme);
   if (!check(page !== null, `canary '${canary.id}' could be applied to the page`,
     page === null ? 'the line or block it edits is gone — the canary is stale, not the page' : '')) {
@@ -1179,7 +1422,8 @@ const HISTORY = [
   }
 ];
 
-for (const h of HISTORY) {
+if (!capturesAreComplete) notRun('4, the page’s own history');
+for (const h of capturesAreComplete ? HISTORY : []) {
   const show = spawnSync('git', ['show', `${h.rev}:README.md`], {
     cwd: repoRoot, encoding: 'utf8'
   });
@@ -1256,31 +1500,34 @@ const KAN125_LINES = [
   'next activate: RESUMES',
   'activated by: none'
 ];
-let staled = readme;
-for (const needle of KAN125_LINES) {
-  const next = editSegment(staled, WALK, 0, STATUS, dropLine(needle));
-  if (next !== null) staled = next;
+if (!capturesAreComplete) notRun('5, the comparison against option 3');
+if (capturesAreComplete) {
+  let staled = readme;
+  for (const needle of KAN125_LINES) {
+    const next = editSegment(staled, WALK, 0, STATUS, dropLine(needle));
+    if (next !== null) staled = next;
+  }
+
+  const flatOnCurrent = flatInventoryCheck(readme, captures);
+  check(flatOnCurrent.length === 0,
+    'the flat inventory check agrees with this one on the CURRENT page (both green)',
+    flatOnCurrent.length ? `${flatOnCurrent.length} line(s) it could not find anywhere` : '');
+
+  const flatOnStaled = flatInventoryCheck(staled, captures);
+  const thisOnStaled = auditPage(staled, captures);
+  check(flatOnStaled.length === 0,
+    "option 3 is GREEN on a page whose `status` block lost KAN-125's five lines",
+    `it found ${flatOnStaled.length} missing — every one of them is still on the page, under \`list\``);
+  check(!reportIsClean(thisOnStaled),
+    'and this check is RED on the same page',
+    `${thisOnStaled.flatMap((r) => r.missing).length} line(s) missing from the block that has to show them`);
+  console.log('');
+  printReport(thisOnStaled.filter((r) => r.missing.length), { limit: 6 });
+  console.log(
+    '\n  That is the reason for the shape chosen, as a measurement rather than an opinion:\n' +
+    '  the cheapest option is green on the exact drift this ticket was filed for.\n'
+  );
 }
-
-const flatOnCurrent = flatInventoryCheck(readme, captures);
-check(flatOnCurrent.length === 0,
-  'the flat inventory check agrees with this one on the CURRENT page (both green)',
-  flatOnCurrent.length ? `${flatOnCurrent.length} line(s) it could not find anywhere` : '');
-
-const flatOnStaled = flatInventoryCheck(staled, captures);
-const thisOnStaled = auditPage(staled, captures);
-check(flatOnStaled.length === 0,
-  "option 3 is GREEN on a page whose `status` block lost KAN-125's five lines",
-  `it found ${flatOnStaled.length} missing — every one of them is still on the page, under \`list\``);
-check(!reportIsClean(thisOnStaled),
-  'and this check is RED on the same page',
-  `${thisOnStaled.flatMap((r) => r.missing).length} line(s) missing from the block that has to show them`);
-console.log('');
-printReport(thisOnStaled.filter((r) => r.missing.length), { limit: 6 });
-console.log(
-  '\n  That is the reason for the shape chosen, as a measurement rather than an opinion:\n' +
-  '  the cheapest option is green on the exact drift this ticket was filed for.\n'
-);
 
 // ---------------------------------------------------------------------------
 rule('6. The mask register — every rule, and what it costs');
@@ -1301,6 +1548,135 @@ for (const v of VARIANTS) {
   console.log(`    ${v.shapes.map((s) => (typeof s === 'string' ? JSON.stringify(s) : String(s))).join('  |  ')}`);
   console.log(`      ${v.why.replace(/\s+/g, ' ')}\n`);
 }
+
+// ---------------------------------------------------------------------------
+rule('7. The missing sidecar, produced on purpose and reported rather than thrown');
+// ---------------------------------------------------------------------------
+
+/**
+ * KAN-191, wired in.
+ *
+ * The bug was not that a directory went missing — that is still unexplained and
+ * the ticket says so. The bug was the RESPONSE to it: `fs.readdirSync` threw out
+ * of the walkthrough and the process died holding section 2's sentence, six
+ * sections and the verdict.
+ *
+ * THIS SECTION PRODUCES THE STATE BY ITS REAL MECHANISM, NOT BY `rm -rf`. The
+ * sidecar is written by the daemon while it spawns an agent, so the state where
+ * there is none is the state where the activation did not spawn — and the one
+ * refusal this script can produce on demand is the capacity one. `crabcast
+ * activate` at a cap of zero, without `--override`, refuses exactly as it
+ * refuses on a machine whose load average has taken headroom to zero. That is
+ * the same road to the same missing directory.
+ *
+ * WHAT THIS SECTION DOES NOT COVER, because the distinction is the one KAN-145
+ * was caught by: it proves the read and the diagnosis behave when the sidecar
+ * is absent. It does NOT prove that the walkthrough's own activation is the
+ * thing that goes wrong in the wild — that question is what the diagnosis text
+ * exists to answer, on the next occurrence, from a real run. Nobody covers it
+ * today, and no run of this script can: it would have to be a run that failed.
+ */
+{
+  const w = world('/tmp/ac1-demo', { CRABCAST_MAX_AGENTS: '0' });
+  const notes = path.join(w.demo, 'notes');
+  fs.mkdirSync(notes, { recursive: true });
+  fs.writeFileSync(path.join(w.demo, 'prompt.txt'), WALKTHROUGH_PROMPT);
+  const N = '/tmp/ac1-demo/notes';
+
+  const captured = [
+    ran(w, `crabcast configure ${N} --priority 1 --launcher shell --prompt-file prompt.txt`),
+    ran(w, `crabcast activate ${N}`, { exitLine: true, alwaysExitLine: true })
+  ];
+  const activateSaid = captured[1].output.join('\n');
+  check(/refus|capacity/i.test(activateSaid),
+    'the activation really was refused, so the sidecar is genuinely absent rather than deleted',
+    activateSaid.split('\n').find((l) => /refus|capacity/i.test(l))?.trim() ?? activateSaid.split('\n')[0]);
+
+  const sidecar = path.join(w.dataDir, 'agents');
+  // The call the walkthrough makes, on the state the walkthrough met. Before
+  // KAN-191 this line was the throw.
+  let threw = null;
+  let digest;
+  try {
+    digest = firstEntry(sidecar);
+  } catch (e) {
+    threw = e;
+  }
+  check(threw === null, 'reading the sidecar answers instead of throwing',
+    threw ? `it threw ${threw.code ?? threw.message} — the process would have died here` : 'no exception');
+  check(digest === null, 'and the answer for an absent sidecar is "there is none"',
+    digest === null ? `${sidecar} is not there` : `it answered '${digest}', so this fixture is not in the state it claims`);
+
+  const diagnosis = sidecarDiagnosis(w, sidecar, captured).join('\n');
+  console.log('\n  The diagnosis a run in this state now prints, verbatim:\n');
+  for (const l of diagnosis.split('\n')) console.log(`      ${l}`);
+  console.log('');
+
+  // AC 2: it must name what it looked for and what it found. Each of these is
+  // a fact the ENOENT stack trace did not carry, and the next occurrence is
+  // only worth more than this one if all of them are in it.
+  const REQUIRED = [
+    ['the real path it looked for', sidecar],
+    ['the path as the page writes it', '/tmp/ac1-demo/.crabcast/agents'],
+    ['what the parent data directory holds', w.dataDir],
+    ['what the demo directory holds', 'crabcast.config.json'],
+    ['what activate printed, quoted rather than summarised', 'Refusing to activate'],
+    ['the load average, which is what can refuse an activation on a busy machine', '1-minute load']
+  ];
+  for (const [what, needle] of REQUIRED) {
+    check(diagnosis.includes(needle), `the diagnosis names ${what}`,
+      diagnosis.includes(needle) ? '' : `nothing in it contains ${JSON.stringify(needle)}`);
+  }
+
+  // AND THOSE REQUIREMENTS ARE NOT SIX WAYS OF SAYING "SOME TEXT WAS PRINTED".
+  // Every one of them that asks for something the PATH ALONE does not already
+  // carry is re-run against the text this diagnosis replaces — the ENOENT line
+  // KAN-191 was filed with, which is the whole of what the old code left behind
+  // — and none of them may be satisfied by it. A requirement a bare stack trace
+  // meets was never asking for anything.
+  //
+  // The path-shaped ones are excluded by construction rather than by hand: the
+  // stack trace does quote the path, so "names the real path" and "names the
+  // parent data directory" are things it already did. What it never did is say
+  // what was IN them, what `activate` said, or what the machine was doing.
+  const THE_STACK_TRACE_IT_REPLACES = `Error: ENOENT: no such file or directory, scandir '${sidecar}'`;
+  const beyondThePath = REQUIRED.filter(([, needle]) => !sidecar.includes(needle));
+  const metAnyway = beyondThePath
+    .filter(([, needle]) => THE_STACK_TRACE_IT_REPLACES.includes(needle))
+    .map(([what]) => what);
+  check(beyondThePath.length >= 4 && metAnyway.length === 0,
+    `and the stack trace it replaces carries none of the ${beyondThePath.length} facts that are not just the path`,
+    metAnyway.length ? `the old text already satisfied: ${metAnyway.join('; ')}`
+      : `it carried the path and nothing else: ${beyondThePath.map(([w2]) => w2).join('; ')}`);
+}
+
+// ---------------------------------------------------------------------------
+rule('8. Nothing this run started is still running');
+// ---------------------------------------------------------------------------
+
+/**
+ * The teardown, asserted rather than assumed — see {@link stopDaemons} for the
+ * pidfile that nothing writes and the 433 orphans it left.
+ *
+ * It is a CHECK and not a hook because a hook that fails silently is what this
+ * whole ticket is about. `process.on('exit')` still calls the same function as
+ * a backstop, but by then the verdict has printed and nothing can be counted;
+ * the number that matters has to be taken while there is still a report to put
+ * it in.
+ *
+ * WHAT IT DOES NOT COVER: the panes. The shim's `agent attach` holds an
+ * interval so an attached session does not look dead, and those shim processes
+ * are the pty's children rather than ours — killing the daemon takes the pty
+ * with it, which is why the count below comes out at zero, but nothing here
+ * asserts that second step and a change to the shim could break it silently.
+ */
+const survivors = stopDaemons();
+check(survivors.length === 0,
+  `every daemon this run started was asked for its pid, signalled, and seen to exit`,
+  survivors.length
+    ? `${survivors.length} still running after SIGTERM: ` +
+      survivors.map((s) => `pid ${s.pid} in ${s.dataDir}`).join('; ')
+    : `${daemonDataDirs.size} world(s), none left behind`);
 
 // ---------------------------------------------------------------------------
 
