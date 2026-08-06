@@ -878,6 +878,75 @@ check(
 );
 
 // ---------------------------------------------------------------------------
+console.log('\n-- 4e. WHICH SPELLINGS, exactly — including the ones nothing here can see');
+// ---------------------------------------------------------------------------
+//
+// A REGEX PRESENTED AS COMPLETE IS THIS EPIC'S COMMONEST COSTUME, so the claim
+// is not made in prose where it cannot be wrong. Every spelling below is
+// asserted, in both directions, and the ones this file cannot see are asserted
+// to be unseen rather than omitted from the list. The three-way split is the
+// point:
+//
+//   USES_HELPER      — the detector reads it as going through the helper.
+//   §4d NAMES IT     — the detector cannot read it, but the sweep above sees a
+//                      quoted './mutation.mjs' and fails LOUDLY. Not covered,
+//                      but it cannot go quiet, which is the property that
+//                      failed here in the first place.
+//   INVISIBLE        — neither. A proof written this way would sit outside all
+//                      of §4, §4a and §4d exactly as the dynamic import did.
+//                      Nothing in this repository is written this way today,
+//                      and nothing checks that it stays so.
+//
+// The invisible column is the honest limit of a textual detector: the path has
+// to be a straight-quoted literal spelled `./mutation.mjs`. Computing it —
+// `path.join(scriptDir, 'mutation.mjs')` — or moving the helper into a
+// subdirectory defeats it, and defeats §4d with it. Making that impossible
+// needs a module graph rather than a regex, and is not attempted here.
+{
+  const SPELLINGS = [
+    // [name, source, expect USES_HELPER, expect MENTIONS_THE_HELPER]
+    ['static, single quotes', "import { makeMutator } from './mutation.mjs';", true, true],
+    ['static, double quotes', 'import { makeMutator } from "./mutation.mjs";', true, true],
+    ['static, namespace', "import * as m from './mutation.mjs';", true, true],
+    ['static, newline before the specifier', "import { makeMutator } from\n  './mutation.mjs';", true, true],
+    ['dynamic, awaited — the form KAN-199 was about', "const { makeMutator } = await import('./mutation.mjs');", true, true],
+    ['dynamic, space before the paren', "await import ('./mutation.mjs')", true, true],
+    ['dynamic, newline inside the paren', "await import(\n  './mutation.mjs'\n)", true, true],
+    ['dynamic, double quotes', 'await import("./mutation.mjs")', true, true],
+    ['side-effect import, no `from`', "import './mutation.mjs';", false, true],
+    ['require — not ESM, so not used here, but spelled out', "const m = require('./mutation.mjs');", false, true],
+    ['new URL(..., import.meta.url)', "await import(new URL('./mutation.mjs', import.meta.url))", false, true],
+    ['dynamic, TEMPLATE LITERAL', 'await import(`./mutation.mjs`)', false, false],
+    ['computed path — path.join(scriptDir, ...)', "await import(path.join(scriptDir, 'mutation.mjs'))", false, false],
+    ['parent-relative path', "import { makeMutator } from '../mutation.mjs';", false, false],
+    ['helper moved to a subdirectory', "import { makeMutator } from './scripts/mutation.mjs';", false, false]
+  ];
+
+  for (const [name, src, wantUses, wantMentions] of SPELLINGS) {
+    const uses = USES_HELPER.test(src);
+    const mentions = MENTIONS_THE_HELPER.test(src);
+    const where = wantUses ? 'USES_HELPER' : wantMentions ? '§4d names it' : 'INVISIBLE to both';
+    check(
+      `spelling — ${name}: ${where}`,
+      uses === wantUses && mentions === wantMentions,
+      `USES_HELPER ${uses} (want ${wantUses}), MENTIONS_THE_HELPER ${mentions} (want ${wantMentions})`
+    );
+  }
+
+  // AND THE TABLE IS NOT ALLOWED TO BECOME ALL-COVERED BY ACCIDENT. A future
+  // widening that swallowed every row would leave this section asserting
+  // nothing, in the same words it uses now.
+  check(
+    'the table still records forms this file cannot see — a table where everything passes is a ' +
+      'table that has stopped saying anything',
+    SPELLINGS.some(([, , wantUses]) => !wantUses) &&
+      SPELLINGS.some(([, , , wantMentions]) => !wantMentions),
+    `${SPELLINGS.filter(([, , u]) => !u).length} not matched by USES_HELPER, ` +
+      `${SPELLINGS.filter(([, , , m]) => !m).length} invisible to both`
+  );
+}
+
+// ---------------------------------------------------------------------------
 fs.rmSync(tmp, { recursive: true, force: true });
 
 console.log(
