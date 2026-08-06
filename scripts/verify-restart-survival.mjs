@@ -46,7 +46,8 @@
 //     "it re-attached rather than re-spawning" is evidence rather than
 //     inference — and a double-spawn would be caught even if herdr refused it.
 //
-// SIX SECTIONS, the first four run once per launcher and the last two once:
+// SEVEN SECTIONS. 1–4 run once per launcher, 5 and 6 run once, and 7 runs its
+// own copy of 1–2 once per launcher against a mutated build:
 //
 //   1. start        — the agent runs, one pane, one `agent start`
 //   2. restart      — a fresh daemon RE-ATTACHES: sessionless false, new
@@ -65,6 +66,10 @@
 //                     must not re-provision a directory somebody has been
 //                     working in. Sections 1–5 count panes and count calls;
 //                     this one reads the FILES (KAN-170 item 12).
+//   7. the mutation — section 2 run again against a build whose `alive` set is
+//                     the PRE-KAN-136 one, asserting the re-attach does NOT
+//                     happen. Until KAN-190 nothing in this repo established
+//                     that section 2 could go red (see its header below).
 //
 // AND EVERY NEGATIVE CLAIM ABOUT THE ARGV LOG WAITS BEFORE IT LOOKS. The attach
 // is issued through `pty.spawn` and lands in the log milliseconds later, so
@@ -78,9 +83,12 @@
 
 import { createHash } from 'crypto';
 import * as fs from 'fs';
+import { createRequire } from 'module';
 import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+
+import { makeMutator } from './mutation.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = process.argv[2] ?? path.join(scriptDir, '..', 'dist');
@@ -749,6 +757,268 @@ console.log(`\n${'='.repeat(76)}\n6. THE RE-ATTACH WRITES NOTHING — observed a
   );
 }
 
+// ===========================================================================
+// 7. THE MUTATION — section 2 shown FALSIFIABLE by this suite (KAN-190).
+//
+// WHAT WAS MISSING, which is the finding rather than the fix. Everything above
+// asserts positive facts about a daemon that is behaving, and all of it passes.
+// Nothing in this repository established that any of it CAN FAIL. That is not a
+// theoretical worry for this particular file: section 2 is the only CI-side
+// assertion of restart survival, this file's own header calls that "the single
+// most expensive behaviour in this codebase", and the reason KAN-134 could sit
+// red on `main` for days was that nothing automated was watching the behaviour
+// at all. A proof of the most expensive thing here was itself the one proof in
+// the mutation-carrying half of this suite with no mutation behind it.
+//
+// It had been watched go red BY HAND — the pre-KAN-136 `alive` set, 15 failed
+// assertions across both launchers, pasted onto KAN-190. A human doing it once
+// is not a mechanism, and this section is the mechanism.
+//
+// THE MUTATION IS THE REGRESSION, not a synthetic break. `alive` loses its
+// second conjunct and goes back to asking ownership alone — exactly the shape
+// `src/reconcile.ts` describes at length as what left the fleet visible and
+// unreachable. Under it, every surviving pane is "already running" at boot, so
+// reconcile skips the whole fleet: nothing is attached, nothing is spawned, and
+// the boot log says everything is fine.
+//
+// WHAT IS MUTATED AND WHAT IS NOT. Only `reconcile.js` is replaced. The
+// registry, the bridge, the PTYs and — the one that matters for the last
+// assertion — the `MessageRouter` that answers `list_agents` are all the real
+// compiled build. So "the fleet row reports sessionless: true" is the REAL
+// daemon reporting on a mutated reconcile, not a mutant reporting on itself.
+//
+// THE PRECONDITION, which `scripts/mutation.mjs` demands of every caller that
+// runs a mutant and which this section owes twice over. "The re-attach did not
+// happen" is trivially true of a reconcile that never ran at all — a mutant
+// that died on an unresolved import would produce EXACTLY this section's
+// evidence. So the mutant has to be caught doing something only the mutant
+// does, and it is: the pre-KAN-136 branch logs `is already running; leaving it
+// alone.` for a path that the unmutated build re-attaches instead. That line is
+// the mutant's fingerprint, it names the directory under test, and it is
+// asserted as a positive fact before anything below is read.
+//
+// WHAT THIS SECTION DOES NOT COVER, marked here because a mutation section is
+// exactly the kind of artifact whose wording outruns it:
+//
+//   * ONE MUTATION, not a demonstration that every assertion above is
+//     falsifiable. It falsifies section 2's re-attach claims. Sections 3, 4, 5
+//     and 6 have no mutation behind them and this does not give them one —
+//     §6's own header already records that its "NOT ONE BYTE was written" check
+//     PASSED under this very mutant (nothing is written by an attach that never
+//     happens), caught only by §6's own precondition.
+//   * IT SUPPLIES ITS OWN WORLD. The census is this file's stub, and the herdr
+//     under it is one this suite wrote. That a real herdr 0.6.x honours
+//     `agent attach --takeover` over the attach slot a dead daemon still holds
+//     is established by `verify-fleet-switch-live` section 3, hand-run against
+//     a real daemon, and by nothing on a runner.
+// ===========================================================================
+console.log(
+  `\n${'='.repeat(76)}\n7. THE MUTATION — the pre-KAN-136 \`alive\` set, and section 2 going red` +
+    `\n${'='.repeat(76)}`
+);
+
+const { mutate, mutationsSkipped } = makeMutator({
+  distDir,
+  scratch: tmp,
+  report: {
+    pass: (label, detail) => check(label, true, detail),
+    fail: (label, detail) => check(label, false, detail)
+  }
+});
+
+/**
+ * The two conjuncts of `alive`, and the one of them KAN-136 added.
+ *
+ * Anchored on the COMPILED text, which `tsc` emits with this exact wrapping —
+ * if that drifts, `mutate` counts a verdict and this section is skipped rather
+ * than the file dying at line one of it.
+ */
+const ALIVE_BOTH_CONJUNCTS =
+  '.filter((r) => ourPaneIn(census, r.path, r.config.launcher) !== null &&\n' +
+  '        herdrBridge.getSessionByPath(r.path) !== undefined)';
+const ALIVE_OWNERSHIP_ALONE =
+  '.filter((r) => ourPaneIn(census, r.path, r.config.launcher) !== null)';
+
+/**
+ * Give a mutant build somewhere to resolve `node-pty` from.
+ *
+ * THE BLOCKER THAT MADE THIS SECTION MISSING, measured on KAN-190 rather than
+ * assumed. Every other mutation-based proof in this suite imports the mutant's
+ * `router.js`, whose `herdr.js` import is type-only and erased by `tsc`. This
+ * one has to import `reconcile.js`, which imports `ourPaneIn` from `herdr.js`
+ * as a VALUE — and `herdr.js` imports `node-pty`. From a mutant under
+ * `os.tmpdir()` that does not resolve, and the failure is an exception at
+ * import time. No script in this suite had yet had to run a mutant that reaches
+ * a native dependency.
+ *
+ * ONE SYMLINK, and the alternative rejected on the record: putting the mutant
+ * inside the repo tree so resolution walks up to the real `node_modules` would
+ * write a mutated build into a working tree that other checks read. This stays
+ * in the scratch directory and is removed by name below.
+ *
+ * `require.resolve` rather than `distDir/../node_modules`, so this holds when
+ * the script is pointed at a dist somewhere else — the argument this file
+ * already accepts.
+ */
+function linkRuntimeDepsInto(mutantDir) {
+  const link = path.join(mutantDir, 'node_modules');
+  let entry;
+  try {
+    entry = createRequire(import.meta.url).resolve('node-pty');
+  } catch (err) {
+    return { ok: false, detail: `node-pty is not resolvable from this script (${err?.message ?? err})` };
+  }
+  const marker = `${path.sep}node_modules${path.sep}`;
+  const at = entry.lastIndexOf(marker);
+  if (at === -1) {
+    return { ok: false, detail: `node-pty resolved to ${entry}, which is not under a node_modules directory` };
+  }
+  const real = entry.slice(0, at + marker.length - 1);
+  fs.symlinkSync(real, link, 'dir');
+  return { ok: true, link, real, detail: `${link} -> ${real}` };
+}
+
+mutation: {
+  const mutantDir = mutate(
+    'pre-kan136-alive-set', 'reconcile.js', ALIVE_BOTH_CONJUNCTS, ALIVE_OWNERSHIP_ALONE
+  );
+  // Already a counted failure. Skip the section rather than asserting about a
+  // build that was never mutated.
+  if (!mutantDir) break mutation;
+
+  const linked = linkRuntimeDepsInto(mutantDir);
+  check(
+    '(setup) the mutant can resolve node-pty — the blocker that kept this section from ' +
+      'existing, closed by one symlink inside the scratch directory',
+    linked.ok,
+    linked.detail
+  );
+  if (!linked.ok) break mutation;
+
+  let brokenReconcile = null;
+  let importError = null;
+  try {
+    ({ reconcileAgents: brokenReconcile } = await import(path.join(mutantDir, 'reconcile.js')));
+  } catch (err) {
+    importError = err?.message ?? String(err);
+  }
+  check(
+    '(setup) the mutated build IMPORTS — a mutant that died on startup would produce exactly ' +
+      'the observations below and prove the opposite of what they say',
+    typeof brokenReconcile === 'function',
+    importError ?? 'reconcileAgents imported from the mutant'
+  );
+  if (typeof brokenReconcile !== 'function') break mutation;
+
+  for (const launcher of ['shell', 'claude']) {
+    console.log(`\n-- 7.${launcher === 'shell' ? '1' : '2'} [${launcher}] under the mutant`);
+
+    const dir = ownedDir(`mutant-survivor-${launcher}`);
+    const paneName = paneNameFor(dir);
+    const registryFile = path.join(tmp, `agents-mutant-${launcher}.jsonl`);
+    setCensus([]);
+
+    // Section 1, verbatim in intent: the agent starts under a real daemon.
+    const registry1 = new AgentRegistry(registryFile);
+    const bridge1 = newBridge();
+    registry1.recordConfigured({ path: dir, config: { ...KNOBS, launcher } });
+    resetArgvLog();
+    const started = await invoke(bridge1, registry1, [], {
+      action: 'activate_agent', path: dir, ...PAST_THE_GATE
+    });
+    check(
+      `[${launcher}] (setup) the agent starts, so there is a survivor for the mutant to fail on`,
+      started.success === true && started.started === true && panesIn(dir).length === 1,
+      `success=${started.success} error=${started.error ?? '(none)'} panes=${panesIn(dir).length}`
+    );
+
+    // Section 2's restart, staged identically.
+    killPtys(bridge1);
+    const registry2 = new AgentRegistry(registryFile);
+    const bridge2 = newBridge();
+    const events2 = [];
+    const router2 = routerFor(bridge2, registry2, events2);
+    resetArgvLog();
+
+    const mutantLog = [];
+    const result = await brokenReconcile({
+      registry: registry2,
+      herdrBridge: bridge2,
+      router: router2,
+      cause: 'reboot',
+      log: (...a) => mutantLog.push(a.join(' '))
+    });
+    for (const line of mutantLog) console.log(`    ${line}`);
+    const outcome = result.outcomes.find((o) => o.path === dir);
+
+    // THE PRECONDITION. Read before anything else, because every assertion
+    // after it is a claim about something NOT happening, and nothing at all
+    // happening is what a dead mutant looks like too.
+    const fingerprint = mutantLog.filter(
+      (l) => l.includes(dir) && l.includes('is already running; leaving it alone.')
+    );
+    check(
+      `[${launcher}] PRECONDITION: the MUTANT really ran — its own pre-KAN-136 branch logged ` +
+        `"is already running; leaving it alone." for this directory, which the shipping build ` +
+        `does not reach at boot. Positive evidence, not silence`,
+      result.expected === 1 && fingerprint.length === 1,
+      `expected=${result.expected} fingerprint=${JSON.stringify(fingerprint)}`
+    );
+
+    check(
+      `[${launcher}] MUTANT: reconcile does NOT re-attach — it answers 'already-running', the ` +
+        `answer that left the fleet unreachable. Section 2's first assertion, inverted`,
+      outcome?.result === 'already-running',
+      `result=${outcome?.result} error=${outcome?.error ?? '(none)'}`
+    );
+    const quietUnderMutant = await afterQuiescence(/^agent attach\b/);
+    check(
+      `[${launcher}] MUTANT: and no terminal was taken back — zero \`agent attach --takeover\`, ` +
+        `read after a wait so a refusal is told apart from one still in flight. Section 2's ` +
+        `second assertion, inverted`,
+      quietUnderMutant.calls.length === 0,
+      `${quietUnderMutant.basis}; log=${JSON.stringify(herdrCalls())}`
+    );
+    check(
+      `[${launcher}] MUTANT: nothing was spawned either — this is the fleet coming back VISIBLE ` +
+        `AND UNREACHABLE, which is why the bug survived a boot log that read fine`,
+      callsMatching(/^agent start\b/).length === 0 && panesIn(dir).length === 1,
+      `starts=${callsMatching(/^agent start\b/).length} panes=${panesIn(dir).length}`
+    );
+
+    // The REAL router, over the mutated reconcile: the daemon's own report.
+    const listed = await invoke(bridge2, registry2, events2, { action: 'list_agents' });
+    const row = listed.agents.find((a) => a.path === dir);
+    console.log(`    row: ${JSON.stringify({ sessionless: row?.sessionless, sessionId: row?.sessionId })}`);
+    check(
+      `[${launcher}] MUTANT: the fleet row reports sessionless: TRUE with no session id — the ` +
+        `unmutated build reports FALSE here, so section 2's reachability assertion is wired to ` +
+        `the daemon rather than to its own hopes`,
+      row?.sessionless === true && row?.sessionId === null,
+      `sessionless=${row?.sessionless} sessionId=${JSON.stringify(row?.sessionId ?? null)}`
+    );
+    check(
+      `[${launcher}] MUTANT: and nothing was ANNOUNCED — no client ever learns the agent became ` +
+        `reachable, because it did not`,
+      events2.filter((e) => e.action === 'agent.activated' && e.path === dir).length === 0,
+      JSON.stringify(events2.map((e) => e.action))
+    );
+  }
+
+  // Removed BY NAME rather than left to the recursive delete at the bottom of
+  // this file. `fs.rmSync(…, { recursive: true })` unlinks a symlink instead of
+  // descending it, so the tree cleanup was already safe — but "the proof that
+  // deleted the repository's node_modules" is a bad enough outcome that the
+  // link is taken down explicitly and its target checked afterwards.
+  fs.unlinkSync(linked.link);
+  check(
+    'the scratch symlink is gone and the REAL node_modules it pointed at is untouched — this ' +
+      'section reaches outside the scratch directory exactly once, and puts it back',
+    !fs.existsSync(linked.link) && fs.existsSync(path.join(linked.real, 'node-pty')),
+    `link removed=${!fs.existsSync(linked.link)} target intact=${fs.existsSync(path.join(linked.real, 'node-pty'))}`
+  );
+}
+
 /** Every regular file under `dir`, at any depth. Absent directory → nothing. */
 function walkAllFiles(dir) {
   const out = [];
@@ -792,6 +1062,14 @@ for (const bridge of openBridges) killPtys(bridge);
 process.env.PATH = realPath;
 fs.rmSync(tmp, { recursive: true, force: true });
 
+if (mutationsSkipped().length) {
+  // Named next to the verdict, because "N FAILED" reads as N ordinary assertion
+  // failures when what actually happened is that a section never executed.
+  console.log(
+    `\n${mutationsSkipped().length} MUTATION(S) DID NOT APPLY, so their sections did not run: ` +
+      mutationsSkipped().join(', ')
+  );
+}
 console.log(
   failures.length ? `\n${failures.length} FAILED: ${failures.join(', ')}` : '\nALL PASS'
 );
