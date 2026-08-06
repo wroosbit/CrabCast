@@ -592,6 +592,55 @@ jobs:
       #                                     echoes the same object and is not
       #                                     swept.
       #
+      # And one whose subject is what the OTHER proofs say about themselves:
+      #
+      #   verify-proof-defences              every tracked proof answers one
+      #                                      question — what would make its
+      #                                      central assertion go red — and the
+      #                                      answer is 'mutation', a
+      #                                      non-mutation 'guard' (a
+      #                                      precondition, a negative case, a
+      #                                      vacuity check, a canary), or
+      #                                      'none'. 'none' is PERMITTED and
+      #                                      has to name the behaviour it
+      #                                      leaves undefended, classify the
+      #                                      cost, and carry a ticket when that
+      #                                      cost is real; the point is to make
+      #                                      a gap visible, not to close it
+      #                                      (KAN-195). A proof in scripts/
+      #                                      with no entry fails BY NAME, the
+      #                                      way proof-registry fails on a
+      #                                      proof in neither list. Its §2 is a
+      #                                      SWEEP rather than a list — it asks
+      #                                      each FILE whether it reaches
+      #                                      scripts/mutation.mjs and compares
+      #                                      that to what the register claims,
+      #                                      so a mutation deleted from a proof
+      #                                      turns the entry that still claims
+      #                                      one red without anyone having
+      #                                      remembered anything. Its §5
+      #                                      sabotages a copy of its own
+      #                                      register five ways and requires
+      #                                      each child to exit 1 with a named
+      #                                      FAIL.
+      #                                      WHAT IT CANNOT SEE: it supplies
+      #                                      its own register in §5, so it
+      #                                      proves the checks report correctly
+      #                                      about a register they are handed —
+      #                                      NOT that the register committed
+      #                                      here is true. An anchor proves a
+      #                                      guard's text is still present; it
+      #                                      cannot prove that guard still
+      #                                      defends the assertion beside it.
+      #                                      That half is a reviewer reading
+      #                                      the entries, and the header says
+      #                                      so. It also does not check that a
+      #                                      proof has a VERDICT at all —
+      #                                      verify-spawn-failure-legibility
+      #                                      has none and exits 0
+      #                                      unconditionally, which is how
+      #                                      KAN-197 exists.
+      #
       # And one whose subject is the only USER-FACING document, which until now
       # had no proof at all:
       #
@@ -697,6 +746,7 @@ jobs:
             verify-ci-proof-residue-is-legible
             verify-mutation-harness
             verify-readme-is-current
+            verify-proof-defences
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,
