@@ -655,7 +655,18 @@ export interface MissingAgent extends ConfigEcho {
   path: string;
   paneName: string;
   label: string | null;
-  /** When the registry last recorded this agent as activated. */
+  /**
+   * When the registry last recorded this agent as activated.
+   *
+   * ACTIVE SINCE, NOT MISSING SINCE, and the difference is the whole of the
+   * ordering decision recorded in {@link MessageRouter.handleListAgents}. This
+   * daemon learns an agent is absent by comparing the registry against a
+   * census taken just now; nothing anywhere records the moment it went. An
+   * agent activated last Tuesday that died a minute ago carries a `since` of
+   * last Tuesday, exactly like one that died last Tuesday. Reading this field
+   * as "how long it has been down" is wrong for every row it is not accidental
+   * on.
+   */
   since: string;
   reason: string;
 }
@@ -4501,6 +4512,33 @@ export class MessageRouter {
       // Agents that should be here and are not. Computed from the same census
       // the list is built from, so the two can never disagree about what is
       // running.
+      //
+      // NEWEST-FIRST HERE IS A DECISION, NOT AN INHERITANCE (KAN-96). The
+      // argument against it was: newest-first says "the oldest rows are the
+      // least urgent", which is right for standby — the thing you just
+      // switched off is the thing you want back — and backwards for a loss,
+      // because an agent nobody has restored in three days is the MOST
+      // neglected, not the least.
+      //
+      // It is a good argument about a field this row does not have. `since` is
+      // when the agent was last recorded ACTIVATED, not when it went missing
+      // (see {@link MissingAgent.since}); nothing durable records the second,
+      // and the daemon's latch is a Set of paths with no time on it that a
+      // restart forgets. So sorting this category the other way would not rank
+      // by neglect. It would rank by "activated longest ago" — which puts the
+      // fleet's longest-lived agents first and reads as a claim about
+      // down-time that the data cannot support. Trading a default that is
+      // merely arbitrary about urgency for one that is WRONG about it is not
+      // an improvement.
+      //
+      // What made the old ordering harmful was reachability, and that is gone:
+      // the cap is a page size now, so the rows past it are reachable by
+      // walking `nextCursor` rather than lost (KAN-163). Ranking by neglect
+      // needs a first-observed-missing timestamp that survives a restart —
+      // filed as KAN-189 — and until such a field exists there is nothing to
+      // sort by. Meanwhile one order across all five categories is one cursor
+      // contract, and a per-category direction is a second thing every
+      // consumer of `pages.*` would have to know.
       ['missingAgents', this.missingAgents(agents, staleSessions, intents),
         (r: any) => r.since, (r: any) => r.path],
       // Work taken off the machine to make room, still owed a decision.

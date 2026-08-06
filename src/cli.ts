@@ -1946,7 +1946,10 @@ export const COMMANDS: CommandSpec[] = [
     // newest-first and capped, so the rows that fall off a default read are
     // the ones that have been waiting LONGEST — the standby agent nobody has
     // switched back on for a week is the first thing to disappear from the
-    // list somebody would switch it back on from. `--after` takes the
+    // list somebody would switch it back on from. (For missingAgents the
+    // ordering key is the ACTIVATION time, so what falls off is the
+    // earliest-activated rather than the longest-dead — nothing records the
+    // second. See the missingAgents entry in router.ts.) `--after` takes the
     // `nextCursor` the previous read printed under the category's own
     // heading; keep going until no `more:` line is printed.
     flags: [
