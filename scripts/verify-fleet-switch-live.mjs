@@ -37,6 +37,34 @@
 // gate is the capacity slice (T3 of KAN-68); activation here passes the
 // always-admit seam it will replace.
 //
+// WHAT SECTION 3 IS THE ONLY THING THAT COVERS, and what it does NOT cover
+// (KAN-134). Restart survival is asserted twice in this suite and the halves
+// are not interchangeable:
+//
+//   * `verify-restart-survival` is the CI half. It runs BOTH launchers through
+//     the whole sequence and counts panes and `agent start` calls from a stub's
+//     argv log — everything on the daemon side is the real compiled code, and
+//     the herdr it is proved against is one this suite wrote.
+//   * SECTION 3 BELOW is the only assertion anywhere that a REAL herdr 0.6.x
+//     honours `agent attach --takeover` over the attach slot a dead daemon's
+//     PTY is still holding. A stub that answers `agent attach` by holding a
+//     terminal open cannot be wrong about that, which is exactly why it cannot
+//     establish it either. That is what the SIGKILL buys, and it is why this
+//     script is excluded from CI rather than merely slow.
+//
+// So this section is not redundant with its CI sibling and its sibling is not
+// redundant with it. Neither covers the other's half; say so rather than let a
+// reader infer that either one is the coverage.
+//
+// AND THE RECIPE FOR MAKING SECTION 3 GO RED, because a gate nobody has watched
+// fail has not been shown to be a gate. Delete the `getSessionByPath` conjunct
+// from `alive` in `src/reconcile.ts` (or, faster, from the compiled
+// `dist/reconcile.js`) — that is the pre-KAN-136 shape, and it is the state
+// `main` was in at 5657bfb when KAN-134 was filed. Section 3 then prints
+// `→ FAILED — restart survival failed: row=false panes=1 missing=0` under a
+// reconcile log reading `is already running; leaving it alone.` The CI half
+// fails 15 assertions on the same one-line edit.
+//
 // Usage:
 //   npm run build
 //   node scripts/verify-fleet-switch-live.mjs
@@ -357,8 +385,9 @@ console.log(`probe pane still alive without its daemon: ${probeRunning()} (herdr
 await startDaemon('daemon #2');
 
 // Reconciliation runs at onListen; give it a moment to restore one agent.
+const RESTORE_WAIT_S = 60;
 let restoredRow = null;
-for (let i = 0; i < 60 && !restoredRow; i++) {
+for (let i = 0; i < RESTORE_WAIT_S && !restoredRow; i++) {
   await sleep(1000);
   const listed = await call('list_agents');
   const row = listed.agents.find((a) => a.path === PROBE_DIR);
@@ -371,12 +400,41 @@ const listedAfter = await call('list_agents');
 console.log('daemon #2 reconcile log:');
 for (const line of grepReconcile()) console.log(`  ${line}`);
 console.log(`\nherdr agent list → probe pane count: ${paneCount} (a double-spawn would need a second name or an error)`);
+// THE ROW IS READ FROM THE RUN, NOT FROM THE WAIT. `restoredRow` is null unless
+// the loop above saw `sessionless: false`, so printing it as "the row" reported
+// `{}` in a failing run — an empty object where the reader needed to see the row
+// that IS there, reporting `sessionless: true`.
+const rowNow = listedAfter.agents.find((a) => a.path === PROBE_DIR);
 console.log(`daemon #2 list_agents row:`);
-console.log(`  ${JSON.stringify({ path: restoredRow?.path, sessionless: restoredRow?.sessionless, sessionId: restoredRow?.sessionId, status: restoredRow?.status })}`);
-console.log(`  (session id ${restoredRow?.sessionId} ≠ daemon #1's ${sessionBefore} — a FRESH ATTACH to`);
-console.log(`   the surviving pane, taken through the real activation path against the live census`);
-console.log(`   that recognised it, not a persisted session id taken on faith. A pane that survives`);
-console.log(`   is still ours; the terminal is not, and re-taking it is what this line proves.)`);
+console.log(`  ${JSON.stringify({ path: rowNow?.path, sessionless: rowNow?.sessionless, sessionId: rowNow?.sessionId, status: rowNow?.status })}`);
+
+// AND THE NARRATION IS CONDITIONAL, which it was not, and that is a defect of
+// exactly the shape this epic keeps re-finding. Written unconditionally these
+// four lines announced "a FRESH ATTACH … is what this line proves" during a run
+// where no attach had happened: `restoredRow` was null, so the text rendered as
+// `session id undefined ≠ daemon #1's crabcast-…` — an inequality that reads as
+// satisfied — and the reader met a confident claim four lines above the FAILED
+// verdict contradicting it. Observed, not imagined; it is what the KAN-134
+// reproduction printed. A caption that describes what a PASSING run would have
+// proved is a claim, and a claim has to be earned by the run printing it.
+if (restoredRow && restoredRow.sessionId !== sessionBefore) {
+  console.log(`  (session id ${restoredRow.sessionId} ≠ daemon #1's ${sessionBefore} — a FRESH ATTACH to`);
+  console.log(`   the surviving pane, taken through the real activation path against the live census`);
+  console.log(`   that recognised it, not a persisted session id taken on faith. A pane that survives`);
+  console.log(`   is still ours; the terminal is not, and re-taking it is what this line proves.)`);
+} else if (restoredRow) {
+  console.log(`  (the row is attached, and carrying daemon #1's OWN session id ${sessionBefore} — so`);
+  console.log(`   this is a remembered name rather than a terminal re-taken. The session that name`);
+  console.log(`   refers to died with daemon #1; nothing can read or type through it.)`);
+} else {
+  console.log(`  (NO row reported sessionless: false within ${RESTORE_WAIT_S}s, so this daemon holds no`);
+  console.log(`   terminal for whatever the pane count above reports: that agent can be listed, and`);
+  console.log(`   it cannot be read, typed at, or noticed dying except by the 30s sweep. The pane`);
+  console.log(`   count is the separate fact and it is printed above rather than assumed here — at`);
+  console.log(`   1 this is an attach that did not happen, and at 2 it would be a double-spawn,`);
+  console.log(`   which is a different failure. Read the reconcile log for which branch produced`);
+  console.log(`   it; "is already running; leaving it alone" is the KAN-134 shape.)`);
+}
 console.log(`missingAgents after reconcile: ${JSON.stringify(listedAfter.missingAgents)}`);
 
 verdict(
