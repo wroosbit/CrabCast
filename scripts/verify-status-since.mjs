@@ -352,7 +352,11 @@ try {
  * `sweep()` writes the shim's statuses too, not only the observation, so the
  * census the row is built from agrees with the observation that was recorded.
  * A world where they disagreed would exercise the row's status-match gate
- * rather than the rule under test, and would do it by accident.
+ * rather than the rule under test, and would do it by accident. AVOIDING IT AS
+ * A CONFOUNDER HERE IS NOT THE SAME AS PROVING IT ANYWHERE, which is a
+ * distinction this file got wrong once: §5b below makes that disagreement its
+ * own subject, deliberately, through `setCensus`, and §6d is the mutant behind
+ * it.
  */
 async function unitWorld(dist, name) {
   const { MessageRouter } = await import(path.join(dist, 'router.js'));
@@ -410,6 +414,20 @@ async function unitWorld(dist, name) {
         }))
       });
       return world.lastTransitions;
+    },
+    /**
+     * Move the CENSUS only, leaving the memory where it is.
+     *
+     * The one lever that can produce a row whose `herdrStatus` disagrees with
+     * the last thing the sweep recorded — which in production is simply the
+     * window between two sweeps, and is exactly when the status-match gate in
+     * `FleetStatusMemory.since` is the only thing standing between a caller and
+     * a moment belonging to a status the agent has already left.
+     */
+    setCensus(agentPath, status) {
+      const statuses = JSON.parse(fs.readFileSync(path.join(state, 'statuses.json'), 'utf8'));
+      statuses[paneNameFor(agentPath)] = status;
+      fs.writeFileSync(path.join(state, 'statuses.json'), JSON.stringify(statuses));
     },
     /** The agent's row out of a real `list_agents`, census and all. */
     row(agentPath) {
@@ -881,7 +899,79 @@ try {
   );
 
   // =========================================================================
-  rule('6. every check above can go red — three mutants, built and run');
+  rule('5b. the gate: a row never dates a status this daemon did not watch it enter');
+  // =========================================================================
+  //
+  // `FleetStatusMemory.since` is asked with the STATUS and not only the path,
+  // and that comparison is what makes the field's sentence — "observed in THIS
+  // status since T" — true rather than nearly true. Remove it and a row reports
+  // a moment belonging to a status the agent has already LEFT: the documented
+  // sentence becomes false while every row still looks populated and entirely
+  // plausible, which is this epic's recurring defect exactly.
+  //
+  // IT IS NOT A HYPOTHETICAL WINDOW. The sweep runs every 30 seconds and
+  // `list_agents` takes its own census on every call, so any caller polling
+  // faster than the sweep meets this state routinely — herdr reporting a status
+  // the memory has not recorded yet is the normal case between two sweeps, not
+  // an edge.
+  //
+  // Asserted by POSITIVE FINGERPRINT, because a null on its own proves nothing
+  // here either: the neighbour in the SAME response still carries its
+  // timestamp, so the null is demonstrably the gate firing rather than a memory
+  // that has gone empty.
+  const gate = await unitWorld(distDir, 'gate');
+  const G1 = gate.agent('gated');
+  const G2 = gate.agent('neighbour');
+
+  gate.sweep(true, [[G1, 'working'], [G2, 'working']]);
+  gate.sweep(true, [[G1, 'idle'], [G2, 'idle']]);
+  const g1Stamp = gate.since(G1);
+  const g2Stamp = gate.since(G2);
+  check(
+    typeof g1Stamp === 'string' && typeof g2Stamp === 'string',
+    '5b. both agents are stamped while the census and the memory agree — the precondition, ' +
+      'measured rather than assumed, because the whole check below is about ONE of them losing it',
+    `gated ${g1Stamp}, neighbour ${g2Stamp}`
+  );
+
+  // The census moves and the sweep does NOT run — the window between two sweeps.
+  gate.setCensus(G1, 'working');
+  const gatedRow = gate.row(G1);
+  const neighbourRow = gate.row(G2);
+  show('one response, after the census moved for ONE of them:', {
+    gated: { herdrStatus: gatedRow?.herdrStatus, statusSince: gatedRow?.statusSince },
+    neighbour: { herdrStatus: neighbourRow?.herdrStatus, statusSince: neighbourRow?.statusSince }
+  });
+
+  check(
+    gatedRow?.herdrStatus === 'working',
+    'the census really did move — the row reports the new status, so what follows is about the ' +
+      'gate and not about a census that never changed',
+    `herdrStatus = ${gatedRow?.herdrStatus}`
+  );
+  check(
+    gatedRow?.statusSince === null,
+    'AND ITS `statusSince` IS NULL rather than the moment it went idle. The daemon has not ' +
+      'watched it enter `working`, so it has nothing to say about when — reporting the idle ' +
+      'moment beside `working` would be a true-looking sentence about the wrong status',
+    `statusSince = ${JSON.stringify(gatedRow?.statusSince)} (the idle moment was ${g1Stamp})`
+  );
+  check(
+    neighbourRow?.statusSince === g2Stamp && typeof g2Stamp === 'string',
+    'while the NEIGHBOUR in the same response still carries its timestamp — so the null above ' +
+      'is the gate firing, not a memory that emptied and not a field that stopped working',
+    `neighbour: ${neighbourRow?.herdrStatus} since ${neighbourRow?.statusSince}`
+  );
+  check(
+    gate.sweep(true, [[G1, 'working'], [G2, 'idle']]).length === 1 &&
+      typeof gate.since(G1) === 'string',
+    'and the next sweep — the one that actually observes the change — announces it and stamps ' +
+      'it, so the null was a WINDOW rather than a value the agent is now stuck with',
+    `after the sweep: ${gate.since(G1)}`
+  );
+
+  // =========================================================================
+  rule('6. every check above can go red — four mutants, built and run');
   // =========================================================================
   //
   // A proof that has only ever passed is evidence of nothing. Each of these is
@@ -960,6 +1050,35 @@ try {
         'the observation is dropped by the empty census and re-seeded as a first sighting. §5\'s ' +
         '"forgets nothing across the blip" goes red against this build',
       `mutant: ${before} → ${JSON.stringify(w.since(a))} · real build: kept`
+    );
+  }
+  // ---- 6d. the status-match gate removed ----------------------------------
+  //
+  // The subtlest of the four, and the only one that produces no null and no
+  // missing field: every row stays populated, every timestamp is real, and the
+  // SENTENCE is false — a moment belonging to a status the agent has left,
+  // reported beside the status it is in now. Nothing in §1-§5 or in the three
+  // mutants above can see it; §5b is the only thing that can, which is why §5b
+  // exists.
+  const m4 = mutatedBuild('gate-removed', 'router.js',
+    'return observation?.status === status ? observation.since : null;',
+    'return observation?.since ?? null;');
+  if (m4) {
+    const w = await unitWorld(m4, 'm4');
+    const a = w.agent('gated');
+    w.sweep(true, [[a, 'working']]);
+    w.sweep(true, [[a, 'idle']]);
+    const idleMoment = w.since(a);
+    w.setCensus(a, 'working');
+    const row = w.row(a);
+    check(
+      typeof idleMoment === 'string' && row?.herdrStatus === 'working' &&
+        row?.statusSince === idleMoment,
+      '6d. the mutant dates `working` with the moment the agent went IDLE — a populated, ' +
+        'plausible, entirely wrong row, and the documented sentence "observed in THIS status ' +
+        'since T" is false. §5b goes red against this build; nothing else in this file does',
+      `mutant: [${row?.herdrStatus}] since ${row?.statusSince} — which is the idle moment ` +
+        `${idleMoment} · real build: null`
     );
   }
 } catch (err) {
