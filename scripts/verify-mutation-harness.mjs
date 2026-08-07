@@ -64,6 +64,20 @@
 // Generalising the helper to cover single-file script mutation is real work and
 // is filed rather than done here (KAN-170).
 //
+// AND THE SWEEPS SHARE ONE ARM, WHICH WAS WRONG FROM THE DAY IT WAS WRITTEN
+// (KAN-199). Both are `detector && !USES_HELPER`, so `USES_HELPER` decides who
+// is excused — and the two sides of the miss landed on the same day, 2026-08-05:
+// this detector in KAN-138 (#32), the dynamic import in KAN-96 (#43). It read
+// only the STATIC import, and `verify-agent-power-controls` takes the helper by
+// dynamic import — a proof that goes through the helper exactly as intended,
+// reading to this file as one that had not. It cost nothing at the time only
+// because that script matches neither detector, which is a fact about today's
+// code rather than about the check. Section 4d is the part that keeps the
+// fourth import syntax from doing the same thing: it walks the real suite and
+// names any proof that mentions the helper in a form `USES_HELPER` cannot see.
+// The fixtures in 4a and 4b cannot do that job — they hand the detector strings
+// THIS FILE WROTE, and the defect was a form nobody thought to write.
+//
 // It needs no daemon, no herdr and no network. It needs `dist/` to exist,
 // because it copies it.
 //
@@ -463,7 +477,32 @@ const COPIES_BUT_DOES_NOT_MUTATE = [
  * being guarded. The bias is set that way on purpose.
  */
 const COPIES_BUILD = /cpSync\(/;
-const USES_HELPER = /from\s+['"]\.\/mutation\.mjs['"]/;
+
+/**
+ * Does this script reach the helper?
+ *
+ * BOTH IMPORT FORMS, because the suite uses both (KAN-199). This read
+ * `/from\s+['"]\.\/mutation\.mjs['"]/` until it was noticed that
+ * `verify-agent-power-controls.mjs` takes the helper by DYNAMIC import — it has
+ * to, because the mutator is built after the config it is keyed to has been
+ * loaded — and so read to this detector as a script that had gone around it.
+ * Nothing went red, because that script matches neither `COPIES_BUILD` nor
+ * `READS_A_SIBLING_SOURCE` and both sweeps are `detector && !USES_HELPER`. That
+ * is worth nothing: the miss was one `cpSync(` away from naming a proof as
+ * having evaded a helper it was using, and whoever got that failure would have
+ * loosened the detector or written a register entry that was not true.
+ *
+ * THE BIAS HERE RUNS THE OTHER WAY FROM `COPIES_BUILD`'s, and it is worth
+ * saying because the two look alike. This one appears NEGATED in every sweep,
+ * so its false positives EXCUSE an offender rather than costing someone a
+ * register entry: prose that happens to contain `from './mutation.mjs'` reads
+ * as an import. That was true of the narrow form too and is not fixed here —
+ * fixing it needs a parser, not a regex. What is new is §4d, which sweeps in
+ * the opposite direction: any real proof that names the helper and does not
+ * match this is named, so a THIRD import form cannot go quiet the way the
+ * second one did.
+ */
+const USES_HELPER = /(?:from|import\s*\()\s*['"]\.\/mutation\.mjs['"]/;
 
 const registered = new Set(COPIES_BUT_DOES_NOT_MUTATE.map((e) => e.script));
 const copiers = [];
@@ -478,7 +517,16 @@ for (const rel of tracked) {
 
 console.log(`\n   ${copiers.length} proof(s) copy a build directly:`);
 for (const m of copiers) {
-  const why = registered.has(m) ? '   (registered: not a mutation)' : '   <-- went around mutation.mjs';
+  // The arrow is for OFFENDERS, not for everything unregistered — a copier that
+  // goes through the helper is neither. This printed `<-- went around
+  // mutation.mjs` beside two compliant proofs while the verdict below said none
+  // had, which is the listing contradicting the check it exists to explain
+  // (KAN-199). §4a's listing already reads its offender set; this one now does.
+  const why = registered.has(m)
+    ? '   (registered: not a mutation)'
+    : offenders.includes(m)
+      ? '   <-- went around mutation.mjs'
+      : '   (through the helper)';
   console.log(`     ${m}${why}`);
 }
 
@@ -620,6 +668,13 @@ check(
     USES_HELPER.test(`import { makeMutator } from './mutation.mjs';\n${privateScriptMutator}`)
   );
   check(
+    'and it CLEARS it when the helper arrives by DYNAMIC import too — the form that read as an ' +
+      'evasion for as long as this detector only knew the static one (KAN-199)',
+    USES_HELPER.test(
+      `const { makeMutator } = await import('./mutation.mjs');\n${privateScriptMutator}`
+    )
+  );
+  check(
     'while a proof that reads no sibling source is not swept up at all',
     !READS_A_SIBLING_SOURCE.test("const cfg = fs.readFileSync(configPath, 'utf8');\n")
   );
@@ -735,8 +790,159 @@ for (const entry of COPIES_BUT_DOES_NOT_MUTATE) {
     USES_HELPER.test(`import { makeMutator } from './mutation.mjs';\n${privateMutator}`)
   );
   check(
+    'and it CLEARS it by DYNAMIC import as well — a proof that cannot take the helper at module ' +
+      'top level is still going through it, and this fixture is the one that fails if the ' +
+      'detector narrows back to the static form (KAN-199)',
+    USES_HELPER.test(`const { makeMutator } = await import('./mutation.mjs');\n${privateMutator}`)
+  );
+  check(
     'a script that copies nothing is not swept up at all',
     !COPIES_BUILD.test("import * as fs from 'node:fs';\nfs.readFileSync(x);\n")
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n-- 4d. and the shared arm can see every form the suite really imports the helper in');
+// ---------------------------------------------------------------------------
+//
+// WHY THE FIXTURES ABOVE DO NOT COVER THIS, which is the whole reason this
+// section exists (KAN-199). Every check in 4a and 4b hands `USES_HELPER` a
+// string this file wrote. They prove it answers correctly about the forms
+// SOMEONE THOUGHT OF — and the defect was precisely a form nobody thought of.
+// A fixture set cannot notice its own omission: the narrow detector passed
+// every fixture it had, every run it ever had, while a real proof in the suite
+// sat outside it. So this sweep asks the opposite question, of files it did not
+// write: does any real proof NAME the helper in a form the detector cannot see?
+//
+// It is the same walk-don't-list rule as §4 (KAN-166, KAN-148) turned on the
+// detector rather than on the proofs. The fourth import syntax gets named the
+// first time it appears, by a check nobody has to remember to update.
+//
+// WHAT IT COSTS AND WHERE THE BIAS POINTS. `MENTIONS_THE_HELPER` is textual and
+// broad in the same way its siblings are, and it can fire on prose: a comment
+// that quotes `'./mutation.mjs'` while importing nothing is a false positive.
+// That costs whoever wrote it one reworded comment. The failure it exists to
+// stop costs a proof its guard, silently, and this file is the third place in
+// this epic where a detector was narrower than the sentence describing it.
+//
+// WHAT IT STILL DOES NOT COVER, said plainly: it checks that a mention and an
+// import agree, not that the import is USED. A proof could match both and never
+// call `mutate()`. §4/§4a own the direction that matters there — a proof that
+// mutates without the helper — and nothing owns "imports the helper and mutates
+// by hand anyway"; that shape has never been observed and is not filed.
+const MENTIONS_THE_HELPER = /['"]\.\/mutation\.mjs['"]/;
+
+const mentioners = [];
+const invisible = [];
+for (const rel of tracked) {
+  const text = fs.readFileSync(path.join(repoRoot, rel), 'utf8');
+  if (!MENTIONS_THE_HELPER.test(text)) continue;
+  mentioners.push(rel);
+  if (!USES_HELPER.test(text)) invisible.push(rel);
+}
+
+const dynamicUsers = mentioners.filter((rel) =>
+  /import\s*\(\s*['"]\.\/mutation\.mjs['"]/.test(fs.readFileSync(path.join(repoRoot, rel), 'utf8'))
+);
+
+console.log(
+  `\n   ${mentioners.length} proof(s) name scripts/mutation.mjs; ` +
+    `${dynamicUsers.length} of them by dynamic import:`
+);
+for (const m of mentioners) {
+  // This file counts as a dynamic user only because its own fixture strings
+  // above spell one out; §4a's listing labels itself for the same reason.
+  const how = dynamicUsers.includes(m)
+    ? m.endsWith('verify-mutation-harness.mjs')
+      ? '   (dynamic import — this file, in its own fixture text above)'
+      : '   (dynamic import)'
+    : '';
+  const seen = invisible.includes(m) ? '   <-- USES_HELPER cannot see this' : '';
+  console.log(`     ${m}${how}${seen}`);
+}
+
+check(
+  '(setup) the suite really does import the helper — a sweep over an empty set would report this ' +
+    "section's all-clear having looked at nothing",
+  mentioners.length > 5,
+  `${mentioners.length} proof(s) name the helper`
+);
+check(
+  'every proof that names scripts/mutation.mjs is SEEN to use it — a form the detector cannot ' +
+    'read makes that proof look like an evasion to both sweeps above, and the day it also copies ' +
+    'a build it is named as having gone around a helper it is using',
+  invisible.length === 0,
+  invisible.length
+    ? `${invisible.join(', ')} — USES_HELPER (${USES_HELPER}) does not match the import form used here; widen it`
+    : `all ${mentioners.length} visible to ${USES_HELPER}`
+);
+
+// ---------------------------------------------------------------------------
+console.log('\n-- 4e. WHICH SPELLINGS, exactly — including the ones nothing here can see');
+// ---------------------------------------------------------------------------
+//
+// A REGEX PRESENTED AS COMPLETE IS THIS EPIC'S COMMONEST COSTUME, so the claim
+// is not made in prose where it cannot be wrong. Every spelling below is
+// asserted, in both directions, and the ones this file cannot see are asserted
+// to be unseen rather than omitted from the list. The three-way split is the
+// point:
+//
+//   USES_HELPER      — the detector reads it as going through the helper.
+//   §4d NAMES IT     — the detector cannot read it, but the sweep above sees a
+//                      quoted './mutation.mjs' and fails LOUDLY. Not covered,
+//                      but it cannot go quiet, which is the property that
+//                      failed here in the first place.
+//   INVISIBLE        — neither. A proof written this way would sit outside all
+//                      of §4, §4a and §4d exactly as the dynamic import did.
+//                      Nothing in this repository is written this way today,
+//                      and nothing checks that it stays so.
+//
+// The invisible column is the honest limit of a textual detector: the path has
+// to be a straight-quoted literal spelled `./mutation.mjs`. Computing it —
+// `path.join(scriptDir, 'mutation.mjs')` — or moving the helper into a
+// subdirectory defeats it, and defeats §4d with it. Making that impossible
+// needs a module graph rather than a regex, and is not attempted here.
+{
+  const SPELLINGS = [
+    // [name, source, expect USES_HELPER, expect MENTIONS_THE_HELPER]
+    ['static, single quotes', "import { makeMutator } from './mutation.mjs';", true, true],
+    ['static, double quotes', 'import { makeMutator } from "./mutation.mjs";', true, true],
+    ['static, namespace', "import * as m from './mutation.mjs';", true, true],
+    ['static, newline before the specifier', "import { makeMutator } from\n  './mutation.mjs';", true, true],
+    ['dynamic, awaited — the form KAN-199 was about', "const { makeMutator } = await import('./mutation.mjs');", true, true],
+    ['dynamic, space before the paren', "await import ('./mutation.mjs')", true, true],
+    ['dynamic, newline inside the paren', "await import(\n  './mutation.mjs'\n)", true, true],
+    ['dynamic, double quotes', 'await import("./mutation.mjs")', true, true],
+    ['side-effect import, no `from`', "import './mutation.mjs';", false, true],
+    ['require — not ESM, so not used here, but spelled out', "const m = require('./mutation.mjs');", false, true],
+    ['new URL(..., import.meta.url)', "await import(new URL('./mutation.mjs', import.meta.url))", false, true],
+    ['dynamic, TEMPLATE LITERAL', 'await import(`./mutation.mjs`)', false, false],
+    ['computed path — path.join(scriptDir, ...)', "await import(path.join(scriptDir, 'mutation.mjs'))", false, false],
+    ['parent-relative path', "import { makeMutator } from '../mutation.mjs';", false, false],
+    ['helper moved to a subdirectory', "import { makeMutator } from './scripts/mutation.mjs';", false, false]
+  ];
+
+  for (const [name, src, wantUses, wantMentions] of SPELLINGS) {
+    const uses = USES_HELPER.test(src);
+    const mentions = MENTIONS_THE_HELPER.test(src);
+    const where = wantUses ? 'USES_HELPER' : wantMentions ? '§4d names it' : 'INVISIBLE to both';
+    check(
+      `spelling — ${name}: ${where}`,
+      uses === wantUses && mentions === wantMentions,
+      `USES_HELPER ${uses} (want ${wantUses}), MENTIONS_THE_HELPER ${mentions} (want ${wantMentions})`
+    );
+  }
+
+  // AND THE TABLE IS NOT ALLOWED TO BECOME ALL-COVERED BY ACCIDENT. A future
+  // widening that swallowed every row would leave this section asserting
+  // nothing, in the same words it uses now.
+  check(
+    'the table still records forms this file cannot see — a table where everything passes is a ' +
+      'table that has stopped saying anything',
+    SPELLINGS.some(([, , wantUses]) => !wantUses) &&
+      SPELLINGS.some(([, , , wantMentions]) => !wantMentions),
+    `${SPELLINGS.filter(([, , u]) => !u).length} not matched by USES_HELPER, ` +
+      `${SPELLINGS.filter(([, , , m]) => !m).length} invisible to both`
   );
 }
 
