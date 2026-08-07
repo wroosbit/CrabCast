@@ -418,6 +418,72 @@ verdict(
   'the behavioural guidance was lost in the rewrite'
 );
 
+/**
+ * THE `statusSince` PARAGRAPH, WHICH UNTIL KAN-213 NOTHING ASSERTED AT ALL.
+ *
+ * It is the longest consumer-visible text CrabCast publishes about that field —
+ * the only place an MCP caller who never reads this repository meets it — and
+ * the two checks above were the whole of the coverage on this description: a
+ * negative residue regex, and the missing/preempted guidance. A rewrite could
+ * delete every sentence below and the suite stayed green, which is how KAN-213
+ * came to be filed against documentation in the first place.
+ *
+ * WHAT FAILURE THIS WOULD CATCH: the paragraph being dropped or hollowed out by
+ * a later rewrite of this description — the same loss `:414` above guards
+ * against for the missing/preempted guidance, applied to the claims that are
+ * load-bearing rather than decorative — four of them, pinned by six needles,
+ * because the last two each need their scope checked as well as their headline.
+ * Each needle is a claim a caller acts on, not a phrase chosen because it
+ * happens to be there:
+ *
+ *   fact-not-diagnosis  — the caller makes the judgement; CrabCast never says
+ *                         "stuck". Losing this invites exactly the confident
+ *                         wrong answer KAN-200 refused to produce.
+ *   null-is-an-answer   — and its SCOPE. A caller who reads null as a gap
+ *                         rather than as "this daemon has not watched" will
+ *                         treat a fresh daemon's whole fleet as unmeasured
+ *                         data rather than as a documented value.
+ *   keep-your-own       — the remedy. Without it the restart sentence states a
+ *                         loss and offers nothing.
+ *   dark-when-wanted    — KAN-213's own sentence: the loss is CORRELATED with
+ *                         the condition being detected. This is the one that
+ *                         had no home on any surface before this commit.
+ *
+ * WHAT IT WILL NOT CATCH, said plainly because the file next door learned this
+ * the expensive way (verify-event-contract's unilateral-guarantee tripwire,
+ * which review defeated with ten paraphrases it had never seen): THIS DEFENDS
+ * AGAINST REMOVAL AND NOT AGAINST CONTRADICTION. A rewrite that keeps these
+ * phrases and adds a sentence promising `statusSince` survives a restart passes
+ * here. It is a presence check, which is worth exactly what a presence check is
+ * worth — and it is four claims more than were checked before, which was none.
+ * The BEHAVIOUR behind them is proven by verify-status-since.mjs, which
+ * covers the field and not this text; neither script covers the other, and the
+ * hole between them is that no proof anywhere reads this description against
+ * that behaviour.
+ */
+const STATUS_SINCE_CLAIMS = [
+  ['it is a fact and not a diagnosis', /FACT AND NOT A DIAGNOSIS/],
+  ['`null` is an answer, and it says whose', /`null` IS AN ANSWER/],
+  ['and names the scope: every agent on a freshly started daemon',
+    /every agent on a freshly started daemon/],
+  ['the remedy — keep your own window', /keep your own/],
+  ['and KAN-213: the field is dark exactly when it is most wanted',
+    /RESTART WINDOW IS THE ONE YOU MOST WANT THIS FIELD IN/],
+  ['naming the correlation rather than only the loss',
+    /precisely in the window where the condition it exists to expose is most likely/]
+];
+const missingClaims = STATUS_SINCE_CLAIMS.filter(([, re]) => !re.test(listDesc));
+for (const [what] of STATUS_SINCE_CLAIMS) {
+  console.log(`     statusSince claim: ${what}`);
+}
+verdict(
+  /statusSince/.test(listDesc) && missingClaims.length === 0,
+  'the statusSince paragraph keeps all six of its load-bearing claims — including that the\n' +
+  '    field is null precisely in the window a caller most wants it (KAN-213)',
+  `the description lost ${missingClaims.length} statusSince claim(s): ` +
+  missingClaims.map(([what]) => what).join('; ')
+);
+
 // ------------------------------------------- the daemon behind the socket --
 
 // The MCP server's eager connect spawns the daemon (none is running in this

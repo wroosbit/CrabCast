@@ -619,6 +619,80 @@ verdict(
   `refuted regions=${refutedRegions.length} (${refutedLength} chars)`
 );
 
+// ---- §3's `statusSince` bullets, which until KAN-213 nothing read at all ----
+//
+// WHAT FAILURE THIS WOULD CATCH: §3's caveats being deleted or hollowed out by
+// a later edit of this document. Three scripts open `event-contract.md` and
+// none of them looked at §3: the check above asserts event NAMES round-trip
+// and rejects the unilateral-guarantee shape, and `verify-fleet-enumeration`
+// asserts §2's obligation sentence and pins its page-size numbers to the
+// constants. §3 is where a consumer who never reads this repository learns what
+// `statusSince` does NOT promise, and it was unguarded prose.
+//
+// WHY IT IS HERE AND NOT LEFT TO THE PULL REQUEST. KAN-213 adds one sentence to
+// §3 and one to the MCP tool description, and `verify-mcp-tools` covers the
+// second. Guarding one of two new claims and not the other is worse than
+// guarding neither: a reader of either sentence has no way to tell which kind
+// they are holding. So both are covered, and the asymmetry does not ship.
+//
+// THE PRECEDENT IS §2's, deliberately: `verify-fleet-enumeration.mjs` locates a
+// section by heading and asserts the sentences that carry the obligation. This
+// does the same for §3, including the same non-vacuity guard — a heading lookup
+// that silently missed would assert six regexes over an empty string and pass.
+//
+// WHAT IT WILL NOT CATCH, in the same terms the tripwire above uses about
+// itself: THIS IS A PRESENCE CHECK AND NOT A CONSISTENCY ONE. An edit that
+// keeps these sentences and adds a contradicting one elsewhere in the document
+// passes here, exactly as the unilateral-guarantee list passes ten paraphrases
+// it has never seen. It makes DELETION loud, which is the way this text has
+// actually been at risk, and it claims nothing further.
+{
+  const s3Start = docText.indexOf('### The same observation, readable without subscribing: `statusSince`');
+  const s3End = docText.indexOf('## 4. ');
+  const section3 = s3Start >= 0 && s3End > s3Start ? docText.slice(s3Start, s3End) : '';
+
+  const S3_CLAIMS = [
+    ['it is a fact, not a diagnosis — CrabCast will never say "stuck"',
+      /\*\*It is a fact, not a diagnosis\.\*\*/],
+    ['`null` is an answer rather than a gap', /\*\*`null` is an answer\.\*\*/],
+    ['and names its scope: every agent on a freshly started daemon',
+      /true of every agent on a freshly started daemon/],
+    ['it does not survive a restart', /\*\*It does not survive a restart\*\*/],
+    ['the remedy — the consumer keeps its own window', /keep your own/],
+    ['it is not a heartbeat or a liveness probe',
+      /\*\*It is not a heartbeat or a liveness probe\.\*\*/],
+    // KAN-213's sentence: the extent was always documented, the CORRELATION
+    // never was. This is the claim the ticket exists for, and the one most
+    // likely to be read as decoration and trimmed by somebody shortening §3.
+    ['and KAN-213: it is dark exactly when you most want it',
+      /\*\*And it is dark exactly when you most want it\*\*/],
+    ['naming the correlation rather than only the loss',
+      /correlated with the thing you are detecting, not\s*\n?\s*independent of it/]
+  ];
+  const s3Missing = S3_CLAIMS.filter(([, re]) => !re.test(section3));
+
+  console.log(`\n   §3 (\`statusSince\`) located: chars ${s3Start}..${s3End} (${section3.length} chars)`);
+  for (const [what, re] of S3_CLAIMS) {
+    console.log(`     ${re.test(section3) ? '·' : '!'} ${what}`);
+  }
+
+  verdict(
+    // Non-vacuity first: a heading that moved would make every regex below
+    // run against '' and the filter come back empty-handed for the wrong
+    // reason. The length floor is what stops `''` from ever being a pass.
+    s3Start >= 0 && s3End > s3Start && section3.length > 1200 &&
+      s3Missing.length === 0,
+    '§3 keeps all eight of its `statusSince` claims — the four caveats, their scope, and\n' +
+    '    KAN-213\'s: that the null is CORRELATED with the condition the field exists to expose,\n' +
+    '    not merely lost on a restart',
+    s3Start < 0 || s3End <= s3Start
+      ? `§3 could not be located in the document (start=${s3Start}, end=${s3End})`
+      : section3.length <= 1200
+        ? `§3 located but implausibly short (${section3.length} chars) — the section was gutted`
+        : `§3 lost ${s3Missing.length} claim(s): ${s3Missing.map(([w]) => w).join('; ')}`
+  );
+}
+
 // ---- `reason` is structurally non-optional, and every site actually sends it --
 //
 // WHY THIS CHECK EXISTS, and it is a consequence of a merge THIS SLICE CHOSE.

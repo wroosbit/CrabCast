@@ -443,7 +443,10 @@ const STATE_READ_PROVENANCE = {
    * REMEMBERED BY THIS PROCESS: neither on the record nor in the census that
    * answered this call, but accumulated by this daemon's own fleet sweep and
    * held in memory. Gone on a restart, and null until this daemon has watched
-   * the thing it describes happen.
+   * the thing it describes happen — which is the WHOLE FLEET of a daemon that
+   * has just started, in the window where a state nobody watched an agent enter
+   * is most likely. See {@link MessageRouter.recordSweepObservation} for when
+   * the null actually falls and why that coincidence is not a defect.
    *
    * A FOURTH BUCKET RATHER THAN A FIELD SQUEEZED INTO ONE OF THE THREE, and
    * that is the whole reason it exists. `statusSince` is not durable — it is
@@ -537,6 +540,15 @@ interface ListedAgent extends ConfigEcho {
    * {@link MessageRouter.recordSweepObservation} for the whole of the
    * mechanism and for the durability decision, which was settled by KAN-189
    * and is not reopened here.
+   *
+   * AND NULL FALLS WHERE IT IS LEAST WELCOME, which is a different sentence
+   * from "it does not survive a restart" and the one a caller does not reach
+   * on their own. A daemon restarts when its fleet does — a crash, a reboot, a
+   * power cut — so the fleet this field goes dark for is the same fleet that
+   * has just come back in states nobody watched it enter, which is the exact
+   * condition KAN-200 built the field to expose. The loss is correlated with
+   * the thing being detected rather than independent of it. Same pointer as
+   * above for why that is inherent rather than fixable.
    */
   statusSince: string | null;
   /** herdr's own `agent` field: the CLI running in the pane, null for a shell. */
