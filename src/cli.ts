@@ -347,10 +347,12 @@ function failure(reader: ResponseReader, what: string): string {
  */
 const CAPACITY_FIELDS = [
   'cap', 'running', 'exemptAgents', 'headroom', 'atCapacity', 'capBoundBy',
-  'headroomBoundBy', 'reason', 'cores', 'load1', 'totalMb', 'availableMb',
+  'headroomBoundBy', 'reason', 'cores', 'load1', 'cpuBusyCores',
+  'cpuWindowSeconds', 'cpuObservedAt', 'totalMb', 'availableMb',
   'agentMemoryMb', 'agentCores', 'agentMemorySource', 'agentCoresSource',
   'measuredAt', 'measuredWindowSeconds', 'measuredAgentTrees', 'capByCpu',
-  'capByMemory', 'headroomByCap', 'headroomByLoad', 'headroomByMemory', 'summary'
+  'capByMemory', 'headroomByCap', 'headroomByCpu', 'headroomByLoad',
+  'headroomByMemory', 'summary'
 ] as const;
 
 function capacityBlock(capacity: any): string | null {
@@ -368,11 +370,24 @@ function capacityBlock(capacity: any): string | null {
   // handed the whole object, which marked it read, so the residue guard could
   // not surface what the block itself left out. A guard that can be silenced
   // by the code it guards is not a guard.
+  // The headroom terms name which CPU-side instrument answered (KAN-208):
+  // `cpu allows N` when this machine's CPU was observed, and the load term
+  // labelled as reported-only; `load allows N (fallback …)` when it was not.
+  // A line that printed only the number could not tell a reader whether the
+  // gate was measuring CPU or standing in for it.
+  const measuredCpu = capacity.cpuBusyCores !== null && capacity.cpuBusyCores !== undefined;
+  const cpuSide = measuredCpu
+    ? `cpu allows ${capacity.headroomByCpu}, load would allow ${capacity.headroomByLoad} (reported only)`
+    : `load allows ${capacity.headroomByLoad} (fallback — nothing measured CPU)`;
   const terms = `${INDENT}cap terms: cpu allows ${capacity.capByCpu}, memory allows ${capacity.capByMemory}` +
     `  ·  headroom terms: count allows ${capacity.headroomByCap}, ` +
-    `load allows ${capacity.headroomByLoad}, memory allows ${capacity.headroomByMemory}`;
+    `${cpuSide}, memory allows ${capacity.headroomByMemory}`;
   const machine =
-    `${INDENT}machine: ${capacity.cores} cores, load ${capacity.load1}, ` +
+    `${INDENT}machine: ${capacity.cores} cores, ` +
+    (measuredCpu
+      ? `${capacity.cpuBusyCores} in use over ${capacity.cpuWindowSeconds}s ` +
+        `to ${capacity.cpuObservedAt}, load ${capacity.load1}, `
+      : `cpu not measured, load ${capacity.load1}, `) +
     `${capacity.availableMb} MB available of ${capacity.totalMb} MB`;
 
   // Anything capacityDto grows that this block has not been taught. Nested

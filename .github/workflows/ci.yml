@@ -754,6 +754,7 @@ jobs:
             verify-activate-requires-agent
             verify-list-agents-survives-restart
             verify-agent-capacity
+            verify-cpu-headroom
             verify-agent-preemption
             verify-agent-power-controls
             verify-agent-resumption

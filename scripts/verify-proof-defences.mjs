@@ -105,18 +105,19 @@
 // ---------------------------------------------------------------------------
 //
 // KAN-190's task agent asked whether "every assertion in every proof carries a
-// mutation" should be policy. The numbers, now that they exist — 44 proofs,
+// mutation" should be policy. The numbers, now that they exist — 45 proofs,
 // this file included:
 //
-//   21 carry a mutation.  22 carry a non-mutation guard.
+//   21 carry a mutation.  23 carry a non-mutation guard.
 //    1 carries nothing, and it names what that leaves undefended.
 //
 // (18 / 21 / 3 when this register was first counted. KAN-197 closed the worst
 // of the three — see finding 3 below — and KAN-198 closed `verify-tab-per-agent`,
 // which was the expensive one: the count moved twice because the work happened,
 // which is what a register is for. The intervening 20 / 21 / 2 is what KAN-206
-// left behind when it added `verify-proof-verdicts`, and 20 / 22 / 1 is what
-// KAN-200 arrived at before adding `verify-status-since`.)
+// left behind when it added `verify-proof-verdicts`, 20 / 22 / 1 is what
+// KAN-200 arrived at before adding `verify-status-since`, and 21 / 22 / 1 is
+// what KAN-208 arrived at before adding `verify-cpu-headroom`.)
 //
 // The answer this file's author gives, with those numbers in hand: **no, and
 // the register is the better instrument.** Three findings support it, and none
@@ -524,13 +525,55 @@ const PROOF_DEFENCES = [
     defence: 'guard',
     central:
       'the concurrent-agent cap is derived from the hardware with reproducible arithmetic, moves ' +
-      'with load, honours the gate triple, and refuses with the constraint that actually bound.',
+      'with what the machine is actually doing, honours the gate triple, and refuses with the ' +
+      'constraint that actually bound.',
     anchor: 'every bad window rejects to null',
     note:
       'NEGATIVE FIXTURES: §12 drives five measurement windows that must each be REJECTED (zero ' +
       'agent trees, negative cores, zero cores, absurd rss, zero-length window), so a sampler that ' +
       'had started believing anything fails. §4 additionally runs the same arithmetic against ' +
-      'hardware this machine is not, with the answers written down.'
+      'hardware this machine is not, with the answers written down. REVISITED BY KAN-208, which ' +
+      'changed what the live CPU-side term measures (observed cores, not the load average) and ' +
+      'therefore what "moves with" meant in the sentence above: §8 now runs four rows differing ' +
+      'only in the CPU observation and requires the measured and unmeasured ones to DISAGREE, and ' +
+      '§15b requires a cpu-bound refusal to name cpu on a machine whose load average would have ' +
+      'allowed it. Both are new negative cases, so the defence is stronger than it was and is ' +
+      'still a guard rather than a mutation. A SEAM WORTH KNOWING WHERE YOU MEET THE ' +
+      'CLASSIFICATION: §14 and §15 drive the LOAD-AVERAGE FALLBACK, not the measured path, ' +
+      'because this script runs no CPU sampler and freshObservedCpu() is therefore null in its ' +
+      'process — the branch they exercise is the pre-KAN-208 one. That is said in the file too, ' +
+      'and it is correct rather than a defect: the fallback is the branch easiest to leave ' +
+      'untested precisely because it used to be the only branch. The measured path belongs to ' +
+      '§15b here and to verify-cpu-headroom, whose §7 is the only place a real daemon\'s sampler ' +
+      'is required to have run at all.'
+  },
+  {
+    script: 'verify-cpu-headroom',
+    defence: 'guard',
+    central:
+      'live headroom bounds on cores actually in use rather than on the 1-minute load average, so ' +
+      'a machine with idle cores is not refused for looking busy — and a machine whose cores are ' +
+      'genuinely full still is.',
+    anchor: 'THE RECONSTRUCTED OLD MODEL DID NOT REFUSE',
+    note:
+      'NEGATIVE CASES IN BOTH DIRECTIONS, which is the whole point of this proof: §2 requires the ' +
+      'RECONSTRUCTED pre-KAN-208 arithmetic to REFUSE the reported figures before it requires the ' +
+      'shipped model to allow them, so a run where the old model also allowed would fail rather ' +
+      'than look like a fix; §3 requires a refusal on 3.9-of-4 cores with the load average reading ' +
+      '0.3, which no weakening of the gate could pass; §4 requires count- and memory-bound ' +
+      'refusals to still happen and to still name their own constraint. §1 and §5 carry rejection ' +
+      'fixtures — malformed /proc/stat lines, backwards counters, an expired observation — that ' +
+      'must each produce null rather than a number. §7 is the POSITIVE CONTROL FOR THE WHOLE ' +
+      'INSTRUMENT: it starts a real daemon, waits for its sampler, and requires the daemon\'s own ' +
+      'capacity derivation to say `measured over Ns` rather than `not measured here` — with the ' +
+      'unmeasured branch observed on the same process moments earlier, so the string it greps for ' +
+      'is one that daemon can fail to print. It exists because a dead sampler is not an uncovered ' +
+      'mechanism but a SILENT REVERSION to the defect: no observation puts headroomByCpu at null, ' +
+      'which puts the gate back on the load average. Deleting the publish in daemon.ts turns §7 ' +
+      'red and leaves §1-§6 green, which is what makes it coverage rather than repetition. ' +
+      'WHAT THIS ENTRY DOES NOT CLAIM: §2 through §5 construct the MachineFacts they assert on, ' +
+      'so they defend the arithmetic and not the wiring, and §6 publishes its own observation — ' +
+      'only §7 proves anything in production ever writes one.'
   },
   {
     script: 'verify-agent-preemption',

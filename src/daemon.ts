@@ -6,6 +6,7 @@ import { execFileSync } from 'child_process';
 import { finishMeasurement, startMeasurement, MeasurementStart } from './agent-cost.js';
 import { dampCost, sampleFromMeasurement, MIN_MEASURED_CORES } from './agent-cost-damping.js';
 import { AgentCost, MEASURED_AGENT_COST, setMeasuredAgentCost } from './capacity.js';
+import { CpuWindow, finishCpuWindow, setObservedCpu, startCpuWindow } from './machine-cpu.js';
 import { ConfigError, CrabcastConfig, loadConfig, resolveConfigPath } from './config.js';
 import { FleetObservation, FleetStatusMemory, MessageRouter, MissingAgent } from './router.js';
 import { HerdrBridge } from './herdr.js';
@@ -478,6 +479,108 @@ function sampleFleetCost() {
 }
 
 /**
+ * How often the daemon re-reads what the machine's CPUs are doing (KAN-208).
+ *
+ * Thirty seconds, and the two ends of that range are set by different things.
+ * The floor is noise: at 100 jiffies per core per second a window of a second
+ * or two is moved by one scheduler decision, and a twitchy CPU term would
+ * refuse activations for reasons nobody could reproduce. The ceiling is the
+ * quantity it is replacing — the 1-minute load average, whose lag is half of
+ * what made it the wrong instrument. A term that lagged as badly as the thing
+ * it replaced would have fixed only half the defect.
+ *
+ * It is deliberately NOT the agent-cost sampler's 60s tick, and not folded
+ * into that function. That sampler degrades to null whenever there are no
+ * agent trees to measure — which is exactly the state a machine is in when the
+ * first activation arrives, and the state in which this figure matters most.
+ * Two instruments that fail for different reasons should not share a failure
+ * path.
+ */
+const CPU_SAMPLE_INTERVAL_MS = 30_000;
+
+/**
+ * How long the FIRST window is, which is a different question from how long
+ * the steady-state ones are.
+ *
+ * Between the daemon opening its first window and closing it, nothing has
+ * measured CPU and the gate falls back to the load average — the instrument
+ * KAN-208 exists to stop trusting. Thirty seconds of that at every boot is
+ * thirty seconds in which reconciliation's restores, and any activation from a
+ * client that started the daemon a moment ago, are decided by the old
+ * behaviour.
+ *
+ * Three seconds is the compromise, and it is bought rather than free: a 3s
+ * window is noisier than a 30s one, and for the first half-minute of a daemon's
+ * life the gate divides that noisier figure. It is above MIN_WINDOW_SECONDS, so
+ * it is a real measurement rather than a rounding artefact, and every report
+ * prints the window it came from — `measured over 3s` is a figure a reader
+ * knows how much to trust. It also errs conservatively in practice: a daemon
+ * has just been spawned, so the machine it measures is one that has just done
+ * work.
+ *
+ * It cannot be zero, and no choice here can make it zero: a window is two reads
+ * separated in time. `verify-readme-is-current` waits for the first one rather
+ * than racing it, for the reason that file's `waitForCpuObservation` gives.
+ */
+const CPU_FIRST_WINDOW_MS = 3_000;
+
+/** The open "before" side of the current CPU window; null until the daemon
+ *  opens the first one and after any read failure. */
+let cpuWindow: CpuWindow | null = null;
+/** Transition memory, so the log records the instrument changing state rather
+ *  than every healthy half-minute. */
+let cpuSamplerState: 'no-measurement' | 'live' = 'no-measurement';
+
+/**
+ * Read the CPU counters, publish the window that just closed, open the next.
+ *
+ * Degrade, never guess, exactly as the cost sampler does: any failure — no
+ * /proc/stat, counters that moved backwards, a window too short to mean
+ * anything — clears the published observation, and capacity falls back to the
+ * load average with the report saying so. A stale figure left posing as live
+ * is the one outcome worth going out of the way to prevent here, because it
+ * fails in the dangerous direction: an old "0.3 cores in use" would hold the
+ * gate open on a machine nobody is measuring.
+ */
+function sampleMachineCpu() {
+  const closing = cpuWindow;
+  cpuWindow = startCpuWindow();
+  if (!cpuWindow) {
+    degradeCpuMeasurement('/proc/stat is not readable');
+    return;
+  }
+  if (!closing) return; // first tick only opens the window
+
+  const observation = finishCpuWindow(closing);
+  if (!observation) {
+    degradeCpuMeasurement('the window closed without a usable reading');
+    return;
+  }
+  setObservedCpu(observation);
+  if (cpuSamplerState !== 'live') {
+    cpuSamplerState = 'live';
+    log(
+      `CPU sampler: live measurement established — ${observation.busyCores.toFixed(2)} of ` +
+      `${os.cpus().length || 1} cores in use over a ${Math.round(observation.windowSeconds)}s ` +
+      `window; capacity's CPU term now divides this rather than the load average`
+    );
+  }
+}
+
+function degradeCpuMeasurement(reason: string) {
+  setObservedCpu(null);
+  if (cpuSamplerState !== 'no-measurement') {
+    cpuSamplerState = 'no-measurement';
+    log(
+      `CPU sampler: ${reason}; capacity falls back to the load average until it recovers ` +
+      `(the load average counts uninterruptible sleep, so it can refuse a machine with ` +
+      `idle cores — that fallback is the pre-KAN-208 behaviour and the report says when ` +
+      `it is in force)`
+    );
+  }
+}
+
+/**
  * A router with nowhere to answer, for the daemon's own use.
  *
  * Reconciliation and the loss sweep are not requests — nobody is connected at
@@ -694,6 +797,29 @@ function onListen() {
   sampleFleetCost();
   const costSampler = setInterval(sampleFleetCost, COST_SAMPLE_INTERVAL_MS);
   costSampler.unref();
+
+  // Same reason, same shape as the cost sampler above: open the window at boot
+  // rather than on the first tick. The first close comes early
+  // (CPU_FIRST_WINDOW_MS) and the steady cadence follows it, so the gap in
+  // which nothing has measured CPU is ~3 seconds rather than ~30.
+  //
+  // The gap is never zero and cannot be — a window is two reads separated in
+  // time — so for those seconds capacity's CPU-side bound is the load average,
+  // and reconciliation's restores can be refused there on a machine whose load
+  // is high exactly as they could before KAN-208. That is stated rather than
+  // hidden: `describeCapacity` says "not measured here" in words for the whole
+  // of it, so a refusal in that window names the instrument that refused.
+  sampleMachineCpu();
+  const firstCpuWindow = setTimeout(() => {
+    sampleMachineCpu();
+    const cpuSampler = setInterval(sampleMachineCpu, CPU_SAMPLE_INTERVAL_MS);
+    cpuSampler.unref();
+  }, CPU_FIRST_WINDOW_MS);
+  firstCpuWindow.unref();
+  // A published observation cannot outlive the sampler that published it: the
+  // age bound is enforced on READ (freshObservedCpu / MAX_OBSERVATION_AGE_MS
+  // in machine-cpu.ts), so an interval that stops ticking expires its own
+  // figure without needing anything here to notice.
 }
 
 const shutdown = () => {

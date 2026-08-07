@@ -14,7 +14,8 @@
 //   5. census        — exempt + charged agents through the real `capacity` action
 //   6. refusal       — a real activate call at capacity, and what it answers
 //   7. re-attach     — the same call for an agent that is already running
-//   8. load          — the same fleet idle and busy, answering differently
+//   8. cpu           — the same fleet idle and busy, answering differently,
+//                      and the KAN-208 row: high load with idle cores
 //   9. override      — the refusal bypassed deliberately, and recorded
 //  10. provenance    — measured cost vs seed: the divisor moves, and says so
 //  11. damping       — step response both directions: up fast, down slow
@@ -23,7 +24,8 @@
 //                      and a zero agent COST is rejected where a zero cap is honoured
 //  14. the gate triple — `refusable: false` activates at zero headroom, with no
 //                     override asked for and none recorded
-//  15. refusal headline — the headline names the constraint that bound
+//  15. refusal headline — the headline names the constraint that bound, in
+//                      all three of its live forms: load (fallback), cpu, cap
 //  16. cores floor  — an idle fleet's measurement cannot round the CPU
 //                      dimension to a zero divisor
 //
@@ -426,21 +428,56 @@ console.log(
 );
 
 // ------------------------------------------------------------- 8. load --
-rule('8. LOAD SENSITIVITY — same machine, same agent count, different load');
+rule('8. CPU SENSITIVITY — same machine, same agent count, different CPU in use');
 
+// KAN-208 replaced the load average with observed CPU as the live CPU-side
+// bound, so this section moved with it: the quantity that separates an idle
+// fleet from a compiling one is now cores in use. The load average is still
+// printed on every row, and the third row below is the reason it is no longer
+// what decides.
 const facts = readMachineFacts();
-for (const [label, load1] of [['idle fleet', 0.15], ['busy fleet (compiling)', facts.cores * 2]]) {
-  const c = computeCapacity({ ...facts, load1 }, 1);
+const observed = (busyCores) => ({ busyCores, windowSeconds: 30, sampledAt: Date.parse('2026-08-07T12:00:00Z') });
+const rows = [
+  ['idle fleet', 0.15, observed(0.2)],
+  ['busy fleet (compiling)', facts.cores * 2, observed(facts.cores - 0.2)],
+  ['high load, idle cores', facts.cores * 1.4, observed(0.4)],
+  ['nothing measured CPU', facts.cores * 1.4, null]
+];
+for (const [label, load1, cpu] of rows) {
+  const c = computeCapacity({ ...facts, load1, cpu }, 1);
   console.log(
-    `${label.padEnd(24)} load ${String(load1.toFixed(2)).padStart(5)}  →  headroom ${c.headroom} ` +
-    `(count says ${c.headroomByCap}, load says ${c.headroomByLoad}, memory says ${c.headroomByMemory}; ` +
+    `${label.padEnd(24)} load ${String(load1.toFixed(2)).padStart(5)}  ` +
+    `cpu ${cpu ? cpu.busyCores.toFixed(2).padStart(5) : '  n/a'}  →  headroom ${c.headroom} ` +
+    `(count says ${c.headroomByCap}, cpu says ${c.headroomByCpu ?? '—'}, ` +
+    `load says ${c.headroomByLoad}, memory says ${c.headroomByMemory}; ` +
     `bound by ${c.headroomBoundBy})`
   );
 }
 console.log(
-  '\n  → one agent is running in both rows. A count-only cap cannot tell these\n' +
-  '    apart; the load average is what the human actually felt.'
+  '\n  → one agent is running in all four rows. A count-only cap cannot tell the\n' +
+  '    first two apart. Row 3 is KAN-208: a machine whose load average says stop\n' +
+  '    and whose cores are nearly all free — it is now allowed, and row 4 is the\n' +
+  "    same machine with no CPU measurement, where the load average stands in and\n" +
+  '    the old answer comes back. Rows 3 and 4 differ ONLY in whether anything\n' +
+  '    looked at /proc/stat.'
 );
+{
+  const [, l3, c3] = rows[2];
+  const [, l4, c4] = rows[3];
+  const withCpu = computeCapacity({ ...facts, load1: l3, cpu: c3 }, 1);
+  const withoutCpu = computeCapacity({ ...facts, load1: l4, cpu: c4 }, 1);
+  const flipped =
+    withCpu.headroom > withoutCpu.headroom &&
+    withCpu.headroomBoundBy !== 'load' &&
+    withoutCpu.headroomBoundBy === 'load';
+  console.log(
+    flag(flipped)
+      ? '  → and the difference is real: the measured row is not load-bound and the\n' +
+        '    unmeasured one is. The instrument responds.'
+      : '  → THE MEASURED AND UNMEASURED ROWS DID NOT DIFFER — CHECK THIS. If both\n' +
+        '    answer the same, the CPU term is not reaching the arithmetic.'
+  );
+}
 
 // --------------------------------------------------------- 9. override --
 rule('9. OVERRIDE — the same call, deliberately');
@@ -658,9 +695,17 @@ rule('14. THE GATE TRIPLE — `refusable: false` activates at zero headroom, no 
 // and `preemptable` whether anything may take it (verify-agent-preemption).
 //
 // Zero headroom is forced the same way an operator could force it: a per-agent
-// core cost so large that the load term answers 0 on any machine this script
-// runs on. That drives the refusal through the real readCapacity/env path
-// rather than through figures this script invented.
+// core cost so large that the CPU-side term answers 0 on any machine this
+// script runs on. That drives the refusal through the real readCapacity/env
+// path rather than through figures this script invented.
+//
+// WHICH CPU-SIDE TERM ANSWERS HERE, said because KAN-208 made it two. This
+// script is not the daemon and runs no CPU sampler, so `freshObservedCpu()` is
+// null in this process and the load average is the term that binds — the
+// FALLBACK path. That is deliberate rather than incidental: the fallback is
+// the branch that is easy to leave untested precisely because it is the one
+// that used to be the only branch. The measured branch is exercised in §15b
+// below and, against a real /proc/stat window, in verify-cpu-headroom.mjs.
 const savedCores = process.env.CRABCAST_AGENT_CORES;
 process.env.CRABCAST_AGENT_CORES = '1000';
 
@@ -717,9 +762,10 @@ console.log(
 );
 console.log(
   flag(taskStillRefused)
-    ? '  → the refusable agent is still refused, load-bound, with the same legible\n' +
-      '    reason as before: the exemption is exactly as wide as `refusable` and\n' +
-      '    no wider.'
+    ? '  → the refusable agent is still refused — load-bound, because nothing in\n' +
+      '    this process measured CPU — with a legible reason that now says which\n' +
+      '    instrument answered: the exemption is exactly as wide as `refusable`\n' +
+      '    and no wider.'
     : '  → THE REFUSABLE AGENT WAS NOT REFUSED LOAD-BOUND — CHECK THIS.'
 );
 
@@ -736,8 +782,10 @@ rule('15. REFUSAL HEADLINE — the headline names the constraint that bound');
 // from headroomBoundBy, so "at capacity" is said only when the count bound.
 
 // Load-bound, count headroom positive: the same env trick as section 14 —
-// a per-agent core cost so large the load term answers 0 on any machine this
-// script runs on, while the count term still has room (nothing is running).
+// a per-agent core cost so large the CPU-side term answers 0 on any machine
+// this script runs on, while the count term still has room (nothing is
+// running). Nothing in this process measures CPU, so the term that answers is
+// the load-average fallback.
 {
   const saved = process.env.CRABCAST_AGENT_CORES;
   process.env.CRABCAST_AGENT_CORES = '1000';
@@ -753,18 +801,71 @@ rule('15. REFUSAL HEADLINE — the headline names the constraint that bound');
 
   const headlineOk =
     /load too high/.test(headline) &&
-    /load average is \d/.test(headline) &&
+    // The live load figure, still quoted. KAN-208 moved the words around it —
+    // the sentence now opens by saying nothing measured CPU — so this matches
+    // the figure rather than the phrasing that used to precede it.
+    /load average stands in: it is \d/.test(headline) &&
     !/at capacity/i.test(headline) &&
     !/\d+ of \d+|\d+\/\d+/.test(headline);
   console.log(
     flag(headlineOk && summary.startsWith('load too high'))
-      ? '  → the headline names load, quotes the live load figure and the cores, and\n' +
-        '    says neither "at capacity" nor "N of cap". The summary leads the same way.'
+      ? '  → the headline names load, says the load average is standing in for a CPU\n' +
+        '    measurement nobody took, quotes the live figure and the cores, and says\n' +
+        '    neither "at capacity" nor "N of cap". The summary leads the same way.'
       : '  → THE HEADLINE DID NOT NAME LOAD, OR STILL SAYS AT CAPACITY / N-OF-CAP — CHECK THIS.'
   );
 
   if (saved === undefined) delete process.env.CRABCAST_AGENT_CORES;
   else process.env.CRABCAST_AGENT_CORES = saved;
+}
+
+// ------------------------------------------------- 15b. cpu headline --
+//
+// The other half of the same slot (KAN-208). `cpu too busy` and `load too
+// high` are separate headlines on purpose: the first is a machine whose cores
+// are full, the second is a machine nobody measured, and a caller that cannot
+// distinguish them cannot act on either. Synthetic facts through the pure
+// function, because a machine with genuinely saturated cores is not something
+// a proof may create on a shared box — and because the arithmetic is what is
+// under test.
+{
+  const saturated = {
+    cores: 8,
+    totalBytes: 16 * GIB,
+    availableBytes: 12 * GIB,
+    // The load average says the machine is FINE. Only the CPU measurement
+    // refuses, so a headline naming load here would be naming a term that
+    // allowed the activation.
+    load1: 0.4,
+    cpu: { busyCores: 7.6, windowSeconds: 30, sampledAt: Date.parse('2026-08-07T12:00:00Z') }
+  };
+  const c = computeCapacity(saturated, 0);
+  const headline = capacityRefusal(c, 'task/KAN-99').split('\n')[0];
+  const summary = summarizeCapacity(c);
+
+  console.log(
+    `\ncpu-bound (${c.cpu.busyCores} of ${saturated.cores} cores in use, load only ` +
+    `${saturated.load1}), the refusal headline:\n`
+  );
+  console.log(`  ${headline}\n`);
+  console.log(`and the one-line summary:\n\n  ${summary}\n`);
+
+  const headlineOk =
+    c.headroomBoundBy === 'cpu' &&
+    /cpu too busy/.test(headline) &&
+    /7\.60 cores are in use/.test(headline) &&
+    /measured over 30s/.test(headline) &&
+    !/at capacity/i.test(headline) &&
+    !/load too high/.test(headline);
+  console.log(
+    flag(headlineOk && summary.startsWith('cpu too busy'))
+      ? '  → the headline names cpu, quotes the measured cores-in-use and the window\n' +
+        '    it was measured over, and does NOT say "load too high" — the load\n' +
+        '    average on this machine is 0.4 and would have allowed the activation.\n' +
+        '    That is the refusal KAN-208 makes possible and the old model could not\n' +
+        '    produce: a machine refused for the resource it has actually run out of.'
+      : '  → THE CPU-BOUND HEADLINE DID NOT NAME CPU, OR NAMED LOAD INSTEAD — CHECK THIS.'
+  );
 }
 
 // Count-bound: the cap genuinely reached, on an otherwise idle machine.
@@ -825,7 +926,7 @@ console.log(describeCapacity(flooredCap));
 console.log(
   `\n  → cores floored to ${MIN_MEASURED_CORES} (${idleSample.cores === MIN_MEASURED_CORES ? 'exactly' : 'NOT — CHECK THIS'}), ` +
   `so capByCpu is ${flooredCap.capByCpu} — finite, and huge honestly:\n` +
-  '    agents this cheap really do fit in droves, and the load term still\n' +
+  '    agents this cheap really do fit in droves, and the live CPU term still\n' +
   '    binds the moment they wake. What can never happen is a zero divisor\n' +
   '    reading as infinite room with the arithmetic unprintable.'
 );
