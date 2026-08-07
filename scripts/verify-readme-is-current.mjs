@@ -81,6 +81,18 @@
 //      is option 4's half, so the intermittency stops being re-found every few
 //      weeks. It is the third ticket about it.
 //
+// KAN-208 UPDATE, and it changes how often this branch is reached rather than
+// whether it is right. The load average is no longer what gates: capacity's
+// live CPU-side term is cores observed in use (/proc/stat, src/machine-cpu.ts),
+// with the load average kept only as the fallback where nothing measured CPU.
+// So `load1 ≥ cores − reserve` is no longer the line — the line is now
+// `cpuBusy ≥ cores − reserve`, which a machine with idle cores does not cross
+// however long its I/O queue is. The 40-run measurement above described a real
+// gate and describes a retired one; it is kept because it is the evidence that
+// commissioned this branch. `loadRefusal` matches BOTH headlines for the same
+// reason it never computed the threshold: the daemon says which term refused,
+// and this file reads that rather than predicting it.
+//
 // Option 3, then: the walkthrough reports NOT RUN rather than failing. It is
 // this repository's existing idiom rather than a new one — section 4 already
 // answers NOT RUN to a git revision it cannot reach, and KAN-191 made sections
@@ -97,8 +109,9 @@
 // register of what it cannot see exists because a sentence wider than its
 // mechanism is the defect this epic keeps re-finding. So nothing here computes
 // the threshold. The walkthrough runs, the daemon applies its own gate, and the
-// skip fires only on the daemon's own words: the `load too high` headline, a
-// `bound by load` derivation, and `started: false`. See `loadRefusal`.
+// skip fires only on the daemon's own words: a `cpu too busy` or `load too
+// high` headline, a `bound by cpu` or `bound by load` derivation, and
+// `started: false`. See `loadRefusal`.
 //
 // HOW IT DEGRADES, said here because a fail-open skip is the thing to be
 // afraid of: if those words are ever reworded, `loadRefusal` stops matching and
@@ -239,7 +252,7 @@ const UNDER_CI = Boolean(process.env.CI || process.env.GITHUB_ACTIONS);
  * the honest answer — and a FAILURE anywhere it is not.
  *
  * There is exactly one such thing today: a walkthrough the daemon refused
- * because the machine's load average is above the line. Locally that is a fact
+ * because the machine's CPU-side term took headroom to zero. Locally that is a fact
  * about the desktop and a red would point at the README, which is not what went
  * wrong. Under CI it is a fact about the RUNNER, and the runner is the one
  * place this block must actually be covered — so there `skip` is `check(false)`
@@ -433,8 +446,10 @@ fs.mkdirSync(fakeHome, { recursive: true });
  *
  * That is not merely untidy, and it is why this sits in the KAN-191 change
  * rather than in a tidy-up ticket: the walkthrough's `activate` is refused when
- * the machine's 1-minute load average reaches `cores − humanReserveCores(cores)`
- * (src/capacity.ts), which on a 4-core desktop is 3. A proof that leaks a fleet
+ * the machine's CPU-side term reaches `cores − humanReserveCores(cores)`
+ * (src/capacity.ts) — since KAN-208 that is cores observed in use, and before it
+ * was the 1-minute load average; either way 3 on a 4-core desktop, and seven
+ * orphaned daemons push on both. A proof that leaks a fleet
  * of daemons every time it runs is a proof that walks its own machine towards
  * the threshold that makes its next run fail. The intermittency this ticket was
  * filed for had this in its causal chain.
@@ -776,6 +791,64 @@ function ran(w, pageCommand, opts = {}) {
   return { command: pageCommand, output: out, recipeOnly: opts.recipeOnly === true };
 }
 
+/**
+ * Wait until this world's daemon has measured its own CPU (KAN-208).
+ *
+ * WHY THIS EXISTS AND WHY IT IS NOT A KNOB. Capacity's CPU-side term is cores
+ * observed in use, which needs a window — two reads of /proc/stat separated in
+ * time — so for the first few seconds of a daemon's life there is no
+ * observation and the report says so, in a DIFFERENT SET OF LINES from the
+ * measured form: `cpu in use: not measured here …` against `cpu in use: 0.97 of
+ * 4 cores …`, and `load allows N (fallback …)` against `cpu allows N, load
+ * would allow N (reported only)`.
+ *
+ * Both are correct. The problem is that which one a scenario captures is a race
+ * between the daemon's first window and how long this script takes to reach the
+ * command — and a page can only show one of them. That is precisely the defect
+ * KAN-194 was filed about, arriving in a new costume: a REQUIRED check whose
+ * verdict depends on timing nobody controls. So this does not race it. It waits
+ * for the state, and the page shows the measured form — which is also the form
+ * worth documenting, since it is what a reader's own daemon will be in by the
+ * time they have typed anything.
+ *
+ * NOTHING HERE PINS OR FAKES THE MEASUREMENT. There is no knob that lets a
+ * caller state a value for CPU or load — KAN-194 rejected that shape and
+ * KAN-208 kept the rejection. This asks the daemon a question it already
+ * answers on the wire (`cpuBusyCores`) and stops asking when the answer stops
+ * being null.
+ *
+ * ON TIMEOUT IT THROWS, and the throw is the right answer rather than a
+ * fallback: /proc/stat unreadable means this machine cannot produce the page's
+ * form at all, and every subsequent comparison would fail anyway — as a pile of
+ * missing lines that reads like README drift instead of like the machine fact
+ * it is. A scenario that throws is a counted failure carrying its diagnosis
+ * (see the capture loop), which is what this should look like. It is NOT a
+ * skip: this must never become a way for a run to check less and stay green.
+ */
+async function waitForCpuObservation(w, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = 'the daemon was never reached';
+  for (;;) {
+    const { text } = crabcast(w, ['capacity', '--json']);
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed?.cpuBusyCores === 'number') return parsed.cpuBusyCores;
+      last = `cpuBusyCores was ${JSON.stringify(parsed?.cpuBusyCores)}`;
+    } catch {
+      last = `the capacity response did not parse as JSON: ${text.split('\n')[0]}`;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `waited ${timeoutMs / 1000}s for the daemon to measure its own CPU and it never did ` +
+        `(${last}). On Linux this means /proc/stat is unreadable; anywhere else it means the ` +
+        `CPU sampler cannot run at all, and capacity is answering on the load average. The page ` +
+        `shows the measured form, so nothing below could match — see waitForCpuObservation.`
+      );
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
 /** Enough shell splitting for the command lines this page contains. */
 function splitArgs(line) {
   const out = [];
@@ -819,7 +892,7 @@ function listing(dir) {
 }
 
 /**
- * The daemon's own load-bound refusal in a scenario's captures, or `null`.
+ * The daemon's own CPU-side refusal in a scenario's captures, or `null`.
  *
  * KAN-194. This is the ONLY thing that turns a truncated walkthrough into a
  * skip instead of a failure, so what it matches matters more than it looks.
@@ -834,13 +907,30 @@ function listing(dir) {
  * weaker than it appears:
  *
  *   - the headline, which `capacityHeadline` says only when `headroomBoundBy`
- *     is 'load' — a cap-bound or memory-bound refusal produces a different
- *     sentence and is NOT skippable, which is what stops this from being a
- *     hatch for any truncated walkthrough at all;
- *   - `bound by load` in the derivation, which is the same fact from the
- *     arithmetic rather than from the prose;
+ *     is the CPU-side term — a cap-bound or memory-bound refusal produces a
+ *     different sentence and is NOT skippable, which is what stops this from
+ *     being a hatch for any truncated walkthrough at all;
+ *   - `bound by cpu` / `bound by load` in the derivation, which is the same
+ *     fact from the arithmetic rather than from the prose;
  *   - `started: false`, which is what makes the absent sidecar a consequence of
  *     this refusal rather than a coincidence beside it.
+ *
+ * WHY IT IS TWO HEADLINES SINCE KAN-208, and this is the part to read before
+ * editing it. That ticket made observed CPU the live CPU-side bound, so the
+ * daemon now has two ways to refuse for the same slot and says which:
+ * `cpu too busy` when it measured this machine's cores, `load too high` when
+ * nothing did and the load average stood in. Matching only the second would
+ * have left this skip silently unreachable on every machine where the daemon's
+ * sampler is healthy — the branch would still be here, still commented, and
+ * never taken, which is the failure this file's own header calls a sentence
+ * wider than its mechanism.
+ *
+ * The expected effect of KAN-208 is that this skip fires far more rarely: the
+ * walkthrough's activation is now refused only when the cores are genuinely
+ * busy, not whenever the load average is high, and KAN-191's intermittency was
+ * the latter. Rarely is not never — a machine actually saturated still refuses
+ * — so the branch stays, and stays a failure under CI for the reason the header
+ * gives.
  *
  * It returns the headline rather than `true` so the skip line and the verdict
  * can quote the figures that refused, rather than asserting them.
@@ -848,9 +938,11 @@ function listing(dir) {
 function loadRefusal(captured) {
   const activate = captured.find((c) => c.command.startsWith('crabcast activate'));
   if (!activate) return null;
-  const headline = activate.output.find((l) => /^Refusing to activate .*: load too high — /.test(l));
+  const headline = activate.output.find((l) =>
+    /^Refusing to activate .*: (cpu too busy|load too high) — /.test(l)
+  );
   if (!headline) return null;
-  if (!activate.output.some((l) => /; bound by load$/.test(l))) return null;
+  if (!activate.output.some((l) => /; bound by (cpu|load)$/.test(l))) return null;
   if (!activate.output.some((l) => /^ {2}started: +false\b/.test(l))) return null;
   return headline.trim();
 }
@@ -905,11 +997,15 @@ function sidecarDiagnosis(w, sidecar, captured) {
       ? activate.output.map((l) => `              | ${l}`)
       : ['              | NO activate COMMAND WAS CAPTURED AT ALL — the scenario did not reach it']),
     `machine now: ${cores} cores, ${reserved} reserved for the human, 1-minute load ` +
-      `${os.loadavg()[0].toFixed(2)}. Headroom by load is ` +
-      `floor((${cores} − ${reserved} − load1) ÷ per-agent cores), so it reaches zero as the load ` +
-      `average approaches ${cores - reserved} — and at zero headroom an activate without ` +
-      `--override is refused. This scenario does not pass --override. The activate output above ` +
-      `prints the terms as the daemon computed them, which is the arithmetic that actually ran.`
+      `${os.loadavg()[0].toFixed(2)}. The CPU-side headroom term is ` +
+      `floor((${cores} − ${reserved} − X) ÷ per-agent cores) where X is cores OBSERVED IN USE ` +
+      `since KAN-208 — /proc/stat, src/machine-cpu.ts — and the load average only where nothing ` +
+      `measured CPU. Either way it reaches zero as X approaches ${cores - reserved}, and at zero ` +
+      `headroom an activate without --override is refused. This scenario does not pass ` +
+      `--override. WHICH of the two refused is printed in the activate output above, in the ` +
+      `headline (\`cpu too busy\` or \`load too high\`) and in \`bound by\` — those terms are the ` +
+      `arithmetic that actually ran, and the load average on this line is context beside it ` +
+      `rather than necessarily the cause.`
   ];
 }
 
@@ -963,6 +1059,11 @@ const SCENARIOS = [
       out.push(ran(w, 'crabcast list', { exitLine: true }));
       out.push(ran(w,
         `crabcast configure ${N} --priority 1 --launcher shell --prompt-file prompt.txt --label "the notes agent"`));
+      // The configure above spawned this world's daemon. Wait for its first CPU
+      // window before capturing anything that prints a capacity block, so the
+      // page's form is decided by the daemon's state rather than by a race
+      // against it — see waitForCpuObservation.
+      await waitForCpuObservation(w);
       out.push(ran(w, `crabcast activate ${N}`));
       out.push(ran(w, 'crabcast list'));
       out.push(ran(w, `crabcast status ${N}`));
@@ -980,14 +1081,15 @@ const SCENARIOS = [
       if (digest === null) {
         // AND WHY THERE IS NO SIDECAR IS ASKED, NOT ASSUMED (KAN-194). One
         // cause is a fact about this desktop rather than about the page: above
-        // `load1 ≈ cores − reserve` the daemon refuses every activation, so the
+        // `cpuBusy ≈ cores − reserve` — or `load1`, where nothing measured CPU
+        // (KAN-208) — the daemon refuses every activation, so the
         // walkthrough cannot run and a red here would point at the README. That
         // case reports NOT RUN; every other cause is still the failure it was.
         const refusal = loadRefusal(out);
         out.incomplete = {
           what: refusal
-            ? 'the daemon refused the activation on this machine’s load average, so nothing ' +
-              'was spawned and there is no sidecar to read'
+            ? 'the daemon refused the activation on this machine’s CPU-side capacity term ' +
+              '(the headline says which), so nothing was spawned and there is no sidecar to read'
             : 'the activation left no sidecar, so the four commands from `send` on could not be run',
           loadRefusal: refusal,
           skipped: ['crabcast send …', 'crabcast tail …', 'crabcast deactivate …', 'crabcast forget …'],
@@ -1042,6 +1144,7 @@ const SCENARIOS = [
       const P = '/tmp/kan174/idem/probe-a';
       const conf = ran(w, `crabcast configure ${P} --priority 1 --launcher shell`);
       if (conf.output.join('\n').includes('FAILED')) return [conf];
+      await waitForCpuObservation(w);   // see the walkthrough, and waitForCpuObservation
       const out = [];
       out.push(ran(w, `crabcast activate ${P} --override      # call #1`,
         { argv: ['activate', a, '--override'] }));
@@ -1086,12 +1189,14 @@ const SCENARIOS = [
       const notes = path.join(w.demo, 'notes');
       fs.mkdirSync(notes, { recursive: true });
       const N = '/tmp/kan174/cap/notes';
+      // The page's `export` line and its `configure` are the recipe rather
+      // than the output — the variable has to reach the process that SPAWNS
+      // the daemon, which is what this world's env does.
+      const configured = ran(w, `crabcast configure ${N} --priority 1 --launcher shell   # spawns the daemon, which reads it here`,
+        { argv: ['configure', notes, '--priority', '1', '--launcher', 'shell'], recipeOnly: true });
+      await waitForCpuObservation(w);   // see the walkthrough, and waitForCpuObservation
       return [
-        // The page's `export` line and its `configure` are the recipe rather
-        // than the output — the variable has to reach the process that SPAWNS
-        // the daemon, which is what this world's env does.
-        ran(w, `crabcast configure ${N} --priority 1 --launcher shell   # spawns the daemon, which reads it here`,
-          { argv: ['configure', notes, '--priority', '1', '--launcher', 'shell'], recipeOnly: true }),
+        configured,
         ran(w, `crabcast activate ${N}`, { exitLine: true })
       ];
     }
@@ -1658,10 +1763,20 @@ rule('4. The page’s own history: red where it really had drifted');
  * show what the walkthrough prints today, and that expectation would have gone
  * red for AGE, which is exactly what it exists to rule out. The green direction
  * therefore moved to `0edd2c1`, the newest README revision, where FIVE
- * scenarios are still accurate against today's program; and they are better
+ * scenarios were still accurate against today's program; and they are better
  * carriers of it than one walkthrough was, because none of them renders `list`
  * or `status`, so the next change to those two commands cannot make this
  * expectation lapse the way KAN-200 made the old one lapse.
+ *
+ * IT IS THREE NOW, NOT FIVE (KAN-208). Two of those five rendered a capacity
+ * derivation, and that change gave every capacity derivation a `cpu in use:`
+ * line and a `cpu allows` term — so `idempotent-activate` and
+ * `capacity-refusal` moved into `expect` as 'lines'. That is drift, not age:
+ * a page written before KAN-208 cannot show a line KAN-208 added, and the
+ * check reporting so is the check working. The three left are green because
+ * nothing in them renders capacity at all, and the reasoning above still
+ * applies to them unchanged. The number to watch is that one: when `green`
+ * would reach zero, the fix is a newer revision, never a shorter list.
  *
  * THE SIXTH SCENARIO AT THAT REVISION IS THE DEMONSTRATION. `0edd2c1`'s
  * walkthrough is expected RED, of the 'lines' kind, and what makes it red is
@@ -1705,16 +1820,30 @@ const HISTORY = [
   },
   {
     rev: '0edd2c1',
-    note: 'the newest README before KAN-200 — five blocks still accurate, the walkthrough not',
+    note: 'the newest README before KAN-200/KAN-208 — three blocks still accurate, three not',
     expect: [
       // Red because of the three lines KAN-200 added to `list` and `status`,
-      // which is this check catching that change's own drift.
-      { id: 'walkthrough', kind: 'lines' }
+      // which is this check catching that change's own drift. KAN-208 adds a
+      // fourth to `list` for the same reason.
+      { id: 'walkthrough', kind: 'lines' },
+      // MOVED FROM `green` BY KAN-208, and moved for drift rather than for age
+      // — the distinction this whole section exists to keep. That change made
+      // capacity's live CPU-side term a measurement rather than the load
+      // average, so every block that renders a capacity derivation grew a `cpu
+      // in use:` line and a `cpu allows` term. These two render one; the three
+      // still green below do not. A page written before KAN-208 cannot show
+      // those lines, which is precisely the drift, and this is the change's
+      // own drift caught by the check the change had to update the page for.
+      { id: 'idempotent-activate', kind: 'lines' },
+      { id: 'capacity-refusal', kind: 'lines' }
     ],
-    green: [
-      'occupied-directory', 'idempotent-activate', 'idempotent-deactivate',
-      'capacity-refusal', 'refused-config'
-    ]
+    // Three remain, and the green direction is what keeps this from measuring
+    // the calendar. None of them renders a capacity derivation, `list` or
+    // `status`, which is why KAN-200 and KAN-208 both left them alone — the
+    // same argument the header makes for why the green moved here in the first
+    // place. If a change ever takes the last of these, the answer is a NEWER
+    // revision to carry the green, not an empty `green` list.
+    green: ['occupied-directory', 'idempotent-deactivate', 'refused-config']
   }
 ];
 
@@ -1862,8 +1991,12 @@ rule('7. The missing sidecar, produced on purpose and reported rather than throw
  * there is none is the state where the activation did not spawn — and the one
  * refusal this script can produce on demand is the capacity one. `crabcast
  * activate` at a cap of zero, without `--override`, refuses exactly as it
- * refuses on a machine whose load average has taken headroom to zero. That is
- * the same road to the same missing directory.
+ * refuses on a machine whose CPU-side term has taken headroom to zero. That is
+ * the same road to the same missing directory. (Which CPU-side term: observed
+ * cores since KAN-208, the load average before it and still where nothing
+ * measures CPU. This section is deliberately indifferent to that — it forces
+ * the refusal through `CRABCAST_MAX_AGENTS=0`, so it is cap-bound and neither
+ * term is involved.)
  *
  * WHAT THIS SECTION DOES NOT COVER, because the distinction is the one KAN-145
  * was caught by: it proves the read and the diagnosis behave when the sidecar
@@ -1917,7 +2050,11 @@ rule('7. The missing sidecar, produced on purpose and reported rather than throw
     ['what the parent data directory holds', w.dataDir],
     ['what the demo directory holds', 'crabcast.config.json'],
     ['what activate printed, quoted rather than summarised', 'Refusing to activate'],
-    ['the load average, which is what can refuse an activation on a busy machine', '1-minute load']
+    ['the load average, which is context for a machine that looks busy', '1-minute load'],
+    // KAN-208: and the term that can actually refuse now, which is not the same
+    // quantity. A diagnosis naming only the load average would send the next
+    // reader to measure the thing that no longer gates.
+    ['the CPU-side term, which is what can refuse an activation on a busy machine', 'cores OBSERVED IN USE']
   ];
   for (const [what, needle] of REQUIRED) {
     check(diagnosis.includes(needle), `the diagnosis names ${what}`,
@@ -2004,7 +2141,8 @@ if (failures) {
   console.log(
     `\nNOT RUN — ${skipped.length} CHECK(S) SKIPPED. Everything this run could measure passed,\n` +
     'and this run measured less than this script is for.\n\n' +
-    'This machine is above the load average at which the daemon refuses every activation, so\n' +
+    'This machine is above the CPU-side threshold at which the daemon refuses every activation,\n' +
+    'so\n' +
     'the walkthrough’s `crabcast activate` was refused and nothing was spawned. The daemon’s\n' +
     'own words for it:\n\n' +
     `    ${refusal ?? '(no refusal was captured, which should not be reachable — see loadRefusal)'}\n\n` +

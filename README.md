@@ -228,8 +228,8 @@ capacity:
   1/3 charged agents, room for 2 more (4 cores, load 1.47, 9.5 GiB available; bound by cap)
   cap 3 (bound by cpu) · running 1 · exempt 0 · headroom 2 (bound by cap)
   reason: 1 charged agent is already running against a cap of 3
-  cap terms: cpu allows 3, memory allows 20  ·  headroom terms: count allows 2, load allows 2, memory allows 11
-  machine: 4 cores, load 1.47, 9756 MB available of 15737 MB
+  cap terms: cpu allows 2500, memory allows 13376  ·  headroom terms: count allows 2, cpu allows 1698, load would allow 1570 (reported only), memory allows 6895
+  machine: 4 cores, 1.3 in use over 3s to 2026-08-07T22:47:54.292Z, load 1.43, 9256 MB available of 15737 MB
   agent cost: 650 MB (seed), 0.75 core (seed)
 
 priorities — what an activation would have to strictly outrank:
@@ -500,18 +500,19 @@ started past the cap on purpose (--override) at 2026-08-05T14:50:46.743Z —
   at capacity: 0/0 charged agents, room for 0 more (4 cores, load 2.23, 9.4 GiB available; bound by cap)
   cap 0 (bound by configured) · running 0 · exempt 0 · headroom 0 (bound by cap) · AT CAPACITY
   reason: 0 charged agents are already running against a cap of 0
-  cap terms: cpu allows 3, memory allows 20  ·  headroom terms: count allows 0, load allows 1, memory allows 11
-  machine: 4 cores, load 2.23, 9605 MB available of 15737 MB
+  cap terms: cpu allows 3, memory allows 20  ·  headroom terms: count allows 0, cpu allows 2, load would allow 2 (reported only), memory allows 10
+  machine: 4 cores, 1.33 in use over 3s to 2026-08-07T22:48:00.137Z, load 1.32, 9236 MB available of 15737 MB
   agent cost: 650 MB (seed), 0.75 core (seed)
 
 the derivation the override bypassed:
-machine: 4 cores, 15.4 GiB RAM (9.4 GiB available), load average 2.23
+machine: 4 cores, 15.4 GiB RAM (9.0 GiB available), load average 1.32
+cpu in use: 1.33 of 4 cores, measured over 3s ending 2026-08-07T22:48:00.137Z — this is the CPU-side bound; the load average above is reported and does not gate
 agent cost: 650 MB resident (seed), 0.75 core while active (seed)
   no live measurement; seed figures are the 2026-07-31 constants, not a measurement of this fleet
 reserved for you: 1 core(s), 2.3 GiB
 cap: 0 charged agents (set by CRABCAST_MAX_AGENTS, derivation skipped)
 running: 0 charged agent(s)
-headroom: 0 more — count allows 0 (0 cap − 0 running), load allows 1 ((4 cores − 1 reserved − 2.23 load) ÷ 0.75), memory allows 11 ((9.4 GiB available − 2.3 GiB reserved) ÷ 650 MB); bound by cap
+headroom: 0 more — count allows 0 (0 cap − 0 running), cpu allows 2 ((4 cores − 1 reserved − 1.33 in use) ÷ 0.75), load would allow 2 ((4 cores − 1 reserved − 1.32 load) ÷ 0.75; reported, does not bind), memory allows 10 ((9.0 GiB available − 2.3 GiB reserved) ÷ 650 MB); bound by cap
 
 $ crabcast activate /tmp/kan174/idem/probe-a                 # call #2, no --override
 /tmp/kan174/idem/probe-a is already running — nothing was started
@@ -626,13 +627,14 @@ $ crabcast activate /tmp/kan174/cap/notes
 FAILED: activate /tmp/kan174/cap/notes
 
 Refusing to activate /tmp/kan174/cap/notes: at capacity — 0 charged agents are already running against a cap of 0.
-machine: 4 cores, 15.4 GiB RAM (9.3 GiB available), load average 2.64
+machine: 4 cores, 15.4 GiB RAM (9.0 GiB available), load average 1.53
+cpu in use: 1.40 of 4 cores, measured over 3s ending 2026-08-07T22:48:06.131Z — this is the CPU-side bound; the load average above is reported and does not gate
 agent cost: 650 MB resident (seed), 0.75 core while active (seed)
   no live measurement; seed figures are the 2026-07-31 constants, not a measurement of this fleet
 reserved for you: 1 core(s), 2.3 GiB
 cap: 0 charged agents (set by CRABCAST_MAX_AGENTS, derivation skipped)
 running: 0 charged agent(s)
-headroom: 0 more — count allows 0 (0 cap − 0 running), load allows 0 ((4 cores − 1 reserved − 2.64 load) ÷ 0.75), memory allows 11 ((9.3 GiB available − 2.3 GiB reserved) ÷ 650 MB); bound by cap
+headroom: 0 more — count allows 0 (0 cap − 0 running), cpu allows 2 ((4 cores − 1 reserved − 1.40 in use) ÷ 0.75), load would allow 1 ((4 cores − 1 reserved − 1.53 load) ÷ 0.75; reported, does not bind), memory allows 10 ((9.0 GiB available − 2.3 GiB reserved) ÷ 650 MB); bound by cap
 Deactivate an agent to make room, or pass override: true to start it anyway (the override is recorded with these numbers).
 Nothing running is below priority 1, so there is nothing this activation may stand down. Running: nothing is running that could be stood down. Preemption is strictly-greater: an agent may not displace one of its own priority.
   refused by:    capacity
@@ -644,13 +646,22 @@ capacity:
   at capacity: 0/0 charged agents, room for 0 more (4 cores, load 2.64, 9.3 GiB available; bound by cap)
   cap 0 (bound by configured) · running 0 · exempt 0 · headroom 0 (bound by cap) · AT CAPACITY
   reason: 0 charged agents are already running against a cap of 0
-  cap terms: cpu allows 3, memory allows 20  ·  headroom terms: count allows 0, load allows 0, memory allows 11
-  machine: 4 cores, load 2.64, 9537 MB available of 15737 MB
+  cap terms: cpu allows 3, memory allows 20  ·  headroom terms: count allows 0, cpu allows 2, load would allow 1 (reported only), memory allows 10
+  machine: 4 cores, 1.4 in use over 3s to 2026-08-07T22:48:06.131Z, load 1.53, 9167 MB available of 15737 MB
   agent cost: 650 MB (seed), 0.75 core (seed)
 [exit 1]
 ```
 
-Every term is reproducible by hand, and the headline names the *binding* constraint. Read `load allows 0` on that machine as an accident of when it was captured rather than as part of the demonstration: it was genuinely busy and would have refused this activation on its own. What the forced cap buys is that `cap: 0` binds *first*, so the same headline and the same `refused by: capacity` come out of an idle machine too — only the machine figures differ. An unforced refusal names whichever term actually bound, and shows the same ones. Wait for room, stand something down, or pass `--override` and have the bypass recorded with the figures it bypassed.
+Every term is reproducible by hand, and the headline names the *binding* constraint. What the forced cap buys is that `cap: 0` binds *first*, so the same headline and the same `refused by: capacity` come out of an idle machine too — only the machine figures differ. An unforced refusal names whichever term actually bound, and shows the same ones. Wait for room, stand something down, or pass `--override` and have the bypass recorded with the figures it bypassed.
+
+**There are four headroom terms and the smallest wins**, which is why the derivation prints all of them and then says `bound by`. `count` is the cap minus what is running. `memory` is what the kernel says it could still hand out, less your reserve. `cpu` is **cores actually in use**, measured over a real window from `/proc/stat`. And `load` is the 1-minute load average, printed on every line and — since the transcript above — **not what gates**.
+
+That last split is worth a paragraph, because the figures can disagree loudly and the disagreement is the point. On Linux the load average counts processes blocked in uninterruptible sleep as well as processes running, so a machine grinding through disk I/O reports a high load with its cores sitting idle. CrabCast used to divide that number, and refused activations it had the capacity to serve — `load too high`, in figures that were internally consistent and about the wrong thing. It now divides observed CPU, and a report where `load would allow 0` sits beside `cpu allows 2` is a machine that is queued, not busy.
+
+Two consequences to know about:
+
+* **A refusal says which instrument refused it.** `cpu too busy` means the cores are full. `load too high` means *nothing measured this machine's CPU* and the load average is standing in — you will see it on anything without `/proc/stat`, and for the first few seconds of a daemon's life, because a window needs two readings separated in time. The derivation says `not measured here` in words for exactly that period.
+* **The load average was accidentally a signal about more than CPU**, and dropping it as the bound gives that up. A machine thrashing on swap, or blocked on a disk that is dying, has a high load and idle cores — CrabCast will now start agents on it. Memory pressure is still caught by the memory term; I/O saturation on a machine with memory to spare is not caught by anything, and `load1` staying on every line is so you can see it yourself.
 
 **What an agent is worth is its own `priority`,** frozen on by `configure` — it used to be a property of its workspace type. And the single `gateExempt` flag that type carried is now three: `refusable` (may the gate refuse this agent), `chargeable` (does it occupy a slot), `preemptable` (may anything take it). They were always three different decisions, and bundling them meant you could not have an agent that costs a slot but can never be taken.
 

@@ -251,6 +251,9 @@ export const CAPACITY_FIELDS = {
   reason: SCALAR,
   cores: SCALAR,
   load1: SCALAR,
+  cpuBusyCores: SCALAR,
+  cpuWindowSeconds: SCALAR,
+  cpuObservedAt: SCALAR,
   totalMb: SCALAR,
   availableMb: SCALAR,
   agentMemoryMb: SCALAR,
@@ -263,6 +266,7 @@ export const CAPACITY_FIELDS = {
   capByCpu: SCALAR,
   capByMemory: SCALAR,
   headroomByCap: SCALAR,
+  headroomByCpu: SCALAR,
   headroomByLoad: SCALAR,
   headroomByMemory: SCALAR,
   summary: SCALAR

@@ -655,7 +655,17 @@ function capacityDto(c: Capacity) {
     // reason out of a paragraph of derivation.
     reason: capacityReason(c),
     cores: c.machine.cores,
+    // Reported on every payload since KAN-208 and no longer what gates
+    // anything wherever `cpuBusyCores` is non-null. Kept on the wire because a
+    // caller comparing the two is reading the finding that ticket recorded —
+    // and because a machine where they diverge is a machine worth looking at.
     load1: Math.round(c.machine.load1 * 100) / 100,
+    // Cores observed in use, or null where nothing measured — in which case
+    // `headroomBoundBy: 'load'` says the load average stood in. Three fields
+    // rather than one so a caller can date the figure without asking again.
+    cpuBusyCores: c.cpu ? Math.round(c.cpu.busyCores * 100) / 100 : null,
+    cpuWindowSeconds: c.cpu ? Math.round(c.cpu.windowSeconds) : null,
+    cpuObservedAt: c.cpu ? new Date(c.cpu.sampledAt).toISOString() : null,
     totalMb: Math.round(c.machine.totalBytes / (1024 * 1024)),
     availableMb: Math.round(c.machine.availableBytes / (1024 * 1024)),
     agentMemoryMb: Math.round(c.cost.residentBytes / (1024 * 1024)),
@@ -670,6 +680,7 @@ function capacityDto(c: Capacity) {
     capByCpu: c.capByCpu,
     capByMemory: c.capByMemory,
     headroomByCap: c.headroomByCap,
+    headroomByCpu: c.headroomByCpu,
     headroomByLoad: c.headroomByLoad,
     headroomByMemory: c.headroomByMemory,
     summary: summarizeCapacity(c)
