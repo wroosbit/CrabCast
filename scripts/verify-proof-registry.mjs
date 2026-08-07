@@ -95,6 +95,28 @@ function check(ok, label, detail = '') {
  */
 const EXCLUSIONS = [
   {
+    script: 'verify-proof-verdicts',
+    reason:
+      'Runs from its own CI job (`proof-verdicts`) instead of this array, and the reason ' +
+      'is §4\'s, applying here more directly than it does to this file. This array is not merely ' +
+      'where that script would sit — it is part of that script\'s SUBJECT: it asserts that every ' +
+      'tracked proof has a verdict-derived exit and a call site able to reach it, which is a claim ' +
+      'about the same list. Listed among the proofs it audits, the one edit it exists to catch — a ' +
+      'merge resolution dropping an entry — could drop the auditor with it, and the tree would go ' +
+      'green with nothing watching. A separate named job is a separate region of ci.yml that the ' +
+      'array\'s conflict hunk does not reach. WHAT MAKES THE EXCLUSION SAFE IS A PREMISE THIS ' +
+      'REPOSITORY CANNOT VERIFY: that `proof-verdicts` is among the branch\'s required status ' +
+      'checks. That list is GitHub branch-protection state (`required_status_checks.contexts`), ' +
+      'not anything in this tree, so no check here can confirm or refute it — an earlier draft of ' +
+      'this entry asserted it flatly and was false at the moment it was written. Excluded but ' +
+      'non-gating, this job would run, go red, and leave the merge button green. Note the axis ' +
+      'cuts the other way too: a required context can be removed by a settings toggle with no ' +
+      'diff, no review and no artefact in the tree, which is a quieter edit than the array hunk ' +
+      'this exclusion exists to survive. KAN-210 tracks that gap. Do not \'fix\' this by adding ' +
+      'it to the array.',
+    evidence: 'scripts/verify-proof-verdicts.mjs:7 asserts its own wiring — not in the array, own named job, job invokes it'
+  },
+  {
     script: 'verify-no-attach-steal',
     reason:
       'Attaches to a live agent. The KAN-16 property — a second spawnSession does not evict the ' +
