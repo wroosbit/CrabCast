@@ -7,7 +7,7 @@ import { finishMeasurement, startMeasurement, MeasurementStart } from './agent-c
 import { dampCost, sampleFromMeasurement, MIN_MEASURED_CORES } from './agent-cost-damping.js';
 import { AgentCost, MEASURED_AGENT_COST, setMeasuredAgentCost } from './capacity.js';
 import { ConfigError, CrabcastConfig, loadConfig, resolveConfigPath } from './config.js';
-import { FleetStatusReading, MessageRouter, MissingAgent } from './router.js';
+import { FleetObservation, FleetStatusMemory, MessageRouter, MissingAgent } from './router.js';
 import { HerdrBridge } from './herdr.js';
 import {
   HERDR_VERSION_NOTICE_FIELD,
@@ -18,7 +18,6 @@ import {
 } from './herdr-health.js';
 import { ensureDataDir, onJsonLines, socketPathFor, writeJsonLine } from './ipc.js';
 import { describeContract, describeEvent, events } from './events.js';
-import { HerdrAgentStatus } from './herdr.js';
 import { resolveUserPath, which } from './env.js';
 import { AgentRegistry, describeUnreadableLog, registryPathFor, scanLogVersions } from './agent-registry.js';
 import { reconcileAgents } from './reconcile.js';
@@ -164,6 +163,22 @@ const herdrBridge = new HerdrBridge(config.dataDir, config.configPath);
 // it. See agent-registry.ts for why it is an fsync'd append-only log.
 const agentRegistry = new AgentRegistry(registryPathFor(config.dataDir));
 
+/**
+ * WHAT THIS DAEMON HAS WATCHED ITS FLEET DOING — one per process, beside the
+ * bridge and the registry because it belongs to the same tier: state that is
+ * the DAEMON's rather than any one connection's.
+ *
+ * The sweep writes it and every `list_agents` reads it, and those happen on
+ * different routers — this daemon makes one per connection. Constructed here
+ * and handed to all of them, which is the only arrangement in which
+ * `statusSince` can ever be anything but null (KAN-200).
+ *
+ * In memory on purpose: it is a fact about this process's watching, not about
+ * the agents, so a restart forgetting it is correct rather than merely
+ * tolerable. KAN-189 settled that question; router.ts carries the reasoning.
+ */
+const fleetStatusMemory = new FleetStatusMemory();
+
 log(`Config loaded from ${config.configPath} (dataDir ${config.dataDir})`);
 // What used to be a list of workspace types. There are none: an agent is a
 // directory plus the knobs a caller froze onto it, and the registry is the
@@ -300,12 +315,20 @@ const server = net.createServer((socket) => {
 
   // One router per connection: responses go back to the requesting client,
   // and PTY listeners registered by this client die with its connection.
+  //
+  // `fleetStatusMemory` is THE SAME INSTANCE every router in this process gets,
+  // and that is load-bearing rather than tidy. It is written by the sweep — on
+  // `daemonRouter` below — and read by whichever of these per-connection
+  // routers answers a `list_agents`. Give each one its own and `statusSince`
+  // comes back null on every row for ever, present and correctly typed and
+  // never once populated. See FleetStatusMemory in router.ts.
   const router = new MessageRouter({
     config,
     herdrBridge,
     daemonStartedAt,
     agentRegistry,
     bootBuild,
+    statusMemory: fleetStatusMemory,
     send,
     broadcast
   });
@@ -469,6 +492,7 @@ const daemonRouter = new MessageRouter({
   daemonStartedAt,
   agentRegistry,
   bootBuild,
+  statusMemory: fleetStatusMemory,
   send: () => {},
   broadcast
 });
@@ -502,25 +526,28 @@ const FLEET_SWEEP_INTERVAL_MS = 30_000;
 const announcedMissing = new Set<string>();
 
 /**
- * The last herdr status this daemon OBSERVED for each live agent of ours.
+ * WHERE THE LAST OBSERVED STATUS LIVES, since it is no longer here.
  *
- * The whole of `agent.status_changed`'s detection mechanism, and the design
- * deliberately left it to this slice to choose. It is a poll, on the sweep
- * that already runs, and the cost of the event is therefore zero additional
- * herdr invocations: `observeFleet` takes the one census the loss sweep was
- * taking anyway and answers both questions from it. That is why the cadence is
- * the sweep's rather than a second one of its own — a faster watcher would be
- * a second `herdr agent list` on a second timer, and Butchr has said (KAN-59
- * comment 10548) that nothing in their supervision model needs sub-poll
- * latency to be CORRECT.
+ * This was `lastObservedStatus`, a `Map<string, HerdrAgentStatus>` in this
+ * file, compared against each sweep's census to produce `agent.status_changed`.
+ * It is now {@link MessageRouter.recordSweepObservation} in `router.ts`, and
+ * the move is KAN-200: the map knew a transition had happened and discarded
+ * WHEN, so an agent that had been idle for four hours was indistinguishable in
+ * everything this daemon published from one that had just finished. The moment
+ * is now kept beside the status and published as `statusSince` on the agent
+ * row — which the router builds, which is why the memory had to move to where
+ * the row is made rather than being copied into a second map that could
+ * disagree with this one.
  *
- * In-memory, so a daemon restart forgets it. That is correct rather than
- * merely acceptable: after a restart there is no previous observation, so
- * there is no transition to report, and inventing a `from` out of a durable
- * copy would be claiming to have witnessed a change nobody watched. A
- * subscriber crossing that restart is told to resync by the new `bootId`.
+ * Everything that was true of it is still true and is documented there: it is
+ * a poll on the sweep that already runs, so the event still costs zero extra
+ * herdr invocations (`observeFleet` takes ONE census and answers both
+ * questions from it); the cadence is the sweep's rather than a second timer's,
+ * because nothing in Butchr's supervision model needs sub-poll latency to be
+ * CORRECT (KAN-59 comment 10548); and it is in memory, so a daemon restart
+ * forgets it. A subscriber crossing that restart is told to resync by the new
+ * `bootId`.
  */
-const lastObservedStatus = new Map<string, HerdrAgentStatus>();
 
 function sweepFleet() {
   let observation;
@@ -536,48 +563,34 @@ function sweepFleet() {
 }
 
 /**
- * SILENCE IS NOT A STATUS.
+ * ANNOUNCE WHAT THE SWEEP RECORDED — and announce only that.
  *
- * An unreachable herdr answers with an empty census, and every row this daemon
- * still reports from its own session map then carries `herdrStatus: 'unknown'`.
- * Reading that as a transition would broadcast `working → unknown` for the
- * whole fleet on any herdr blip and `unknown → working` when it came back —
- * events describing our own blindness as the agents' behaviour. So when the
- * census did not answer, nothing is compared, nothing is recorded, and nothing
- * is announced. It is the same rule the bridge applies to liveness
- * (`reachable: false` is silence, not evidence) applied to status.
+ * The comparison, the memory and the rules that make a transition a transition
+ * are {@link MessageRouter.recordSweepObservation}'s, for the reason above:
+ * `statusSince` on the agent row and `agent.status_changed` on the socket are
+ * the SAME observation read twice, and the surest way to make them disagree
+ * would be to derive them from two maps in two files. So this function does
+ * exactly one thing the router cannot — it broadcasts — and takes the
+ * transitions as given.
  *
- * A status of `unknown` from a herdr that DID answer is a real observation and
- * is reported as one: herdr saw the pane and had nothing to say about it.
+ * The rules those transitions obey, restated here because this is where a
+ * reader arrives looking for them, and enforced there:
+ *
+ *   - SILENCE IS NOT A STATUS. An unreachable herdr answers with an empty
+ *     census and every row then reads `herdrStatus: 'unknown'`; treating that
+ *     as a transition would broadcast `working → unknown` for the whole fleet
+ *     on any herdr blip. Nothing is compared, recorded or announced. It is the
+ *     rule the bridge applies to liveness (`reachable: false` is silence, not
+ *     evidence) applied to status. A status of `unknown` from a herdr that DID
+ *     answer is a real observation and is reported as one: herdr saw the pane
+ *     and had nothing to say about it.
+ *   - A FIRST SIGHTING IS NOT A TRANSITION. It seeds the memory silently,
+ *     because the alternative is a `from` this daemon never saw.
  */
-function announceStatusChanges(observation: { reachable: boolean; statuses: FleetStatusReading[] }) {
-  if (!observation.reachable) return;
-
-  const seen = new Set<string>();
-  for (const reading of observation.statuses) {
-    seen.add(reading.path);
-    const from = lastObservedStatus.get(reading.path);
-    lastObservedStatus.set(reading.path, reading.herdrStatus);
-    // No previous observation is not a transition. A first sighting — a fresh
-    // activation, an agent that came back — seeds the map silently, because
-    // the alternative is a `from` this daemon never saw.
-    if (from === undefined || from === reading.herdrStatus) continue;
-    log(`AGENT STATUS: ${reading.path} ${from} → ${reading.herdrStatus}`);
-    broadcast({
-      action: 'agent.status_changed',
-      path: reading.path,
-      paneName: reading.paneName,
-      paneId: reading.paneId,
-      from,
-      to: reading.herdrStatus
-    });
-  }
-
-  // An agent that is no longer live forgets its last status, so that coming
-  // back is a first sighting rather than a transition from whatever it was
-  // doing when it disappeared.
-  for (const path of lastObservedStatus.keys()) {
-    if (!seen.has(path)) lastObservedStatus.delete(path);
+function announceStatusChanges(observation: FleetObservation) {
+  for (const transition of daemonRouter.recordSweepObservation(observation)) {
+    log(`AGENT STATUS: ${transition.path} ${transition.from} → ${transition.to}`);
+    broadcast({ action: 'agent.status_changed', ...transition });
   }
 }
 

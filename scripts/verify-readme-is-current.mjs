@@ -1646,9 +1646,29 @@ rule('4. The page’s own history: red where it really had drifted');
  *
  * Wired in rather than pasted into a pull request once, because a red run
  * nobody can re-run is a claim rather than a check. The direction matters as
- * much as the redness: e7ffb58's WALKTHROUGH is expected green, because
- * KAN-139 had already fixed it. A detector that reported every older page as
- * red would be measuring the calendar.
+ * much as the redness: a detector that reported every older page as red would
+ * be measuring the calendar rather than drift, so some page has to be expected
+ * GREEN.
+ *
+ * WHICH PAGE CARRIES THAT GREEN MOVED IN KAN-200, and the move is worth
+ * reading before anybody moves it back. It used to be e7ffb58's WALKTHROUGH,
+ * green because KAN-139 had already fixed it. KAN-200 added three lines to what
+ * `crabcast list` and `crabcast status` print — a `statusSince` line on each
+ * agent row and a fourth provenance bucket — so no page written before it can
+ * show what the walkthrough prints today, and that expectation would have gone
+ * red for AGE, which is exactly what it exists to rule out. The green direction
+ * therefore moved to `0edd2c1`, the newest README revision, where FIVE
+ * scenarios are still accurate against today's program; and they are better
+ * carriers of it than one walkthrough was, because none of them renders `list`
+ * or `status`, so the next change to those two commands cannot make this
+ * expectation lapse the way KAN-200 made the old one lapse.
+ *
+ * THE SIXTH SCENARIO AT THAT REVISION IS THE DEMONSTRATION. `0edd2c1`'s
+ * walkthrough is expected RED, of the 'lines' kind, and what makes it red is
+ * KAN-200's own three lines: it is this check catching the exact drift the
+ * change that added this entry would have shipped had it not updated the page.
+ * The page in this repository is green for the same scenario, and the two facts
+ * together are the check working rather than a claim that it does.
  *
  * THE KIND OF RED IS ASSERTED, NOT JUST THE REDNESS. There are two, and they
  * are not equally strong evidence:
@@ -1678,7 +1698,23 @@ const HISTORY = [
       { id: 'idempotent-activate', kind: 'commands' },
       { id: 'capacity-refusal', kind: 'commands' }
     ],
-    green: ['walkthrough']
+    // `walkthrough` was here, expected green. See the header: KAN-200 changed
+    // what `list` and `status` print, so this page cannot show it any more and
+    // the expectation would report age. The green direction lives at 0edd2c1.
+    green: []
+  },
+  {
+    rev: '0edd2c1',
+    note: 'the newest README before KAN-200 — five blocks still accurate, the walkthrough not',
+    expect: [
+      // Red because of the three lines KAN-200 added to `list` and `status`,
+      // which is this check catching that change's own drift.
+      { id: 'walkthrough', kind: 'lines' }
+    ],
+    green: [
+      'occupied-directory', 'idempotent-activate', 'idempotent-deactivate',
+      'capacity-refusal', 'refused-config'
+    ]
   }
 ];
 

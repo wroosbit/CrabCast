@@ -613,7 +613,15 @@ function provenanceBlock(p: any): string | null {
         : ''),
     `${INDENT}durable  (from the registry, survives a restart): ${list(p.durable)}`,
     `${INDENT}observed (read from herdr just now):              ${list(p.observed)}`,
-    `${INDENT}derived  (computed from the two):                 ${list(p.derived)}`
+    `${INDENT}derived  (computed from the two):                 ${list(p.derived)}`,
+    // Printed only when the daemon declares one, so this CLI stays readable
+    // against a daemon older than the fourth bucket — the same rule
+    // `echoContractBlock` applies to a response with no sweep in it. Rendering
+    // an empty `remembered:` line for a daemon that has no such fields would be
+    // this CLI making a claim on that daemon's behalf.
+    Array.isArray(p.remembered) && p.remembered.length
+      ? `${INDENT}remembered (this daemon's memory, not durable):   ${list(p.remembered)}`
+      : null
   );
 }
 
@@ -669,8 +677,35 @@ function agentRow(a: any): string {
     // `configBlock` prints the whole of that. Two identical lines is how a
     // reader learns to skim past one of them.
     a.paneId ? `${INDENT}${INDENT}pane ${a.paneName} (${a.paneId})` : null,
+    statusSinceLine(a),
     configBlock(a)
   );
+}
+
+/**
+ * How long this daemon has been watching the agent do what it is doing.
+ *
+ * PRINTED IN BOTH DIRECTIONS, and the null wording is the one that matters.
+ * The whole reason KAN-200 exists is that a wedged agent and a finished one
+ * both read `[idle]` on the line above, and the only thing that separates them
+ * on a terminal is the age of that idle. A reader who sees no line at all
+ * concludes there is nothing to know; a reader who sees "not observed"
+ * concludes — correctly — that this daemon has not watched it change, which is
+ * a different sentence and usually means the daemon restarted since.
+ *
+ * IT DOES NOT SAY "STUCK", and no amount of elapsed time will make it. Whether
+ * four hours of idle is wrong depends on what the agent was asked to do, which
+ * is the caller's knowledge and not this daemon's.
+ */
+function statusSinceLine(a: any): string | null {
+  // Absent, rather than null: a daemon older than the field says nothing here,
+  // which is not the same claim as "this daemon has not observed a change".
+  if (!('statusSince' in a)) return null;
+  return a.statusSince === null
+    ? `${INDENT}${INDENT}[${a.herdrStatus}] since: not observed — this daemon has not seen this ` +
+        `agent's status change (it is null after a restart)`
+    : `${INDENT}${INDENT}[${a.herdrStatus}] since: ${a.statusSince} — observed by THIS daemon, ` +
+        `in memory, gone on a restart`;
 }
 
 // -------------------------------------------------------------- the renderers

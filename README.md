@@ -185,6 +185,7 @@ agents (1)
   /tmp/ac1-demo/notes  [unknown]  runtime (none reported)
     session crabcast-notes-31e31d1b7540dabf-1785934891515 (active), created 2026-08-05T13:01:31.515Z
     pane crabcast-notes-31e31d1b7540dabf (w65702dcc803d94-10)
+    [unknown] since: not observed — this daemon has not seen this agent's status change (it is null after a restart)
     config v1 frozen 2026-08-05T13:01:25.211Z: priority 1, launcher shell, refusable true, chargeable true, preemptable true
     prompt: 250 characters
     label: the notes agent
@@ -219,6 +220,7 @@ where these fields came from — read at 2026-08-05T13:01:36.686Z
   durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent
   observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir
   derived  (computed from the two):                 paneName, state, occupies, reason
+  remembered (this daemon's memory, not durable):   statusSince
 
 config echo: every knob on every row is declared (priority, refusable, chargeable, preemptable, launcher, prompt, mcpServers, label)
 
@@ -258,6 +260,7 @@ where these fields came from — read at 2026-08-05T13:01:42.798Z
   durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent
   observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir
   derived  (computed from the two):                 paneName, state, occupies, reason
+  remembered (this daemon's memory, not durable):   statusSince
 
 $ crabcast send /tmp/ac1-demo/notes cat /tmp/ac1-demo/.crabcast/agents/31e31d1b7540dabf/prompt.md
 delivered to /tmp/ac1-demo/notes — the message was seen in its transcript as submitted output

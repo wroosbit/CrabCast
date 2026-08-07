@@ -989,8 +989,17 @@ rule('7. `provenance` classifies every key on every row');
   check(typeof p?.observedAt === 'string' && p?.censusReachable === true,
     'with the moment the census answered, and whether it answered at all');
 
+  // FOUR BUCKETS SINCE KAN-200, and the fourth is here rather than folded into
+  // `observed` on purpose. `statusSince` is this daemon's memory of an EARLIER
+  // sweep, so it satisfies neither `durable` ("survives a restart", which it
+  // does not) nor `observed` ("read from herdr for THIS response and true as of
+  // observedAt", which it was not) nor `derived` ("computed from the two",
+  // which it cannot be — the only input is what this process saw last time).
+  // Filing it under any of the three would have left the legend confidently
+  // mislabelling exactly one field, which is the defect the classification half
+  // of this section exists for.
   const buckets = new Map();
-  for (const bucket of ['durable', 'observed', 'derived']) {
+  for (const bucket of ['durable', 'observed', 'derived', 'remembered']) {
     for (const key of p?.[bucket] ?? []) {
       if (buckets.has(key)) {
         check(false, `\`${key}\` is in two buckets (${buckets.get(key)} and ${bucket})`);
@@ -998,6 +1007,13 @@ rule('7. `provenance` classifies every key on every row');
       buckets.set(key, bucket);
     }
   }
+  check(
+    buckets.get('statusSince') === 'remembered',
+    '`statusSince` is declared REMEMBERED — not durable (it does not survive a restart), not ' +
+      'observed (no census answered it), not derived (nothing in the record or the census can ' +
+      'produce it). See scripts/verify-status-since.mjs for the behaviour behind the label',
+    `statusSince is classified ${buckets.get('statusSince') ?? '(nothing)'}`
+  );
 
   const rows = [
     ...listed.agents, ...listed.missingAgents, ...listed.standbyAgents,
