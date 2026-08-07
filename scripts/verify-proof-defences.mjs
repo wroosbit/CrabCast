@@ -50,11 +50,16 @@
 // ticket that commissioned this file explicitly refused.
 //
 // WHAT 'guard' DELIBERATELY DOES NOT MEAN. A measurement that COULD fail is not
-// a guard. `verify-tab-per-agent` reads a real column width off a real pane and
-// the number could be anything; nothing in it establishes the two reads it
-// compares could have differed, so it is 'none' and says why. The bar for
-// 'guard' is a mechanism in the file, cited by an `anchor` this script requires
-// to still be there.
+// a guard. `verify-tab-per-agent` used to be the example: it reads a real column
+// width off a real pane and the number could be anything, but nothing in it
+// established that the two reads it compares could have DIFFERED, so it was
+// 'none' and said why. KAN-198 closed it — two canaries that force the number to
+// move and require it to — and it is a 'guard' now. The example is kept because
+// the distinction it draws is the whole basis of this register: what moved that
+// entry was not "the assertion is more likely to be right", it was "there is now
+// something in the file that goes red when the instrument stops measuring". The
+// bar for 'guard' is a mechanism in the file, cited by an `anchor` this script
+// requires to still be there.
 //
 // AND WHAT NONE OF THE THREE MEAN: that the proof is good. This register
 // answers one question about each file. It says nothing about whether the
@@ -100,15 +105,17 @@
 // ---------------------------------------------------------------------------
 //
 // KAN-190's task agent asked whether "every assertion in every proof carries a
-// mutation" should be policy. The numbers, now that they exist — 42 proofs,
+// mutation" should be policy. The numbers, now that they exist — 43 proofs,
 // this file included:
 //
-//   19 carry a mutation.  21 carry a non-mutation guard.
-//    2 carry nothing, and each names what that leaves undefended.
+//   20 carry a mutation.  22 carry a non-mutation guard.
+//    1 carries nothing, and it names what that leaves undefended.
 //
 // (18 / 21 / 3 when this register was first counted. KAN-197 closed the worst
-// of the three — see finding 3 below — and the count moved because the work
-// happened, which is what a register is for.)
+// of the three — see finding 3 below — and KAN-198 closed `verify-tab-per-agent`,
+// which was the expensive one: the count moved twice because the work happened,
+// which is what a register is for. The intervening 20 / 21 / 2 is what KAN-206
+// left behind when it added `verify-proof-verdicts`.)
 //
 // The answer this file's author gives, with those numbers in hand: **no, and
 // the register is the better instrument.** Three findings support it, and none
@@ -127,6 +134,15 @@
 //      check that a one-line vacuity guard fixes, and a mutation would be
 //      ceremony over it. The rule would have generated work in exactly the
 //      places that did not need it and none in the place that does.
+//
+//      KAN-198 IS THE EVIDENCE FOR THAT, and it landed after this was written.
+//      Closing `verify-tab-per-agent` needed no mutation — it needed two
+//      canaries — and building them turned up that the proof's central number
+//      is a CONSTANT on any machine with no herdr app rendering, which is every
+//      machine an agent runs on. So the pre-fix code passed it too. A blanket
+//      mutation rule would have demanded a mutation of a build for a proof whose
+//      actual defect was that its instrument was not connected to anything, and
+//      would not have found it. What found it was running the thing and looking.
 //
 //   3. THE WORST THING FOUND WAS NOT A MISSING MUTATION.
 //      `verify-spawn-failure-legibility` had no assertions at all and exited 0
@@ -728,6 +744,56 @@ const PROOF_DEFENCES = [
       'Code drew, which is the one fact its CI sibling cannot hold.'
   },
 
+  {
+    script: 'verify-tab-per-agent',
+    defence: 'guard',
+    central:
+      "an agent's COLUMN WIDTH does not shrink as the fleet grows — each agent lands in a tab of " +
+      'its own, and a third arrival does not narrow the first two.',
+    anchor: 'at least one deliberate change MOVED the width this run reads',
+    note:
+      'KAN-198, and it is TWO canaries plus a negative case rather than one mechanism. §3 resizes ' +
+      "this run's own attach PTY and requires the read to follow it to the exact requested width " +
+      'and back — that is the READ path (pane -> shell -> `herdr agent read` -> parse). §4 is the ' +
+      'canary the ticket asked for: a second pane in the subject\'s own tab, the pre-fix placement ' +
+      'in miniature, whose width must DROP — that is LAYOUT. The anchor cites the disjunction the ' +
+      'two feed, because that is the load-bearing line: if NEITHER deliberate change moves the ' +
+      'number, every width in the run is unfalsifiable and the run is a FAIL. Both canaries assert ' +
+      'a positive fingerprint (smaller, still parsing as a width, and for §3 exactly the width ' +
+      'requested) rather than "the number differed", which noise satisfies. §7 puts three synthetic ' +
+      'censuses through `survivorVerdict` and requires pass / not-run / fail, so the vacuity ' +
+      'verdict is reachable code rather than an unexecuted branch.\n' +
+      'WHAT KAN-198 FOUND WHILE BUILDING IT, because it is larger than the gap it was filed for: ' +
+      'width is produced by a terminal app laying out a RENDERED tab, and that is as true of a real ' +
+      'herdr with no app attached as it is of the shimmed one in CI. On such a machine — every ' +
+      'agent-driven run — every pane just reports its attach client\'s size, so the third spawn ' +
+      'could not have narrowed anything and the PRE-FIX code passes this proof too. Measured: the ' +
+      'pre-fix script with `widthOf` frozen at a constant exits 0 and prints PASS. §4 is what ' +
+      'detects that state, and §5 then reports the central assertion NOT RUN (red) instead of ' +
+      'passing it.\n' +
+      'READ THIS BEFORE READING "guard" AS COVERAGE OF THE CENTRAL ASSERTION, BECAUSE IT IS NOT. ' +
+      'What is defended everywhere is that the run cannot report a width nothing could have ' +
+      'changed: §3 + §4 feed a disjunction that goes RED if neither deliberate change moves the ' +
+      'number. THE CENTRAL ASSERTION ITSELF — a third arrival does not narrow the first two — is ' +
+      'defended ONLY where §4 goes green, and on a headless machine §4 is itself NOT RUN, so there ' +
+      'the central assertion still has nothing behind it. What the reclassification bought is that ' +
+      'such a run now says so (§5 reports NOT RUN, red) instead of printing PASS. The gap moved ' +
+      'from invisible to named; it did not close.\n' +
+      'SEAMS. (a) The GREEN arm of §4 has never been observed — it needs a machine with the herdr ' +
+      'app attached and rendering, and every run so far has been headless, so what is demonstrated ' +
+      'is the canary firing, not the canary clearing. KAN-211. (b) Both canaries read the same way ' +
+      'the assertions do, so a fault common to the forcing and the reading is invisible to both. ' +
+      '(c) §7 supplies its own input: it covers the predicate, not the census, and only the ' +
+      'populated arm is covered live. (d) Nothing here touches the KAN-32 THRESHOLD: the outage ' +
+      'was at seven agents and this runs three.\n' +
+      'THE OUTPUT RECORDS WHICH MACHINE IT RAN ON, on every run including a passing one — ' +
+      '`layout: LIVE (…)` / `NONE (…)` / `UNKNOWN (…)`. That line is the fix for the defect shape ' +
+      'this file found and had not been named before: VALIDITY CONTINGENT ON WHO RAN IT, with ' +
+      'nothing in the output recording which mode it was in. This proof was valid exactly when a ' +
+      'human ran it and vacuous exactly when an agent did, and for its whole life nothing said ' +
+      'which. A verdict alone still would not.'
+  },
+
   // -------------------------------------------------------------------------
   // none — and each names what that leaves undefended. This is the half the
   // ticket that commissioned this file was written for.
@@ -755,27 +821,6 @@ const PROOF_DEFENCES = [
       'ticket because filing a ticket for a one-line vacuity guard is how a register becomes a ' +
       'backlog nobody reads; it is written down here so the next person to touch this file has it ' +
       'in front of them.'
-  },
-  {
-    script: 'verify-tab-per-agent',
-    defence: 'none',
-    central:
-      "an agent's COLUMN WIDTH does not shrink as the fleet grows — each agent lands in a tab of " +
-      'its own, and a third arrival does not narrow the first two.',
-    undefended:
-      'that the width measurement is LIVE. `unchanged` is `after === widthsBefore[dir]`, two reads ' +
-      'of the same instrument; a `widthOf()` that had stopped reflecting the pane — a stale cache, ' +
-      'a changed herdr response shape, a parse falling back to a constant — returns equal values ' +
-      'and produces exactly the passing answer. The `>= 60` readability floor rules out one ' +
-      'degenerate value, not a frozen one. Separately, `survivors.length === before.length` (the ' +
-      '"we disturbed nobody" conjunct) is `0 === 0` on a machine with no pre-existing agents.',
-    cost: 'expensive',
-    ticket: 'KAN-198',
-    note:
-      'Expensive because a shimmed herdr has no layout to measure — the recorded reason this ' +
-      'script is excluded from CI — so neither the canary nor its red demonstration can be written ' +
-      'without a real terminal app laying out rendered tabs. verify-no-attach-steal:337 is the ' +
-      'shape to copy.'
   },
 
   // -------------------------------------------------------------------------
@@ -1166,8 +1211,21 @@ if (IS_CHILD) {
     {
       id: 'gap-unfiled',
       what: 'an expensive gap loses the ticket where closing it lives',
-      edits: [{ find: "    ticket: 'KAN-198',\n", replace: '' }],
-      expect: /FAIL\s+'verify-tab-per-agent' is expensive, so it carries the ticket/,
+      // IT PROMOTES A CHEAP GAP RATHER THAN UNFILING AN EXPENSIVE ONE, and that
+      // is a rewrite rather than the original. This sabotage used to delete
+      // `ticket: 'KAN-198'` from `verify-tab-per-agent`'s 'none' entry — until
+      // KAN-198 closed that gap, moved the entry to 'guard' and took the ticket
+      // line with it, leaving this row's anchor matching nothing. The helper
+      // caught it (`found 0`, a counted FAIL rather than a silent no-op) which
+      // is the whole reason the exact-count rule exists.
+      //
+      // There is now NO 'expensive' entry in the register to unfile, so the
+      // condition §4 checks has to be manufactured: promoting the one remaining
+      // 'cheap' gap creates an expensive gap carrying no ticket, which is the
+      // same state by a different road. If a future entry is 'expensive' again,
+      // deleting its ticket is the more direct sabotage and should replace this.
+      edits: [{ find: "    cost: 'cheap',\n", replace: "    cost: 'expensive',\n" }],
+      expect: /FAIL\s+'verify-prompt-is-not-a-template' is expensive, so it carries the ticket/,
       because:
         'an expensive gap with no ticket is a gap that has been noticed and then put down, which ' +
         'reads on the page exactly like one that is being worked on'
