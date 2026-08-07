@@ -538,8 +538,14 @@ const PROOF_DEFENCES = [
       'only in the CPU observation and requires the measured and unmeasured ones to DISAGREE, and ' +
       '§15b requires a cpu-bound refusal to name cpu on a machine whose load average would have ' +
       'allowed it. Both are new negative cases, so the defence is stronger than it was and is ' +
-      'still a guard rather than a mutation. The instrument itself, and the whole path from ' +
-      '/proc/stat to a headroom figure, is verify-cpu-headroom\'s subject, not this file\'s.'
+      'still a guard rather than a mutation. A SEAM WORTH KNOWING WHERE YOU MEET THE ' +
+      'CLASSIFICATION: §14 and §15 drive the LOAD-AVERAGE FALLBACK, not the measured path, ' +
+      'because this script runs no CPU sampler and freshObservedCpu() is therefore null in its ' +
+      'process — the branch they exercise is the pre-KAN-208 one. That is said in the file too, ' +
+      'and it is correct rather than a defect: the fallback is the branch easiest to leave ' +
+      'untested precisely because it used to be the only branch. The measured path belongs to ' +
+      '§15b here and to verify-cpu-headroom, whose §7 is the only place a real daemon\'s sampler ' +
+      'is required to have run at all.'
   },
   {
     script: 'verify-cpu-headroom',
@@ -557,11 +563,17 @@ const PROOF_DEFENCES = [
       '0.3, which no weakening of the gate could pass; §4 requires count- and memory-bound ' +
       'refusals to still happen and to still name their own constraint. §1 and §5 carry rejection ' +
       'fixtures — malformed /proc/stat lines, backwards counters, an expired observation — that ' +
-      'must each produce null rather than a number. WHAT THIS ENTRY DOES NOT CLAIM: §2 through §5 ' +
-      'construct the MachineFacts they assert on, so they defend the arithmetic and not the ' +
-      'wiring; §6 is the section that takes a real /proc/stat window through readMachineFacts and ' +
-      'requires it to arrive, and the daemon sampler that publishes it in production is covered by ' +
-      'neither — see that file\'s header, which names the hole and where the evidence for it lives.'
+      'must each produce null rather than a number. §7 is the POSITIVE CONTROL FOR THE WHOLE ' +
+      'INSTRUMENT: it starts a real daemon, waits for its sampler, and requires the daemon\'s own ' +
+      'capacity derivation to say `measured over Ns` rather than `not measured here` — with the ' +
+      'unmeasured branch observed on the same process moments earlier, so the string it greps for ' +
+      'is one that daemon can fail to print. It exists because a dead sampler is not an uncovered ' +
+      'mechanism but a SILENT REVERSION to the defect: no observation puts headroomByCpu at null, ' +
+      'which puts the gate back on the load average. Deleting the publish in daemon.ts turns §7 ' +
+      'red and leaves §1-§6 green, which is what makes it coverage rather than repetition. ' +
+      'WHAT THIS ENTRY DOES NOT CLAIM: §2 through §5 construct the MachineFacts they assert on, ' +
+      'so they defend the arithmetic and not the wiring, and §6 publishes its own observation — ' +
+      'only §7 proves anything in production ever writes one.'
   },
   {
     script: 'verify-agent-preemption',

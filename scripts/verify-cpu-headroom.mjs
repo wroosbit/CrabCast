@@ -36,18 +36,23 @@
 //     whole path from the kernel's counters to a `headroomByCpu` runs at least
 //     once with nothing hand-written in it. What it cannot assert is a
 //     threshold: the number depends on what else is running.
-//   - The DAEMON's sampler — the thing that actually calls `setObservedCpu` in
-//     production — is covered by neither. Nothing in this file starts a daemon.
-//     The evidence that a running daemon publishes an observation is an
-//     observation of the running system, pasted into the KAN-208 pull request,
-//     because no assertion here can hold it. If that ever silently stopped,
-//     every section below would stay green and every capacity report would say
-//     `cpu in use: not measured here` — which is at least loud in the output,
-//     and is the reason `describeCapacity` says it in words rather than
-//     omitting the line.
+//   - §7 starts a REAL DAEMON, waits for its sampler, and requires its capacity
+//     report to say `measured over Ns` rather than `not measured here`. That is
+//     the one claim §6 still cannot make: §6 publishes the observation itself
+//     via `setObservedCpu`, so it proves the read path and not that anything in
+//     production ever writes.
+//
+// WHY §7 EXISTS AT ALL, since §1–§6 were written without it and looked
+// complete. A dead sampler is not an uncovered mechanism, it is a SILENT
+// REVERSION TO THE DEFECT THIS FILE IS ABOUT: no observation puts
+// `headroomByCpu` at null, which puts the gate back on the load average, which
+// is KAN-208. The tree stays green, the code stays correct, and the behaviour
+// is pre-change. That is KAN-200's shape exactly — a field present, correctly
+// typed, and permanently null, with every in-process assertion passing because
+// nothing read it from a real daemon over a real socket.
 //
 // ---------------------------------------------------------------------------
-// SIX SECTIONS
+// SEVEN SECTIONS
 //
 //   1. the instrument   — /proc/stat parsed, with iowait NOT counted as busy
 //   2. the defect       — the reported refusal, before and after, same figures
@@ -56,10 +61,15 @@
 //   5. degradation      — no reading, a stale reading, a rejected window: the
 //                         load average takes over and the report says so
 //   6. live             — a real window on this machine, through the real path
+//   7. the sampler      — a real daemon, over a real socket, publishing a real
+//                         figure: both branches observed on one process
 //
 // Run `npm run build` first. Usage: node scripts/verify-cpu-headroom.mjs [distDir]
 
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
+import { spawn, spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -528,6 +538,157 @@ if (!window) {
     );
     setObservedCpu(null);
   }
+}
+
+// ------------------------------------------------------------ 7. sampler --
+rule('7. THE SAMPLER — a real daemon, over a real socket, publishing a real figure');
+
+// The section the first six did not have, added because their completeness was
+// convincing and wrong. Everything above runs in THIS process: §2-§5 write the
+// facts, and even §6 publishes its own observation through `setObservedCpu`.
+// None of them would notice if `daemon.ts` stopped sampling — the gate would
+// fall back to the load average, silently, which is the defect restored.
+//
+// So this starts the real daemon, asks it over its real socket, and requires
+// its own capacity report to say it measured. herdr is deliberately NOT
+// required: with no herdr the census is empty and the daemon still answers
+// `capacity`, which is the whole of what is under test here, and it keeps this
+// section runnable on a CI runner that has no terminal multiplexer.
+//
+// BOTH BRANCHES, ON ONE PROCESS. A daemon younger than its first window has
+// nothing measured and says so; the same daemon a few seconds later says
+// `measured over Ns`. The first is a POSITIVE CONTROL for the second — it
+// shows the string this section greps for is one the daemon can fail to print,
+// so a green here is not a grep that matches anything. It is observed rather
+// than asserted: whether the first reachable read lands before the first window
+// closes is a race with daemon startup, and a proof that fails on losing a race
+// is a flake. The MEASURED half is asserted and is not a race — it polls.
+
+const daemonJs = path.join(distDir, 'daemon.js');
+const cliJs = path.join(distDir, 'cli.js');
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'kan208-sampler-'));
+const configPath = path.join(scratch, 'crabcast.config.json');
+fs.writeFileSync(configPath, JSON.stringify({ dataDir: path.join(scratch, 'data') }) + '\n');
+
+/** Ask the running daemon for capacity. Null while it is not answering yet. */
+const askDaemon = () => {
+  const r = spawnSync(process.execPath, [cliJs, '--config', configPath, 'capacity', '--json'], {
+    encoding: 'utf8', timeout: 30_000
+  });
+  try {
+    const parsed = JSON.parse(r.stdout ?? '');
+    return parsed?.success === true ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const child = spawn(process.execPath, [daemonJs, configPath], { stdio: 'ignore' });
+let daemonExited = false;
+child.on('exit', () => { daemonExited = true; });
+
+try {
+  // The first answer this daemon gives, whenever it starts giving them.
+  let first = null;
+  const startedAt = Date.now();
+  while (!first && Date.now() - startedAt < 40_000) {
+    first = askDaemon();
+    if (!first) await new Promise((r) => setTimeout(r, 200));
+  }
+  if (!first) {
+    console.log('  the daemon never answered within 40s — CHECK THIS');
+    flag(false);
+  } else {
+    const sawUnmeasured = first.cpuBusyCores === null;
+    console.log(
+      `  first answer, ${((Date.now() - startedAt) / 1000).toFixed(1)}s after spawn: ` +
+      `cpuBusyCores ${JSON.stringify(first.cpuBusyCores)}, ` +
+      `headroomByCpu ${JSON.stringify(first.headroomByCpu)}, ` +
+      `bound by ${first.headroomBoundBy}`
+    );
+    console.log(
+      sawUnmeasured
+        ? '  → the unmeasured branch was OBSERVED on this daemon: younger than its first\n' +
+          '    window, nothing measured, and it says so. That is the positive control —\n' +
+          '    the string §7 greps for below is one this daemon can fail to print.'
+        : '  → the unmeasured branch was NOT OBSERVED this run: the daemon became\n' +
+          '    reachable only after its first window closed. Not a failure — that is a\n' +
+          '    race with process startup, and §5 asserts the unmeasured branch\n' +
+          '    deterministically through the pure function.'
+    );
+
+    // And now the half that is asserted. Polled, not slept on: the first window
+    // is CPU_FIRST_WINDOW_MS (3s) and a fixed sleep would be a flake waiting to
+    // happen on a loaded runner.
+    let measured = null;
+    const waitFrom = Date.now();
+    while (!measured && Date.now() - waitFrom < 60_000) {
+      const c = askDaemon();
+      if (typeof c?.cpuBusyCores === 'number') measured = c;
+      else await new Promise((r) => setTimeout(r, 250));
+    }
+
+    if (!measured) {
+      console.log(
+        '\n  → THE DAEMON NEVER PUBLISHED A MEASURED FIGURE in 60s — CHECK THIS.\n' +
+        '    Its sampler is not running, or /proc/stat is unreadable here. Either way\n' +
+        '    the gate on this machine is answering on the load average, which is the\n' +
+        '    defect this file exists to prevent, restored silently.'
+      );
+      flag(false);
+    } else {
+      const derivation = String(measured.derivation ?? '');
+      console.log(
+        `\n  measured after ${((Date.now() - waitFrom) / 1000).toFixed(1)}s: ` +
+        `${measured.cpuBusyCores} of ${measured.cores} cores in use over ` +
+        `${measured.cpuWindowSeconds}s, ending ${measured.cpuObservedAt}\n`
+      );
+      console.log(derivation.split('\n').map((l) => `    ${l}`).join('\n'));
+      console.log('');
+      // Asserted on the DIAGNOSTIC TEXT rather than on the field alone: the
+      // report's wording is what a caller reads, and a figure on the wire that
+      // the derivation still describes as unmeasured would be a worse bug than
+      // either half on its own.
+      verdict(
+        /cpu in use: [\d.]+ of \d+ cores, measured over \d+s ending /.test(derivation) &&
+          !derivation.includes('not measured here'),
+        'a RUNNING DAEMON published a measured figure and its own derivation says\n' +
+        '    so, in the words a caller reads. Nothing in this file wrote that number:\n' +
+        '    daemon.ts sampled /proc/stat, setObservedCpu published it, readMachineFacts\n' +
+        '    picked it up, and it crossed a socket to get here.',
+        'THE DERIVATION DOES NOT SAY IT MEASURED — CHECK THIS. A cpuBusyCores on the\n' +
+        '    wire with an unmeasured derivation beside it is worse than either alone.'
+      );
+      verdict(
+        typeof measured.headroomByCpu === 'number' &&
+          measured.cpuWindowSeconds >= MIN_WINDOW_SECONDS &&
+          measured.cpuBusyCores >= 0 && measured.cpuBusyCores <= measured.cores,
+        `and the figure it published is usable: headroomByCpu ${measured.headroomByCpu}, ` +
+        `window ${measured.cpuWindowSeconds}s\n    (at least ${MIN_WINDOW_SECONDS}s), ` +
+        `${measured.cpuBusyCores} within [0, ${measured.cores}] cores.`,
+        'THE PUBLISHED FIGURE IS OUT OF BOUNDS OR THE WINDOW IS TOO SHORT — CHECK THIS.'
+      );
+    }
+  }
+} finally {
+  // This repository has measured 433 orphaned daemons left by one proof
+  // (verify-readme-is-current, KAN-191). Stopping is asserted, not assumed.
+  child.kill('SIGTERM');
+  const killedAt = Date.now();
+  while (!daemonExited && Date.now() - killedAt < 10_000) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  if (!daemonExited) child.kill('SIGKILL');
+  await new Promise((r) => setTimeout(r, 200));
+  fs.rmSync(scratch, { recursive: true, force: true });
+  console.log('');
+  verdict(
+    daemonExited,
+    'and the daemon this section started was signalled and seen to exit.',
+    'THE DAEMON THIS SECTION STARTED DID NOT EXIT ON SIGTERM — CHECK THIS. It was\n' +
+    '    SIGKILLed; a proof that leaks daemons walks its own machine towards the\n' +
+    '    state that makes its next run fail.'
+  );
 }
 
 if (failures > 0) {
