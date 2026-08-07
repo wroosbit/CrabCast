@@ -399,6 +399,15 @@ try {
   if (!pty || typeof pty.resize !== 'function') {
     skip('the read-path canary needs this run\'s own attach PTY, and there is none to resize',
       `session for ${paneNameFor(canarySubject)} has no resizable pty`);
+  } else if (!parsesAsWidth(nativeWidth)) {
+    // THE PRECONDITION, and it is not pedantry: the restore step is
+    // `pty.resize(nativeWidth, 24)`, so an unreadable starting width would be
+    // handed to node-pty as `undefined` and throw out of the canary — killing
+    // the run before §4, §5 and the verdict, which is the shape mutation.mjs
+    // exists to prevent ("a failed mutation is a counted verdict, never a
+    // throw"). Named and counted instead, and §4 then carries the disjunction.
+    skip('the read-path canary needs a readable starting width to resize away from and back to',
+      `${paneNameFor(canarySubject)} read ${JSON.stringify(nativeWidth)}, which does not parse as a width`);
   } else {
     console.log(`  resizing this run's attach on ${paneNameFor(canarySubject)}: ${nativeWidth} -> ${CANARY_COLS}`);
     pty.resize(CANARY_COLS, 24);
