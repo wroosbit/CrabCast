@@ -401,6 +401,28 @@ missing-agent latch (`announcedMissing`) is in-memory, so a restart
 **re-announces** agents that are still missing. That is consistent with
 at-most-once and with the resync above.
 
+#### How long has it been down? That is yours to keep, and here is why
+
+`agent.lost` is latched per path and carries the envelope's `at`, so **the
+moment this daemon first observed a loss is published exactly once, with a time
+on it.** It is not *stored*. The `since` on the row — and on the matching
+`missingAgents` row from the poll — is when the agent was last recorded
+**activated**, not when it went. Nothing here records the second, and
+**KAN-189 decided that nothing will**: the reasoning is on `MissingAgent.since`
+in `src/router.ts`, and the short version is that a durable copy of an
+observation would be this daemon claiming a duration it was not watching for,
+and would be the replay log this section declines, narrowed to one field.
+
+So if you want down-time, keep the first `at` you saw for a path (or the first
+poll it appeared in) and clear it when the path leaves the category. You are
+already required to poll on a timer, so you have both halves.
+
+**The part of this that is a real cost, stated rather than implied:** a
+subscriber that connects to a daemon which has been running for a week cannot
+find out how old an already-missing agent is. The daemon observed it and does
+not say. If that bites you, say so on the epic — the remedy is a decision made
+with you, not a field added quietly.
+
 ### Latency
 
 | event | bound |
