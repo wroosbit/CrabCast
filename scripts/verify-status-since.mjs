@@ -44,9 +44,17 @@
 // daemon reacts correctly to a census that changes, not that a real runtime's
 // idle looks like this one's.
 //
+// RUNNING IT AGAINST A DIFFERENT BUILD, which is how the red run is
+// reproduced. An optional first argument replaces the build under test, so a
+// reviewer can point this at a `dist` with the fix backed out and watch §2 go
+// red rather than take this file's word that it can. The recipe is in the pull
+// request; the one that matters is un-sharing `FleetStatusMemory` between the
+// daemon's routers, because that is the defect this proof actually caught and
+// the one every other assertion here stayed green through.
+//
 // Usage:
 //   npm run build
-//   node scripts/verify-status-since.mjs
+//   node scripts/verify-status-since.mjs [distDir]
 
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -59,7 +67,7 @@ import { makeMutator } from './mutation.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
-const distDir = path.join(repoRoot, 'dist');
+const distDir = process.argv[2] ?? path.join(repoRoot, 'dist');
 
 let failures = 0;
 const check = (ok, label, detail = '') => {
