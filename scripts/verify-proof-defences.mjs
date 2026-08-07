@@ -103,8 +103,12 @@
 // mutation" should be policy. The numbers, now that they exist — 42 proofs,
 // this file included:
 //
-//   18 carry a mutation.  21 carry a non-mutation guard.
-//    3 carry nothing, and each names what that leaves undefended.
+//   19 carry a mutation.  21 carry a non-mutation guard.
+//    2 carry nothing, and each names what that leaves undefended.
+//
+// (18 / 21 / 3 when this register was first counted. KAN-197 closed the worst
+// of the three — see finding 3 below — and the count moved because the work
+// happened, which is what a register is for.)
 //
 // The answer this file's author gives, with those numbers in hand: **no, and
 // the register is the better instrument.** Three findings support it, and none
@@ -117,7 +121,7 @@
 //      written against a picture that was wrong by a factor of nearly three.
 //
 //   2. THE 'none' ENTRIES ARE NOT WHERE A BLANKET RULE WOULD HAVE LOOKED. Two
-//      of the three are LIVE proofs CI cannot run — the half a blanket rule
+//      of the three were LIVE proofs CI cannot run — the half a blanket rule
 //      cannot reach, because the machine it needs is the reason they are
 //      excluded. The third (`verify-prompt-is-not-a-template`) is an absence
 //      check that a one-line vacuity guard fixes, and a mutation would be
@@ -125,11 +129,15 @@
 //      places that did not need it and none in the place that does.
 //
 //   3. THE WORST THING FOUND WAS NOT A MISSING MUTATION.
-//      `verify-spawn-failure-legibility` has no assertions at all and exits 0
+//      `verify-spawn-failure-legibility` had no assertions at all and exited 0
 //      unconditionally (KAN-197). A mutation policy would not have found it;
 //      counting what defends each central assertion did, on the first pass,
 //      because the question "what would make this go red" has no answer for a
-//      file that cannot go red.
+//      file that cannot go red. It is now 'mutation': the same predicates its
+//      §1 asserts are run against a build with the KAN-24 fix removed and
+//      required to fail. THE FINDING STANDS AFTER THE FIX — what found it was
+//      the question, not the policy, and closing it needed the machine a
+//      blanket rule could never have reached.
 //
 // So: no blanket mutation rule. What is proposed instead is what this file
 // already enforces — every proof answers the question, 'none' is a permitted
@@ -150,15 +158,20 @@
 // reviewer reading the entries, and the entries are written to be read that way
 // — each names the specific mechanism, not the category.
 //
-// IT DOES NOT ASSERT THAT A PROOF HAS A VERDICT AT ALL. That absence is how
-// KAN-197 exists: `verify-spawn-failure-legibility` ends `process.exit(0)` with
-// no assertion anywhere above it, and no check in this repository notices. A
-// sweep for verdict-derived exits is the obvious next instrument and is NOT
-// built here, because building it would go red on that one file immediately and
-// this ticket's whole point is to make gaps visible rather than to close them
-// under time pressure. The gap has a name, a register entry and a ticket; what
-// it does not yet have is a check. Whoever builds that sweep should read
-// KAN-197 first.
+// IT STILL DOES NOT ASSERT THAT A PROOF HAS A VERDICT AT ALL. That absence is
+// how KAN-197 existed: `verify-spawn-failure-legibility` ended `process.exit(0)`
+// with no assertion anywhere above it, and no check in this repository noticed.
+// KAN-197 fixed THAT FILE; it did not build the instrument. The sweep is still
+// not here — but the reason it was not written has gone. When this register was
+// first counted, a sweep for verdict-derived exits would have gone red on that
+// one file immediately, and closing a gap under the time pressure of a check
+// that had just started failing was the opposite of what the ticket was for.
+// The suite is now clean by that measure, so the sweep can be added on a green
+// tree and would hold the line rather than announce a backlog. Filed as
+// KAN-206. Whoever builds it should read KAN-197 first: passing such a sweep is
+// necessary and nowhere near sufficient — it proves a script CAN report failure,
+// never that its assertions can be false, which is still §5's question one level
+// down.
 //
 // IT DISAGREES WITH `verify-mutation-harness` ABOUT ONE FILE, ON PURPOSE. That
 // script's `USES_HELPER` is `/from\s+['"]\.\/mutation\.mjs['"]/`, which does not
@@ -356,6 +369,24 @@ const PROOF_DEFENCES = [
     note:
       'Its shim draws the composer marker it is then checked against, so COMPOSER_MARKERS itself ' +
       'is covered only by verify-send-confirms-delivery-live. Both headers say so.'
+  },
+  {
+    script: 'verify-spawn-failure-legibility',
+    defence: 'mutation',
+    central:
+      'a failed agent spawn is REPORTED rather than swallowed — the KAN-24 outage, where a refused ' +
+      "`herdr agent start` produced a session marked 'active' and `success: true`.",
+    note:
+      'THE ENTRY THIS REGISTER WAS WORTH BUILDING FOR, and it read `none` until KAN-197: the file ' +
+      'contained no assertion of any kind and ended `process.exit(0)`, so it was the only proof in ' +
+      'the suite that could not go red. Its §2 now takes the SAME predicate set §1 uses, runs it ' +
+      'against a copy of the build with the KAN-24 catch arm removed, and requires the four ' +
+      'central rows to come back FALSE — with a control spawn on the real build in the same ' +
+      'seconds, because a mutant that reports nothing because nothing was refused is ' +
+      'indistinguishable from one that swallowed a refusal. What §2 does NOT establish is that ' +
+      "`dist/` is the build CrabCast runs; §1 and §3 are the assertions about the real one. It is " +
+      'excluded from CI and hand-run, so its NOT RUN is a counted failure rather than a third ' +
+      'verdict — nothing runs it again.'
   },
   {
     script: 'verify-state-read-echoes-config',
@@ -708,28 +739,6 @@ const PROOF_DEFENCES = [
       'ticket because filing a ticket for a one-line vacuity guard is how a register becomes a ' +
       'backlog nobody reads; it is written down here so the next person to touch this file has it ' +
       'in front of them.'
-  },
-  {
-    script: 'verify-spawn-failure-legibility',
-    defence: 'none',
-    central:
-      'a failed agent spawn is REPORTED rather than swallowed — the KAN-24 outage, where a refused ' +
-      "`herdr agent start` produced a session marked 'active' and `success: true`.",
-    undefended:
-      'ALL OF IT, and this is the sharpest entry in the register. The file contains no assertion of ' +
-      'any kind — no check, no verdict, no failure counter, no `process.exitCode` — and ends ' +
-      '`process.exit(0)`. It drives two real spawn failures and PRINTS what HerdrBridge reports ' +
-      'for each. If the bridge went back to discarding the spawn result it would print ' +
-      '`spawnError .. (none)`, print `== done ==`, and exit 0. It is the only proof in this suite ' +
-      'with no verdict, and nothing in the repository notices: its EXCLUSIONS entry in ' +
-      'verify-proof-registry is honest about why CI cannot run it and was never asked whether it ' +
-      'reports anything.',
-    cost: 'expensive',
-    ticket: 'KAN-197',
-    note:
-      'Expensive rather than cheap because writing the assertions is the easy half; watching them ' +
-      'go red needs a machine with a real herdr server, real panes and prlimit, which is the same ' +
-      'reason CI does not run it. A version written blind would be this defect in a new costume.'
   },
   {
     script: 'verify-tab-per-agent',
@@ -1141,8 +1150,8 @@ if (IS_CHILD) {
     {
       id: 'gap-unfiled',
       what: 'an expensive gap loses the ticket where closing it lives',
-      edits: [{ find: "    ticket: 'KAN-197',\n", replace: '' }],
-      expect: /FAIL\s+'verify-spawn-failure-legibility' is expensive, so it carries the ticket/,
+      edits: [{ find: "    ticket: 'KAN-198',\n", replace: '' }],
+      expect: /FAIL\s+'verify-tab-per-agent' is expensive, so it carries the ticket/,
       because:
         'an expensive gap with no ticket is a gap that has been noticed and then put down, which ' +
         'reads on the page exactly like one that is being worked on'

@@ -181,10 +181,13 @@ const EXCLUSIONS = [
   {
     script: 'verify-spawn-failure-legibility',
     reason:
-      'Private herdr server. The KAN-24 defect was that a REFUSED `herdr agent start` was reported ' +
-      'as success, so the proof needs a real server that can genuinely refuse; a stub that returns ' +
-      'a refusal shape is asserting the fixture, not the bridge.',
-    evidence: 'scripts/verify-spawn-failure-legibility.mjs:11 runs against a private herdr server on its own socket'
+      'Private herdr server, real panes and `prlimit`. The KAN-24 defect was that a REFUSED ' +
+      '`herdr agent start` was reported as success, so the proof needs a real server that can ' +
+      'genuinely refuse; a stub that returns a refusal shape is asserting the fixture, not the ' +
+      'bridge. Since KAN-197 its §2 also runs the same refusal through a build with the fix taken ' +
+      'out, which needs the refusal to be real for the same reason twice over — a mutant that ' +
+      'reports nothing because nothing was refused looks exactly like one that swallowed a refusal.',
+    evidence: 'scripts/verify-spawn-failure-legibility.mjs:68 runs against a private herdr server on its own socket'
   }
 ];
 
