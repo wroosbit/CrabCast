@@ -90,6 +90,38 @@ jobs:
           node-version: 20
       - run: node scripts/verify-proof-registry.mjs
 
+  # KAN-206: every tracked proof must have a verdict-derived exit AND something
+  # able to reach it. KAN-197 is why: verify-spawn-failure-legibility.mjs was
+  # 136 lines with zero assertions ending `process.exit(0)`, in the array, in
+  # the registry, green, proving nothing. This is what notices.
+  #
+  # A JOB, and deliberately NOT an entry in the `scripts=(` array below, for
+  # verify-proof-registry §4's reason — which applies here MORE directly than it
+  # does there. The array is not merely where this script would sit; it is part
+  # of the script's SUBJECT. Listed among the proofs it audits, it could be
+  # removed by the very edit it exists to catch, and the tree would go green
+  # with nothing watching. The exclusion is recorded in that script's EXCLUSIONS
+  # register with this reason.
+  #
+  # This job MUST be a required check. Excluding it from the array without
+  # gating on it would be strictly worse than leaving it in: it would run, go
+  # red, and the merge button would stay green. The required list is five with
+  # this: typecheck, build, verify, proof-registry, proof-verdicts.
+  #
+  # It is pure static analysis over scripts/ plus two in-process mutations of a
+  # copied source file — no build, no daemon, no herdr, no PTY, no network — so
+  # there is nothing in it that can be flaky. Do not soften it with
+  # `continue-on-error`, an `if:`, or a path filter.
+  proof-verdicts:
+    name: proof-verdicts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node scripts/verify-proof-verdicts.mjs --verbose
+
   # Additive to the two required checks above (KAN-88 item 10). Until this
   # existed, every behavioural invariant in this daemon — verified activation,
   # the capacity gate's arithmetic, preemption's consent rules, restart

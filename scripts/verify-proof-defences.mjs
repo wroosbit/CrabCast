@@ -247,6 +247,22 @@ const PROOF_DEFENCES = [
   // mutation — through scripts/mutation.mjs
   // -------------------------------------------------------------------------
   {
+    script: 'verify-proof-verdicts',
+    defence: 'mutation',
+    central:
+      'every tracked scripts/verify-*.mjs has an exit derived from an accumulated verdict, and at ' +
+      'least one call site able to make that verdict negative.',
+    note:
+      'SEAM: this proves a proof CAN report failure. It says nothing about whether that proof\'s ' +
+      'assertions can ever be FALSE — `check(true, …)` is a call site by every measure it applies. ' +
+      'That is THIS file\'s question, one level down, and the two must not be read as covering ' +
+      'each other. §6 mutates a real proof (verify-config-and-socket) two ways and requires the ' +
+      'sweep to catch both: the KAN-197 shape, where the verdict exit becomes exit(0); and the ' +
+      'subtler one where the verdict exit is left intact and only the counter\'s increment is ' +
+      'removed, which the first property alone would clear. The second mutation is the reason the ' +
+      'reachability half exists.'
+  },
+  {
     script: 'verify-activated-by',
     defence: 'mutation',
     central:
