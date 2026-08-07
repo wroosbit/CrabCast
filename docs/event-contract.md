@@ -509,7 +509,7 @@ agent wedged at a prompt nobody will answer both read `idle`, and until KAN-200
 nothing this daemon published separated them; two agents sat at their runtime's
 usage-limit dialog for hours looking exactly like agents that were done.
 
-Four things about it, and each is the same rule this section already applies to
+Five things about it, and each is the same rule this section already applies to
 the event:
 
 * **It is a fact, not a diagnosis.** CrabCast will never say "stuck". It does
@@ -528,6 +528,18 @@ the event:
   nothing was watching. If you need a window longer than one daemon's life,
   keep your own — the same answer this document already gives for how long an
   agent has been missing (§1).
+* **And it is dark exactly when you most want it** — the sentence above says
+  *that* you lose the value, this one says *when*, and they are not the same
+  thing to a reader. A daemon comes back at the same moment its fleet does,
+  after a crash, a reboot or a power cut, and that is precisely when agents come
+  back in states nobody watched them enter: alive, reported healthy, and sitting
+  at a screen they will sit at indefinitely. So the field is null across the
+  whole fleet in the very window where the condition it exists to expose is most
+  likely. **The loss is correlated with the thing you are detecting, not
+  independent of it.** Nothing here is going to change that — it is what an
+  in-memory observation is — so a consumer that needs to see across a restart
+  keeps its own first-seen-in-this-status record, and treats a page of nulls as
+  "this daemon is new" rather than as "this fleet just started work".
 * **It is not a heartbeat or a liveness probe.** It says nothing about whether
   an agent is healthy, and an agent quietly waiting on a human is
   indistinguishable from one that is wedged. That is deliberate: telling them
