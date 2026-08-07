@@ -105,8 +105,11 @@ jobs:
   #
   # This job MUST be a required check. Excluding it from the array without
   # gating on it would be strictly worse than leaving it in: it would run, go
-  # red, and the merge button would stay green. The required list is five with
-  # this: typecheck, build, verify, proof-registry, proof-verdicts.
+  # red, and the merge button would stay green. The required list is INTENDED to be
+  # five with this — typecheck, build, verify, proof-registry, proof-verdicts — but
+  # that list lives in branch protection, not in this file, and nothing in this repo
+  # can confirm it. If you are reading this while `proof-verdicts` is not required,
+  # the exclusion in verify-proof-registry's EXCLUSIONS is unsound. See KAN-210.
   #
   # It is pure static analysis over scripts/ plus two in-process mutations of a
   # copied source file — no build, no daemon, no herdr, no PTY, no network — so

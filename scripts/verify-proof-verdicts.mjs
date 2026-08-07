@@ -81,8 +81,15 @@
 // listed in the array it audits, can be removed by the very edit it exists to
 // catch, and the tree would go green with nothing watching. That is
 // `verify-proof-registry` §4's argument, and it applies here more directly than
-// it does there. This runs from its own required CI job instead, and is
-// recorded in that script's EXCLUSIONS register with this reason.
+// it does there. This runs from its own CI job instead, and is recorded in that
+// script's EXCLUSIONS register with this reason.
+//
+// That exclusion is only safe if `proof-verdicts` is among the branch's REQUIRED
+// status checks — and that is a premise NOTHING HERE CAN CHECK. The required list
+// is GitHub branch-protection state, not a file in this tree; §7 below verifies the
+// job exists and invokes this script, which is as far as the tree can see. KAN-210
+// tracks the gap. Excluded but non-gating, this would run, go red, and leave the
+// merge button green.
 //
 // Usage: node scripts/verify-proof-verdicts.mjs [--verbose]
 
