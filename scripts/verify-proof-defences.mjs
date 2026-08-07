@@ -105,17 +105,18 @@
 // ---------------------------------------------------------------------------
 //
 // KAN-190's task agent asked whether "every assertion in every proof carries a
-// mutation" should be policy. The numbers, now that they exist — 43 proofs,
+// mutation" should be policy. The numbers, now that they exist — 44 proofs,
 // this file included:
 //
-//   20 carry a mutation.  22 carry a non-mutation guard.
+//   21 carry a mutation.  22 carry a non-mutation guard.
 //    1 carries nothing, and it names what that leaves undefended.
 //
 // (18 / 21 / 3 when this register was first counted. KAN-197 closed the worst
 // of the three — see finding 3 below — and KAN-198 closed `verify-tab-per-agent`,
 // which was the expensive one: the count moved twice because the work happened,
 // which is what a register is for. The intervening 20 / 21 / 2 is what KAN-206
-// left behind when it added `verify-proof-verdicts`.)
+// left behind when it added `verify-proof-verdicts`, and 20 / 22 / 1 is what
+// KAN-200 arrived at before adding `verify-status-since`.)
 //
 // The answer this file's author gives, with those numbers in hand: **no, and
 // the register is the better instrument.** Three findings support it, and none
@@ -427,6 +428,25 @@ const PROOF_DEFENCES = [
       'every fleet category echoes the agent\'s frozen configuration, `unstartedAgents` is distinct ' +
       'from standby, and the echo survives a daemon restart.',
     note: 'It PRODUCES every category before asserting completeness over it, which is a guard in its own right.'
+  },
+  {
+    script: 'verify-status-since',
+    defence: 'mutation',
+    central:
+      '`statusSince` on an agent row is when THIS DAEMON first observed that agent in the status ' +
+      'beside it, is null when it has not watched it change, and is null for the whole fleet after ' +
+      'a restart rather than invented from the boot time.',
+    note:
+      'SEAM: §1-§4 run a real daemon and let its OWN 30-second sweep produce every timestamp, ' +
+      'which is the half KAN-145 was missing — a proof that supplies the record it asserts on has ' +
+      'not tested that anything real produces it. §5-§6 drive the memory in-process with ' +
+      'observations the script builds, because an unreachable census and an agent vanishing ' +
+      'cannot be produced against the shim inside a 30-second sweep; those sections prove the ' +
+      'FUNCTION and not the wiring, and the header says so. The distinction earned its keep: the ' +
+      'field was first written as a router field, every in-process assertion passed, and §2 — the ' +
+      'one that reads a timestamp back over a real socket — is what found that one router per ' +
+      'connection made it permanently null. What NOTHING here covers is a real herdr: the shim ' +
+      'reports the statuses it is told to.'
   },
 
   // -------------------------------------------------------------------------

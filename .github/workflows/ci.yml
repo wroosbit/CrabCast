@@ -782,6 +782,7 @@ jobs:
             verify-mutation-harness
             verify-readme-is-current
             verify-proof-defences
+            verify-status-since
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

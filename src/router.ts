@@ -438,7 +438,38 @@ const STATE_READ_PROVENANCE = {
    * join the record against the census, and `reason` is the sentence that
    * explains the result.
    */
-  derived: ['paneName', 'state', 'occupies', 'reason']
+  derived: ['paneName', 'state', 'occupies', 'reason'],
+  /**
+   * REMEMBERED BY THIS PROCESS: neither on the record nor in the census that
+   * answered this call, but accumulated by this daemon's own fleet sweep and
+   * held in memory. Gone on a restart, and null until this daemon has watched
+   * the thing it describes happen.
+   *
+   * A FOURTH BUCKET RATHER THAN A FIELD SQUEEZED INTO ONE OF THE THREE, and
+   * that is the whole reason it exists. `statusSince` is not durable — it is
+   * not written anywhere. It is not `observed` either, and that is the one a
+   * reader would otherwise assume: `observed` promises "read from herdr for
+   * THIS response and true as of `observedAt`", and `statusSince` was read
+   * from no census at all — it is this process's memory of an EARLIER sweep.
+   * Filing it under `observed` would have made the legend's own sentence
+   * false for exactly one field, which is worse than having no legend: a
+   * consumer trusts what the legend says about a field it has never seen
+   * before.
+   *
+   * It is not `derived` either. `derived` says "computed from the two above",
+   * and nothing in the record or in this call's census can produce it — the
+   * only input is what this process saw last time.
+   *
+   * ONLY `list_agents` ROWS IN `agents` CARRY A FIELD FROM THIS BUCKET.
+   * `agent_status` does not, and neither do the four not-running categories:
+   * the memory is keyed on the sweep's census of our LIVE agents and is
+   * dropped the moment an agent stops appearing in one, so those rows would
+   * carry a field that is structurally incapable of being anything but null.
+   * The legend is shared by both responses, so this bucket is announced on a
+   * surface that has no field in it — the same way `workDir` and
+   * `occupiedAgent` are announced on responses that do not carry them.
+   */
+  remembered: ['statusSince']
 } as const;
 
 /**
@@ -474,6 +505,40 @@ interface ListedAgent extends ConfigEcho {
   createdAt: string | null;
   status: HerdrSession['status'] | null;
   herdrStatus: HerdrAgentStatus;
+  /**
+   * When THIS DAEMON first observed the agent in the `herdrStatus` above, or
+   * null when it has not observed it change into anything.
+   *
+   * WHAT IT IS FOR (KAN-200). Two agents stopped at their runtime's
+   * usage-limit dialog and sat there for hours. The process was alive, the
+   * pane was present, `list_agents` reported them under `agents` with
+   * `herdrStatus: 'idle'`, and they were in none of the not-running
+   * categories — indistinguishable, in everything this daemon published, from
+   * an agent that had finished and was waiting for its next instruction. The
+   * one fact that would have separated them is how LONG they had been like
+   * that, and the sweep already knew and threw it away.
+   *
+   * IT IS NOT A DIAGNOSIS AND MUST NOT BECOME ONE. This daemon does not know
+   * what a "usage limit" is; that is the agent runtime's vocabulary, and
+   * learning to recognise one runtime's modal would rot the first time that
+   * tool changed a word (the parseable-name antipattern, KAN-103/KAN-123).
+   * What is published is one fact — the status, and when this daemon first
+   * saw it — and "idle since four hours ago while its ticket says In
+   * Progress" is then a judgement the CALLER makes, out of this field and its
+   * own knowledge, which is the half this daemon does not have.
+   *
+   * SO IT IS ALSO NOT A HEARTBEAT AND NOT A LIVENESS PROBE. It says nothing
+   * about whether the agent is healthy, and an agent quietly waiting on a
+   * human looks exactly like one wedged at a screen nobody will answer. That
+   * ambiguity is deliberate: distinguishing them requires interpreting a
+   * screen, which is how a confident wrong answer gets produced.
+   *
+   * IN MEMORY, PER DAEMON, AND NULL IS A REAL VALUE. See
+   * {@link MessageRouter.recordSweepObservation} for the whole of the
+   * mechanism and for the durability decision, which was settled by KAN-189
+   * and is not reopened here.
+   */
+  statusSince: string | null;
   /** herdr's own `agent` field: the CLI running in the pane, null for a shell. */
   agentRuntime: string | null;
   /** Display only. Never parsed, never an address. */
@@ -738,6 +803,125 @@ export interface FleetObservation {
   reachable: boolean;
   missing: MissingAgent[];
   statuses: FleetStatusReading[];
+}
+
+/**
+ * A status change this daemon actually watched happen, for the sweep to
+ * announce as `agent.status_changed`.
+ *
+ * `from` is never optional here, and that is the type carrying a rule rather
+ * than describing one: a FIRST SIGHTING IS NOT A TRANSITION, so an agent with
+ * no previous observation produces no entry at all rather than one with an
+ * invented `from`. See {@link MessageRouter.recordSweepObservation}.
+ */
+export interface StatusTransition {
+  path: string;
+  paneName: string;
+  paneId: string | null;
+  from: HerdrAgentStatus;
+  to: HerdrAgentStatus;
+}
+
+/**
+ * What this daemon last saw one agent doing, and when it first saw that.
+ *
+ * `since` is nullable for the same reason `from` above is required: the only
+ * moment this daemon can honestly stamp is one it watched. A first sighting
+ * seeds `status` with `since: null` — the daemon knows WHAT the agent is doing
+ * and has no idea since when, and saying so is the whole point.
+ */
+interface StatusObservation {
+  status: HerdrAgentStatus;
+  since: string | null;
+}
+
+/**
+ * WHAT THIS DAEMON HAS WATCHED ITS FLEET DOING — one per PROCESS, and the
+ * "per process" is the whole reason this is a class rather than a field.
+ *
+ * THE DEFECT IT EXISTS TO PREVENT, because it was written the other way first
+ * and the proof caught it. This daemon builds ONE MessageRouter PER CONNECTION
+ * (daemon.ts: responses go back to the requesting client, and PTY listeners die
+ * with the socket), plus one more for the sweep. A memory held as a field on
+ * the router is therefore private to a connection: the sweep records into the
+ * daemon's router, `list_agents` is answered by a different one that has
+ * watched nothing, and `statusSince` comes back null on every row for ever. The
+ * field would be PRESENT, CORRECTLY TYPED and ALWAYS NULL — which is exactly
+ * the shape KAN-145 shipped to production behind two green proofs, because
+ * every assertion anybody thinks to write about such a field still passes.
+ *
+ * So the observation is a dependency, injected like the bridge and the
+ * registry, and the daemon hands the same instance to every router it makes.
+ *
+ * A router constructed WITHOUT one gets its own, which is right for a caller
+ * that is the only router in its process (the verify scripts) and would be
+ * wrong for a daemon. `scripts/verify-status-since.mjs` §2 is what holds the
+ * daemon to sharing it: it changes an agent's status under a REAL daemon and
+ * requires the timestamp to appear on a row read back over the socket, which
+ * is the one assertion a private memory cannot satisfy.
+ *
+ * IN MEMORY, AND THAT IS SETTLED. See {@link MessageRouter.recordSweepObservation}
+ * for the durability decision and for KAN-189, which made it.
+ */
+export class FleetStatusMemory {
+  private readonly observations = new Map<string, StatusObservation>();
+
+  /** See {@link MessageRouter.recordSweepObservation}, which is this method's contract. */
+  record(observation: FleetObservation): StatusTransition[] {
+    if (!observation.reachable) return [];
+
+    const at = new Date().toISOString();
+    const transitions: StatusTransition[] = [];
+    const seen = new Set<string>();
+
+    for (const reading of observation.statuses) {
+      seen.add(reading.path);
+      const previous = this.observations.get(reading.path);
+      if (previous && previous.status === reading.herdrStatus) continue;
+      this.observations.set(reading.path, {
+        status: reading.herdrStatus,
+        // The one moment this daemon may stamp: it has just watched this
+        // agent's status become something other than what it last held. A
+        // first sighting (`previous === undefined`) has no such moment.
+        since: previous ? at : null
+      });
+      if (!previous) continue;
+      transitions.push({
+        path: reading.path,
+        paneName: reading.paneName,
+        paneId: reading.paneId,
+        from: previous.status,
+        to: reading.herdrStatus
+      });
+    }
+
+    // An agent that is no longer live forgets both halves, so that coming back
+    // is a first sighting rather than a transition from whatever it was doing
+    // when it disappeared.
+    for (const path of this.observations.keys()) {
+      if (!seen.has(path)) this.observations.delete(path);
+    }
+
+    return transitions;
+  }
+
+  /**
+   * When this daemon first saw `path` in `status`, or null.
+   *
+   * ASKED WITH THE STATUS, NOT JUST THE PATH, so the answer's sentence is true
+   * rather than nearly true. `statusSince` means "observed in THIS status since
+   * T". The status a row reports came from the census that answered THAT call;
+   * this memory came from the last sweep, up to one sweep interval earlier.
+   * When they disagree — the agent changed in the window between — the
+   * remembered moment belongs to the status the agent has just LEFT, and
+   * returning it would date the wrong one. Null is the honest answer there, and
+   * it is the value that already means "this daemon has not observed a change
+   * into what you are looking at".
+   */
+  since(path: string, status: HerdrAgentStatus): string | null {
+    const observation = this.observations.get(path);
+    return observation?.status === status ? observation.since : null;
+  }
 }
 
 /**
@@ -1211,6 +1395,21 @@ export interface RouterDeps {
    * looking healthy while a daemon serves a build that has been replaced.
    */
   bootBuild: BuildSnapshot;
+  /**
+   * What this daemon has watched its fleet doing, for `statusSince` (KAN-200).
+   *
+   * SHARED, AND THE DAEMON MUST SHARE IT. This process builds one router per
+   * connection; the sweep records into one of them and `list_agents` is
+   * answered by another, so a memory that is not handed in here is a memory the
+   * list can never read — and `statusSince` is then present, correctly typed
+   * and null for ever. See {@link FleetStatusMemory}, which carries the whole
+   * of that argument, and `scripts/verify-status-since.mjs` §2, which is what
+   * fails when it stops being true.
+   *
+   * Optional because a caller that is the only router in its process is
+   * correctly served by one of its own.
+   */
+  statusMemory?: FleetStatusMemory;
   /** Replies to the requesting client. */
   send: (msg: DaemonResponse) => void;
   /** Events for every connected client (activations, teardowns, PTY deaths). */
@@ -1981,7 +2180,9 @@ export class MessageRouter {
    */
   private warnedEchoDrift = new Set<string>();
 
-  constructor(private deps: RouterDeps) {}
+  constructor(private deps: RouterDeps) {
+    this.statusMemory = deps.statusMemory ?? new FleetStatusMemory();
+  }
 
   public handle(data: any): void {
     // Responses echo the request's `id` so a transport can correlate them.
@@ -4508,7 +4709,12 @@ export class MessageRouter {
         'durable fields come from the append-only agent registry and survive a daemon ' +
         'restart unchanged; observed fields were read from herdr for THIS response and ' +
         'are true as of observedAt; derived fields are computed from the two. paneId is ' +
-        'observed, never durable — herdr pane ids are positions in a list that compacts.'
+        'observed, never durable — herdr pane ids are positions in a list that compacts. ' +
+        'remembered fields are this daemon\'s own accumulated observation, held in memory ' +
+        'and NOT surviving a restart: statusSince is when this process first saw the agent ' +
+        'in the status beside it, and is null when it has not watched it change (which is ' +
+        'every agent on a freshly started daemon). Null there is an answer, not a gap — ' +
+        'a consumer wanting a window longer than one daemon\'s life keeps its own.'
     };
   }
 
@@ -5084,6 +5290,80 @@ export class MessageRouter {
     return this.observeFleet().missing;
   }
 
+  /**
+   * TAKE ONE SWEEP'S CENSUS INTO MEMORY, AND HAND BACK THE TRANSITIONS IT
+   * CONTAINS.
+   *
+   * This is the whole of `agent.status_changed`'s detection and the whole of
+   * `statusSince`'s population, and they are one function on purpose: they are
+   * the same observation read twice. It used to be `lastObservedStatus`, a map
+   * in `daemon.ts`, which compared the census against what it held and threw
+   * the moment away — the daemon knew the transition had happened and kept no
+   * record of WHEN. That is the defect KAN-200 was filed for, and the fix is
+   * one field on the value rather than a second memory beside it. A second map
+   * could disagree with this one about the same agent, and the disagreement
+   * would show up as an event and a row telling a caller two different stories.
+   *
+   * SILENCE IS NOT A STATUS, and this is the guard's only home. An unreachable
+   * herdr answers with an EMPTY census, and every row this daemon still
+   * reports from its own session map then carries `herdrStatus: 'unknown'`.
+   * Recording that would do two things, both wrong: it would broadcast
+   * `working → unknown` for the whole fleet on any herdr blip and
+   * `unknown → working` when it came back — events describing our own
+   * blindness as the agents' behaviour — and it would stamp a fresh
+   * `statusSince` on every agent on the machine, which is this daemon claiming
+   * to have watched a change that never happened. So when the census did not
+   * answer, nothing is compared, nothing is recorded, nothing is returned.
+   *
+   * A FIRST SIGHTING IS NOT A TRANSITION. An agent this daemon has never
+   * observed — a fresh activation, an agent that came back, every agent alive
+   * at the moment this process started — seeds the map with `since: null` and
+   * announces nothing. There is no `from` anybody watched, and there is no
+   * moment anybody watched either. `null` is therefore a REAL VALUE with a
+   * documented meaning ("this daemon has not observed a change for this
+   * agent"), and it is what a freshly started daemon reports for its entire
+   * fleet.
+   *
+   * IN MEMORY, AND THAT IS SETTLED RATHER THAN PENDING. KAN-189 asked the
+   * durability question for `missingSince` — see the four grounds on
+   * {@link MissingAgent.since}, which this is the other half of — and answered
+   * no: "inventing a `from` out of a durable copy would be claiming to have
+   * witnessed a change nobody watched". `statusSince` is a fact about THIS
+   * DAEMON'S WATCHING rather than about the agent, and a value read back off
+   * disk after a restart would make exactly that claim, over a gap in which
+   * nothing was watching. A consumer that wants a window longer than one
+   * daemon's life keeps its own, which is the same answer KAN-189 gave for
+   * down-time. Do not re-derive this; it is not an oversight.
+   *
+   * An agent that is no longer live forgets both halves, so that coming back
+   * is a first sighting rather than a transition from whatever it was doing
+   * when it disappeared — and its `statusSince` starts null again, because
+   * this daemon did not watch whatever happened in between.
+   */
+  public recordSweepObservation(observation: FleetObservation): StatusTransition[] {
+    return this.statusMemory.record(observation);
+  }
+
+  /**
+   * What this daemon's sweep last saw each live agent of ours doing, and when.
+   * Written only by {@link recordSweepObservation} and read only by
+   * {@link rowFrom}.
+   *
+   * SHARED ACROSS EVERY ROUTER IN THE PROCESS when the daemon injects one —
+   * which it must, because it builds one router per connection and this memory
+   * is written by the sweep's router and read by whichever router answers a
+   * `list_agents`. {@link FleetStatusMemory} carries what goes wrong when it is
+   * not shared.
+   *
+   * DELIBERATELY NOT WRITTEN BY `list_agents`. The list takes its own census on
+   * every request, and letting it record would make `statusSince` track
+   * whatever cadence callers happen to poll at — so two consumers polling at
+   * different rates would move a number that is supposed to describe the agent.
+   * The sweep is one clock, it runs whether anybody is asking or not, and it is
+   * the clock the field's documented meaning is written against.
+   */
+  private readonly statusMemory: FleetStatusMemory;
+
   private rowFrom(
     agentPath: string,
     paneName: string,
@@ -5116,6 +5396,16 @@ export class MessageRouter {
       createdAt: session ? session.createdAt.toISOString() : null,
       status: session?.status ?? null,
       herdrStatus: census?.herdrStatus ?? 'unknown',
+      // GATED ON THE STATUS MATCHING, so the field's sentence is true rather
+      // than nearly true. `statusSince` says "this daemon has observed this
+      // agent in THIS status since T". The status on this row came from the
+      // census that answered THIS call; the memory came from the last sweep,
+      // up to one sweep interval ago. When they disagree — the agent changed
+      // in the window between — the remembered moment belongs to the status
+      // the agent has just left, and reporting it here would date the wrong
+      // one. So the answer is null, which is the value that already means
+      // "this daemon has not observed a change into what you are looking at".
+      statusSince: this.statusMemory.since(agentPath, census?.herdrStatus ?? 'unknown'),
       agentRuntime: census?.agentRuntime ?? null,
       label: config?.label ?? null,
       // An agent with no record cannot be priced, refused or preempted — so it

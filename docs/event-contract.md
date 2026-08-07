@@ -495,6 +495,48 @@ polling `agent_status` harder on their side, not by CrabCast pushing faster.
 Statuses are herdr's vocabulary: `idle`, `working`, `blocked`, `done`,
 `unknown`.
 
+### The same observation, readable without subscribing: `statusSince`
+
+**This adds no event.** The sweep above already knows *when* it saw a status
+change and used to throw that away, so the moment is now kept beside the status
+and published as `statusSince` on every row in `list_agents`' `agents` — the
+same memory the event is derived from, read twice rather than computed twice.
+Nothing about the nine events changes.
+
+It exists because `herdrStatus` alone cannot answer the question a supervisor
+actually has. An agent that has finished its work and is waiting for you and an
+agent wedged at a prompt nobody will answer both read `idle`, and until KAN-200
+nothing this daemon published separated them; two agents sat at their runtime's
+usage-limit dialog for hours looking exactly like agents that were done.
+
+Four things about it, and each is the same rule this section already applies to
+the event:
+
+* **It is a fact, not a diagnosis.** CrabCast will never say "stuck". It does
+  not know what your runtime's dialogs are, and learning one runtime's screen
+  vocabulary would rot the first time that tool changed a word. "Idle since four
+  hours ago, and I know that agent has work outstanding" is your judgement, from
+  this field plus what only you know.
+* **`null` is an answer.** It means this daemon has not observed that agent's
+  status change — true of every agent on a freshly started daemon, of one whose
+  status changed between the last sweep and your call, and of one that has just
+  come back after disappearing. It is the same "a first sighting is not a
+  transition" rule above, seen from the row.
+* **It does not survive a restart**, for the reason the last bullet above gives
+  and the reason KAN-189 gave for down-time: it is a fact about *this process's
+  watching*, and a value read back off disk would describe a gap in which
+  nothing was watching. If you need a window longer than one daemon's life,
+  keep your own — the same answer this document already gives for how long an
+  agent has been missing (§1).
+* **It is not a heartbeat or a liveness probe.** It says nothing about whether
+  an agent is healthy, and an agent quietly waiting on a human is
+  indistinguishable from one that is wedged. That is deliberate: telling them
+  apart means interpreting a screen, which is how a confident wrong answer gets
+  produced.
+
+The response's `provenance` block files it under a fourth bucket, `remembered` —
+not `observed`, which promises a value read from herdr for *that* response.
+
 ---
 
 ## 4. Something you do not recognise — an action, or a field
