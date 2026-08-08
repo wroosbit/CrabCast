@@ -216,12 +216,34 @@ whatever they are incidentally doing has never been stated by anyone.
 
 ## Where the extraction source is named
 
-Twelve ported modules refer to *"the extraction source"* — 25 times — and until
-this document existed **the tree never said what it was or at what commit.**
-Those headers also cite ticket keys (KAN-21, KAN-24, KAN-34, KAN-36, KAN-41,
-KAN-44, KAN-54, KAN-56) that are **not CrabCast tickets**: they belong to epic
-KAN-39 (Butchr) in the same Jira project. They resolve correctly only because
-the two projects share a tracker. This document is the referent for that phrase.
+Twelve ported modules refer to the extraction source — **25 occurrences of the
+bare phrase `extraction source`**, measured at `5153501`, the commit this
+document was written against:
+
+```
+git grep -o 'extraction source' 5153501 -- src | wc -l   # 25
+git grep -l 'extraction source' 5153501 -- src | wc -l   # 12
+```
+
+Every one of them reads *"the extraction source"* in prose. Grepping for the
+phrase **with** its article returns 22, not 25, because three occurrences are
+line-wrapped with "the" ending the previous line — so 22 is a measurement of
+comment formatting and 25 is the number of references. (Both numbers are larger
+in the working tree than at `5153501`: the banner this change adds contains the
+phrase itself, once per module.)
+
+Until this document existed, **the tree never said what the extraction source
+was, or at what commit.** A dangling referent repeated 25 times reads as a
+definition that lives somewhere else. It did not. This document is that
+referent.
+
+Those headers also cite ticket keys — KAN-21, KAN-24, KAN-34, KAN-36, KAN-41,
+KAN-44, KAN-54, KAN-56 — that are **not CrabCast tickets**: they belong to epic
+KAN-39 (Butchr) in the same Jira project, and they resolve, to real tickets
+about something else. A reader following `src/herdr.ts`'s citation lands
+somewhere plausible and wrong, which is worse than a broken link because a
+broken link announces itself. Annotating those citations to say whose tickets
+they are is filed as **KAN-220**, unstaffed.
 
 ## What this document is not
 
