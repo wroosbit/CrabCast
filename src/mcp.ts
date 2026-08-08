@@ -1,3 +1,8 @@
+// LINEAGE. "The extraction source" in this file is wroosbit/butchr, daemon/src,
+// read at 928743a — a frozen commit, not a tree to stay in sync with. What came
+// across, what has diverged since and why, and which modules nobody has examined:
+// docs/ported-lineage.md. Read it before you change behaviour here.
+
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {

@@ -803,3 +803,9 @@ npm run build       # tsc → dist/, then dist/build-stamp.json
 `npm run build` is `tsc` plus a `postbuild` step (`scripts/stamp-build.mjs`) that records the commit, whether the checkout was clean, and the time into `dist/build-stamp.json`. Running `tsc` directly still works and is still a valid build — it just produces an *unstamped* one, which the daemon reports as `UNKNOWN` rather than guessing at.
 
 The verify scripts under `scripts/` are the live proofs of this daemon's behavioural invariants. The isolatable ones run in CI (the `verify` check) against a shimmed `herdr`; the rest need a real herdr and real panes and are run by hand, with their output going on the pull request. See the comments in `.github/workflows/ci.yml` for which are which and why.
+
+### Where this code came from
+
+Nineteen modules under `src/` were extracted from another codebase over five commits in August 2026, and several still carry decisions made before CrabCast existed. [`docs/ported-lineage.md`](docs/ported-lineage.md) is the record: the extraction source and the commit it was read at, the exact file list and what was deliberately left behind, how each module has diverged since and whether that was on purpose, and — the part a list of stated purposes would miss — **what some of those mechanisms were incidentally doing beyond their stated job**. It also names the modules nobody has examined, rather than omitting them.
+
+It is a document, not a proof: nothing enforces it, and it is meant to be read **when you edit a ported module**, not on a schedule. The modules in question say so in their first four lines.
