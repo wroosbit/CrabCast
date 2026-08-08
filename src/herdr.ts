@@ -106,6 +106,18 @@ export interface HerdrSession {
    * a partially-resolved set and act on it as though it were complete.
    */
   mcpDefinitions?: Record<string, unknown>;
+  /**
+   * Which keys of {@link mcpDefinitions} CrabCast supplied itself, rather than
+   * the caller supplying them (KAN-235).
+   *
+   * SET AT THE SAME MOMENT AS `mcpDefinitions` AND READ WITH IT, so the two
+   * cannot drift into describing different activations. A launcher writing to a
+   * SHARED file needs the distinction: CrabCast's builtin carries this agent's
+   * identity, and identity written where every agent reads it is identity
+   * fabricated for all of them. Resolution erases the difference, so it is
+   * captured where the `'builtin'` sentinel still exists.
+   */
+  mcpBuiltinNames?: string[];
 }
 
 /**
@@ -898,6 +910,13 @@ export class HerdrBridge {
       // asked to notice a key that never arrived.
       const definitions: Record<string, unknown> = Object.create(null);
       const unsupplied: string[] = [];
+      // Which names CrabCast filled in itself, recorded AS WE RESOLVE THEM.
+      // Once a builtin has been resolved it is an ordinary `{command, args,
+      // env}` and nothing downstream can tell it from a caller's server that
+      // looks similar — so the only place this is knowable is here, where the
+      // `'builtin'` sentinel is still in hand. The agy launcher needs it to
+      // avoid writing per-agent identity into a shared file (KAN-235).
+      const builtinNames: string[] = [];
       // Insertion order preserved: the caller's map is iterated in the order it
       // arrived and each value is carried across untouched, so "nothing is
       // resolved, renamed or reordered" holds by construction rather than by
@@ -912,7 +931,10 @@ export class HerdrBridge {
           // identity in this system, and it is issued here.
           const builtin = builtinMcpServer(name, this.configPath, session.path);
           if (builtin === null) unsupplied.push(name);
-          else definitions[name] = builtin;
+          else {
+            definitions[name] = builtin;
+            builtinNames.push(name);
+          }
           continue;
         }
         definitions[name] = spec;
@@ -951,6 +973,7 @@ export class HerdrBridge {
         return;
       }
       session.mcpDefinitions = definitions;
+      session.mcpBuiltinNames = builtinNames;
     }
 
     // Agent-specific provisioning, on every activation: it is idempotent, and
@@ -963,6 +986,11 @@ export class HerdrBridge {
         launcher.setup({
           workDir: session.path,
           mcpServers: session.mcpDefinitions ?? {},
+          // Read together with `mcpDefinitions` above, for the reason given at
+          // the field: a launcher writing to a shared file must be able to tell
+          // CrabCast's own definitions from the caller's, and after resolution
+          // nothing else can.
+          builtinMcpNames: session.mcpBuiltinNames ?? [],
           // Both directories, for the agy launcher's foreign-key refusal
           // (KAN-178). It is deciding whether a key already in the SHARED
           // global config is CrabCast's or the user's, and that question is
@@ -989,7 +1017,10 @@ export class HerdrBridge {
                 agentPath: session.path,
                 sidecarDir,
                 file: artifact.file,
-                keys: artifact.keys
+                keys: artifact.keys,
+                // Disclosed even when `keys` is null: an omission is not a
+                // non-event, it is a capability this agent does not have.
+                omittedBuiltins: artifact.omittedBuiltins
               });
               if (agy) disclosures.push(agy);
               return;

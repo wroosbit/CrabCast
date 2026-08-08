@@ -95,6 +95,23 @@ function check(ok, label, detail = '') {
  */
 const EXCLUSIONS = [
   {
+    script: 'verify-agy-reads-what-we-write',
+    reason:
+      'Needs a real `agy` binary, which no GitHub runner has and which cannot be installed on one ' +
+      'unattended — it is distributed by Google and gated behind an account. The script fails ' +
+      'rather than skipping when agy is absent, deliberately, so it can never go green on a ' +
+      'machine that could not run it. WHY IT IS WORTH THE HAND-RUN: it is the only proof in this ' +
+      'repository whose assertion CrabCast cannot satisfy by behaving correctly. Every other agy ' +
+      'proof writes a file and reads it back, which is exactly how the write path stayed wrong ' +
+      'through three merged slices (KAN-140, KAN-178 and their proofs were all green while every ' +
+      'agy agent received nothing). This one asserts that a real agy STARTS a server CrabCast ' +
+      'defined, so the evidence is a process another program chose to spawn. It also carries the ' +
+      'sabotage run: the same steps against a build using the pre-KAN-235 path, where agy starts ' +
+      'nothing.',
+    evidence:
+      'scripts/verify-agy-reads-what-we-write.mjs:1 runs a real agy under a scratch $HOME; §1 exits non-zero when no agy is on PATH'
+  },
+  {
     script: 'verify-proof-verdicts',
     reason:
       'Runs from its own CI job (`proof-verdicts`) instead of this array, and the reason ' +

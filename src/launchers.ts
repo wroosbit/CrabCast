@@ -165,8 +165,46 @@ export function builtinMcpServer(
 //
 // (The per-directory `.mcp.json` has no such problem: one directory, one agent,
 // so removal is unambiguous. See provisioning.ts.)
+//
+// THE PATH WAS WRONG UNTIL KAN-235, AND EVERYTHING ABOVE WAS BOOKKEEPING OVER A
+// FILE NOTHING READ. This used to return `~/.gemini/antigravity-cli/mcp.json`.
+// The antigravity CLI does not read that path — it reads the one below, and it
+// never opens ours. So every agy agent was activated, had its servers resolved,
+// merged, disclosed and recorded, and RECEIVED NONE OF THEM, behind
+// `success: true`. Nothing anywhere went red, because every check in this
+// repository asked whether CrabCast had written its own file correctly, and it
+// always had.
+//
+// The reference counting and the refusals above were never wrong. They encode
+// rules that are still right — a key that is already the user's is not ours to
+// take over, a failed write must refuse, ownership that cannot be established
+// is not an all-clear — and they now point at a file that is actually read.
+// What was wrong was that their claims were larger than their effect.
+//
+// MEASURED, NOT READ OFF A DOCUMENT (KAN-235, agy 1.1.11, re-verified from
+// scratch before this line was changed):
+//
+//   - A real `agy` session OPENS AND READS `~/.gemini/config/mcp_config.json`
+//     three times. It performs no operation of any kind on the old path, with a
+//     valid config sitting at it — the strong form of the negative, not
+//     "absent, so of course unread".
+//   - A stdio server defined in that file IS SPAWNED BY AGY. That is the
+//     assertion that matters: not that our bytes are on disk where we put them,
+//     but that agy read them and started the process they describe.
+//   - `strings` on the agy binary contains ZERO occurrences of the old path.
+//   - `~/.gemini/config/.migrated` exists, so agy's layout migration has already
+//     run and will not run again. A file at the old path would never be adopted
+//     later. There is no waiting it out.
+//
+// WHAT THIS FUNCTION STILL CANNOT PROMISE, because the bound that caught this
+// is worth keeping rather than replacing with a new unfalsifiable sentence:
+// agy's own shipped documentation is wrong about agy in at least two places
+// (see docs/callers-directory.md), so the doc naming this path is not why we
+// believe it. `scripts/verify-agy-reads-what-we-write.mjs` is why — it runs a
+// real agy binary and asserts on what agy DOES. If that script is ever deleted
+// or stubbed, this path goes back to being a claim carried from an author.
 export function agyMcpConfigPath(): string {
-  return path.join(os.homedir(), '.gemini', 'antigravity-cli', 'mcp.json');
+  return path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
 }
 
 /**
@@ -201,6 +239,15 @@ export interface AgyMcpResult {
   keys: Record<string, string> | null;
   /** Why nothing was written. Present exactly when `keys` is `null`. */
   reason?: string;
+  /**
+   * CrabCast's own builtin servers that were NOT written, because this file is
+   * shared and they carry per-agent identity (KAN-235).
+   *
+   * NOT AN ERROR AND NOT A REFUSAL. The caller's servers were delivered; this
+   * names the one thing that could not be. Empty for every launcher and every
+   * activation that asked for no builtin.
+   */
+  omittedBuiltins: string[];
 }
 
 /**
@@ -271,13 +318,70 @@ export function configureAgyMcp(
     sidecarDir?: string;
     /** Every agent's sidecar, so a sibling's key is not mistaken for the user's. */
     agentsDir?: string;
+    /**
+     * CrabCast's own definitions among `defs`, which this function will NOT
+     * write. See the omission argument in the doc comment above.
+     */
+    builtinNames?: readonly string[];
   } = {}
 ): AgyMcpResult {
   const agyConfigPath = options.configPath ?? agyMcpConfigPath();
 
+  // THE OMISSION, AND IT HAPPENS BEFORE ANYTHING ELSE (KAN-235).
+  //
+  // `builtinMcpServer` bakes CRABCAST_AGENT_PATH into the `crabcast` definition,
+  // and that is the entire supply of caller identity in this system: the daemon
+  // knows which agent is calling because it wrote that agent's own path into a
+  // file only it could write. That reasoning holds for a PER-AGENT file. It
+  // collapses at this one, because every agy agent reads the same one.
+  //
+  // Write it here and the last agent to activate sets the identity for all of
+  // them. `send_to_agent` from agy agent A would arrive attributed to agy agent
+  // B — not a missing feature but a FABRICATED one, and never fabricate is
+  // absolute. Note that this is the defect the corrected path CREATES: while we
+  // were writing a file nothing read, the overwrite was inert. Correcting the
+  // path without this would take a harmless bug and make it live, which is why
+  // the two land together.
+  //
+  // NO PER-AGENT CHANNEL EXISTS TO PUT IT SOMEWHERE ELSE, and this was settled
+  // by measurement rather than assumed: agy 1.1.11 has three MCP scopes and all
+  // three are global. No env var carries one (the binary's string table was
+  // enumerated for `AGY_*`/`ANTIGRAVITY_*`), `--project` has no MCP file, and a
+  // valid workspace-scoped plugin fixture — accepted by `agy plugin validate` —
+  // was never launched in a real session.
+  //
+  // SO THE CAPABILITY IS GENUINELY ABSENT, and that is bigger than it sounds: an
+  // agy agent with no `crabcast` server cannot call `send_to_agent`, cannot call
+  // `list_agents`, and cannot take part in the fleet the way a claude agent
+  // does. It is not a regression — agy agents received nothing at all before —
+  // but it is a real difference between launchers, and `omittedBuiltins` is how
+  // the activation says so instead of leaving it to be discovered as work the
+  // agent quietly cannot do.
+  const builtinNames = new Set(options.builtinNames ?? []);
+  const omittedBuiltins = Object.keys(defs).filter((name) => builtinNames.has(name));
+  const writable: Record<string, unknown> = Object.create(null);
+  for (const [name, definition] of Object.entries(defs)) {
+    if (!builtinNames.has(name)) writable[name] = definition;
+  }
+
   // Nothing to contribute: leave the user's global config alone entirely.
-  if (Object.keys(defs).length === 0) {
-    return { file: agyConfigPath, keys: null, reason: 'no MCP servers were configured for this agent' };
+  //
+  // REACHED BY A SECOND ROUTE NOW — an agent whose only server was the builtin.
+  // The file is untouched either way, so it is the same non-write, but the
+  // reason has to distinguish them: "you asked for nothing" and "the one thing
+  // you asked for is the one thing this launcher cannot deliver" leave the
+  // caller in very different positions.
+  if (Object.keys(writable).length === 0) {
+    return {
+      file: agyConfigPath,
+      keys: null,
+      omittedBuiltins,
+      reason: omittedBuiltins.length
+        ? `the only MCP server(s) configured for this agent were CrabCast's own ` +
+          `(${omittedBuiltins.map((k) => `'${k}'`).join(', ')}), which cannot be written to the ` +
+          `antigravity CLI's shared global config`
+        : 'no MCP servers were configured for this agent'
+    };
   }
 
   const agyConfigDir = path.dirname(agyConfigPath);
@@ -323,10 +427,14 @@ export function configureAgyMcp(
   // not: a key that is already the user's is not ours to take over. Asked of
   // every CrabCast record rather than only this agent's, because the file is
   // shared — see `classifyAgyKeys`.
+  // `writable`, NOT `defs` — the builtin is not being written, so it cannot
+  // collide with anything and must not be able to refuse an activation over a
+  // key this function has already decided to leave alone.
   const ownership = classifyAgyKeys({
     file: agyConfigPath,
     existing: config.mcpServers,
-    writing: Object.keys(defs),
+    writing: Object.keys(writable),
+    definitions: writable,
     agentsDir: options.agentsDir,
     ownSidecarDir: options.sidecarDir
   });
@@ -356,6 +464,45 @@ export function configureAgyMcp(
     );
   }
 
+  // REFUSAL 4, AND IT IS THE ONE THE CORRECTED PATH CREATES (KAN-235).
+  //
+  // Ownership says these keys are CrabCast's — a sibling recorded writing them,
+  // so they are not the user's and refusal 2 correctly lets them through. But
+  // the sibling recorded DIFFERENT BYTES, and one file holds one value per key.
+  // Merging ours does not share the key with that agent, it TAKES the key from
+  // it: the sibling's server silently becomes ours, pointed at our command,
+  // while the sibling goes on believing it has what it was promised.
+  //
+  // THIS WAS INERT UNTIL TODAY AND IS NOT ANY MORE, which is why it could not be
+  // a later slice. While CrabCast wrote a file nothing read, every collision in
+  // it was harmless — B overwriting A's key took nothing from A, because A had
+  // never received it either. Correcting the path is exactly what converts this
+  // class from harmless to harmful, so the correction and this refusal are one
+  // change or the correction makes things worse.
+  //
+  // A SIBLING WITH THE SAME DEFINITION IS NOT A CONFLICT and still merges. That
+  // is the ordinary shared-server case the reference count exists to support,
+  // and refusing it would make the second agy agent on a machine unstartable.
+  if (ownership.conflicting.length) {
+    const detail = ownership.conflicting
+      .map(
+        (c) =>
+          `'${c.key}' (claimed by ${c.sibling}, which recorded ${c.theirs}; this agent would ` +
+          `write ${c.ours})`
+      )
+      .join('; ');
+    throw new ProvisioningError(
+      AGY_MCP_ARTIFACT,
+      `${agyConfigPath} is SHARED by every agy agent this daemon runs, and it holds only one ` +
+        `definition per server name. Another agent already claims ${detail}. Writing ours would ` +
+        `not share that server, it would REDIRECT the sibling's — that agent would keep running, ` +
+        `believing it has the server it was configured with, while its tool calls went somewhere ` +
+        `else. NOTHING WAS WRITTEN TO IT and nothing was started. Give this agent's server a ` +
+        `different name, configure it with the same definition the sibling uses, or ` +
+        `\`crabcast forget\` the sibling first.` + PARTIAL_PROVISIONING_NOTE
+    );
+  }
+
   // NULL-PROTOTYPE TARGET, not a spread. `{ ...a, ...b }` builds an ordinary
   // literal, and assigning a server named `__proto__` into one stores nothing
   // at all — our key would silently fail to be written while `keys` below still
@@ -367,9 +514,20 @@ export function configureAgyMcp(
       ? config.mcpServers
       : {}
   );
-  for (const [name, definition] of Object.entries(defs)) servers[name] = definition;
+  for (const [name, definition] of Object.entries(writable)) servers[name] = definition;
   config.mcpServers = servers;
 
+  // THE REFUSAL BELOW USED TO SAY "and nowhere else", AND IT WAS FALSE. The CLI
+  // read a DIFFERENT file, not no other file, and that sentence is what made the
+  // defect invisible for three merged slices — it asserted the stakes of a write
+  // that had no stakes. What it says now is the narrower claim the measurement
+  // supports: this is a path agy has been observed to read and spawn from.
+  //
+  // (The comment sits ABOVE the `try` rather than inside the `catch`, because
+  // `verify-agy-mcp-write-refusals`'s `swallow-the-failed-write` mutation
+  // anchors on the compiled `catch (e) {\n        throw new ProvisioningError`.
+  // A comment emitted between those two lines silently stops the mutation
+  // applying, and a mutation that does not apply is a section that never runs.)
   try {
     fs.mkdirSync(agyConfigDir, { recursive: true });
     fs.writeFileSync(agyConfigPath, JSON.stringify(config, null, 2));
@@ -377,15 +535,19 @@ export function configureAgyMcp(
     throw new ProvisioningError(
       AGY_MCP_ARTIFACT,
       `Could not write ${agyConfigPath} (${e?.message ?? String(e)}). The agent was configured ` +
-        `with MCP servers and the antigravity CLI reads them from that file and nowhere else, so ` +
+        `with MCP servers and this is the file the antigravity CLI reads them from, so ` +
         `starting now would deliver an agent quietly missing what it was promised. NOTHING WAS ` +
-        `STARTED.`
+        `STARTED.` + PARTIAL_PROVISIONING_NOTE
     );
   }
 
+  // `writable` again, and this is the load-bearing one for `forget`. Provenance
+  // is what the reversal removes BY, so recording the builtin here would point a
+  // later `crabcast forget` at a key this function never wrote — and, with the
+  // path corrected, at whatever the user's own `crabcast` entry happens to be.
   const keys: Record<string, string> = {};
-  for (const [name, definition] of Object.entries(defs)) keys[name] = JSON.stringify(definition);
-  return { file: agyConfigPath, keys };
+  for (const [name, definition] of Object.entries(writable)) keys[name] = JSON.stringify(definition);
+  return { file: agyConfigPath, keys, omittedBuiltins };
 }
 
 // WHAT USED TO BE HERE, AND WHY IT IS NOT
@@ -644,6 +806,27 @@ export interface LauncherSetupContext {
    */
   mcpServers: Record<string, unknown>;
   /**
+   * Which of {@link mcpServers} are CrabCast's OWN definitions rather than the
+   * caller's — the names the caller asked for as `'builtin'` and the daemon
+   * filled in itself.
+   *
+   * ADDED BY KAN-235, AND ONLY THE AGY LAUNCHER NEEDS IT. The distinction did
+   * not matter while every launcher wrote a per-agent file: a definition is a
+   * definition, and `builtinMcpServer` had already baked this agent's identity
+   * into it. It matters at a SHARED file, because CrabCast's builtin is the one
+   * definition that carries WHO THE AGENT IS. Writing it into a file every agy
+   * agent reads would give every one of them the identity of whichever agent
+   * activated last.
+   *
+   * So the launcher has to be able to tell the two apart, and `mcpServers`
+   * alone cannot: by the time it arrives the builtin has been resolved into an
+   * ordinary-looking `{command, args, env}` and is indistinguishable from a
+   * caller-supplied server that happens to look similar. Matching on the name
+   * `crabcast` would be a guess about a name the caller chooses. This is the
+   * daemon stating what it knows rather than the launcher inferring it.
+   */
+  builtinMcpNames?: readonly string[];
+  /**
    * This agent's sidecar, where CrabCast's record of what it has written for
    * this agent lives.
    *
@@ -682,7 +865,24 @@ export interface LauncherSetupContext {
   note?: (
     artifact:
       | { kind: 'folder-trust'; file: string; trustKey: string; wroteIt: boolean }
-      | { kind: 'agy-mcp'; file: string; keys: Record<string, string> | null; reason?: string }
+      | {
+          kind: 'agy-mcp';
+          file: string;
+          keys: Record<string, string> | null;
+          reason?: string;
+          /**
+           * CrabCast's own servers that this launcher DELIBERATELY did not
+           * write, and cannot write, because the file is shared and they carry
+           * per-agent identity (KAN-235).
+           *
+           * Separate from `keys: null`, which means nothing was written at all.
+           * This is a write that happened and was INCOMPLETE BY DESIGN, and the
+           * caller has to be told which capability the agent therefore does not
+           * have. A capability removed silently is worse than one refused
+           * loudly; this is the channel that keeps it from being silent.
+           */
+          omittedBuiltins?: readonly string[];
+        }
   ) => void;
 }
 
@@ -886,9 +1086,27 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
     // The two directories are what make the foreign-key half answerable: the
     // file is shared, so "CrabCast has no record of this key" is a question
     // about every agent's record, not just this one's.
-    setup: ({ mcpServers, note, sidecarDir, agentsDir }) => {
-      const outcome = configureAgyMcp(mcpServers, { sidecarDir, agentsDir });
-      note?.({ kind: 'agy-mcp', file: outcome.file, keys: outcome.keys, reason: outcome.reason });
+    //
+    // AND CRABCAST'S OWN BUILTIN IS NOT WRITTEN AT ALL (KAN-235). The file is
+    // shared by every agy agent, so a definition carrying one agent's identity
+    // would hand that identity to all of them. `builtinMcpNames` is how the
+    // daemon says which definitions are its own; the omission is reported
+    // through the same `note` channel as the write, because an agent that
+    // cannot call `send_to_agent` needs to be told so at activation rather than
+    // discover it as work it silently cannot do.
+    setup: ({ mcpServers, builtinMcpNames, note, sidecarDir, agentsDir }) => {
+      const outcome = configureAgyMcp(mcpServers, {
+        sidecarDir,
+        agentsDir,
+        builtinNames: builtinMcpNames
+      });
+      note?.({
+        kind: 'agy-mcp',
+        file: outcome.file,
+        keys: outcome.keys,
+        reason: outcome.reason,
+        omittedBuiltins: outcome.omittedBuiltins
+      });
     },
     runtimeComm: 'agy'
     // No restoresConversation, deliberately, despite the `--continue` above:
