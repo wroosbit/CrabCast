@@ -2070,15 +2070,71 @@ function configEcho(intent: AgentIntent | undefined): ConfigEcho {
 }
 
 /**
- * `bootId` and the current `seq`, for a subscriber deciding whether to resync.
+ * The three facts about the ANSWERING PROCESS that a caller needs before it can
+ * read the rest of a response: `bootId`, the current `seq`, and when this
+ * daemon started.
  *
- * Read from the process-wide event stream rather than threaded through the
- * router's deps, because there is one boot per process and the daemon's
- * broadcast stamps from the same object — two copies could disagree, and the
- * one a subscriber compares against would be the one that was wrong.
+ * `bootId` and `eventSeq` are read from the process-wide event stream rather
+ * than threaded through the router's deps, because there is one boot per
+ * process and the daemon's broadcast stamps from the same object — two copies
+ * could disagree, and the one a subscriber compares against would be the one
+ * that was wrong.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY `startedAt` IS HERE AND NOT IN THE `provenance` BLOCK (KAN-214)
+ *
+ * The ticket proposed `provenance`, and this is the decision against it,
+ * recorded here because the ticket asked for the reasoning rather than the
+ * choice.
+ *
+ * `statusSince` is null for the whole fleet on a daemon that has not yet
+ * watched anything change — which is every daemon in the minutes after a
+ * restart, and a restart is correlated with the fleet's own (a power cut takes
+ * both). A caller reading a page of nulls could not tell "my observer is new,
+ * ignore this column" from "this column is meaningful and nothing is moving".
+ * The two call for opposite responses. `startedAt` is the one more fact that
+ * separates them: a daemon younger than the window you care about has not had
+ * time to witness anything, and that is computable rather than guessable.
+ *
+ * NOT in {@link MessageRouter.provenance}, whose four buckets are a
+ * classification of where each ROW FIELD came from. `observedAt` and
+ * `censusReachable` belong there because they qualify how to read those
+ * buckets. A process start time qualifies nothing in the legend — it is a fact
+ * about the answering daemon, of the same kind as `pid`, and filing it under a
+ * legend would blur the very line the comment on that method exists to hold.
+ *
+ * HERE, THOUGH, IT COSTS NOTHING TO KEEP HONEST. This function feeds BOTH
+ * `daemon_status` and `list_agents`, so the two surfaces cannot disagree about
+ * when the daemon started — not because somebody remembered to update both,
+ * but because there is one expression and they share it. A constraint that
+ * cannot be violated beats one that must be remembered.
+ *
+ * AND IT IS THE NAME `daemon_status` ALREADY PUBLISHES. `startedAt` has been on
+ * that response since before KAN-122 (see provenance.ts's header, which dates
+ * the PROCESS by it). This adds no new spelling for a fact that had one; it
+ * makes the existing fact reachable on `list_agents`, which is the response the
+ * nulls are on — and, as it happens, the only one of the two an MCP caller can
+ * call at all.
+ *
+ * `daemonStartedAt` IS threaded through the deps, and that does not reintroduce
+ * the disagreement the paragraph above warns about. There is one
+ * `const daemonStartedAt` in daemon.ts, handed to every router this process
+ * builds; unlike `bootId` it is stamped on no event, so no second copy exists
+ * anywhere for a subscriber to compare against and find wrong.
+ *
+ * WHAT IT DOES NOT ESTABLISH, stated because a timestamp invites more than it
+ * says: it is when this PROCESS started. It is not a claim that the daemon is
+ * healthy, and it says nothing whatever about whether any agent's status is
+ * meaningful. It bounds how long this daemon COULD have been watching; what it
+ * actually watched is `statusSince`, one field per row, and still null when it
+ * has not watched.
  */
-function eventWatermark() {
-  return { bootId: events.bootId, eventSeq: events.seq };
+function eventWatermark(daemonStartedAt: Date) {
+  return {
+    bootId: events.bootId,
+    eventSeq: events.seq,
+    startedAt: daemonStartedAt.toISOString()
+  };
 }
 
 /**
@@ -2260,7 +2316,12 @@ export class MessageRouter {
           action: 'daemon_status_response',
           success: true,
           pid: process.pid,
-          startedAt: daemonStartedAt.toISOString(),
+          // `startedAt` USED TO BE SPELLED OUT HERE and now arrives with the
+          // watermark below, which is the whole point of KAN-214: the same
+          // expression puts it on `list_agents` too, so the two responses
+          // cannot disagree about when this daemon started. Removing the
+          // duplicate is not tidying — a second copy is the one that would
+          // have gone stale.
           configPath: config.configPath,
           dataDir: config.dataDir,
           // What used to be `workspaceTypes` — the answer to "is the daemon up
@@ -2274,7 +2335,7 @@ export class MessageRouter {
           // the cheapest call on the socket, and a subscriber whose only
           // question is "did the daemon restart" should not have to survey the
           // whole fleet to find out.
-          ...eventWatermark(),
+          ...eventWatermark(daemonStartedAt),
           build,
           freshness
         });
@@ -4947,7 +5008,12 @@ export class MessageRouter {
       // whole fleet. `eventSeq` is the highest sequence number stamped so far,
       // so a subscriber can also tell whether it has missed anything since its
       // last event without waiting for the next one.
-      ...eventWatermark(),
+      //
+      // `startedAt` rides along, and this is the response it was added for
+      // (KAN-214): the `statusSince` nulls below are on THESE rows, and this is
+      // the field that says whether this daemon has been running long enough
+      // for a null to mean anything.
+      ...eventWatermark(this.deps.daemonStartedAt),
       // Which fields above are durable, which were observed just now, and
       // which this daemon computed. See MessageRouter.provenance.
       provenance: this.provenance(census),

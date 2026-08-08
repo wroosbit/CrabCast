@@ -431,6 +431,28 @@ const PROOF_DEFENCES = [
     note: 'It PRODUCES every category before asserting completeness over it, which is a guard in its own right.'
   },
   {
+    script: 'verify-daemon-started-at',
+    defence: 'mutation',
+    central:
+      '`startedAt` — when this daemon\'s PROCESS began — is on both `daemon_status` and ' +
+      '`list_agents`, the two agree because one expression feeds them, and the value tracks a ' +
+      'real boot rather than the moment of the call.',
+    note:
+      'SEAM: nothing here constructs a start time. Every value asserted on is read back over a ' +
+      'real socket from a daemon spawned as a real OS process, and the script controls only WHEN ' +
+      'it spawns one and how long it waits before asking — which is the half KAN-145 was missing. ' +
+      'The two mutations cover the two ways this field goes wrong while still looking right: the ' +
+      'value becoming the call time (present, correctly typed, always wrong) and the two surfaces ' +
+      'being re-split so they can disagree. FOUR ASSERTIONS HERE WERE VACUOUS WHEN FIRST WRITTEN ' +
+      'and the pre-fix red run is what caught them — `undefined === undefined` satisfied the ' +
+      '"it did not move" and "the surfaces agree" checks, and `!(NaN >= n)` reported a mutant as ' +
+      'caught when the field was simply absent; each is now guarded on the VALUE\'S TYPE. What ' +
+      'NOTHING here covers is the MCP surface — that `crabcast_list_agents` carries the field ' +
+      'through to an MCP caller is verify-mcp-tools against the tool description, and neither ' +
+      'script covers the other. Nor does it cover a wrong system clock: every window is a ' +
+      'duration between two readings of one clock.'
+  },
+  {
     script: 'verify-status-since',
     defence: 'mutation',
     central:
