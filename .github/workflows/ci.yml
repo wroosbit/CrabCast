@@ -785,6 +785,7 @@ jobs:
             verify-proof-defences
             verify-status-since
             verify-daemon-started-at
+            verify-daemon-status-over-mcp
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,
