@@ -240,6 +240,7 @@ herdr health: 724/65536 open files (1%), room for about 12962 more panes (pid 84
 other fields in the daemon's response:
   bootId: 6e3b7c3a-8f0a-45b1-be63-29f2fddd2425
   eventSeq: 2
+  startedAt: 2026-08-07T22:47:51.104Z
 
 $ crabcast status /tmp/ac1-demo/notes
 /tmp/ac1-demo/notes — unknown
