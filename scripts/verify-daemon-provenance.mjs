@@ -53,9 +53,28 @@
 //   do this by accident in the wild — it arranges one, which is the only way
 //   to observe the property deliberately.
 //
+//   §3b (the README block, KAN-180) is HALF self-supplied and the halves are
+//   worth telling apart. The OUTPUT side is this script's own: a fixture tree,
+//   a daemon it started, a rebuild it performed. The PAGE side is not — README.md
+//   is a real artifact written by people, and the whole assertion is that it has
+//   not fallen behind. So the thing under test is the page, and the output is
+//   the yardstick. WHAT THAT LEAVES UNCOVERED: that a reader following the
+//   recipe in that README section, in a real checkout rather than a copied
+//   fixture, sees these lines. Nobody covers that, and it is the same hole §2
+//   and §3 have had since KAN-122 — the fixture is a copy of `dist/` and `src/`,
+//   which is what makes the provenance situations constructible at all. It is
+//   also blind to VALUES: `commit:` and the newest-source basename are masked
+//   (scripts/readme-blocks.mjs prints the register and what each rule costs),
+//   so §3b checks that the block shows every LINE, and §1 above is what checks
+//   that the commit a stamp names is the commit it was built from.
+//
 // Usage:
 //   npm run build
 //   node scripts/verify-daemon-provenance.mjs
+//
+// §3b reads README.md and two historical revisions of it (`git show`), and
+// reports NOT RUN — a failure, not a pass — rather than skipping if a shallow
+// clone cannot reach them.
 //
 // Exits non-zero on any failure, so a reviewer can re-run it against the PR
 // head. It is meant to be ABLE to fail: make the provenance reader answer
@@ -66,6 +85,17 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+// §3b compares this script's own daemon-status output against the README block
+// that pastes it. The mask and the page parser are IMPORTED rather than copied:
+// verify-readme-is-current.mjs uses the same module for the six blocks it
+// reproduces, and two copies of a mask would mean two checks blind to different
+// things while both reporting the page current. See that module's header.
+import {
+  BUILD_BLOCK_FIRST_LINE,
+  buildFreshnessBlock,
+  compareSegment
+} from './readme-blocks.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
@@ -506,6 +536,223 @@ async function startDaemonAlongside(tree) {
   const configPath = path.join(scratch, `${tree.name}-2.json`);
   fs.writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
   return await startDaemon({ ...tree, dataDir, configPath }, `${tree.name}-second`);
+}
+
+// ---------------------------------------------------------------------------
+// 3b. AND THE README SHOWS WHAT IT PRINTS.
+// ---------------------------------------------------------------------------
+//
+// WHAT FAILURE THIS WOULD CATCH (KAN-180): the README's `build`/`freshness`
+// block going stale. The page says of those two blocks that they are
+// "reproduced here in full and verbatim", and until this section nothing on
+// earth went red when they stopped being. It had already happened once — at
+// e7ffb58 the block was four lines short in `build` and had lost the entire
+// evidence tail under `freshness`, and it was found by a person reading the
+// page months later, which is the failure mode this whole epic exists to end.
+//
+// WHY IT IS HERE AND NOT IN verify-readme-is-current.mjs, which is the script
+// whose NAME says it checks the README. Because the state this block describes
+// is expensive and §3 above has already paid for it: a daemon still serving the
+// `dist/` it booted from while a newer build sits on disk. Reproducing that in
+// the README checker meant a second fixture tree and a second rebuild inside a
+// check that otherwise finishes in seconds. So the assertion goes where the
+// state already is, and `staleCli` — the very `crabcast daemon-status` §3
+// captured eleven lines ago — is what gets compared. KAN-180 decided this
+// deliberately over the alternative; the reasoning is on that ticket.
+//
+// WHAT THE SPLIT COSTS, AND WHAT PAYS FOR IT. "The README is current" is now
+// answered by two scripts rather than one, and a reader running only
+// verify-readme-is-current gets a green that does not include this block. Two
+// things stop that from being the seam-between-two-scripts defect KAN-180 was
+// filed about:
+//
+//   - that script's section 1 register names this block as COVERED_ELSEWHERE
+//     and cites this file AND this section, so the enumeration of the page stays
+//     complete rather than quietly losing an entry;
+//   - the mask is IMPORTED from scripts/readme-blocks.mjs rather than copied, so
+//     the two scripts cannot become blind to different things while both
+//     reporting the page current.
+//
+// AND THE MASK ITSELF IS GUARDED BY verify-readme-is-current, NOT BY THIS
+// SECTION — which is the dependency to know about before editing either. This
+// comparison masks BOTH sides with the same function, so a mask that is too
+// WIDE makes §3b agree with itself: widen `maskLine` to a catch-all and every
+// check in this section still passes, exit 0, asserting nothing. It was
+// measured rather than reasoned about — a one-line catch-all in
+// readme-blocks.mjs left this whole section green while turning
+// verify-readme-is-current red seven times, and its expected-GREEN canaries
+// (`timestamps-and-pane-ids-rewritten`, `a-number-changed`) are what noticed:
+// they are graded green precisely BECAUSE the mask hides those values, so a
+// wider mask breaks the grading. Nothing here can make that measurement,
+// because there is no unmasked side to compare against.
+//
+// So: WEAKENING THOSE CANARIES SILENTLY WEAKENS THIS SECTION, and it would
+// weaken it into a PASS. CI runs both scripts, so a widened mask goes red
+// before it merges — the protection is real, it is simply not owned here. Do
+// not answer this by adding a canary to this file: a second copy of that guard
+// is exactly the drift the shared module exists to prevent. Found in review of
+// KAN-180, in the fix for KAN-180 — the gap between two scripts, one level over.
+//
+// The §3b red/green history pair below does NOT cover it either, and the reason
+// is worth stating so it is not mistaken for coverage: under a catch-all mask
+// `e7ffb58` still reports red, but only because that revision's block has FEWER
+// LINES than the capture, so the subsequence check runs out of page. It is
+// counting, not comparing.
+//
+// AND THE FAILURE NAMES THE README, which matters more than it looks. When this
+// goes red it goes red inside a script called `verify-daemon-provenance`, and
+// the person reading the output will usually be somebody who just edited a
+// documentation page and has no reason to think provenance is involved. A
+// diagnostic that said "provenance mismatch" would send them to src/provenance.ts
+// to look for a bug that is not there.
+
+rule('3b. AND THE README SHOWS WHAT IT PRINTS — the page’s block against that output');
+
+const README_PATH = path.join(repoRoot, 'README.md');
+
+/**
+ * The directory prefix the README's block shows, as a SUBSTITUTION rather than
+ * a mask.
+ *
+ * The page was captured in `/tmp/kan174/crabcast` and this run's fixture is a
+ * scratch directory; rewriting one to the other lets the four path lines
+ * (`git root`, `loaded from`, `stamp`, `sources`) and the summary be compared
+ * for what they say rather than skipped. A substitution and not a `<PATH>` mask
+ * on purpose — a path the renderer got WRONG still shows up as a difference,
+ * whereas masking every path would make four of this block's lines unfalsifiable.
+ *
+ * IF THE PAGE IS EVER RE-CAPTURED SOMEWHERE ELSE this constant goes stale and
+ * this section goes red on every path line. That is a true red — the page did
+ * change — but the fix is to update this constant, and the check below says so
+ * by name rather than leaving it to be deduced from a pile of missing lines.
+ */
+const PAGE_TREE = '/tmp/kan174/crabcast';
+
+/** `daemon-status` from the `build —` line to the end: the two blocks the page pastes. */
+function buildFreshnessLines(stdout) {
+  const lines = stdout.replace(/\n$/, '').split('\n');
+  const at = lines.findIndex((l) => BUILD_BLOCK_FIRST_LINE.test(l));
+  return at === -1 ? [] : lines.slice(at);
+}
+
+const capturedBlock = buildFreshnessLines(staleCli.stdout).map((l) => l.split(clean.dir).join(PAGE_TREE));
+
+// PRECONDITIONS, because every one of them is a way this comparison could pass
+// while checking nothing. An empty capture compares zero lines against the page
+// and reports zero missing — a green that means "I did not look" — and a capture
+// taken from a daemon that was NOT in the stale state would be comparing the
+// wrong block's worth of output against a block about staleness.
+check(capturedBlock.length > 0,
+  'the daemon-status output has a `build — what THIS process was loaded from` block to compare',
+  capturedBlock.length > 0 ? `${capturedBlock.length} lines` :
+    'NOTHING WAS CAPTURED — the comparison below would be vacuously green');
+check(capturedBlock.some((l) => /^freshness: PROCESS-PREDATES-BUILD$/.test(l)),
+  'and it is the PROCESS-PREDATES-BUILD state, which is the state the page documents',
+  'the block the README pastes is of a daemon that predates its build; a capture in any other ' +
+  'state would be a comparison against the wrong page block');
+check(!capturedBlock.some((l) => l.includes(scratch)),
+  'and every fixture path in it was rewritten to the prefix the page shows',
+  `a leftover ${scratch} path would go red as README drift when it is this script’s own scratch dir`);
+
+const pageBlock = buildFreshnessBlock(fs.readFileSync(README_PATH, 'utf8'));
+
+if (!check(pageBlock !== null,
+  'README.md still pastes that block',
+  pageBlock ? `README.md:${pageBlock.start}-${pageBlock.end}` :
+    'THE README NO LONGER SHOWS A build/freshness BLOCK AT ALL. If it was removed on purpose, ' +
+    'remove this section and the COVERED_ELSEWHERE entry in scripts/verify-readme-is-current.mjs ' +
+    'that cites it — a citation pointing at coverage of nothing is worse than no citation')) {
+  // Nothing below can mean anything without a block to compare against.
+} else {
+  check(pageBlock.body.some((l) => l.includes(PAGE_TREE)),
+    `and it still shows the ${PAGE_TREE} prefix this section substitutes for`,
+    pageBlock.body.some((l) => l.includes(PAGE_TREE)) ? '' :
+      `THE PAGE WAS RE-CAPTURED SOMEWHERE ELSE. Update PAGE_TREE in ${path.relative(repoRoot, scriptDir)}/` +
+      'verify-daemon-provenance.mjs to the prefix the block now shows; until then every path line ' +
+      'below reports as missing for this reason and not because the README is wrong');
+
+  const missing = compareSegment({ output: capturedBlock }, { output: pageBlock.body });
+  show('$ crabcast daemon-status   (this run, fixture paths rewritten to the page’s)',
+    capturedBlock.join('\n'));
+  check(missing.length === 0,
+    'THE README’S build/freshness BLOCK SHOWS EVERY LINE THIS daemon-status PRINTED',
+    missing.length === 0
+      ? `README.md:${pageBlock.start}-${pageBlock.end}, ${capturedBlock.length} captured line(s) all present`
+      : `THE README IS STALE — README.md:${pageBlock.start}-${pageBlock.end} is missing ` +
+        `${missing.length} line(s) that \`crabcast daemon-status\` prints today. This is a ` +
+        `DOCUMENTATION failure, not a provenance one: the daemon is answering correctly above ` +
+        `and the page has fallen behind it. Re-run the recipe in that README section and paste ` +
+        `the new output over the block`);
+  for (const m of missing) {
+    console.log(`          the page does not show: ${JSON.stringify(m.line)}`);
+    console.log(`                         masked as: ${JSON.stringify(m.shape)}`);
+  }
+}
+
+/**
+ * The page's own history: this comparison goes RED against the revision that
+ * really had drifted, and GREEN against one that had not.
+ *
+ * KAN-180's AC 2 asks for this to be watched going red, and wiring it in beats
+ * pasting one red run into a pull request: a demonstration nobody can re-run is
+ * a claim. `e7ffb58` is the README as it stood before KAN-174 re-ran this block,
+ * and it is genuinely stale rather than synthetically broken — nobody
+ * constructed it to fail, it simply was.
+ *
+ * THE GREEN DIRECTION IS WHAT KEEPS THIS FROM MEASURING THE CALENDAR. A check
+ * that called every older page stale would go red on `e7ffb58` for the wrong
+ * reason and nobody would notice. `0edd2c1` is the newest README before KAN-200,
+ * and its copy of THIS block is byte-identical to today's — so it is a page from
+ * the past that must stay green, and the pair of expectations together is the
+ * evidence. If a future change to the build or freshness renderer makes that
+ * revision go red, the honest fix is a NEWER revision to carry the green, never
+ * an empty list.
+ */
+const BLOCK_HISTORY = [
+  {
+    rev: 'e7ffb58',
+    expect: 'red',
+    note: 'before KAN-174 re-ran this block: `build` was missing git root/loaded from/stamp/read ' +
+          'at, and `freshness` had lost its whole evidence tail behind an ellipsis'
+  },
+  {
+    rev: '0edd2c1',
+    expect: 'green',
+    note: 'the newest README before KAN-200 — this block was already accurate there and is ' +
+          'unchanged since, so a red here would mean this check is measuring age'
+  }
+];
+
+for (const h of BLOCK_HISTORY) {
+  const shown = spawnSync('git', ['show', `${h.rev}:README.md`], { cwd: repoRoot, encoding: 'utf8' });
+  // NOT RUN IS A FAILURE. A shallow clone that cannot reach these revisions has
+  // demonstrated nothing, and reporting that is the difference between the
+  // demonstration happening and its absence being announced.
+  if (!check(shown.status === 0 && shown.stdout.length > 0,
+    `${h.rev}:README.md is reachable`,
+    shown.status === 0 ? '' : 'NOT RUN — git could not read that revision (a shallow clone?)')) {
+    continue;
+  }
+  const old = buildFreshnessBlock(shown.stdout);
+  if (!check(old !== null, `${h.rev} has a build/freshness block to audit`,
+    old ? '' : 'the revision does not paste one — this history entry is stale, not the page')) {
+    continue;
+  }
+  const oldMissing = compareSegment({ output: capturedBlock }, { output: old.body });
+  const got = oldMissing.length ? 'red' : 'green';
+  check(got === h.expect,
+    `${h.rev}: the block is ${h.expect.toUpperCase()} — ${h.note.replace(/\s+/g, ' ')}`,
+    got === h.expect
+      ? h.expect === 'red'
+        ? `${oldMissing.length} line(s) that revision did not show`
+        : 'every line today’s daemon prints was already on that page'
+      : `EXPECTED ${h.expect.toUpperCase()}, GOT ${got.toUpperCase()}`);
+  if (h.expect === 'red' && oldMissing.length) {
+    for (const m of oldMissing.slice(0, 6)) {
+      console.log(`          ${h.rev} did not show: ${JSON.stringify(m.line)}`);
+    }
+    if (oldMissing.length > 6) console.log(`          … and ${oldMissing.length - 6} more`);
+  }
 }
 
 // ---------------------------------------------------------------------------
