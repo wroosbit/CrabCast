@@ -339,7 +339,9 @@ Stated here because a census read as complete is worse than one read as partial.
   daemons with different data directories write the same global file and are
   invisible to each other.
 - **Keys written by hand**, or by any agy user who is not CrabCast. Those are not
-  claims and are not counted — the byte comparison is what protects them.
+  claims and are not counted — the byte comparison is what protects them here,
+  and the write-side refusal below is what now stops one becoming ours in the
+  first place.
 - **A write whose record never landed.** The file is written and the provenance
   recorded immediately after; a crash between the two leaves a key with no
   claimant.
@@ -362,6 +364,48 @@ per-agent identity** — and has a second consequence worth knowing about while 
 is open: every agy agent also reads whichever agent's `CRABCAST_AGENT_PATH` was
 written last, so `activatedBy` for an agy fleet is decided by activation order.
 Tracked separately rather than papered over here.
+
+### And the write into it refuses the same three ways
+
+For a while it did not, and the gap ran in one direction: this file's **removal**
+was careful and its **write** was not. The same three refusals the `.mcp.json`
+write has now apply here — an unparseable (or unreadable, or non-object) config,
+a **key that is already yours**, and a write that fails.
+
+The middle one is why this mattered more than a missing symmetry:
+
+> Reference-counting made `forget` able to **remove** the key. So overwriting an
+> entry of yours no longer merely clobbered its value — CrabCast recorded the
+> key as its own, and a later `forget` then deleted it. **The byte comparison
+> does not catch this**: it protects a key edited *after* we wrote it, not one
+> that was yours *before*.
+
+Every step in that sequence did exactly what it was designed to do, and the end
+of it was your entry gone from your own file. The refusal stops it at step one.
+
+**Whose key is it? Asked of every CrabCast record, not just this agent's.** The
+file is shared, so reading the rule as *"I have no record"* would refuse the
+**second** agy agent over the **first** agent's key — blocking an activation over
+state that agent does not own. The question is *"CrabCast has no record"*, and
+the evidence is the same fleet-wide census the reversal reference-counts with. A
+sibling's key merges exactly as before; only a key that predates every CrabCast
+record is yours, and only that one refuses.
+
+**And there is a third answer.** The census can fail — a missing agents
+directory, an unreadable sibling record — and an unestablished answer is not an
+all-clear. It refuses too, naming what it could not read. That is the same
+principle the removal side applies, pointing at the opposite action:
+
+| deciding whether to… | when ownership cannot be established |
+| --- | --- |
+| **remove** a key (`forget`) | leave it — it may be one somebody still needs |
+| **write over** a key (activation) | refuse — it may be one of yours |
+
+Both are *do not touch what you cannot account for*. Only the verb differs.
+
+This is bounded by being asked **only of keys already in the file**. An
+activation with no collision — which includes every re-activation whose own
+record explains its keys — consults no census and cannot be refused by any of it.
 
 ## `forget` — what comes back out
 
@@ -421,7 +465,12 @@ afterwards.
 ## Failure to provision refuses the activation
 
 Every provisioning failure above refuses, with `started: false` and nothing
-spawned. This is not defensiveness; it is a lesson with a receipt. A swallowed
+spawned. (This sentence was here before it was true of all of them: the write
+into the shared agy config used to log and return, and the agent started. It is
+true as written now — that was KAN-178 — and it is worth naming, because a
+blanket sentence covering one launcher less than it claimed is exactly the shape
+of defect this document keeps finding elsewhere.) This is not defensiveness; it
+is a lesson with a receipt. A swallowed
 prompt-file write once let an agent start with no instructions at all, behind
 `success: true, verified: true` — a check rendering its own failure as an
 all-clear. An agent that is quietly missing what it was promised is worse than an
@@ -455,6 +504,19 @@ instead — each asserted on the diagnostic text as well as on the file, because
 "removed" and "removed because nothing else claimed it" are different claims. Its
 last section backs each behaviour out of a copy of the build and shows the checks
 go red.
+
+`scripts/verify-agy-mcp-write-refusals.mjs`, also in CI, covers the **write** end
+of that same file. Its first section runs the data-loss sequence end to end — a
+key of yours in the global config before CrabCast has seen the machine, an
+activation, a `forget` — and requires your entry to still be there, byte for
+byte, at the end of it. Its last section runs **the same sequence** against a
+build with the refusal backed out and watches your entry be **deleted**, so the
+first section is a measurement of something that really can happen rather than a
+description of it. Two positive controls sit between them — a key CrabCast wrote
+(re-activation) and a **sibling's** key (the shared-file case) — because every
+refusal assertion in that file would also pass against a write that refused
+everything, and a guard indistinguishable from a wall has not been shown to be a
+guard.
 
 **What no proof in this repository covers**, said here rather than left as an
 assumption: nothing runs a real `agy` binary or a real agy fleet. That the

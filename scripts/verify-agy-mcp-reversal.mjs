@@ -692,6 +692,19 @@ section('7. A write that did NOT happen is neither disclosed nor recorded');
 // It matters more now than it did: provenance is what `forget` removes by, so a
 // record written for a write that never happened would point the reversal at
 // somebody else's key.
+//
+// THE FIRST ASSERTION HERE INVERTED IN KAN-178, and the inversion is that
+// ticket's whole point rather than drift in this one. This section used to
+// check that the activation STILL SUCCEEDED, with the note "this slice did not
+// change who gets an agent" — true of KAN-140, which was about the reversal and
+// deliberately left the refusal decision unmade. KAN-178 made it: an agy agent
+// whose servers could not be written is an agent missing what it was promised,
+// so the activation is REFUSED instead of started silently.
+//
+// What the section is FOR is unchanged, and every other check below is
+// untouched: a write that did not happen must be neither disclosed nor
+// recorded. That property now holds through a stronger route — nothing is
+// started at all — so these assertions are the same ones asked of a refusal.
 const w7 = newWorld('unparseable');
 const a7 = w7.ownedDir('agent-a');
 {
@@ -702,9 +715,23 @@ const a7 = w7.ownedDir('agent-a');
   const { activated } = await w7.bringUp(a7);
   console.log('    the activation response\'s disclosures:');
   console.log(block((activated?.provisioned ?? []).map((d) => `${d.artifact} ${d.file}`)));
+  console.log(`    the refusal:\n      ${activated?.error}`);
 
-  check('the activation still succeeded — this slice did not change who gets an agent',
-    activated?.success === true, activated?.error);
+  check(
+    'the activation is REFUSED (KAN-178) — an agy agent whose MCP servers could not be written ' +
+      'is an agent quietly missing what it was promised, and it used to start anyway',
+    activated?.success === false,
+    JSON.stringify({ success: activated?.success, error: activated?.error })
+  );
+  check(
+    'and the refusal names the file, says it was NOT replaced, and says nothing was started — a ' +
+      'refusal the caller cannot act on is a log line with extra steps',
+    typeof activated?.error === 'string' &&
+      activated.error.includes(w7.agyFile) &&
+      /NOT REPLACED/i.test(activated.error) &&
+      /NOTHING WAS STARTED/i.test(activated.error),
+    activated?.error
+  );
   check(
     'THEIR FILE WAS NOT REPLACED — it is the user\'s global config and CrabCast cannot read it',
     readIfPresent(w7.agyFile) === theirs

@@ -667,6 +667,137 @@ export function countAgyClaims(options: {
   return { claimants, unreadable, consulted };
 }
 
+/**
+ * Whether the keys we are about to write into the SHARED agy config are ours to
+ * write (KAN-178).
+ *
+ * THE QUESTION `provisionMcpConfig` ASKS ONE FILE OVER, ASKED OF A FILE WITH
+ * MANY OWNERS. Its rule is that a server key already present that CrabCast has
+ * no record of writing is the caller's, and is refused rather than taken over.
+ * It answers that from ONE sidecar, which is exactly right for `.mcp.json`:
+ * one directory, one agent, so our own record is the whole of CrabCast's
+ * memory of that file.
+ *
+ * THAT READING WOULD BE WRONG HERE, and getting it wrong costs an activation.
+ * The agy config is shared, so a key written by a SIBLING is CrabCast's key
+ * too — refusing over it would block an agent because of state it does not own
+ * and never touched. The rule is "CrabCast has no record", not "I have no
+ * record", so the evidence has to be the whole fleet's records: our own, plus
+ * every sibling's, which is what {@link countAgyClaims} already reads for
+ * `forget`. Storage is per-agent; the QUESTION is fleet-wide, and this is
+ * where the two are reconciled.
+ *
+ * THREE ANSWERS, NOT TWO, because the census can fail:
+ *
+ *  - **ours** — recorded by us or by a sibling. Merged, exactly as before.
+ *  - **foreign** — present, and no CrabCast record anywhere accounts for it.
+ *    The user's. Refused.
+ *  - **indeterminate** — the records could not be read, so ownership was never
+ *    established. Also refused, and `doubt` says what could not be read.
+ *
+ * WHY INDETERMINATE REFUSES, when the removal side leaves the key instead. The
+ * two are the same principle pointing at opposite actions. `removeOurAgyKeys`
+ * is deciding whether to TAKE something away, so the unestablished case must
+ * not remove; this is deciding whether to WRITE OVER something, so the
+ * unestablished case must not overwrite. Both resolve to "do not touch what you
+ * cannot account for".
+ *
+ * AND IT IS CHEAP BECAUSE IT IS RARE. Nothing here runs unless a key we are
+ * about to write is ALREADY IN THE FILE. An activation with no collision — the
+ * ordinary case, including every re-activation of an agent whose own record
+ * explains its keys — consults no census at all and cannot be refused by this.
+ *
+ * The per-key census loop is deliberate: `countAgyClaims` answers about a SET,
+ * and a refusal has to name the individual key it is about. Colliding keys
+ * number one or two in practice, and the loop only runs on the collision path.
+ */
+export interface AgyKeyOwnership {
+  /** Keys in the file that no CrabCast record accounts for — the user's. */
+  foreign: string[];
+  /** Keys in the file whose ownership could not be established either way. */
+  indeterminate: string[];
+  /** What could not be read. Present exactly when `indeterminate` is non-empty. */
+  doubt?: string;
+}
+
+export function classifyAgyKeys(options: {
+  /** The global config, for matching against the file each record names. */
+  file: string;
+  /** The `mcpServers` value currently in that file, exactly as parsed. */
+  existing: unknown;
+  /** The key names we are about to write. */
+  writing: string[];
+  agentsDir?: string;
+  /** Our own sidecar. Its absence is a doubt, not an all-clear. */
+  ownSidecarDir?: string;
+}): AgyKeyOwnership {
+  const { file, existing, writing, agentsDir, ownSidecarDir } = options;
+  const nothing: AgyKeyOwnership = { foreign: [], indeterminate: [] };
+
+  // NULL-PROTOTYPE AND `ownKey`, for the reason spelled out at the equivalent
+  // read in `provisionMcpConfig`: every name here is caller-chosen, and a user's
+  // own server called `toString` answered the plain-literal version of this test
+  // as OURS — inheriting a function from Object.prototype rather than being
+  // absent — which is this guard failing in the exact direction it exists to
+  // prevent. Building the map with no prototype and asking through `ownKey` each
+  // close it independently, and both are kept for the same reason they are kept
+  // there.
+  const servers: Record<string, unknown> = Object.assign(
+    Object.create(null),
+    existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {}
+  );
+  const colliding = writing.filter((key) => ownKey(servers, key));
+  if (!colliding.length) return nothing;
+
+  // Our own record first: it is the cheapest evidence and it explains the
+  // commonest collision by far — this same agent activating again over the keys
+  // it wrote last time.
+  const ownClaim = ownSidecarDir ? readProvenance(ownSidecarDir)?.agyMcp : undefined;
+  const ownKeys: Record<string, string> = Object.assign(
+    Object.create(null),
+    ownClaim && ownClaim.file === file ? ownClaim.keys : {}
+  );
+  const unexplained = colliding.filter((key) => !ownKey(ownKeys, key));
+  if (!unexplained.length) return nothing;
+
+  if (!ownSidecarDir) {
+    return {
+      foreign: [],
+      indeterminate: unexplained,
+      doubt:
+        `no sidecar directory was supplied, so CrabCast's own record of what it has written to ` +
+        `${file} could not be read at all`
+    };
+  }
+
+  const foreign: string[] = [];
+  const indeterminate: string[] = [];
+  const doubts: string[] = [];
+  for (const key of unexplained) {
+    const census = countAgyClaims({ agentsDir, ownSidecarDir, file, keys: [key] });
+    if (census.failed) {
+      indeterminate.push(key);
+      doubts.push(census.failed);
+      continue;
+    }
+    // A record that exists and cannot be believed may be the very one that
+    // wrote this key, so it is a doubt rather than a non-claim — the same
+    // reading `removeOurAgyKeys` gives it, and for the same reason.
+    if (census.unreadable.length) {
+      indeterminate.push(key);
+      doubts.push(...census.unreadable);
+      continue;
+    }
+    if (!census.claimants.length) foreign.push(key);
+  }
+
+  return {
+    foreign,
+    indeterminate,
+    ...(doubts.length ? { doubt: [...new Set(doubts)].join('; ') } : {})
+  };
+}
+
 // ------------------------------------------------------------ git exclude
 
 /**

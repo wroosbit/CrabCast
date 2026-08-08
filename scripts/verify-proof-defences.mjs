@@ -313,6 +313,25 @@ const PROOF_DEFENCES = [
       'never counted as "claims nothing".'
   },
   {
+    script: 'verify-agy-mcp-write-refusals',
+    defence: 'mutation',
+    central:
+      "the WRITE into the antigravity CLI's GLOBAL mcp.json refuses rather than starting an agent " +
+      'without its servers, and refuses a server key that is already the USER\'S rather than ' +
+      'taking it over — so the sequence "overwrite their key, record it as ours, then let ' +
+      '`forget` remove it" cannot end with their entry deleted.',
+    note:
+      'Its §7a is the reason to believe §1: the SAME end-to-end sequence, against a build with the ' +
+      'foreign-key refusal backed out, and the user\'s entry is observed being DESTROYED rather ' +
+      'than the loss being described. Two positive controls (§3 our own key on re-activation, §4 a ' +
+      "sibling's key in the shared file) are what separate this from a check that refuses " +
+      'everything — without them every refusal assertion here would also pass against a ' +
+      '`configureAgyMcp` that threw unconditionally. SEAM: the REVERSAL itself is ' +
+      'verify-agy-mcp-reversal, whose §7 owns "a write that did not happen is neither disclosed ' +
+      'nor recorded"; this file owns the write-side refusals and re-proves neither. Neither runs a ' +
+      'real `agy` binary, so the shared file\'s RUNTIME behaviour is unowned by both.'
+  },
+  {
     script: 'verify-ci-proof-residue-is-legible',
     defence: 'mutation',
     central:

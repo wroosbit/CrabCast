@@ -963,6 +963,14 @@ export class HerdrBridge {
         launcher.setup({
           workDir: session.path,
           mcpServers: session.mcpDefinitions ?? {},
+          // Both directories, for the agy launcher's foreign-key refusal
+          // (KAN-178). It is deciding whether a key already in the SHARED
+          // global config is CrabCast's or the user's, and that question is
+          // answered from the provenance records: ours, plus every sibling's.
+          // Omitting either would make the answer "cannot tell", which refuses
+          // — so these are what keep an ordinary activation ordinary.
+          sidecarDir,
+          agentsDir: this.agentsDir(),
           // What the launcher wrote outside our data dir. The trust entry is
           // the whole reason this channel exists: it is written by the claude
           // launcher, into the user's GLOBAL config, and neither this bridge
