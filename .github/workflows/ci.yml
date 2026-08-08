@@ -192,6 +192,23 @@ jobs:
       #                                      things it guards and asserts the
       #                                      checks go red, because a check that
       #                                      cannot fail is not a check.
+      #   verify-agy-mcp-write-refusals      the same disciplines one launcher
+      #                                      over, on the antigravity CLI's
+      #                                      GLOBAL config: a failed write
+      #                                      refuses, and a server key that is
+      #                                      already the USER'S is refused
+      #                                      rather than taken over. Its §1 runs
+      #                                      the data-loss sequence end to end —
+      #                                      their key, an activation, a
+      #                                      `forget` — and requires their entry
+      #                                      to survive it; its §7a runs the
+      #                                      SAME sequence against a build with
+      #                                      the refusal removed and watches the
+      #                                      entry be DELETED. Two positive
+      #                                      controls (our own key, a sibling's)
+      #                                      are what keep it distinguishable
+      #                                      from a check that refuses
+      #                                      everything.
       #
       # And two more, both for the same class of reason — a reconciler calls
       # these paths constantly, and every way they can break is silent:
@@ -768,6 +785,7 @@ jobs:
             verify-prompt-is-not-a-template
             verify-callers-directory
             verify-agy-mcp-reversal
+            verify-agy-mcp-write-refusals
             verify-daemon-provenance
             verify-state-read-echoes-config
             verify-activated-by
