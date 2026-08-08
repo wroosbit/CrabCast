@@ -5,11 +5,12 @@
 // mistakes it invites are not the same size. Believe too quickly that agents
 // are cheap — one idle minute while the whole fleet waits on an API — and the
 // cap opens to a fleet the machine cannot carry the moment they all wake,
-// which is exactly the desktop-killing incident (KAN-34) this file descends
-// from. Believe too slowly that agents are expensive and the only cost is a
-// refused activation, which the operator can read, override, or wait out. So
-// the filter is asymmetric on purpose: quick to believe an agent is
-// expensive, slow to believe it is cheap.
+// which is exactly the desktop-killing incident (KAN-34, in the extraction
+// source; see docs/ported-lineage.md) this file descends from. Believe too
+// slowly that agents are expensive and the only cost is a refused activation,
+// which the operator can read, override, or wait out. So the filter is
+// asymmetric on purpose: quick to believe an agent is expensive, slow to
+// believe it is cheap.
 //
 // The shape is an EWMA with a per-direction alpha, chosen over a
 // high-water-mark window because it needs no history buffer, degrades to

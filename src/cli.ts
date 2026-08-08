@@ -805,8 +805,9 @@ function renderActivate(reader: ResponseReader, request: Record<string, unknown>
     field('launcher', reader.take('launcher')),
     echo,
     // `verified: true` is the difference between this response and a false
-    // success (KAN-23): the agent was found in herdr's census before the
-    // daemon answered. Printed rather than assumed.
+    // success (KAN-23, in the extraction source; see docs/ported-lineage.md):
+    // the agent was found in herdr's census before the daemon answered.
+    // Printed rather than assumed.
     field('verified', reader.take('verified')),
     field('resumed', reader.has('resume')
       ? `${reader.take('resume')} (conversation restored: ${reader.take('resumedConversation')})`

@@ -123,7 +123,8 @@ async function waitForHerdr(herdrBridge: HerdrBridge, timeoutMs: number): Promis
  *    in the log line a human reads at boot, and the word "failed" next to an
  *    agent that is perfectly restorable is how somebody concludes it is gone.
  *  - **Silently skipped.** The worst: the fleet comes back short and the
- *    summary says nothing, which is the KAN-21 shape exactly.
+ *    summary says nothing, which is the KAN-21 (in the extraction source)
+ *    shape exactly.
  *  - **Retried forever.** A herdr that is genuinely down would keep boot
  *    hanging, and boot is the one place a daemon must not hang.
  *

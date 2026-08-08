@@ -14,9 +14,9 @@ export type { CpuObservation };
  *
  * On 2026-07-31 the extraction source's board manager staffed seven agents on
  * a 4-core laptop: load average 11.3 against 4 cores, 9 claude processes
- * holding 3.0 GB, and 319 MB of 15 GB free. Nothing in the product knew any
- * of that. The only instrument that noticed was a human saying the desktop
- * felt slow (KAN-34).
+ * holding 3.0 GB, and 319 MB of 15 GB free. Nothing in the product knew any of
+ * that. The only instrument that noticed was a human saying the desktop felt
+ * slow (KAN-34, in the extraction source).
  *
  * Everything here is arithmetic over figures read from the machine, so the
  * answer travels: the same code on a 64-core box says 73, not 2. The
@@ -27,8 +27,9 @@ export type { CpuObservation };
  * re-measured, which is why they are constants with names rather than magic
  * numbers, and why every one of them has an environment override.
  *
- * KAN-36 corrected two things about the first version, both discovered the
- * same way — a human found the product unusable and no instrument had noticed:
+ * KAN-36 (in the extraction source) corrected two things about the first
+ * version, both discovered the same way — a human found the product unusable
+ * and no instrument had noticed:
  *
  *   - The cap counts *charged* agents. At the time there was one always-on
  *     supervisor, so KAN-36 reserved its share off the top like herdr's rather
@@ -45,30 +46,32 @@ export type { CpuObservation };
  * fixed reservation for one of them had become arithmetic about an agent that
  * may not exist.
  *
- * The rule that replaced it (KAN-41), now expressed per agent rather than per
- * workspace type: only *chargeable* agents are accounted for at all. `cap` is
- * cores and memory minus the human reserve and herdr's overhead, and nothing
- * else. An agent a caller configured with `chargeable: false` is neither
- * counted in `running` nor reserved for — that flag is asked for because the
- * agent supervises rather than does the work, typically low-resource and idle,
- * not competing for the machine the way a worker compiling a repo does. Such
- * agents are still reported in `Capacity.exemptAgents`, so a reader of a
- * capacity report can see they exist; they are simply never charged.
+ * The rule that replaced it (KAN-41, in the extraction source), now expressed
+ * per agent rather than per workspace type: only *chargeable* agents are
+ * accounted for at all. `cap` is cores and memory minus the human reserve and
+ * herdr's overhead, and nothing else. An agent a caller configured with
+ * `chargeable: false` is neither counted in `running` nor reserved for — that
+ * flag is asked for because the agent supervises rather than does the work,
+ * typically low-resource and idle, not competing for the machine the way a
+ * worker compiling a repo does. Such agents are still reported in
+ * `Capacity.exemptAgents`, so a reader of a capacity report can see they
+ * exist; they are simply never charged.
  *
  * `chargeable` used to be one third of a `gateExempt` boolean declared on a
  * workspace type. Splitting it out is what lets a caller have an agent that
  * costs a slot but can never be taken, or one that is free but still refusable
  * — combinations the single flag could not express.
  *
- * KAN-44/KAN-56 closed the loop this header opened. `readCapacity()` always
- * read cores, memory and load live; the one static input left was the
- * per-agent cost divisor, measured once on 2026-07-31. Now the daemon
- * re-measures its own fleet on a timer (daemon.ts, with agent-cost.ts as the
- * instrument), damps the estimate (agent-cost-damping.ts — asymmetric on
- * purpose, see that file), and this arithmetic divides by the damped figure.
- * The constants below remain as the *seed*: what capacity answers from when
- * there is nothing to measure — no agent trees, no /proc, a sample that fails
- * validation — because whatever breaks, capacity still answers, conservatively.
+ * KAN-44/KAN-56 (both in the extraction source) closed the loop this header
+ * opened. `readCapacity()` always read cores, memory and load live; the one
+ * static input left was the per-agent cost divisor, measured once on
+ * 2026-07-31. Now the daemon re-measures its own fleet on a timer (daemon.ts,
+ * with agent-cost.ts as the instrument), damps the estimate
+ * (agent-cost-damping.ts — asymmetric on purpose, see that file), and this
+ * arithmetic divides by the damped figure. The constants below remain as the
+ * *seed*: what capacity answers from when there is nothing to measure — no
+ * agent trees, no /proc, a sample that fails validation — because whatever
+ * breaks, capacity still answers, conservatively.
  *
  * That accuracy is paid for in predictability. The original argument here was
  * for a static cap — "a cap nobody can follow is a cap people route around" —
@@ -182,11 +185,12 @@ export interface AgentCost {
  * that is the whole difficulty. Measured CPU is 0.15 cores per agent tree over
  * 90 seconds (0.02–0.24 across three agents), because most of an agent's life
  * is spent waiting on an API; calibrating on that says a 4-core box carries
- * sixteen, and the human who filed KAN-34 had already found out what seven
- * feels like. The load average is the other extreme: seven agents produced a
- * load of 11.3, ~1.6 each, but that is a queue length, and it inflates as the
- * machine gets worse — each of those seven was mostly waiting on the other
- * six. Calibrating on 1.6 says a 4-core box carries one.
+ * sixteen, and the human who filed KAN-34 (in the extraction source) had
+ * already found out what seven feels like. The load average is the other
+ * extreme: seven agents produced a load of 11.3, ~1.6 each, but that is a
+ * queue length, and it inflates as the machine gets worse — each of those
+ * seven was mostly waiting on the other six. Calibrating on 1.6 says a 4-core
+ * box carries one.
  *
  * So it is calibrated on the configuration that was *observed to be fine*.
  * A supervisor plus two worker agents sat at a load of 2.6–2.9 on four cores,
@@ -198,12 +202,13 @@ export interface AgentCost {
  * thrashing-inflated share, which is the range a divisor in a load-average
  * budget has to live in. Re-measure it before trusting it.
  *
- * Since KAN-56 the daemon does re-measure it, continuously, and these numbers
- * are the seed rather than the answer: they hold until the sampler has a
- * damped live figure, and they are what everything degrades to when it does
- * not. A capacity report built from them says `seed`, because a figure nobody
- * measured on this fleet must be labelled as such — that mislabelling is the
- * exact failure story KAN-44 exists to correct.
+ * Since KAN-56 (in the extraction source) the daemon does re-measure it,
+ * continuously, and these numbers are the seed rather than the answer: they
+ * hold until the sampler has a damped live figure, and they are what
+ * everything degrades to when it does not. A capacity report built from them
+ * says `seed`, because a figure nobody measured on this fleet must be labelled
+ * as such — that mislabelling is the exact failure story KAN-44 (likewise in
+ * the extraction source) exists to correct.
  */
 export const MEASURED_AGENT_COST: AgentCost = {
   residentBytes: 650 * MIB,
@@ -634,8 +639,8 @@ const gib = (bytes: number) => `${(bytes / GIB).toFixed(1)} GiB`;
  * The derivation in words, with the numbers that produced it.
  *
  * This is the whole point: an agent refused for capacity has to say why, in
- * figures the reader can check, the way KAN-24 made a refused spawn name its
- * cause instead of failing obscurely.
+ * figures the reader can check, the way KAN-24 (in the extraction source) made
+ * a refused spawn name its cause instead of failing obscurely.
  */
 export function describeCapacity(c: Capacity): string {
   const m = c.machine;
@@ -741,9 +746,10 @@ export function describeCapacity(c: Capacity): string {
 /**
  * One line for callers that only have room for one.
  *
- * When there is no room, it leads with the binding constraint rather than
- * with the count (KAN-60): opening "2/10 agents" on a load-bound refusal
- * read as "at capacity" by count, which the line's own figures contradicted.
+ * When there is no room, it leads with the binding constraint rather than with
+ * the count (KAN-60, in the extraction source): opening "2/10 agents" on a
+ * load-bound refusal read as "at capacity" by count, which the line's own
+ * figures contradicted.
  */
 export function summarizeCapacity(c: Capacity): string {
   // The CPU figure leads where there is one and the load average follows it,
@@ -812,12 +818,12 @@ export function capacityReason(c: Capacity): string {
  * The headline of a refusal: the binding constraint, named, then the figures
  * that make it checkable.
  *
- * KAN-60: a load-bound refusal used to be headlined "at capacity" with the
- * cap count leading — read by a human as "2 of 10, at capacity", which was
- * false by its own numbers (2 running against a cap of 10) and pointed at the
- * wrong constraint entirely. `headroomBoundBy` already knows which term
- * bound; the headline renders from it, so "at capacity" is said only when
- * the count is what bound.
+ * KAN-60 (in the extraction source): a load-bound refusal used to be headlined
+ * "at capacity" with the cap count leading — read by a human as "2 of 10, at
+ * capacity", which was false by its own numbers (2 running against a cap of
+ * 10) and pointed at the wrong constraint entirely. `headroomBoundBy` already
+ * knows which term bound; the headline renders from it, so "at capacity" is
+ * said only when the count is what bound.
  */
 export function capacityHeadline(c: Capacity): string {
   // KAN-208 added `cpu too busy` and left `load too high` in place rather than

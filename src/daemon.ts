@@ -398,7 +398,8 @@ server.on('error', (err: any) => {
 });
 
 /**
- * How often the daemon re-measures what its own agents cost (KAN-56).
+ * How often the daemon re-measures what its own agents cost (KAN-56, in the
+ * extraction source).
  *
  * Sixty seconds, for two reasons. Long enough that the utime deltas average
  * over an agent's think/act duty cycle instead of catching one busy or one
@@ -421,10 +422,10 @@ let costSamplerState: 'no-measurement' | 'live' = 'no-measurement';
 
 /**
  * Degrade, never guess: any failure — /proc unreadable, an empty fleet, a
- * sample that fails validation — clears the live measurement so capacity
- * falls back to MEASURED_AGENT_COST with the report labelling the figures as
- * seed. A stale estimate left posing as live would be the exact mislabelling
- * the provenance labels (KAN-44) exist to correct.
+ * sample that fails validation — clears the live measurement so capacity falls
+ * back to MEASURED_AGENT_COST with the report labelling the figures as seed. A
+ * stale estimate left posing as live would be the exact mislabelling the
+ * provenance labels (KAN-44, in the extraction source) exist to correct.
  */
 function degradeCostMeasurement(reason: string) {
   costEstimate = null;
