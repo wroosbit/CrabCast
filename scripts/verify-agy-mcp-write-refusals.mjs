@@ -72,6 +72,35 @@
 //     `mkdir` fails deterministically rather than depending on the uid the
 //     suite happens to run as.
 //
+// THE LAUNCHER SETUP CONTEXT IS THE DAEMON'S, AND THAT IS LOAD-BEARING (KAN-228).
+// `sidecarDir` and `agentsDir` are what make the ownership question answerable —
+// omit either and every colliding key reads as "cannot tell", which refuses. THIS
+// FILE SUPPLIES NEITHER. It drives real activations through the ordinary verbs, so
+// the context `launcher.setup` receives is the one `HerdrBridge` assembled in
+// `herdr.ts`, exactly as in production. The wiring is therefore covered
+// STRUCTURALLY rather than by an assertion somebody has to remember to write:
+//
+//   - delete `agentsDir: this.agentsDir(),` from herdr.ts's setup context and this
+//     file goes red with 12 failures, headed by §4's "AGENT B IS NOT REFUSED over
+//     agent A's key" — the ordinary multi-agent path, refused.
+//   - delete `sidecarDir,` and it goes red with 14, headed by §3's "RE-ACTIVATION
+//     OVER OUR OWN KEY IS NOT REFUSED".
+//
+// Both are `?`-optional in `LauncherSetupContext` by design, so `tsc` catches
+// NEITHER deletion. §3 and §4 are what catch them — a second reason those two
+// positive controls are not decoration.
+//
+// THE COUNTS ARE THERE TO BE CHECKED rather than to reassure: they were measured
+// at KAN-228 and they are the whole content of the claim. If you change this file,
+// re-run both deletions rather than editing the numbers to match.
+//
+// WHY THIS PARAGRAPH EXISTS, which is worth knowing. A reviewer read a
+// `world.agentsDir` convenience field this file used to carry — assigned once and
+// read nowhere — inferred from it that the harness injected `agentsDir`, and filed
+// a coverage gap that did not exist. The field is deleted and this replaces it. A
+// grepped literal is not a mechanism, and an unread field that looks like an
+// injection costs more than it saves.
+//
 // WHAT THIS FILE DOES NOT COVER, and who does:
 //
 //   - THE REVERSAL. That a `forget` removes our key only when no sibling still
@@ -210,7 +239,6 @@ async function loadDaemon(distDir) {
     MessageRouter: router.MessageRouter,
     AgentRegistry: registry.AgentRegistry,
     loadConfig: config.loadConfig,
-    agentsDirFor: identity.agentsDirFor,
     sidecarDirFor: identity.sidecarDirFor,
     agyMcpConfigPath: launchers.agyMcpConfigPath
   };
@@ -264,7 +292,6 @@ function newWorld(label, build = realBuild) {
     dataDir,
     config,
     agyFile,
-    agentsDir: build.agentsDirFor(dataDir),
     /** The `mcpServers` map currently in the global agy config, or null. */
     agyServers: () => parseIfPresent(agyFile)?.mcpServers ?? null,
     sidecarOf: (dir) => build.sidecarDirFor(dataDir, dir),
