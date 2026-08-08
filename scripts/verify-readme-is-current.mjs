@@ -161,11 +161,20 @@
 //   output for a census, not that this census ever existed. A row shape the
 //   renderer grows still goes red; a foreign pane the page invented does not.
 //
-// * IT COVERS SIX OF THE PAGE'S THIRTEEN PROGRAM-OUTPUT BLOCKS. The other
-//   seven are in UNCOVERED below, each with the reason it is not reproduced
-//   here. Section 1 fails if a fenced block of program output is in neither
-//   list, so the coverage cannot silently shrink — but it is coverage of six,
-//   and a green run is not a statement about the other seven.
+// * IT REPRODUCES SIX OF THE PAGE'S FOURTEEN PROGRAM-OUTPUT BLOCKS. One more —
+//   the build/freshness block — is covered by ANOTHER script and is listed in
+//   COVERED_ELSEWHERE with the citation (KAN-180); the remaining seven are in
+//   UNCOVERED, each with the reason it is not reproduced here. Section 1 fails
+//   if a fenced block of program output is in none of the three lists, so the
+//   coverage cannot silently shrink — but a green run here is a statement about
+//   six blocks, and about the seventh only by reference to a script this run
+//   does not execute.
+//
+//   THE COUNT WAS THIRTEEN WHEN THIS FILE WAS WRITTEN AND IS NOT PINNED
+//   ANYWHERE, deliberately: section 1 enumerates the page rather than counting
+//   it, so a block added to the README is a named failure ("NOT reproduced by a
+//   scenario and NOT in the UNCOVERED register") instead of an off-by-one. It
+//   went to fourteen when KAN-181 added the herdr 0.8.0 version notice.
 //
 // * A SCENARIO THAT STOPS EARLY TAKES SECTIONS 2 TO 5 WITH IT, and this run
 //   says so rather than passing over them. Since KAN-191 a scenario that cannot
@@ -222,6 +231,22 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+// The page parser, the mask and the comparison used to live here. KAN-180 moved
+// them to scripts/readme-blocks.mjs so verify-daemon-provenance.mjs §3b could
+// compare the build/freshness block against the SAME mask rather than a second
+// copy of it — see that module's header for why one copy matters.
+import {
+  blockFor,
+  compareSegment,
+  fencedBlocks,
+  isProgramOutput,
+  MASKS,
+  maskLine,
+  segmentsOf,
+  shapesMatch,
+  VARIANTS
+} from './readme-blocks.mjs';
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
 const distDir = path.resolve(process.argv[2] ?? path.join(repoRoot, 'dist'));
@@ -275,153 +300,6 @@ const skip = (claim, detail = '') => {
   return false;
 };
 
-// ===========================================================================
-// The page, parsed.
-// ===========================================================================
-
-/** Every fenced block in a markdown document, with the heading it sits under. */
-function fencedBlocks(markdown) {
-  const lines = markdown.split('\n');
-  const blocks = [];
-  let heading = '(top)';
-  let open = null;
-  lines.forEach((line, i) => {
-    const fence = /^```(.*)$/.exec(line);
-    if (fence) {
-      if (!open) open = { info: fence[1], heading, start: i + 2 };
-      else {
-        blocks.push({ ...open, end: i, body: lines.slice(open.start - 1, i) });
-        open = null;
-      }
-      return;
-    }
-    if (!open && /^#{1,6} /.test(line)) heading = line.trim();
-  });
-  return blocks;
-}
-
-/**
- * A block is program output when it contains a shell prompt driving this
- * program, or a line the program itself begins. Everything else on the page is
- * an install snippet, a config document or a command menu, and no renderer
- * emits it.
- */
-const isProgramOutput = (block) =>
-  block.body.some((l) => /^\$ (crabcast|herdr|export )/.test(l) || /^crabcast: /.test(l)) ||
-  block.body.some((l) => /^build — what THIS process was loaded from/.test(l));
-
-/**
- * A block split into `$ command` / output pairs. Lines before the first
- * command belong to no command and are returned under a null command, which
- * is how the freshness block (all output, no prompt) is still addressable.
- */
-function segmentsOf(body) {
-  const segments = [];
-  let current = { command: null, output: [] };
-  for (const line of body) {
-    if (line.startsWith('$ ')) {
-      if (current.command !== null || current.output.length) segments.push(current);
-      current = { command: line.slice(2), output: [] };
-    } else current.output.push(line);
-  }
-  segments.push(current);
-  return segments.filter((s) => s.command !== null || s.output.length);
-}
-
-// ===========================================================================
-// The mask. Every rule is a value that MUST differ between two runs, and each
-// one is a hole in what this check can see — section 6 prints the register.
-// ===========================================================================
-
-const MASKS = [
-  {
-    id: 'TIME',
-    re: /\d{4}-\d{2}-\d{2}T[\d:.]+Z/g,
-    to: '<TIME>',
-    why: 'an ISO timestamp. Two runs never share one.',
-    costs: 'a renderer that printed the WRONG timestamp — a stale read, a boot time where a read time belongs — is invisible here.'
-  },
-  {
-    id: 'UUID',
-    re: /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g,
-    to: '<UUID>',
-    why: "the daemon's bootId, minted at every start.",
-    costs: 'two different boots are indistinguishable, so a stale bootId reads the same as a fresh one.'
-  },
-  {
-    id: 'ID',
-    re: /\b[0-9a-f]{16}\b/g,
-    to: '<ID>',
-    why: "the 16-hex digest `identity.ts` derives a pane name from. It is a function of the directory, and this check's directory is a scratch one.",
-    costs: 'two different agents\u2019 pane names are indistinguishable after masking, so a row attributed to the wrong agent still passes.'
-  },
-  {
-    id: 'PANE',
-    re: /\bw[0-9a-f]+-\d+\b/g,
-    to: '<PANE>',
-    why: "a herdr pane id. It is a position in herdr's pane list and moves whenever any pane anywhere closes.",
-    costs: 'a pane id printed where a different pane id belongs reads the same.'
-  },
-  {
-    id: 'MS',
-    re: /\b\d+ms\b/g,
-    to: '<MS>',
-    why: 'a millisecond duration of a real wait.',
-    costs: 'nothing about durations is checked at all.'
-  },
-  {
-    id: 'BOUND',
-    re: /bound by (cpu|memory|load|cap|configured|floor|count)\b/g,
-    to: 'bound by <TERM>',
-    why: 'which capacity term binds is a fact about the machine the command ran on. A GitHub runner and a ThinkPad do not agree, and neither is wrong.',
-    costs: 'a capacity report that named the wrong binding constraint would pass. `verify-agent-capacity` owns that arithmetic; this check owns the page.'
-  },
-  {
-    id: 'SOURCE',
-    re: /\((seed|measured|override)\)/g,
-    to: '(<SOURCE>)',
-    why: 'whether the agent-cost figures are the seed constants, a live measurement or an operator override depends on how long the daemon has been up (the sampler fires at 60s) and on the environment.',
-    costs: 'a page claiming measured figures where the program says seed would pass.'
-  },
-  {
-    id: 'NUM',
-    re: /\b\d+(\.\d+)?\b/g,
-    to: '<NUM>',
-    why: 'every bare number: counts, sizes, load averages, character totals, versions.',
-    costs: 'THE WIDEST RULE HERE. A page showing `priority 1` where the program prints `priority 9` passes. Numbers are values; this check is about lines.'
-  }
-];
-
-const maskLine = (line) => MASKS.reduce((s, m) => s.replace(m.re, m.to), line);
-
-/**
- * Lines that legitimately have two shapes, because the branch taken depends on
- * the machine rather than on the code. A captured line matches the page when
- * the page shows EITHER member of its group.
- */
-const VARIANTS = [
-  {
-    why: 'the agent-cost provenance line. With no live measurement the renderer prints the seed disclaimer; once the daemon\u2019s 60s sampler has fired it prints the measurement instead. A run slow enough to cross that boundary must not turn red.',
-    shapes: [
-      '  no live measurement; seed figures are the <NUM>-<NUM>-<NUM> constants, not a measurement of this fleet',
-      /^ {2}measured \(damped\): /
-    ]
-  },
-  {
-    why: 'the capacity summary headline gains an `at capacity: ` prefix when headroom is zero, which on a busy runner it may be and on the capturing machine it was not.',
-    shapes: [/^ {2}(at capacity: )?<NUM>\/<NUM> charged agents/]
-  }
-];
-
-/** Does `pageShape` satisfy `captured`, allowing for a declared variant? */
-function shapesMatch(captured, pageShape) {
-  if (captured === pageShape) return true;
-  for (const group of VARIANTS) {
-    const hit = (s) => group.shapes.some((m) => (typeof m === 'string' ? m === s : m.test(s)));
-    if (hit(captured) && hit(pageShape)) return true;
-  }
-  return false;
-}
 
 // ===========================================================================
 // The scratch, the shim, and the CLI driver.
@@ -1286,62 +1164,53 @@ const UNCOVERED = [
       'Four command lines with NO output pasted under them: the block is the recipe for reaching ' +
       'PROCESS-PREDATES-BUILD, not a transcript. There are no printed lines for this check to ' +
       'find missing.'
-  },
+  }
+];
+
+/**
+ * Blocks this script does not reproduce because ANOTHER script does — named
+ * here so section 1 stays a complete enumeration of the page.
+ *
+ * WHY THIS LIST EXISTS AT ALL, AND WHY IT IS NOT SIMPLY A DELETION (KAN-180).
+ * The obvious edit when a block becomes covered elsewhere is to drop its
+ * UNCOVERED entry, and that edit is wrong in this file specifically. Section 1's
+ * whole value is that every fenced block of program output is accounted for by
+ * name; a block that quietly leaves the register still passes section 1 — the
+ * `claimed` map only cares that SOMETHING claimed it — so the enumeration would
+ * stop being complete while continuing to look complete. That is this epic's
+ * commonest costume and section 1 is the thing that exists to prevent it.
+ *
+ * So a covered-elsewhere block is claimed here, printed here, and carries a
+ * CITATION rather than a reason: the script and the section, so a reader who
+ * wants to know what covers it can open the file rather than take this list's
+ * word for it. `script` is checked against the filesystem below — a citation
+ * pointing at a file that has been renamed or deleted is worse than no citation,
+ * because it reads as coverage.
+ *
+ * WHAT THIS COSTS, said plainly: ownership of "the README is current" is now
+ * split across two scripts, and a reader running only this one gets a green that
+ * does not include these blocks. The verdict line says so.
+ */
+const COVERED_ELSEWHERE = [
   {
     heading: '### Which build is running',
     index: 1,
-    reason:
-      'The build/freshness block. Reaching PROCESS-PREDATES-BUILD needs a real `npm run build` ' +
-      'in the middle of the run, under a live daemon — a minute of tsc inside a check that ' +
-      'otherwise takes seconds, and a second build tree to rebuild. NOBODY COVERS THIS PAGE ' +
-      'BLOCK. scripts/verify-daemon-provenance.mjs produces the state and asserts the daemon’s ' +
-      'answer, but it never looks at README.md. Filed as KAN-180.'
+    script: 'scripts/verify-daemon-provenance.mjs',
+    section: '§3b',
+    why:
+      'The build/freshness block. Reaching PROCESS-PREDATES-BUILD means running a daemon and ' +
+      'rebuilding the dist/ underneath it — the state verify-daemon-provenance §3 already ' +
+      'constructs and already asserts the daemon’s answer about. KAN-180 put the page comparison ' +
+      'there, beside the state, rather than building a second fixture tree here to reach a state ' +
+      'that already exists: §3b takes the very `crabcast daemon-status` output §3 captures and ' +
+      'requires this block to show every line of it, through the mask in scripts/readme-blocks.mjs ' +
+      'that this script uses for the six it does reproduce.'
   }
 ];
 
 // ===========================================================================
 // The comparison. One captured segment against one pasted segment.
 // ===========================================================================
-
-/**
- * Locate a scenario's or an exclusion's block on a page.
- *
- * `index` is the nth fenced block under that heading, counting only blocks of
- * program output — so an install snippet appearing under the same heading does
- * not shift the numbering.
- */
-function blockFor(blocks, heading, index) {
-  const under = blocks.filter((b) => b.heading === heading && isProgramOutput(b));
-  return under[index] ?? null;
-}
-
-/**
- * Every line the program printed, in order, must appear in the page's segment
- * for that command — as a SUBSEQUENCE, not as a set.
- *
- * Set membership is the weak form and it fails in a specific way KAN-174 hit
- * from the other direction: a line satisfied by an occurrence somewhere else
- * entirely. Requiring order means a line that only appears BEFORE the one
- * already matched does not count, so a block whose lines were shuffled or
- * whose section was pasted from a different command is still caught. Extra
- * lines on the page are allowed: the page is a real session and may show
- * values this shimmed run does not produce.
- */
-function compareSegment(captured, pasted) {
-  const want = captured.output.map(maskLine);
-  const have = pasted.output.map(maskLine);
-  const missing = [];
-  let cursor = 0;
-  for (let i = 0; i < want.length; i += 1) {
-    let at = -1;
-    for (let j = cursor; j < have.length; j += 1) {
-      if (shapesMatch(want[i], have[j])) { at = j; break; }
-    }
-    if (at === -1) missing.push({ line: captured.output[i], shape: want[i] });
-    else cursor = at + 1;
-  }
-  return missing;
-}
 
 /**
  * Match a captured command line to a pasted one, masked, AT OR AFTER `from`.
@@ -1458,6 +1327,22 @@ for (const u of UNCOVERED) {
   check(typeof u.reason === 'string' && u.reason.trim().length >= 60,
     `that exclusion carries a reason, not just a name`);
 }
+for (const c of COVERED_ELSEWHERE) {
+  const b = claim(c.heading, c.index, `covered by ${c.script} ${c.section}`);
+  check(Boolean(b), `'${c.heading}' #${c.index} — the block cited as covered elsewhere is on the page`,
+    b ? `README.md:${b.start}-${b.end}` : 'the block is gone — remove the entry, or it cites coverage of nothing');
+  // THE CITATION IS CHECKED, NOT TRUSTED. A citation naming a file that has
+  // been renamed or deleted is worse than no citation: it reads as coverage to
+  // anyone auditing this register, which is the only reason the register is
+  // worth keeping. This cannot tell whether that script still contains the
+  // section — see the verdict's note — but a missing FILE is a claim this can
+  // and does falsify.
+  check(fs.existsSync(path.join(repoRoot, c.script)),
+    `and ${c.script} exists to carry that coverage`,
+    fs.existsSync(path.join(repoRoot, c.script)) ? c.section : 'THE CITED SCRIPT IS NOT THERE');
+  check(typeof c.why === 'string' && c.why.trim().length >= 60 && Boolean(c.section),
+    `and the entry cites a section and says why coverage lives there`);
+}
 
 for (const b of programBlocks) {
   check(claimed.has(b.start),
@@ -1467,7 +1352,14 @@ for (const b of programBlocks) {
 }
 
 console.log(`\n  ${programBlocks.length} program-output block(s): ` +
-  `${SCENARIOS.length} reproduced, ${UNCOVERED.length} registered as uncovered.\n`);
+  `${SCENARIOS.length} reproduced here, ${COVERED_ELSEWHERE.length} covered by another script, ` +
+  `${UNCOVERED.length} registered as uncovered.\n`);
+for (const c of COVERED_ELSEWHERE) {
+  const b = blockFor(blocks, c.heading, c.index);
+  console.log(`  COVERED ELSEWHERE  ${c.heading} #${c.index}${b ? ` (README.md:${b.start}-${b.end})` : ''}`);
+  console.log(`    by ${c.script} ${c.section}`);
+  console.log(`    ${c.why.replace(/\s+/g, ' ')}\n`);
+}
 for (const u of UNCOVERED) {
   const b = blockFor(blocks, u.heading, u.index);
   console.log(`  UNCOVERED  ${u.heading} #${u.index}${b ? ` (README.md:${b.start}-${b.end})` : ''}`);
@@ -2161,7 +2053,13 @@ if (failures) {
 }
 console.log(
   '\nRemember what a green run does NOT say: that the pasted sessions are real, that the\n' +
-  'page’s prose is true, or anything at all about the seven blocks in the UNCOVERED\n' +
-  'register above.\n'
+  `page’s prose is true, or anything at all about the ${UNCOVERED.length} blocks in the UNCOVERED\n` +
+  'register above.\n' +
+  `\nAND IT DOES NOT RUN THE COVERAGE IT CITES. ${COVERED_ELSEWHERE.length} block(s) above are marked COVERED\n` +
+  'ELSEWHERE, which means this run checked that the block is on the page and that the\n' +
+  'script named beside it exists — never that the script still asserts anything about\n' +
+  'it. "The README is current" is split across two scripts since KAN-180, and only\n' +
+  'running both answers it:\n' +
+  COVERED_ELSEWHERE.map((c) => `  - ${c.heading} #${c.index} → node ${c.script} (${c.section})`).join('\n') + '\n'
 );
 process.exit(failures ? 1 : 0);
