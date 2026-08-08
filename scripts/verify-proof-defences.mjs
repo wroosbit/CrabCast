@@ -672,6 +672,29 @@ const PROOF_DEFENCES = [
       'really can through the normal one, so the difference measured is the PATH.'
   },
   {
+    script: 'verify-daemon-status-over-mcp',
+    defence: 'guard',
+    central:
+      '`daemon_status` is REACHABLE from MCP — a tenth registered tool a real client discovers ' +
+      'over stdio — and the payload it answers with is the same answer the raw socket gives for ' +
+      'the same action, field for field.',
+    anchor: 'cached at boot, or computed anywhere but in that daemon, would still say `current`',
+    note:
+      'THE GUARD IS §4, and it exists because §3 alone is satisfiable by the wrong thing. §3 ' +
+      'compares the MCP payload to the socket\'s on a quiescent daemon; a payload cached at boot, ' +
+      'or recomputed independently but plausibly, agrees there and goes on agreeing forever. So §4 ' +
+      'CHANGES WHAT THE TRUE ANSWER IS — it rebuilds the fixture `dist/` under the running daemon, ' +
+      'the real KAN-122 situation — and requires both surfaces to move together to the new one. A ' +
+      'cached mirror passes §3 and fails §4. §3 also carries a vacuity check ' +
+      '(`Object.keys(sockCompare).length > 0`), because a comparison over zero fields would ' +
+      'otherwise report agreement about nothing. WHAT IS NOT DEFENDED: §1\'s eight ' +
+      'description claims are a PRESENCE check — they catch removal and not contradiction, so a ' +
+      'rewrite keeping the phrases while adding a sentence calling this a health check passes. And ' +
+      'nothing here re-checks what `build`/`freshness` MEAN; verify-daemon-provenance owns that ' +
+      'over the socket and this proof asserts only that the blocks arrive and that the two ' +
+      'surfaces agree about them.'
+  },
+  {
     script: 'verify-fleet-switch-live',
     defence: 'guard',
     central:

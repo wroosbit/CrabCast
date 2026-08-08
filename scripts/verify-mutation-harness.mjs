@@ -466,6 +466,22 @@ const COPIES_BUT_DOES_NOT_MUTATE = [
       'edits a file inside a copy to change the daemon\'s behaviour, which is the practice this ' +
       'sweep is about; it builds worlds for an unmutated daemon to report on.',
     evidence: 'scripts/verify-daemon-provenance.mjs:121 cpSync of dist and src into a fixture tree, not a mutant'
+  },
+  {
+    script: 'scripts/verify-daemon-status-over-mcp.mjs',
+    reason:
+      'Same shape as verify-daemon-provenance above, and for the same reason: it copies dist/ and ' +
+      'src/ into ONE fixture tree — a real little git repo — and runs an unmutated MCP server and ' +
+      'daemon out of it, because `build`/`freshness` describe the tree a process was loaded from ' +
+      'and the real repository is not a tree this proof may arrange. WHAT IT DOES TO THAT COPY, ' +
+      'said explicitly because the file contains a `touch` and a re-`stamp` that a reader of this ' +
+      'entry would otherwise have to go and check: §4 changes FILE TIMES and rewrites ' +
+      'build-stamp.json to simulate a rebuild under the running daemon. Not one byte of compiled ' +
+      'code is edited, and the daemon\'s behaviour is identical before and after — what changes is ' +
+      'what the tree LOOKS like, which is the thing under report. That is building a world for an ' +
+      'unmutated daemon to describe, not a mutant.',
+    evidence: 'scripts/verify-daemon-status-over-mcp.mjs:188 cpSync of dist into a fixture tree; ' +
+      'the §4 touch/re-stamp alters mtimes and the stamp, never compiled code'
   }
 ];
 
