@@ -729,12 +729,13 @@ export class AgentRegistry {
    * whole lines rather than overwriting each other.
    *
    * Never throws — a registry that cannot be written is a degraded restore,
-   * not a reason to fail the operation the caller is in the middle of — but
-   * it *answers*. A swallowed failure here is KAN-21 re-entering through the
-   * error path: the agent exists, the disk does not know, and nothing outside
-   * the daemon log can observe it. The caller surfaces `ok: false` (a
-   * `durable: false` on its response, a degraded-registry broadcast) so the
-   * gap is somebody's to act on rather than nobody's.
+   * not a reason to fail the operation the caller is in the middle of — but it
+   * *answers*. A swallowed failure here is KAN-21 (in the extraction source)
+   * re-entering through the error path: the agent exists, the disk does not
+   * know, and nothing outside the daemon log can observe it. The caller
+   * surfaces `ok: false` (a `durable: false` on its response, a
+   * degraded-registry broadcast) so the gap is somebody's to act on rather
+   * than nobody's.
    */
   public record(
     event: AgentEvent,
@@ -1035,10 +1036,10 @@ export class AgentRegistry {
    * had been through a compaction came back with NO resume cause: Claude Code
    * restored its whole conversation, the nudge never fired because nothing
    * thought this was a resume, and it sat at an empty prompt with all of its
-   * memory and no turn to take. That is the KAN-21 idle-forever failure,
-   * reached through the one path that was supposed to have been made safe —
-   * and `standbyAgents` was meanwhile telling the reader that switching it on
-   * "resumes the conversation it was stopped in."
+   * memory and no turn to take. That is the KAN-21 (in the extraction source)
+   * idle-forever failure, reached through the one path that was supposed to
+   * have been made safe — and `standbyAgents` was meanwhile telling the reader
+   * that switching it on "resumes the conversation it was stopped in."
    *
    * The debt may be forgotten. That the work was interrupted may not.
    */

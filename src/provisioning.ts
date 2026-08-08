@@ -197,11 +197,12 @@ export interface ArtifactDisclosure {
 /**
  * Provisioning that did not stick, raised so the activation is REFUSED.
  *
- * KAN-84's lesson, and this daemon has paid for it once: a swallowed
- * prompt-file write let an uninstructed agent start behind `verified: true`.
- * Every failure in this file therefore throws rather than logging — the one
- * exception is the git exclude line, which is a courtesy rather than a
- * requirement and is reported instead (see {@link addGitExclude}).
+ * KAN-84's lesson (in the extraction source; see docs/ported-lineage.md), and
+ * this daemon has paid for it once: a swallowed prompt-file write let an
+ * uninstructed agent start behind `verified: true`. Every failure in this file
+ * therefore throws rather than logging — the one exception is the git exclude
+ * line, which is a courtesy rather than a requirement and is reported instead
+ * (see {@link addGitExclude}).
  */
 export class ProvisioningError extends Error {
   constructor(

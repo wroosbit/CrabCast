@@ -1,10 +1,11 @@
 // What one agent actually costs this machine, measured rather than assumed.
 //
 // MEASURED_AGENT_COST in capacity.ts is the whole cap in two numbers, and
-// KAN-34 shipped them from a single afternoon's observation with a note
-// saying "re-measure it before trusting it". This is that instrument (KAN-55)
-// — the daemon runs the same measurement a hand-held script would, with
-// exactly one copy of the logic.
+// KAN-34 (in the extraction source; see docs/ported-lineage.md) shipped them
+// from a single afternoon's observation with a note saying "re-measure it
+// before trusting it". This is that instrument (KAN-55, in the extraction
+// source) — the daemon runs the same measurement a hand-held script would,
+// with exactly one copy of the logic.
 //
 // An agent is not the runtime process. It is that process plus everything it
 // starts — tsc, npm, git, ripgrep, subagents — and the cost that matters is

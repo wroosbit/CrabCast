@@ -337,7 +337,8 @@ const TRUST_SETTLE_MS = 60;
 // window — a sibling's write-back landing after the last verify here but
 // before the new claude reads the file — closes at the pre-spawn re-check
 // (herdr.ts) and cannot be closed entirely from this side of the spawn;
-// watching agents past their startup dialogs was explicitly deferred (KAN-49).
+// watching agents past their startup dialogs was explicitly deferred (KAN-49,
+// in the extraction source).
 /**
  * The user's global Claude Code configuration — the ONLY file folder trust can
  * be recorded in.
@@ -541,8 +542,9 @@ export interface AgentLauncher {
   /**
    * Re-run immediately before the pane spawn, after everything between setup
    * and the spawn (prompt write, `herdr agent get`) has had time to happen —
-   * time in which another process can undo what setup wrote (KAN-54). Throws
-   * to refuse the activation through the same spawnError channel.
+   * time in which another process can undo what setup wrote (KAN-54, in the
+   * extraction source). Throws to refuse the activation through the same
+   * spawnError channel.
    */
   preSpawnCheck?: (workDir: string) => void;
   /**
@@ -583,15 +585,15 @@ export interface AgentLauncher {
 // `configure` parameter; it selects from this table and is never itself
 // executed as shell.
 //
-// The resolution rule (KAN-53), now one step shorter: the caller's `launcher`
-// wins, and only a bridge-level caller with no configured agent in hand ever
-// reaches DEFAULT_AGENT. The middle step — a workspace type's
-// `defaultLauncher` — is gone with the types, and nothing replaces it: an
-// agent's launcher is a value its caller froze onto its record, so there is no
-// second place for it to come from and therefore no chance of the two
-// disagreeing. An unknown name at either step refuses the activation.
-// Nothing resolves to `shell` unless someone asked for `shell` by name: the
-// extraction source's old rule was `name || 'shell'` plus a
+// The resolution rule (KAN-53, in the extraction source), now one step
+// shorter: the caller's `launcher` wins, and only a bridge-level caller with
+// no configured agent in hand ever reaches DEFAULT_AGENT. The middle step — a
+// workspace type's `defaultLauncher` — is gone with the types, and nothing
+// replaces it: an agent's launcher is a value its caller froze onto its
+// record, so there is no second place for it to come from and therefore no
+// chance of the two disagreeing. An unknown name at either step refuses the
+// activation. Nothing resolves to `shell` unless someone asked for `shell` by
+// name: the extraction source's old rule was `name || 'shell'` plus a
 // warn-and-fall-back for unknown names, and both halves were the same trap —
 // an activation that omitted or misspelled the field got a bare bash prompt
 // wearing an agent's name, reported `success: true, verified: true` because a
@@ -672,7 +674,8 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
     // trustClaudeWorkspace is its own verifier: present-and-true returns fast
     // with no write, a clobbered entry is rewritten, and only an entry that
     // will not stick throws. So the pre-spawn check is simply setup's trust
-    // half again, run as late as the daemon can run anything (KAN-54).
+    // half again, run as late as the daemon can run anything (KAN-54, in the
+    // extraction source).
     preSpawnCheck: (workDir: string) => {
       const trust = trustClaudeWorkspace(workDir);
       if (!trust.ok) {
@@ -753,8 +756,8 @@ export function knownLaunchers(): string[] {
  * False only for `shell`, where a bare prompt with nothing running in it is
  * the delivered product. Everywhere this daemon asks "does an agent exist
  * here?", the answer for every other launcher is "only if herdr reports a
- * runtime" — a name registration over a dead pane must not verify (KAN-58) —
- * and for `shell` the name is all there is to see.
+ * runtime" — a name registration over a dead pane must not verify (KAN-58, in
+ * the extraction source) — and for `shell` the name is all there is to see.
  *
  * One function rather than a `!== 'shell'` at each site: `initPty` decides it
  * for a session, `confirmAgentPresent` is passed it, `ourPaneIn` needs it to
@@ -779,10 +782,10 @@ export function launcherDeliversRuntime(launcherName?: string): boolean {
  * Map a requested launcher name to its launcher.
  *
  * An unknown name throws, and the message names the valid launchers — the rule
- * set for pty_init's unknown sessionId (KAN-25): refuse rather than substitute
- * something plausible. initPty turns the throw into session.spawnError, the
- * channel activate already answers `success: false` from, so the refusal
- * reaches the caller without new vocabulary.
+ * set for pty_init's unknown sessionId (KAN-25, in the extraction source):
+ * refuse rather than substitute something plausible. initPty turns the throw
+ * into session.spawnError, the channel activate already answers `success:
+ * false` from, so the refusal reaches the caller without new vocabulary.
  */
 export function resolveLauncher(name?: string): { name: string; launcher: AgentLauncher } {
   const requested = name?.trim() || DEFAULT_AGENT;

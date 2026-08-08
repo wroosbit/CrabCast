@@ -675,8 +675,9 @@ function capacityDto(c: Capacity) {
     availableMb: Math.round(c.machine.availableBytes / (1024 * 1024)),
     agentMemoryMb: Math.round(c.cost.residentBytes / (1024 * 1024)),
     agentCores: c.cost.cores,
-    // Where the two cost figures came from (KAN-56): 'override', 'measured'
-    // or 'seed', plus the sample's metadata when a measurement was consulted.
+    // Where the two cost figures came from (KAN-56, in the extraction source):
+    // 'override', 'measured' or 'seed', plus the sample's metadata when a
+    // measurement was consulted.
     agentMemorySource: c.costSource.residentBytes,
     agentCoresSource: c.costSource.cores,
     measuredAt: c.measured ? new Date(c.measured.sampledAt).toISOString() : null,
@@ -869,14 +870,15 @@ interface StatusObservation {
  *
  * THE DEFECT IT EXISTS TO PREVENT, because it was written the other way first
  * and the proof caught it. This daemon builds ONE MessageRouter PER CONNECTION
- * (daemon.ts: responses go back to the requesting client, and PTY listeners die
- * with the socket), plus one more for the sweep. A memory held as a field on
- * the router is therefore private to a connection: the sweep records into the
- * daemon's router, `list_agents` is answered by a different one that has
- * watched nothing, and `statusSince` comes back null on every row for ever. The
- * field would be PRESENT, CORRECTLY TYPED and ALWAYS NULL — which is exactly
- * the shape KAN-145 shipped to production behind two green proofs, because
- * every assertion anybody thinks to write about such a field still passes.
+ * (daemon.ts: responses go back to the requesting client, and PTY listeners
+ * die with the socket), plus one more for the sweep. A memory held as a field
+ * on the router is therefore private to a connection: the sweep records into
+ * the daemon's router, `list_agents` is answered by a different one that has
+ * watched nothing, and `statusSince` comes back null on every row for ever.
+ * The field would be PRESENT, CORRECTLY TYPED and ALWAYS NULL — which is
+ * exactly the shape KAN-145 (in the extraction source) shipped to production
+ * behind two green proofs, because every assertion anybody thinks to write
+ * about such a field still passes.
  *
  * So the observation is a dependency, injected like the bridge and the
  * registry, and the daemon hands the same instance to every router it makes.
@@ -1483,10 +1485,10 @@ type ConfigParse =
  * loader refused on. A silently-defaulted `priority` sits at the floor, is
  * preemptable by everything, and nobody finds out until the work is destroyed
  * — that was true when priority came from a workspace type and it is true now
- * that it comes from here. `launcher` is required for the reason KAN-53
- * records: an omitted launcher used to fall back to `shell`, which staffed
- * work with a bare bash prompt that answered `success: true` and executed
- * messages as shell commands.
+ * that it comes from here. `launcher` is required for the reason KAN-53 (in
+ * the extraction source) records: an omitted launcher used to fall back to
+ * `shell`, which staffed work with a bare bash prompt that answered `success:
+ * true` and executed messages as shell commands.
  *
  * The three gate flags DEFAULT to `true` rather than being required, and that
  * asymmetry is deliberate: `true` is the safe reading of each (refusable
@@ -3409,11 +3411,12 @@ export class MessageRouter {
    *
    * The registry itself never throws — an unwritable log must not fail the
    * lifecycle operation the caller is in the middle of — but a swallowed
-   * failure is the KAN-21 silent loss re-entering through the error path: the
-   * agent exists, the disk does not know, and the next boot forgets it. So
-   * the failure is broadcast to every connected client, and the caller puts
-   * `durable: false` on its response, which is the difference between "the
-   * daemon said yes and the disk knows" and "the daemon said yes".
+   * failure is the KAN-21 (in the extraction source) silent loss re-entering
+   * through the error path: the agent exists, the disk does not know, and the
+   * next boot forgets it. So the failure is broadcast to every connected
+   * client, and the caller puts `durable: false` on its response, which is the
+   * difference between "the daemon said yes and the disk knows" and "the
+   * daemon said yes".
    */
   private surfaceRegistryOutcome(outcome: RecordOutcome, what: string): RecordOutcome {
     if (!outcome.ok) {
@@ -3526,9 +3529,10 @@ export class MessageRouter {
     session: HerdrSession
   ): Promise<{ error: string } | { paneId: string | null }> {
     // Existence means a live runtime for every launcher but `shell` — a name
-    // registration over a dead pane must not verify (KAN-58). Sessions that
-    // reached this point were built by initPty, which sets the field; an
-    // unset one gets the strict reading rather than the lenient one.
+    // registration over a dead pane must not verify (KAN-58, in the extraction
+    // source). Sessions that reached this point were built by initPty, which
+    // sets the field; an unset one gets the strict reading rather than the
+    // lenient one.
     const presence = await this.deps.herdrBridge.confirmAgentPresent(
       session.paneName,
       session.expectsRuntime ?? true
@@ -3744,8 +3748,9 @@ export class MessageRouter {
       // reconciler diffs on, on an agent that had been configured seven times.
       // A converging write that loses a field is not a repair.
       //
-      // AND `null` FOR THE CALLER, WHICH IS THE WHOLE OF KAN-145'S LESSON IN
-      // ONE ARGUMENT. This is the branch that runs when the agent is ALREADY
+      // AND `null` FOR THE CALLER, WHICH IS THE WHOLE OF THE LESSON OF
+      // KAN-145 (IN THE EXTRACTION SOURCE) IN ONE ARGUMENT. This is the
+      // branch that runs when the agent is ALREADY
       // RUNNING — it re-attaches a terminal and repairs a record; it does not
       // stand anything up. So the caller here is whoever is *looking at* this
       // agent, not whoever *started* it, and those are different questions that
@@ -3793,7 +3798,8 @@ export class MessageRouter {
         // without a terminal for it, which is not a success however healthy
         // the pane is. Reported on the same channel a refused spawn uses — a
         // response carrying `success: true` and no usable session is the
-        // KAN-23 false success in its other direction.
+        // KAN-23 (in the extraction source) false success in its other
+        // direction.
         if (session.spawnError) {
           fail(session.spawnError, {
             path: agentPath,
@@ -4084,8 +4090,9 @@ export class MessageRouter {
       // false` below says why, which is better than a `true` nothing backs.
       ...configEcho(this.deps.agentRegistry.intents().get(agentPath)),
       // Not decoration: it is the difference between this response and the
-      // KAN-23 false success. `true` means the agent was found in herdr's
-      // census before this was sent, and success is never reported without it.
+      // KAN-23 (in the extraction source) false success. `true` means the
+      // agent was found in herdr's census before this was sent, and success is
+      // never reported without it.
       verified: true,
       // Present only when the registry write FAILED: the agent is running and
       // verified, but a daemon restart will not know to restore it. `verified`

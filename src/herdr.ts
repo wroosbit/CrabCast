@@ -74,7 +74,8 @@ export interface HerdrSession {
    * pane is the delivered product. Set by initPty once the launcher is
    * resolved, and read wherever "does an agent exist here?" is answered: for
    * every other launcher, a pane herdr reports no runtime for is not an agent,
-   * however many name registrations point at it (KAN-58).
+   * however many name registrations point at it (KAN-58, in the extraction
+   * source).
    */
   expectsRuntime?: boolean;
   /**
@@ -143,7 +144,7 @@ export const AGENT_CONFIRM_TIMEOUT_MS = 5000;
  * process herdr reports as the pane's agent exists). On the healthy path the
  * poll returns at the first census that shows the runtime, so this ceiling is
  * only ever paid in full when no agent is coming — the case where a slow
- * honest answer beats a fast false one (KAN-58).
+ * honest answer beats a fast false one (KAN-58, in the extraction source).
  *
  * Exported because the census's stale-session release (router.ts) must grant
  * a freshly spawned session at least this long before reading "no runtime
@@ -501,11 +502,11 @@ export function ourPaneIn(
   if (!pane) return null;
   // What "alive" means depends on the launcher, exactly as it does for
   // `confirmAgentPresent`: for everything but `shell`, a name registration
-  // over a pane with no runtime is not an agent (KAN-58). For `shell` the name
-  // IS all there is to see, and requiring a runtime unconditionally made every
-  // shell agent permanently unrecognisable as its own — the same shape of
-  // always-false ownership answer as the pane-id bug, found by running the
-  // live proof rather than by reading.
+  // over a pane with no runtime is not an agent (KAN-58, in the extraction
+  // source). For `shell` the name IS all there is to see, and requiring a
+  // runtime unconditionally made every shell agent permanently unrecognisable
+  // as its own — the same shape of always-false ownership answer as the
+  // pane-id bug, found by running the live proof rather than by reading.
   if (launcherDeliversRuntime(launcher) && pane.agentRuntime === null) return null;
   return pane;
 }
@@ -553,10 +554,10 @@ export class HerdrBridge {
    * A session of ours that is currently attached to this agent's terminal.
    *
    * herdr allows exactly one terminal attach per terminal, so this is the
-   * question that decides whether a new attach may use `--takeover`: an
-   * attach we already own is a live client, and stealing it is the KAN-16
-   * freeze. A session with no `ptyProcess` never got one (pty.spawn threw) and
-   * holds nothing.
+   * question that decides whether a new attach may use `--takeover`: an attach
+   * we already own is a live client, and stealing it is the KAN-16 (in the
+   * extraction source) freeze. A session with no `ptyProcess` never got one
+   * (pty.spawn threw) and holds nothing.
    */
   private liveAttachFor(paneName: string): HerdrSession | undefined {
     for (const session of this.sessions.values()) {
@@ -840,10 +841,11 @@ export class HerdrBridge {
     const { paneName } = session;
 
     // Resolved before anything else happens. An unknown launcher refuses the
-    // whole activation (KAN-53), and it must do so before anything is
-    // provisioned for an agent that will never exist. The refusal travels as
-    // spawnError — the same channel a spawn herdr refused uses — so activate
-    // answers `success: false` with the message naming the valid launchers.
+    // whole activation (KAN-53, in the extraction source), and it must do so
+    // before anything is provisioned for an agent that will never exist. The
+    // refusal travels as spawnError — the same channel a spawn herdr refused
+    // uses — so activate answers `success: false` with the message naming the
+    // valid launchers.
     let launcher: AgentLauncher;
     let launcherName: string;
     try {
@@ -936,9 +938,10 @@ export class HerdrBridge {
           ...provisionMcpConfig({ agentPath: session.path, sidecarDir, definitions })
         );
       } catch (e: any) {
-        // KAN-84's lesson, and the reason this is a refusal rather than a
-        // logged warning: a swallowed provisioning failure once let an
-        // uninstructed agent start behind `verified: true`.
+        // KAN-84's lesson (in the extraction source), and the reason this is a
+        // refusal rather than a logged warning: a swallowed provisioning
+        // failure once let an uninstructed agent start behind `verified:
+        // true`.
         session.spawnError =
           e instanceof ProvisioningError
             ? e.message
@@ -951,10 +954,10 @@ export class HerdrBridge {
     }
 
     // Agent-specific provisioning, on every activation: it is idempotent, and
-    // a setup that throws refuses the activation (KAN-54) — provisioning that
-    // demonstrably did not stick, the folder trust entry above all, would
-    // otherwise spawn an agent wedged on a startup dialog behind a
-    // `success: true, verified: true` answer.
+    // a setup that throws refuses the activation (KAN-54, in the extraction
+    // source) — provisioning that demonstrably did not stick, the folder trust
+    // entry above all, would otherwise spawn an agent wedged on a startup
+    // dialog behind a `success: true, verified: true` answer.
     if (launcher.setup) {
       try {
         launcher.setup({
@@ -1048,7 +1051,8 @@ export class HerdrBridge {
     // not evidence of an agent. The record's inner `agent` field is: it is
     // herdr's report of a live runtime in the pane. Reading mere registration
     // as existence skipped the launcher, attached this session to a dead
-    // prompt, and still answered `verified: true` (KAN-58).
+    // prompt, and still answered `verified: true` (KAN-58, in the extraction
+    // source).
     let agentExists = false;
     let staleRecord: any;
     try {
@@ -1110,10 +1114,11 @@ export class HerdrBridge {
           ? degradedResumePrompt(session.path, session.resume, promptFile)
           : coldStart;
 
-      // The last daemon-side moment to look (KAN-54). Between setup and here
-      // sit the prompt-file write and a subprocess round-trip to `herdr agent
-      // get` — real time, in which a sibling claude's boot write-back can
-      // erase the trust entry setup just verified.
+      // The last daemon-side moment to look (KAN-54, in the extraction
+      // source). Between setup and here sit the prompt-file write and a
+      // subprocess round-trip to `herdr agent get` — real time, in which a
+      // sibling claude's boot write-back can erase the trust entry setup just
+      // verified.
       if (launcher.preSpawnCheck) {
         try {
           launcher.preSpawnCheck(session.path);
@@ -1134,7 +1139,7 @@ export class HerdrBridge {
         //
         // Routed through runHerdr so a refusal is raised rather than dropped.
         // A bare spawnSync whose result was discarded is the silent false
-        // success in KAN-24.
+        // success in KAN-24 (in the extraction source).
         //
         // RESUME_ENV rides in on the same `env` invocation. It raises the two
         // thresholds behind Claude Code's "Resume from summary / Resume full
@@ -1186,10 +1191,11 @@ export class HerdrBridge {
 
     // `--takeover` evicts whoever already holds this agent's terminal attach,
     // and the evicted client is killed outright — which is exactly how a live
-    // client froze (KAN-16). The guard in spawnSession is what actually
-    // prevents that, so by the time we get here nothing of ours is attached
-    // and this resolves to true; it is kept as a second line of defence for
-    // any future caller that reaches initPty another way.
+    // client froze (KAN-16, in the extraction source). The guard in
+    // spawnSession is what actually prevents that, so by the time we get here
+    // nothing of ours is attached and this resolves to true; it is kept as a
+    // second line of defence for any future caller that reaches initPty
+    // another way.
     //
     // ON THE RESTART PATH IT IS LOAD-BEARING RATHER THAN DEFENSIVE. The
     // daemon that died still had a PTY attached to this pane when it was
@@ -1280,9 +1286,9 @@ export class HerdrBridge {
       session.status = 'terminated';
       // And recorded as a spawn failure, because that is what the caller has
       // to be told. Marking the session terminated without it produced the
-      // second false success in KAN-23: activate checks `spawnError` alone, so
-      // an attach that threw was answered with `success: true` and, in the
-      // same object, `status: "terminated"`.
+      // second false success in KAN-23 (in the extraction source): activate
+      // checks `spawnError` alone, so an attach that threw was answered with
+      // `success: true` and, in the same object, `status: "terminated"`.
       session.spawnError =
         `Agent '${paneName}' could not be attached to: ${e?.message ?? String(e)}. ` +
         `The agent may be running in herdr, but this activation produced no usable terminal.`;
@@ -1491,8 +1497,9 @@ export class HerdrBridge {
    * A spawn herdr refuses is reported through `spawnError`, and that covers
    * only the failures herdr *tells* us about. The failure this exists for is
    * the other one: herdr acknowledges the start and no agent is there
-   * afterwards — the KAN-23 false success, where `success: true` and a
-   * plausible session id were returned for an agent that never existed.
+   * afterwards — the KAN-23 (in the extraction source) false success, where
+   * `success: true` and a plausible session id were returned for an agent that
+   * never existed.
    *
    * The world here is {@link listHerdrAgentsChecked} — the same census
    * `list_agents` reports from, deliberately, so that activate and the fleet
@@ -1501,8 +1508,8 @@ export class HerdrBridge {
    * `requireRuntime` is what "exists" means. herdr's census lists every name
    * registration, including panes that are bare shells with no agent process
    * behind them, so for any launcher that delivers a runtime, presence-by-name
-   * is not presence (KAN-58). `false` is for `shell` agents, where the name is
-   * all there is to see.
+   * is not presence (KAN-58, likewise in the extraction source). `false` is
+   * for `shell` agents, where the name is all there is to see.
    *
    * It also returns the pane id from that same census read, because that id is
    * what becomes the record's durable binding — taking it from a second call
@@ -2046,12 +2053,12 @@ export class HerdrBridge {
    * Every caller here is a client that was handed a session id earlier, so an
    * id we cannot find is a caller bug — most often a client re-initialising
    * against a daemon that has restarted since the id was issued. In the
-   * extraction source all of these once fell through to a helper that
-   * returned an arbitrary active session, or spawned a default shell when
-   * there were none. A stale re-init was answered with somebody else's
-   * terminal, or with a phantom agent that then sat in the pane list — and
-   * both look like success from the outside, which is how the bug survived
-   * unnoticed (KAN-25).
+   * extraction source all of these once fell through to a helper that returned
+   * an arbitrary active session, or spawned a default shell when there were
+   * none. A stale re-init was answered with somebody else's terminal, or with
+   * a phantom agent that then sat in the pane list — and both look like
+   * success from the outside, which is how the bug survived unnoticed (KAN-25,
+   * in the extraction source).
    *
    * So: `false`/`undefined` means "no such session", and the caller owes its
    * client an error. Nothing in here creates a session as a side effect, and
@@ -2106,7 +2113,8 @@ export class HerdrBridge {
    * close was wrapped in a try/catch that logged the failure and swallowed it,
    * so a stand-down herdr had refused — or never received, because the server
    * was down — was answered `success: true` while the agent carried on
-   * working. That is the KAN-23 defect on the other side of the switch.
+   * working. That is the KAN-23 (in the extraction source) defect on the other
+   * side of the switch.
    *
    * An agent or pane herdr does not have is still a success: the caller asked
    * for the agent to be gone and it is. Anything else is reported.

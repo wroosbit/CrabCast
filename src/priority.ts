@@ -8,11 +8,11 @@ import { HerdrAgentStatus } from './herdr.js';
 /**
  * Which work gets the machine when there is not enough machine.
  *
- * The capacity model (KAN-36) gave the cap a number and a legible refusal.
- * What it could not do is choose: at capacity every activation was refused
- * identically, so an agent that needed to start could not, and the person
- * asking was left to work out for themselves what to stand down. This file is
- * the missing comparison.
+ * The capacity model (KAN-36, in the extraction source) gave the cap a number
+ * and a legible refusal. What it could not do is choose: at capacity every
+ * activation was refused identically, so an agent that needed to start could
+ * not, and the person asking was left to work out for themselves what to stand
+ * down. This file is the missing comparison.
  *
  * WHERE PRIORITY COMES FROM
  *
