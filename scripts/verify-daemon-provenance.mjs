@@ -573,6 +573,32 @@ async function startDaemonAlongside(tree) {
 //     the two scripts cannot become blind to different things while both
 //     reporting the page current.
 //
+// AND THE MASK ITSELF IS GUARDED BY verify-readme-is-current, NOT BY THIS
+// SECTION — which is the dependency to know about before editing either. This
+// comparison masks BOTH sides with the same function, so a mask that is too
+// WIDE makes §3b agree with itself: widen `maskLine` to a catch-all and every
+// check in this section still passes, exit 0, asserting nothing. It was
+// measured rather than reasoned about — a one-line catch-all in
+// readme-blocks.mjs left this whole section green while turning
+// verify-readme-is-current red seven times, and its expected-GREEN canaries
+// (`timestamps-and-pane-ids-rewritten`, `a-number-changed`) are what noticed:
+// they are graded green precisely BECAUSE the mask hides those values, so a
+// wider mask breaks the grading. Nothing here can make that measurement,
+// because there is no unmasked side to compare against.
+//
+// So: WEAKENING THOSE CANARIES SILENTLY WEAKENS THIS SECTION, and it would
+// weaken it into a PASS. CI runs both scripts, so a widened mask goes red
+// before it merges — the protection is real, it is simply not owned here. Do
+// not answer this by adding a canary to this file: a second copy of that guard
+// is exactly the drift the shared module exists to prevent. Found in review of
+// KAN-180, in the fix for KAN-180 — the gap between two scripts, one level over.
+//
+// The §3b red/green history pair below does NOT cover it either, and the reason
+// is worth stating so it is not mistaken for coverage: under a catch-all mask
+// `e7ffb58` still reports red, but only because that revision's block has FEWER
+// LINES than the capture, so the subsequence check runs out of page. It is
+// counting, not comparing.
+//
 // AND THE FAILURE NAMES THE README, which matters more than it looks. When this
 // goes red it goes red inside a script called `verify-daemon-provenance`, and
 // the person reading the output will usually be somebody who just edited a
