@@ -514,6 +514,22 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: [],
         },
       },
+      // LAST, and about the DAEMON rather than about an agent — which is why it
+      // sits after the nine rather than beside `crabcast_capacity`, the other
+      // call that asks about the machine. It is a MIRROR of the `daemon_status`
+      // action the socket and the CLI have always had (KAN-227): same action,
+      // same field names, same shapes, nothing subsetted and nothing renamed,
+      // so there is exactly one `daemon_status` and now two ways to reach it.
+      {
+        name: "crabcast_daemon_status",
+        description:
+          "Answers WHICH CRABCAST IS RUNNING — the question no amount of looking at the filesystem can answer, because the filesystem is the thing that lies. A daemon started before a rebuild goes on executing the old `dist/` while the checkout on disk has moved on and looks perfectly current; every filesystem check reads healthy and the fleet misbehaves anyway. Only the process knows what it was loaded from, and this is where it says so. Ask it when a fleet is behaving in a way the code you are reading does not explain. `build` is what the RUNNING PROCESS was built from, read out of the `dist/` it actually loaded: `commit` (never abbreviated), `clean` (whether that checkout was clean AT BUILD TIME, which is not a claim about now), `builtAt`, `gitRoot`, `distDir`, `stampPath`, `stampPresent` and `stampUsable`. THOSE LAST TWO ARE NOT THE SAME QUESTION: a stamp that is present and NOT usable means there is a file sitting in that directory naming a commit which this daemon refused to believe — because `dist/` was rewritten under it without re-stamping (`tsc` run by hand does exactly this), or because it is a format this daemon does not read. A confidently wrong provenance is worse than an absent one, so it is demoted rather than reported. `freshness` compares that against what is on disk RIGHT NOW: `state` is one of `current`, `process-predates-build` (the daemon is not running the build on disk — restart it), `build-predates-sources` (the build is older than `src/` — rebuild, then restart) or `unknown`, with a `summary` sentence naming the remedy, plus `processIsCurrentBuild`, `sourcesNewerThanBuild` and `basis`. READ `basis`: `build-stamp` identifies the build, while `file-times` merely dates it and cannot tell 'nobody rebuilt this' from 'somebody rebuilt it and landed on the same newest mtime with the same file count'. `unknown` MAPS A FIELD NAME TO WHY IT IS NULL, everywhere on this response, and a non-empty `unknown` is NOT a clean bill of health — `state: 'unknown'` is deliberately not `current`, because a check that reports success when it could not run is worse than no check. WHAT THIS RESPONSE DOES NOT ESTABLISH, said plainly because the fields above read like a health check and are not one: a green `freshness` IS NOT A HEALTHY DAEMON. It says the running code matches the code on disk — nothing about whether that code is correct, whether the daemon can reach herdr, whether any agent is alive, or whether the fleet is doing what you asked. An agent that has silently stopped, a herdr that is not answering and a registry that failed to write all sit behind a `state: 'current'`. Use crabcast_list_agents for the fleet and crabcast_capacity for the machine; this call is about the process serving you and nothing else. `clean` is about build time and says nothing about your working tree now, and `commit` is what was BUILT, not what is checked out. It also carries the process facts: `pid`, `configPath`, `dataDir`, `registryPath`, `configuredAgents` (how many agents have records) and `expectedAgents` (how many of those records say activated — a COUNT OFF THE REGISTRY and not a census, so it is what SHOULD be running rather than what is; crabcast_list_agents' missingAgents is the difference). And `startedAt` and `bootId`, the same two fields crabcast_list_agents carries, from the same expression, so the two responses cannot disagree about when this daemon started. THE COST, because it is not free and this is where it is disclosed: `build` and `freshness` are recomputed on every call — two recursive directory walks, stat per file, over `dist/` and `src/` — which is why they are here, on a call somebody makes deliberately, rather than on the fleet read a poller hits continuously. Do not poll this.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+          required: [],
+        },
+      },
     ],
   };
 });
@@ -658,6 +674,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           res?.success === false ||
           (Array.isArray(res?.missingAgents) && res.missingAgents.length > 0) ||
           (Array.isArray(res?.preemptedAgents) && res.preemptedAgents.length > 0),
+      };
+    }
+
+    if (name === "crabcast_daemon_status") {
+      // No arguments, and nothing between the caller and the action. Whatever
+      // the daemon answers for `daemon_status` is what an MCP caller gets —
+      // the same bytes a socket or CLI caller has always had. Anything this
+      // branch selected, renamed or reshaped would make it a COPY of
+      // `daemon_status` rather than a second way to reach the one there is,
+      // and a copy is what goes stale (KAN-227). `verify-daemon-status-over-mcp`
+      // asserts exactly that equality against a live daemon.
+      const res = await callDaemonAPI('daemon_status');
+      return {
+        content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+        // On `success: false` only. A daemon that is running a stale build
+        // answered the question correctly, so `state: 'process-predates-build'`
+        // is a true report and not a failed call — flagging it would tell a
+        // caller their call broke when what it did was work.
+        isError: res?.success === false,
       };
     }
 

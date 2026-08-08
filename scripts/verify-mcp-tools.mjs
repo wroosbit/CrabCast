@@ -4,7 +4,7 @@
 // What is proven, in sections:
 //
 //   1. handshake  — the server comes up over stdio as `crabcast-mcp`
-//   2. tool list  — exactly the nine crabcast_* tools, no staleness tool, no
+//   2. tool list  — exactly the ten crabcast_* tools, no staleness tool, no
 //                   butchr residue, descriptions free of ticket-product
 //                   vocabulary while keeping the behavioural guidance
 //                   (missing = silently stopped; preempted = decision owed)
@@ -360,13 +360,24 @@ verdict(
 
 // --------------------------------------------------------- 2. the tool list --
 
-rule('2. the tool list — nine crabcast_* tools, rewritten descriptions');
+rule('2. the tool list — ten crabcast_* tools, rewritten descriptions');
 
 // Eight became nine: `crabcast_reset_agent` is REMOVED (CrabCast no longer
 // creates the directory an agent runs in, so it may not delete one either),
 // and `crabcast_configure_agent` and `crabcast_forget_agent` are added — the
 // two halves `reset` was conflating, split into making an agent exist and
 // making it stop existing.
+//
+// AND NINE BECAME TEN (KAN-227): `crabcast_daemon_status`. The `daemon_status`
+// action had been on the socket and the CLI since before this file existed and
+// was on no MCP tool, so `build` and `freshness` — the whole of "which CrabCast
+// is running", which cannot be answered from the filesystem — were reachable
+// from every surface but this one. THE COUNT IS THE ASSERTION HERE, and it is
+// exact in both directions: this list is what makes a tenth tool a deliberate
+// act rather than something that appears. What this section does NOT check is
+// that the new tool ANSWERS anything — it reads the advertisement, not the
+// call. verify-daemon-status-over-mcp.mjs calls it and holds its payload
+// against the socket's; neither script covers the other's half.
 const EXPECTED_TOOLS = [
   'crabcast_capacity',
   'crabcast_configure_agent',
@@ -376,7 +387,8 @@ const EXPECTED_TOOLS = [
   'crabcast_send_to_agent',
   'crabcast_tail_agent',
   'crabcast_agent_status',
-  'crabcast_list_agents'
+  'crabcast_list_agents',
+  'crabcast_daemon_status'
 ];
 
 const { tools } = await clientA.request('tools/list');
@@ -388,8 +400,8 @@ for (const t of tools) {
 const names = tools.map((t) => t.name).sort();
 verdict(
   JSON.stringify(names) === JSON.stringify([...EXPECTED_TOOLS].sort()),
-  'exactly the nine crabcast_* tools, and no staleness tool',
-  `tool names differ from the expected nine: ${JSON.stringify(names)}`
+  'exactly the ten crabcast_* tools, and no staleness tool',
+  `tool names differ from the expected ten: ${JSON.stringify(names)}`
 );
 verdict(
   !names.includes('crabcast_reset_agent'),
