@@ -4,7 +4,7 @@
 // when no other agy agent still needs it.
 //
 // WHAT FAILURE THIS WOULD CATCH: a `forget` that removes CrabCast's key from
-// `~/.gemini/antigravity-cli/mcp.json` while another agy agent is still using
+// `~/.gemini/config/mcp_config.json` while another agy agent is still using
 // it. That file is GLOBAL and has no project-scoped equivalent, so one agent's
 // cleanup reaches into every sibling's configuration. The removal would be
 // silent and the damage would surface later and elsewhere — the sibling simply
@@ -41,9 +41,9 @@
 //      removal RESTED ON rather than only that it happened
 //   4. a sibling record that cannot be read does NOT remove
 //   5. a census that cannot be taken at all does NOT remove
-//   6. a key whose bytes are not the ones we recorded is left — including the
-//      case that arises with no human involved at all (6b), which is this
-//      mechanism's own known residue, demonstrated rather than asserted
+//   6. a key whose bytes are not the ones we recorded is left — and (6b) the
+//      no-human case that used to produce that residue is now CLOSED, so the
+//      section proves an absence where it used to prove a presence (KAN-235)
 //   7. a write that did NOT happen is neither disclosed nor recorded
 //   8. every check above can actually fail (mutation, via scripts/mutation.mjs)
 //
@@ -67,15 +67,19 @@
 // valid one and there is no other way to reach that branch). Both are named
 // here rather than left to be inferred.
 //
-// AND WHAT NOTHING COVERS: no proof in this repository runs a real `agy`
-// binary or a real agy fleet. The global config is written by CrabCast and read
-// back by CrabCast here; that the antigravity CLI reads this file, at this path,
-// in this shape, is an assumption carried from the launcher's original author
-// and is not tested anywhere. `verify-agent-resumption` is the only other proof
-// that mentions this launcher and it asserts one thing about a command string.
-// So the SHARED-OWNERSHIP HAZARD — two real agy agents, one real file — has an
-// owner for its bookkeeping (this file) and no owner at all for its runtime
-// behaviour. That is the honest answer, and it is the answer.
+// AND WHAT THIS FILE DOES NOT COVER: it does not run a real `agy` binary. The
+// global config is written by CrabCast and read back by CrabCast here, so every
+// assertion below would hold just as well if no other program on the machine
+// ever opened the file — WHICH IS EXACTLY WHAT WAS TRUE until KAN-235. This
+// suite was green for three slices while the path in it was wrong, and it could
+// not have been otherwise: its input was its own output.
+//
+// THAT GAP HAS AN OWNER NOW: `verify-agy-reads-what-we-write.mjs` runs a real
+// `agy` and requires agy to START a server CrabCast defined. It covers delivery
+// and says nothing about reference counting; this file covers reference counting
+// and says nothing about delivery. Neither covers the other, and the hole
+// between them is what KAN-145 and KAN-235 were both about — so it is named
+// here rather than left to be inferred from two green runs.
 //
 // Usage:
 //   npm run build
@@ -272,7 +276,7 @@ function newWorld(label) {
       action: 'configure_agent',
       path: dir,
       ...AGY,
-      mcpServers: { crabcast: 'builtin' },
+      mcpServers: { crabcast: 'builtin', [SHARED_KEY]: OUR_DEFINITION },
       ...knobs
     });
     if (!configured.success) return { configured, activated: null };
@@ -291,8 +295,32 @@ function newWorld(label) {
 
 const AGY = { priority: 1, refusable: true, chargeable: true, preemptable: true, launcher: 'anti-gravity' };
 
+/**
+ * The CALLER-SUPPLIED server whose reference counting this file is about.
+ *
+ * IT USED TO BE THE `crabcast` BUILTIN, AND THAT STOPPED WORKING AT KAN-235.
+ * The builtin carries this agent's identity and the agy config is shared by
+ * every agy agent, so it is now deliberately not written there at all. A suite
+ * whose subject is "the shared key survives one forget and goes with the last"
+ * needs a key that actually reaches the shared file, and caller-supplied
+ * servers are the ones that do.
+ *
+ * Agents here are configured with BOTH — the builtin and this — because that is
+ * the ordinary production shape, and because it keeps §2's contrast honest: the
+ * builtin still lands in the agent's own `.mcp.json` and is still removed from
+ * it by the same `forget` that leaves the shared key alone.
+ */
+const SHARED_KEY = 'notes';
+
+/** What the caller configures both agents with. Identical, so they may share it. */
+const OUR_DEFINITION = {
+  command: '/usr/local/bin/notes-mcp',
+  args: ['--shared-by-both-agents'],
+  env: { SOURCE: 'caller' }
+};
+
 /** Whether the global agy config still holds CrabCast's server key. */
-const hasOurKey = (world) => world.agyServers()?.crabcast !== undefined;
+const hasOurKey = (world) => world.agyServers()?.[SHARED_KEY] !== undefined;
 
 const showForget = (label, response) => {
   console.log(`    ${label}`);
@@ -362,7 +390,7 @@ let up2;
   check(
     "agent A's provenance records the claim — the daemon wrote this, which is what makes the " +
       'sections below a test of the mechanism rather than of a record this script typed in',
-    provA?.agyMcp?.file === w1.agyFile && typeof provA?.agyMcp?.keys?.crabcast === 'string',
+    provA?.agyMcp?.file === w1.agyFile && typeof provA?.agyMcp?.keys?.[SHARED_KEY] === 'string',
     JSON.stringify(provA?.agyMcp)
   );
 }
@@ -595,11 +623,11 @@ const a6 = w6.ownedDir('agent-a');
   await w6.bringUp(a6);
   const before = w6.agyServers();
   check('setup precondition: the key CrabCast wrote is on disk to be edited',
-    before?.crabcast !== undefined, JSON.stringify(before));
+    before?.[SHARED_KEY] !== undefined, JSON.stringify(before));
 
   const tampered = parseIfPresent(w6.agyFile) ?? {};
-  if (tampered?.mcpServers?.crabcast) {
-    tampered.mcpServers.crabcast.args = ['/somebody/changed/this.js'];
+  if (tampered?.mcpServers?.[SHARED_KEY]) {
+    tampered.mcpServers[SHARED_KEY].args = ['/somebody/changed/this.js'];
     fs.writeFileSync(w6.agyFile, JSON.stringify(tampered, null, 2));
   }
 
@@ -610,7 +638,7 @@ const a6 = w6.ownedDir('agent-a');
     'the edited key is LEFT — this agent is the last claimant, so the count permits removal, and ' +
       'the bytes are what stop it: removing them would destroy somebody\'s change rather than ' +
       'undo ours',
-    w6.agyServers()?.crabcast?.args?.[0] === '/somebody/changed/this.js',
+    w6.agyServers()?.[SHARED_KEY]?.args?.[0] === '/somebody/changed/this.js',
     JSON.stringify(w6.agyServers())
   );
   check(
@@ -623,58 +651,76 @@ const a6 = w6.ownedDir('agent-a');
   );
 }
 
-console.log('\n  6b. THE KNOWN RESIDUE — the same outcome with no human involved at all');
+console.log('\n  6b. THE KNOWN RESIDUE IS CLOSED — CrabCast can no longer produce it (KAN-235)');
 
-// This is the mechanism's own limit, demonstrated rather than asserted in a
-// comment. `builtinMcpServer` bakes each agent's OWN path into the definition,
-// and the global file holds one value per key — so the second agy agent's
-// activation overwrites the first's definition. When the second is forgotten
-// first, the survivor is the last claimant holding a record that no longer
-// describes what is in the file, and it leaves the key.
+// WHAT THIS SECTION USED TO DO, AND WHY IT CANNOT ANY MORE.
 //
-// The residue is disclosed, which is the property this slice owes. That it
-// happens at all is a defect in the WRITE — a shared file cannot carry
-// per-agent identity, so every agy agent also reads whichever agent's
-// CRABCAST_AGENT_PATH was written last — and it is KAN-177 rather than
-// something papered over here. The setup precondition below IS that defect,
-// asserted: this proof depends on the overwrite happening, so it is the one
-// place in the suite where it is on the record.
-const w6b = newWorld('sibling-rewrote');
+// It demonstrated a residue: `builtinMcpServer` bakes each agent's OWN path into
+// the `crabcast` definition, the global file holds one value per key, so the
+// SECOND agy agent's activation overwrote the FIRST's definition. Forget the
+// second and the survivor is the last claimant holding a record that no longer
+// describes the file, so the key is left behind. Its setup precondition
+// ASSERTED THE OVERWRITE — this suite depended on the defect happening.
+//
+// KAN-235 removed both halves of that precondition:
+//
+//   - The builtin is no longer written to the shared file at all, because
+//     per-agent identity in a file every agent reads is fabricated identity.
+//   - Two agents whose CALLER-SUPPLIED definitions differ under one name are now
+//     REFUSED rather than merged, because merging redirects the sibling's server
+//     rather than sharing it.
+//
+// So there is no longer a route by which one CrabCast agent silently rewrites
+// another's key. THE ASSERTION HAD TO INVERT: what used to be proven present is
+// now proven absent, and this section is where that is on the record rather than
+// quietly deleted. The residue class §6 covers — a HUMAN editing the key — is
+// untouched and is still proven above; this is only about the no-human case.
+const w6b = newWorld('sibling-cannot-rewrite');
 const a6b = w6b.ownedDir('agent-a');
 const b6b = w6b.ownedDir('agent-b');
 {
   await w6b.bringUp(a6b);
-  const afterA = JSON.stringify(w6b.agyServers()?.crabcast);
+  const afterA = JSON.stringify(w6b.agyServers()?.[SHARED_KEY]);
+  const fileAfterA = readIfPresent(w6b.agyFile) ?? '';
   await w6b.bringUp(b6b);
-  const afterB = JSON.stringify(w6b.agyServers()?.crabcast);
+  const afterB = JSON.stringify(w6b.agyServers()?.[SHARED_KEY]);
   console.log(`    the key after A activated:\n      ${afterA}`);
   console.log(`    the key after B activated:\n      ${afterB}`);
+
   check(
-    'setup precondition, and the defect in one line: the second agent OVERWROTE the first\'s ' +
-      'definition, because the shared file holds one value per key and the definition carries ' +
-      'the agent\'s own path',
-    afterA !== afterB && afterA !== 'undefined',
+    'THE OVERWRITE NO LONGER HAPPENS. Two agy agents activate over one shared key and the ' +
+      'definition is unchanged — it is the caller\'s, identical for both, so there is nothing to ' +
+      'fight over',
+    afterA === afterB && afterA !== 'undefined',
     `${afterA}\n        vs\n        ${afterB}`
   );
+  check(
+    'and NEITHER agent\'s identity is in the shared file, which is what used to differ between ' +
+      'the two writes and make them collide',
+    !fileAfterA.includes(a6b) && !(readIfPresent(w6b.agyFile) ?? '').includes(b6b),
+    readIfPresent(w6b.agyFile)
+  );
 
+  // The claim still has two owners, so the reference count is still doing work —
+  // this section proves an overwrite is absent, not that sharing is absent.
   const forgotB = await w6b.standDownAndForget(b6b);
-  check('forgetting B leaves the key — A still claims it',
+  check('forgetting B still leaves the key — A claims it, and that has not changed',
     hasOurKey(w6b) && (forgotB.left ?? []).some((l) => l.includes(w6b.agyFile) && l.includes(a6b)),
     JSON.stringify(forgotB.left));
 
   const forgotA = await w6b.standDownAndForget(a6b);
-  showForget('forget(A), now the last claimant, over bytes B wrote:', forgotA);
+  showForget('forget(A), now the last claimant:', forgotA);
   check(
-    'the key is LEFT rather than removed on a record that no longer describes it — the safe ' +
-      'direction, and the honest one',
-    hasOurKey(w6b),
+    'AND THE KEY IS NOW REMOVED RATHER THAN LEFT. This is the residue closing: the last claimant ' +
+      'holds a record that still describes the file, because no sibling ever rewrote it, so the ' +
+      'bytes guard permits the removal it used to have to block',
+    !hasOurKey(w6b),
     JSON.stringify(w6b.agyServers())
   );
   check(
-    'AND IT IS REPORTED. This is residue, in the ordinary multi-agent case rather than an exotic ' +
-      'one, and a reader learns it from the response rather than from their config months later',
-    (forgotA.left ?? []).some((l) => l.includes(w6b.agyFile)),
-    JSON.stringify(forgotA.left)
+    'and the file itself survives — it is the user\'s global config',
+    parseIfPresent(w6b.agyFile) !== null,
+    readIfPresent(w6b.agyFile)
   );
 }
 

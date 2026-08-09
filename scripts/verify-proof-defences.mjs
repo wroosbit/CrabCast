@@ -313,6 +313,37 @@ const PROOF_DEFENCES = [
       'never counted as "claims nothing".'
   },
   {
+    script: 'verify-agy-reads-what-we-write',
+    defence: 'mutation',
+    central:
+      "an agy agent's MCP servers land where the antigravity CLI ACTUALLY READS THEM — asserted " +
+      'by running a real `agy` binary and requiring it to START a server CrabCast defined, so the ' +
+      'evidence is a process another program chose to spawn rather than a file CrabCast wrote and ' +
+      'read back.',
+    note:
+      'ITS MUTATION IS THE PRE-FIX BUILD ITSELF: §3 backs `agyMcpConfigPath` out to the path this ' +
+      'repository used for three merged slices, writes through the same real `configureAgyMcp`, ' +
+      'and observes agy start NOTHING. §4 is what makes that mean anything — the pre-fix build is ' +
+      'shown to have written a valid config, in the right shape, under the right key, so §3 ' +
+      'measures a file agy declined to read rather than an absence of work. §5 is a negative ' +
+      'control against the harness fabricating its own sentinels. WHY IT EXISTS AT ALL: every ' +
+      'other agy proof takes CrabCast\'s output as its own input, which is precisely why all of ' +
+      'them stayed green while every agy agent received nothing. SEAM: it covers DELIVERY and ' +
+      'nothing else — reference counting, refusals, disclosure and provenance are ' +
+      'verify-agy-mcp-reversal and verify-agy-mcp-write-refusals, and it does not drive an ' +
+      'activation, so that the LAUNCHER is reached by a real activation is that second file\'s. ' +
+      'UNDEFENDED: that an agy agent genuinely cannot call the daemon is checked here only as the ' +
+      'absence of CRABCAST_AGENT_PATH from the file agy reads; no proof starts an agy agent and ' +
+      'watches send_to_agent fail. ' +
+      'AND THE OTHER DIRECTION, because two entries that each assume the other covers something is ' +
+      'how the gap this ticket is about survived: THIS SCRIPT IS WHAT STANDS BEHIND THE PATH ' +
+      "LITERAL IN verify-agy-mcp-write-refusals §0. That guard is gating and this one is not; it " +
+      'makes a path change loud, and it cannot tell a right path from a wrong one — only a real ' +
+      'agy starting a real server does that, which is what happens here. If this script is ever ' +
+      'deleted or stubbed, that literal silently becomes an unverified assumption again, and a ' +
+      'confidently-asserted one is worse than the disclosed gap it replaced.'
+  },
+  {
     script: 'verify-agy-mcp-write-refusals',
     defence: 'mutation',
     central:
@@ -321,6 +352,20 @@ const PROOF_DEFENCES = [
       'taking it over — so the sequence "overwrite their key, record it as ours, then let ' +
       '`forget` remove it" cannot end with their entry deleted.',
     note:
+      'ITS §0 IS A GUARD RATHER THAN A MUTATION, and it is registered here rather than as its own ' +
+      "entry because this register is one entry per script and this script's defence is genuinely " +
+      "'mutation' (§9 drives scripts/mutation.mjs, which §2 of this file requires to be registered " +
+      "'mutation'). WHAT §0 ESTABLISHES: that `agyMcpConfigPath()` matches a path LITERAL typed " +
+      'into the proof, so changing the path in `src/` cannot pass CI unchallenged. WHAT IT DOES ' +
+      'NOT ESTABLISH, and the distinction is the whole of KAN-235: it does not establish that the ' +
+      'path is CORRECT. A wrong path changed in both places at once passes it without a murmur. ' +
+      'The literal is exactly as capable of being wrong as the code was. THE ONLY THING STANDING ' +
+      "BEHIND THE LITERAL'S TRUTH is verify-agy-reads-what-we-write, which runs a real `agy` and " +
+      'requires it to START a server CrabCast defined — and that proof is EXCLUDED from CI, so ' +
+      'nothing in the array runs it. §0 makes the change LOUD; that script makes the value TRUE. ' +
+      'Measured before it was written: with `agyMcpConfigPath` reverted to the pre-KAN-235 path, ' +
+      'this file and verify-agy-mcp-reversal both exited 0, ALL PASS — every other section derives ' +
+      'the path from the function and so follows the code wherever it goes. ' +
       'Its §7a is the reason to believe §1: the SAME end-to-end sequence, against a build with the ' +
       'foreign-key refusal backed out, and the user\'s entry is observed being DESTROYED rather ' +
       'than the loss being described. Two positive controls (§3 our own key on re-activation, §4 a ' +

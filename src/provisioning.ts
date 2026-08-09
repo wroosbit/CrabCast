@@ -35,12 +35,20 @@ import * as path from 'path';
  * AND A THIRD, which is the awkward one and the reason this file grew a census
  * (KAN-140):
  *
- *   `~/.gemini/antigravity-cli/mcp.json`
+ *   `~/.gemini/config/mcp_config.json`
  *                    The antigravity CLI reads MCP config from its GLOBAL
  *                    config and has no project-scoped equivalent at all — so
  *                    unlike the two above, this artifact is not merely outside
  *                    the agent's directory, it is SHARED BY EVERY AGY AGENT
  *                    THIS DAEMON RUNS. One file, many owners.
+ *
+ *                    THIS PATH WAS WRONG UNTIL KAN-235 — it read
+ *                    `~/.gemini/antigravity-cli/mcp.json`, which agy has been
+ *                    measured never to open. The census below is older than the
+ *                    correction, so for three merged slices it was careful
+ *                    bookkeeping over a file nothing read. It was not wrong,
+ *                    only inert; it is load-bearing now. See `agyMcpConfigPath`
+ *                    in launchers.ts for the measurement.
  *
  * That last property is what made "reversible" hard rather than tedious.
  * Removing our key when one agent is forgotten would take the servers away from
@@ -541,9 +549,49 @@ export function noteAgyMcpConfig(options: {
   sidecarDir: string;
   file: string;
   keys: Record<string, string> | null;
+  /**
+   * CrabCast's own servers that this launcher could not write (KAN-235). These
+   * are disclosed EVEN WHEN NOTHING WAS WRITTEN, which is why they are handled
+   * before the early return below.
+   */
+  omittedBuiltins?: readonly string[];
 }): ArtifactDisclosure | null {
   const { agentPath, sidecarDir, file, keys } = options;
-  if (!keys || Object.keys(keys).length === 0) return null;
+  const omitted = options.omittedBuiltins ?? [];
+
+  // WHAT THE AGENT DOES NOT GET, SAID EVEN THOUGH NOTHING WAS WRITTEN.
+  //
+  // The early return below is right about writes: a disclosure for a write that
+  // did not land is a false sentence. An OMISSION is the opposite case — there
+  // is no file change to describe, and that is exactly the thing the caller
+  // needs told. An agy agent configured with `crabcast` comes up unable to call
+  // `send_to_agent` or `list_agents`, which is a capability difference between
+  // launchers, and a capability removed silently is worse than one refused
+  // loudly.
+  const omissionNote = omitted.length
+    ? ` CrabCast's own server(s) ${omitted.map((k) => `'${k}'`).join(', ')} were NOT written and ` +
+      `cannot be: they carry this agent's identity (CRABCAST_AGENT_PATH), and every antigravity ` +
+      `MCP scope is global, so writing one agent's identity here would hand it to every agy agent ` +
+      `on this machine. THIS AGENT THEREFORE CANNOT CALL CRABCAST AT ALL — no send_to_agent, no ` +
+      `list_agents, no participation in the fleet the way a claude agent has. Nothing is wrong ` +
+      `and nothing was lost; agy agents never received these. Use the claude launcher for an ` +
+      `agent that must steer other agents.`
+    : '';
+
+  if (!keys || Object.keys(keys).length === 0) {
+    if (!omitted.length) return null;
+    // NO PROVENANCE IS RECORDED HERE, deliberately. Provenance is what `forget`
+    // removes by, and nothing was written to remove. A record naming these keys
+    // would aim a later reversal at whatever the USER's `crabcast` entry is.
+    return {
+      artifact: AGY_MCP_ARTIFACT,
+      file,
+      detail:
+        `NOTHING WAS WRITTEN to your GLOBAL antigravity CLI config.${omissionNote}`,
+      origin: 'preexisting',
+      reversal: `Nothing to undo — CrabCast did not modify ${file}.`
+    };
+  }
 
   const provenance = readProvenance(sidecarDir) ?? emptyProvenance(agentPath);
   const agyMcp: AgyMcpProvenance = { file, keys };
@@ -557,7 +605,7 @@ export function noteAgyMcpConfig(options: {
       `mcpServers.${names.join(', mcpServers.')} — this is your GLOBAL antigravity CLI config, ` +
       `OUTSIDE ${agentPath}. The antigravity CLI has no project-scoped equivalent, so there is ` +
       `no per-agent file to put these in. It is therefore SHARED with every other agy agent this ` +
-      `daemon runs.`,
+      `daemon runs.${omissionNote}`,
     origin: 'crabcast',
     reversal:
       `crabcast forget ${agentPath} — removes those keys, but ONLY when no other agent's ` +
@@ -605,6 +653,15 @@ export function noteAgyMcpConfig(options: {
 export interface AgyClaimCensus {
   /** Paths of OTHER agents whose provenance still claims one of these keys. */
   claimants: string[];
+  /**
+   * Each sibling claim in full — which agent, which key, and the EXACT bytes
+   * that agent recorded writing for it (KAN-235).
+   *
+   * `claimants` answers "may this key be removed"; this answers "can the shared
+   * file honour this key for two agents at once", which needs the value and not
+   * just the name. See {@link classifyAgyKeys}.
+   */
+  claims: Array<{ path: string; key: string; value: string }>;
   /** Records that exist and could not be believed, with the reason for each. */
   unreadable: string[];
   /** How many sibling sidecars were consulted, so "none claim it" has a size. */
@@ -621,7 +678,7 @@ export function countAgyClaims(options: {
   keys: string[];
 }): AgyClaimCensus {
   const { agentsDir, ownSidecarDir, file, keys } = options;
-  const empty = { claimants: [], unreadable: [], consulted: 0 };
+  const empty = { claimants: [], claims: [], unreadable: [], consulted: 0 };
 
   if (!agentsDir) {
     return {
@@ -644,6 +701,7 @@ export function countAgyClaims(options: {
 
   const own = path.resolve(ownSidecarDir);
   const claimants: string[] = [];
+  const claims: Array<{ path: string; key: string; value: string }> = [];
   const unreadable: string[] = [];
   let consulted = 0;
 
@@ -661,10 +719,15 @@ export function countAgyClaims(options: {
     }
     const claim = outcome.provenance.agyMcp;
     if (!claim || claim.file !== file) continue;
-    if (keys.some((key) => ownKey(claim.keys, key))) claimants.push(outcome.provenance.path);
+    const matched = keys.filter((key) => ownKey(claim.keys, key));
+    if (!matched.length) continue;
+    claimants.push(outcome.provenance.path);
+    for (const key of matched) {
+      claims.push({ path: outcome.provenance.path, key, value: claim.keys[key] });
+    }
   }
 
-  return { claimants, unreadable, consulted };
+  return { claimants, claims, unreadable, consulted };
 }
 
 /**
@@ -718,6 +781,16 @@ export interface AgyKeyOwnership {
   indeterminate: string[];
   /** What could not be read. Present exactly when `indeterminate` is non-empty. */
   doubt?: string;
+  /**
+   * Keys a SIBLING agent records writing with a DIFFERENT definition than the
+   * one we are about to write (KAN-235).
+   *
+   * Ours, in the ownership sense — a CrabCast record accounts for them, so they
+   * are not the user's and `foreign` is the wrong answer. But one file cannot
+   * hold two values for one key, so writing ours takes the sibling's server
+   * away from it. Named with the sibling so the refusal can say who.
+   */
+  conflicting: Array<{ key: string; sibling: string; theirs: string; ours: string }>;
 }
 
 export function classifyAgyKeys(options: {
@@ -727,12 +800,19 @@ export function classifyAgyKeys(options: {
   existing: unknown;
   /** The key names we are about to write. */
   writing: string[];
+  /**
+   * The definitions we are about to write, for the differing-definition
+   * comparison (KAN-235). Omitting it disables that check only — ownership is
+   * still classified, so an older caller keeps its previous behaviour rather
+   * than silently getting a weaker answer it cannot tell apart.
+   */
+  definitions?: Record<string, unknown>;
   agentsDir?: string;
   /** Our own sidecar. Its absence is a doubt, not an all-clear. */
   ownSidecarDir?: string;
 }): AgyKeyOwnership {
-  const { file, existing, writing, agentsDir, ownSidecarDir } = options;
-  const nothing: AgyKeyOwnership = { foreign: [], indeterminate: [] };
+  const { file, existing, writing, definitions, agentsDir, ownSidecarDir } = options;
+  const nothing: AgyKeyOwnership = { foreign: [], indeterminate: [], conflicting: [] };
 
   // NULL-PROTOTYPE AND `ownKey`, for the reason spelled out at the equivalent
   // read in `provisionMcpConfig`: every name here is caller-chosen, and a user's
@@ -758,12 +838,12 @@ export function classifyAgyKeys(options: {
     ownClaim && ownClaim.file === file ? ownClaim.keys : {}
   );
   const unexplained = colliding.filter((key) => !ownKey(ownKeys, key));
-  if (!unexplained.length) return nothing;
 
   if (!ownSidecarDir) {
     return {
       foreign: [],
       indeterminate: unexplained,
+      conflicting: [],
       doubt:
         `no sidecar directory was supplied, so CrabCast's own record of what it has written to ` +
         `${file} could not be read at all`
@@ -772,28 +852,61 @@ export function classifyAgyKeys(options: {
 
   const foreign: string[] = [];
   const indeterminate: string[] = [];
+  const conflicting: AgyKeyOwnership['conflicting'] = [];
   const doubts: string[] = [];
-  for (const key of unexplained) {
+  // EVERY COLLIDING KEY, NOT ONLY THE UNEXPLAINED ONES (KAN-235). Ownership only
+  // ever needed the keys our own record could not explain — re-activating over
+  // your own key is nobody else's business. The differing-definition question is
+  // not about ownership and does not have that shortcut: a key OUR record
+  // explains can still be claimed by a sibling with different bytes, and writing
+  // ours would take that sibling's server away. So the loop widened.
+  //
+  // The cost is one census per colliding key on a re-activation that previously
+  // took none. It is still bounded by there being a collision at all, which
+  // means the key is already in the shared file, and a census is a readdir plus
+  // one small JSON read per sibling.
+  for (const key of colliding) {
+    const explainedByUs = ownKey(ownKeys, key);
     const census = countAgyClaims({ agentsDir, ownSidecarDir, file, keys: [key] });
     if (census.failed) {
-      indeterminate.push(key);
-      doubts.push(census.failed);
+      if (!explainedByUs) {
+        indeterminate.push(key);
+        doubts.push(census.failed);
+      }
       continue;
     }
     // A record that exists and cannot be believed may be the very one that
     // wrote this key, so it is a doubt rather than a non-claim — the same
     // reading `removeOurAgyKeys` gives it, and for the same reason.
     if (census.unreadable.length) {
-      indeterminate.push(key);
-      doubts.push(...census.unreadable);
+      if (!explainedByUs) {
+        indeterminate.push(key);
+        doubts.push(...census.unreadable);
+      }
       continue;
     }
-    if (!census.claimants.length) foreign.push(key);
+    if (!explainedByUs && !census.claimants.length) {
+      foreign.push(key);
+      continue;
+    }
+
+    // A CrabCast record accounts for this key, so it is not the user's. The
+    // remaining question is whether the ONE value this file can hold is the
+    // same value the sibling is relying on. If it is not, merging does not
+    // share the key — it takes it.
+    if (!definitions || !ownKey(definitions, key)) continue;
+    const ours = JSON.stringify(definitions[key]);
+    for (const claim of census.claims) {
+      if (claim.value === ours) continue;
+      conflicting.push({ key, sibling: claim.path, theirs: claim.value, ours });
+      break;
+    }
   }
 
   return {
     foreign,
     indeterminate,
+    conflicting,
     ...(doubts.length ? { doubt: [...new Set(doubts)].join('; ') } : {})
   };
 }

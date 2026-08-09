@@ -120,6 +120,9 @@ Two consequences, stated because neither is obvious:
 
 - An agent configured **without** the `crabcast` builtin is never identified —
   but it also has no way to reach the daemon, so it cannot activate anything.
+  **Every `anti-gravity` agent is in this position**, whatever it was configured
+  with: the builtin cannot be written to a file every agy agent shares. See
+  *What an agy agent does NOT get* below.
 - The **CLI is never identified**. A human at a shell has no supervisor of
   record, and `activatedBy: null` says so explicitly rather than by omission.
 
@@ -292,10 +295,11 @@ it, `forget` removes that key and nothing else in the file.
 
 ## The antigravity CLI's global config — the shared one
 
-An agent on the `anti-gravity` launcher gets its MCP servers merged into
-`~/.gemini/antigravity-cli/mcp.json`. The antigravity CLI reads MCP config from
-there and has **no project-scoped equivalent at all**, so unlike everything
-above, this artifact is not merely outside the agent's directory:
+An agent on the `anti-gravity` launcher gets its caller-supplied MCP servers
+merged into `~/.gemini/config/mcp_config.json` — the file a real `agy` binary has
+been measured to read and to spawn servers from. It has **no project-scoped
+equivalent at all**, so unlike everything above, this artifact is not merely
+outside the agent's directory:
 
 > **One file, many owners.** Every agy agent this daemon runs has its servers
 > written into the same file. There is no per-agent version of it to write
@@ -349,21 +353,57 @@ Stated here because a census read as complete is worse than one read as partial.
   claims, deliberately: it will need the key when it starts, and `forget` is what
   retires a claim.
 
-### The residue this leaves in the ordinary case
+### The residue this used to leave, and why it is closed
 
-The `crabcast` builtin's definition carries **the agent's own path**, and this
-file holds one value per key — so a second agy agent's activation overwrites the
-first's definition. When the last remaining agent is finally forgotten, the value
-on disk is often one *another CrabCast agent* wrote, which its own record does not
-describe. It leaves the key, and reports it.
+This section used to describe a residue in the *ordinary* multi-agent case: the
+`crabcast` builtin's definition carries the agent's own path, one key holds one
+value, so a second agy agent's activation overwrote the first's definition and
+the last `forget` then found bytes its record did not describe and left the key.
 
-That is the safe direction, and it is disclosed rather than discovered. But it
-means the ordinary multi-agent case ends in reported residue rather than a clean
-removal. The cause is upstream of the reversal — **a shared file cannot carry
-per-agent identity** — and has a second consequence worth knowing about while it
-is open: every agy agent also reads whichever agent's `CRABCAST_AGENT_PATH` was
-written last, so `activatedBy` for an agy fleet is decided by activation order.
-Tracked separately rather than papered over here.
+**KAN-235 closed it, by removing its cause rather than handling its effect.** The
+builtin is no longer written to this file at all — see the capability note below
+— so no CrabCast agent rewrites another's key here. Two agy agents sharing a
+caller-supplied server write *identical* bytes and share it cleanly; two agents
+asking for the same name with *different* definitions are now **refused**,
+because merging would not share that server, it would redirect the sibling's.
+
+The residue class that remains is the one that always mattered: **a human editing
+the key.** `forget` leaves an edited key and says so.
+
+## What an agy agent does NOT get: the `crabcast` server itself
+
+> **An agy agent cannot call CrabCast.** No `send_to_agent`, no `list_agents`, no
+> participation in the fleet the way a `claude` agent has. This is a real
+> capability difference between launchers, and it is disclosed at activation.
+
+The reason is the one above, taken seriously. The `crabcast` builtin's whole
+value is that it carries `CRABCAST_AGENT_PATH` — an identity **CrabCast issued**,
+in a file only CrabCast could write. That argument depends on the file belonging
+to *one agent*. Every antigravity MCP scope is global:
+
+| scope | shared? |
+| --- | --- |
+| `~/.gemini/config/mcp_config.json` | one file, every session |
+| `~/.gemini/antigravity-cli/builtin/mcp_config.json` | one file, every session |
+| plugin `mcp_config.json` | the registry that enables plugins is global |
+
+Measured, not assumed: no environment variable carries one (agy's binary string
+table was enumerated for `AGY_*` and `ANTIGRAVITY_*`), `--project` has no
+MCP-scoped file, and a workspace-scoped plugin fixture that agy's own validator
+accepted was **never loaded** in a real session.
+
+So writing the builtin here would not give one agent an identity — it would give
+**every** agy agent on the machine the identity of whichever activated last.
+`send_to_agent` from one would arrive attributed to another. That is not a
+missing feature, it is a fabricated one, and *never fabricate* outranks
+*deliver everything asked for*.
+
+**Caller-supplied servers are unaffected and are still delivered.** The omission
+is surgical: what CrabCast cannot supply is the one definition that was CrabCast's
+rather than yours. And it is **not a regression** — until KAN-235 an agy agent
+received nothing at all, because the file was written to a path nothing read.
+
+If an agent must steer other agents, use the `claude` launcher.
 
 ### And the write into it refuses the same three ways
 
@@ -518,11 +558,42 @@ refusal assertion in that file would also pass against a write that refused
 everything, and a guard indistinguishable from a wall has not been shown to be a
 guard.
 
-**What no proof in this repository covers**, said here rather than left as an
-assumption: nothing runs a real `agy` binary or a real agy fleet. That the
-antigravity CLI reads this file, at this path, in this shape is carried from the
-launcher's original author and is tested nowhere. The bookkeeping has an owner;
-the runtime behaviour does not.
+### The bound that fired
+
+This paragraph stood here, unchanged, through three merged slices:
+
+> **What no proof in this repository covers**, said here rather than left as an
+> assumption: nothing runs a real `agy` binary or a real agy fleet. That the
+> antigravity CLI reads this file, at this path, in this shape is carried from the
+> launcher's original author and is tested nowhere. The bookkeeping has an owner;
+> the runtime behaviour does not.
+
+**It was right, and it is kept here because it was right.** The path was wrong.
+The antigravity CLI never read `~/.gemini/antigravity-cli/mcp.json`; it reads
+`~/.gemini/config/mcp_config.json`. Every agy agent was activated with its
+servers resolved, merged, disclosed and recorded, and received **none of them**,
+behind `success: true`. Three slices of careful bookkeeping — the reference
+count, the refusals, their proofs — were all correct, all green, and all pointed
+at a file nothing opened.
+
+Two lessons, and the second is the one that cost the time:
+
+- **A disclosed untested assumption is not a safe one.** Naming the gap did not
+  contain it. Everyone who read this paragraph stepped over it, including in a
+  decision comment that quoted this document approvingly.
+- **Every check asked whether CrabCast had written its own file correctly, and it
+  always had.** The proofs could not have caught this, because *the input to
+  every one of them was our own output*. That is the shape to look for: not a
+  broken mechanism, but a sentence claiming more than its mechanism covers.
+
+**The bound is now smaller, not gone.** `scripts/verify-agy-reads-what-we-write.mjs`
+runs a real `agy` binary and asserts on what agy *does* — it starts a server
+CrabCast defined and requires the process to actually come up. What remains
+uncovered is stated at the top of that script, and agy's own shipped
+documentation is **wrong about agy in at least two places** (it says plugins are
+discovered from workspace customization roots — measured never to happen — and
+`AGY_CLI_DISABLE_AUTO_UPDATE=1` did not prevent an auto-update). So the doc
+naming this path is not why we believe it. The measurement is.
 
 `scripts/verify-activated-by.mjs` covers the `CRABCAST_AGENT_PATH` half, and it
 is deliberately arranged so that it cannot pass without the identity genuinely

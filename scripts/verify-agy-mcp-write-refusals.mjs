@@ -5,14 +5,14 @@
 // USER'S is refused rather than taken over.
 //
 // WHAT FAILURE THIS WOULD CATCH: the user losing their own `mcpServers` entry
-// from `~/.gemini/antigravity-cli/mcp.json` entirely, through a sequence in
+// from `~/.gemini/config/mcp_config.json` entirely, through a sequence in
 // which every individual step looks correct. CrabCast overwrites their key
 // because the merge never asked whose it was; it records the key as its own
 // because it did write those bytes; and a later `crabcast forget` removes it
 // because its record says it is ours and the bytes on disk match. Three
 // defensible steps composing into deletion of somebody else's data, in a file
 // CrabCast does not own. §1 runs that whole sequence and requires their entry
-// to survive it; §7a runs the SAME sequence against a build with the refusal
+// to survive it; §9a runs the SAME sequence against a build with the refusal
 // backed out and watches the entry be destroyed, which is the only reason to
 // believe §1 is measuring anything.
 //
@@ -32,6 +32,9 @@
 //
 // THE SECTIONS:
 //
+//   0. THE PATH ITSELF — `agyMcpConfigPath()` matches a LITERAL written in this
+//      file, so a change to it cannot pass CI unchallenged. It does NOT
+//      establish the path is right; see §0's own comment for that seam
 //   1. THE DATA-LOSS SEQUENCE, END TO END: a user's own key is in the global
 //      config BEFORE CrabCast sees it; activate; `forget`; their entry — their
 //      exact bytes — is still there
@@ -41,7 +44,17 @@
 //   5. ownership that cannot be ESTABLISHED refuses, and names what it could
 //      not read
 //   6. a write that FAILS refuses the activation
-//   7. every refusal above can actually fail (mutation, via scripts/mutation.mjs)
+//   7. CrabCast's own builtin is NOT written to the shared file, and the
+//      activation SAYS the agent therefore cannot call CrabCast (KAN-235)
+//   8. a sibling claiming the same key with a DIFFERENT definition refuses,
+//      and one claiming it with the SAME definition still merges (KAN-235)
+//   9. every refusal above can actually fail (mutation, via scripts/mutation.mjs)
+//
+// §7 AND §8 ARE THE HALF THE CORRECTED PATH MADE NECESSARY. While CrabCast wrote
+// a file nothing read, both of these were inert: writing per-agent identity into
+// a shared file gave nobody a false identity, and one agent overwriting
+// another's key took nothing away, because neither agent ever received anything.
+// Correcting the path is what makes them live, which is why they land with it.
 //
 // §3 AND §4 ARE NOT DECORATION. A check that refuses everything passes every
 // refusal assertion in this file. Those two are what make §1, §2, §5 and §6
@@ -61,7 +74,7 @@
 //
 // What IS a fixture, in each case necessarily:
 //
-//   - THE USER'S PRE-EXISTING KEY (§1, §2, §7a). It has to be written by this
+//   - THE USER'S PRE-EXISTING KEY (§1, §2, §9a). It has to be written by this
 //     script, because "an entry that was the user's before CrabCast arrived" is
 //     by definition not something CrabCast can produce. Everything downstream
 //     of it — the collision, the refusal, the record, the removal — is the
@@ -111,11 +124,17 @@
 //     disclosed nor recorded is that same file's §7. KAN-178 changed that
 //     section's first assertion — the activation is now REFUSED rather than
 //     silently succeeding — and the section is still where that property lives.
-//   - A REAL `agy` BINARY. No proof in this repository runs one. That the
-//     antigravity CLI reads this file, at this path, in this shape is an
-//     assumption carried from the launcher's original author and is tested
-//     nowhere. The shared-ownership hazard has an owner for its bookkeeping
-//     (this file and its sibling) and none at all for its runtime behaviour.
+//   - A REAL `agy` BINARY. This file does not run one, and until KAN-235
+//     nothing in this repository did — which is how the path in it stayed wrong
+//     through three merged slices while every check here stayed green. Every
+//     assertion in this file reads a file CrabCast wrote, so none of them could
+//     ever have noticed that no other program read it. THAT GAP NOW HAS AN
+//     OWNER: `verify-agy-reads-what-we-write.mjs` runs a real `agy` and asserts
+//     that agy STARTS a server CrabCast defined. This file covers the
+//     bookkeeping; that one covers the delivery; neither covers the other.
+//   - THE BUILTIN'S OMISSION beyond §8's write-side check — that an agy agent
+//     genuinely cannot reach the daemon is a property of the running agent, and
+//     nothing here starts one.
 //
 // Usage:
 //   npm run build
@@ -246,6 +265,84 @@ async function loadDaemon(distDir) {
 
 const realBuild = await loadDaemon(dist);
 
+// ===========================================================================
+section('0. THE PATH ITSELF — changing it can no longer be silent (KAN-235)');
+
+// WHY THIS SECTION EXISTS, AND IT IS NOT WHAT IT LOOKS LIKE.
+//
+// Everything else in this file — and in `verify-agy-mcp-reversal` — derives the
+// path from `agyMcpConfigPath()` and then writes to it and reads back from it.
+// That is deliberate and correct for what those sections test, and it has one
+// consequence nobody noticed for three merged slices: THE PROOFS FOLLOW THE CODE
+// WHEREVER IT GOES. Point `agyMcpConfigPath` at any path at all and every
+// section here still passes, because every section is asking whether CrabCast is
+// internally consistent, and it always is.
+//
+// MEASURED, not theorised. `agyMcpConfigPath` was reverted to the pre-KAN-235
+// path, rebuilt, and both gating proofs were run against that build:
+// `verify-agy-mcp-write-refusals` exit 0, `verify-agy-mcp-reversal` exit 0, ALL
+// PASS on both. A silent revert of the exact defect KAN-235 fixes was invisible
+// to CI. This section is the smallest thing that makes it visible.
+//
+// THE COMPARISON IS AGAINST A LITERAL WRITTEN HERE, and that is the whole
+// design. Comparing against a constant imported from `src/` — or against the
+// function itself — would be tautological: it would assert that the code equals
+// the code, which is the same "our output is our own input" shape that made this
+// possible. The segments below are typed out in this file on purpose. If you
+// change the path in `src/`, this goes red until somebody changes it here too,
+// and that second edit is the moment a reviewer gets to ask why.
+//
+// WHAT THIS DOES **NOT** ESTABLISH, said plainly because the distinction is the
+// entire point of the ticket:
+//
+//   - IT DOES NOT ESTABLISH THAT THE PATH IS CORRECT. Nothing in CI can. This
+//     literal is just as capable of being wrong as the code was — and a wrong
+//     path changed in BOTH places at once passes this section without a murmur.
+//   - THE ONLY THING STANDING BEHIND THE LITERAL'S TRUTH is
+//     `verify-agy-reads-what-we-write.mjs`, which runs a REAL `agy` binary and
+//     requires it to actually START a server CrabCast defined. That proof is
+//     excluded from CI (no runner has agy) and is run by hand.
+//   - So: THIS SECTION MAKES THE CHANGE LOUD. THAT SCRIPT MAKES THE VALUE TRUE.
+//     Neither does the other's job, and if that hand-run proof is ever deleted
+//     or stubbed, this literal becomes an unverified assumption again — a
+//     confidently-asserted one, which is worse than the honest gap it replaced.
+{
+  const home = path.join(tmp, 'path-guard-home');
+  fs.mkdirSync(home, { recursive: true });
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+
+  const actual = realBuild.agyMcpConfigPath();
+  // The literal. Not imported, not derived — typed here.
+  const expected = path.join(home, '.gemini', 'config', 'mcp_config.json');
+  const preFix = path.join(home, '.gemini', 'antigravity-cli', 'mcp.json');
+
+  console.log(`    agyMcpConfigPath() → ${actual.replace(home, '$HOME')}`);
+  check(
+    'CrabCast writes the agy MCP config to `~/.gemini/config/mcp_config.json` — compared against ' +
+      'a literal in this file, so a change to the path in `src/` cannot pass CI unchallenged',
+    actual === expected,
+    actual === expected
+      ? undefined
+      : actual === preFix
+        ? `IT IS THE PRE-KAN-235 PATH (${actual}). The antigravity CLI does not read that file. ` +
+          'Every agy agent would be activated with servers it never receives, behind `success: ' +
+          'true`, and every other section in this file would still pass.'
+        : `expected ${expected}\n        actual   ${actual}`
+  );
+  // VACUITY GUARD. Without this, a function that returned a constant — or an
+  // empty string that some future refactor made both sides of the comparison
+  // agree on — would satisfy the check above while deriving nothing from $HOME.
+  check(
+    'and it is genuinely derived from the home directory rather than a constant that happens to ' +
+      'match, so the comparison above is measuring something',
+    actual.startsWith(home + path.sep) && actual !== home,
+    actual
+  );
+
+  process.env.HOME = previousHome;
+}
+
 // ---------------------------------------------------------------------------
 // Scaffolding.
 
@@ -342,7 +439,7 @@ function newWorld(label, build = realBuild) {
       action: 'configure_agent',
       path: dir,
       ...AGY,
-      mcpServers: { crabcast: 'builtin' },
+      mcpServers: { [SHARED_KEY]: OUR_DEFINITION },
       ...knobs
     });
     if (!configured.success) return { configured, activated: null };
@@ -361,16 +458,46 @@ function newWorld(label, build = realBuild) {
 
 const AGY = { priority: 1, refusable: true, chargeable: true, preemptable: true, launcher: 'anti-gravity' };
 
+/**
+ * The contested server name.
+ *
+ * IT USED TO BE `crabcast`, THE BUILTIN, AND THAT STOPPED BEING A VALID FIXTURE
+ * AT KAN-235. The builtin carries this agent's identity, and the agy config is
+ * shared by every agy agent, so it is now deliberately NOT written — an agent
+ * configured with only `crabcast: 'builtin'` produces no write at all. Every
+ * refusal below is about a write, so a fixture that no longer writes would have
+ * turned this whole file green by testing nothing.
+ *
+ * A CALLER-SUPPLIED SERVER IS THE HONEST FIXTURE NOW, because caller-supplied
+ * servers are exactly what an agy agent still receives. The omission itself is
+ * §8's subject.
+ */
+const SHARED_KEY = 'notes';
+
 /** The definition a user might plausibly have under the name we also want. */
 const THEIR_DEFINITION = {
-  command: '/usr/local/bin/my-own-crabcast',
+  command: '/usr/local/bin/my-own-notes',
   args: ['--not-the-daemons'],
   env: { MINE: 'yes' }
 };
 
-/** Whether the global agy config still holds the USER'S bytes under `crabcast`. */
+/** What a CALLER configures an agy agent with — written, unlike the builtin. */
+const OUR_DEFINITION = {
+  command: '/usr/local/bin/notes-mcp',
+  args: ['--from-the-caller'],
+  env: { SOURCE: 'caller' }
+};
+
+/** A second caller's definition under the SAME name — the KAN-235 conflict. */
+const OTHER_DEFINITION = {
+  command: '/usr/local/bin/notes-mcp',
+  args: ['--a-different-database'],
+  env: { SOURCE: 'caller' }
+};
+
+/** Whether the global agy config still holds the USER'S bytes under the key. */
 const theirKeyIntact = (world, expected) =>
-  JSON.stringify(world.agyServers()?.crabcast) === expected;
+  JSON.stringify(world.agyServers()?.[SHARED_KEY]) === expected;
 
 // ===========================================================================
 section('1. THE DATA-LOSS SEQUENCE, END TO END — their entry survives it (AC 1)');
@@ -401,7 +528,7 @@ section('1. THE DATA-LOSS SEQUENCE, END TO END — their entry survives it (AC 1
 const w1 = newWorld('their-key');
 const a1 = w1.ownedDir('agent-a', { 'README.md': '# theirs\n' });
 {
-  const theirBytes = w1.seedTheirKey('crabcast', THEIR_DEFINITION, {
+  const theirBytes = w1.seedTheirKey(SHARED_KEY, THEIR_DEFINITION, {
     // Something of theirs that is not ours, so "the file survived" is a claim
     // about the whole file and not only about the one key.
     theirOwnSetting: 'do not lose this either'
@@ -511,13 +638,17 @@ section('2. The refusal says WHICH key, WHOSE it is, and WHAT TO DO (AC 2)');
 const w2 = newWorld('refusal-wording');
 const a2 = w2.ownedDir('agent-a');
 {
-  w2.seedTheirKey('crabcast', THEIR_DEFINITION);
+  w2.seedTheirKey(SHARED_KEY, THEIR_DEFINITION);
   const { activated } = await w2.bringUp(a2);
   const error = activated?.error ?? '';
   console.log(`    the refusal:\n      ${error}`);
 
   check('it refused', activated?.success === false, JSON.stringify(activated));
-  check("it names the KEY, so the reader knows which entry to look at", /'crabcast'/.test(error), error);
+  check(
+    'it names the KEY, so the reader knows which entry to look at',
+    new RegExp(`'${SHARED_KEY}'`).test(error),
+    error
+  );
   check('it names the FILE, by absolute path', error.includes(w2.agyFile), error);
   check(
     'it says WHOSE the key is, in the vocabulary `provisionMcpConfig` already uses for this ' +
@@ -574,7 +705,7 @@ const a3 = w3.ownedDir('agent-a');
   const first = await w3.bringUp(a3);
   check('the first activation succeeds against a config with no collision in it',
     first.activated?.success === true, first.activated?.error);
-  const ourBytes = JSON.stringify(w3.agyServers()?.crabcast);
+  const ourBytes = JSON.stringify(w3.agyServers()?.[SHARED_KEY]);
   check('and our key really is in the file, so the second activation is a genuine collision',
     typeof ourBytes === 'string' && ourBytes !== 'undefined', JSON.stringify(w3.agyServers()));
   check(
@@ -618,7 +749,7 @@ const b4 = w4.ownedDir('agent-b');
   const first = await w4.bringUp(a4);
   check('agent A activated', first.activated?.success === true, first.activated?.error);
   check('(precondition) A left its key in the shared file, so B faces a real collision',
-    w4.agyServers()?.crabcast !== undefined, JSON.stringify(w4.agyServers()));
+    w4.agyServers()?.[SHARED_KEY] !== undefined, JSON.stringify(w4.agyServers()));
   check(
     '(precondition) and B has NO record of its own for that key — so if the question were asked ' +
       'of B\'s sidecar alone, B would be refused here',
@@ -655,7 +786,7 @@ const b5 = w5.ownedDir('agent-b');
 {
   const first = await w5.bringUp(a5);
   check('(precondition) agent A activated and left its key in the shared file',
-    first.activated?.success === true && w5.agyServers()?.crabcast !== undefined,
+    first.activated?.success === true && w5.agyServers()?.[SHARED_KEY] !== undefined,
     first.activated?.error);
 
   // The fixture: A's record — a real one the daemon wrote — is corrupted. The
@@ -687,7 +818,7 @@ const b5 = w5.ownedDir('agent-b');
   );
   check(
     'their file is untouched, as with every other refusal here',
-    w5.agyServers()?.crabcast !== undefined && parseIfPresent(w5.agyFile) !== null
+    w5.agyServers()?.[SHARED_KEY] !== undefined && parseIfPresent(w5.agyFile) !== null
   );
 }
 
@@ -721,10 +852,17 @@ const a6 = w6.ownedDir('agent-a');
     activated?.success === false,
     JSON.stringify({ success: activated?.success, error })
   );
+  // THIS ASSERTION USED TO REQUIRE THE WORDS "nowhere else", AND THEY WERE
+  // FALSE (KAN-235). The antigravity CLI read a DIFFERENT file, not no other
+  // file, so the refusal was explaining the stakes of a write that had no
+  // stakes. The proof required the false sentence to be present, which is how a
+  // wrong claim acquires a green check standing behind it. What is required now
+  // is the claim the measurement supports.
   check(
-    'and the refusal explains WHY that matters — the antigravity CLI reads its servers from that ' +
-      'file and nowhere else',
-    /nowhere else/.test(error) && /quietly missing what it was promised/.test(error),
+    'and the refusal explains WHY that matters — this is the file the antigravity CLI reads its ' +
+      'servers from',
+    /the file the antigravity CLI reads them from/.test(error) &&
+      /quietly missing what it was promised/.test(error),
     error
   );
   check('and says nothing was started', /NOTHING WAS STARTED/i.test(error), error);
@@ -736,14 +874,171 @@ const a6 = w6.ownedDir('agent-a');
 }
 
 // ===========================================================================
-section('7. The refusals above can actually fail (mutation)');
+section("7. CrabCast's OWN builtin is not written to the shared file (KAN-235)");
+
+// THE DEFECT THE CORRECTED PATH WOULD OTHERWISE CREATE. `builtinMcpServer` bakes
+// CRABCAST_AGENT_PATH into the `crabcast` definition, and that is the entire
+// supply of caller identity in this system. That works because the file it
+// normally goes in belongs to ONE agent. The agy config belongs to all of them,
+// so writing it there would give every agy agent the identity of whichever one
+// activated last — `send_to_agent` from A arriving as B. Not a missing feature,
+// a FABRICATED one.
+//
+// While the path was wrong this was inert: nobody read the file, so nobody got
+// anybody's identity. Correcting the path is what would have made it live, which
+// is why this section exists in the same slice.
+const w8 = newWorld('builtin-omitted');
+const a8 = w8.ownedDir('agent-a');
+{
+  const { activated } = await w8.bringUp(a8, {
+    mcpServers: { crabcast: 'builtin', [SHARED_KEY]: OUR_DEFINITION }
+  });
+  check('(precondition) the activation succeeded — this is an omission, not a refusal',
+    activated?.success === true, activated?.error);
+
+  const servers = w8.agyServers() ?? {};
+  check(
+    "THE BUILTIN IS NOT IN THE SHARED FILE. Writing it would hand this agent's identity to every " +
+      'other agy agent on the machine',
+    servers.crabcast === undefined,
+    JSON.stringify(servers)
+  );
+  check(
+    "and the CALLER'S server IS, so the omission is surgical rather than the launcher giving up",
+    JSON.stringify(servers[SHARED_KEY]) === JSON.stringify(OUR_DEFINITION),
+    JSON.stringify(servers)
+  );
+
+  // A grep for the identity itself, not just for the key name: the failure mode
+  // is the VALUE leaking, and a definition written under some other name would
+  // pass the check above while still fabricating identity.
+  check(
+    'and this agent\'s CRABCAST_AGENT_PATH appears NOWHERE in the shared file, under any key',
+    !(readIfPresent(w8.agyFile) ?? '').includes(a8),
+    readIfPresent(w8.agyFile)
+  );
+
+  const record = parseIfPresent(path.join(w8.sidecarOf(a8), 'provisioned.json'))?.agyMcp;
+  check(
+    'and nothing was RECORDED for it either — provenance is what `forget` removes by, so a record ' +
+      'here would aim a later reversal at whatever the user\'s own `crabcast` entry is',
+    record !== undefined && record.keys.crabcast === undefined,
+    JSON.stringify(record)
+  );
+
+  const disclosure = (activated?.provisioned ?? []).find((d) => d.artifact === 'agy-mcp-config');
+  console.log(`    the disclosure:\n      ${disclosure?.detail}`);
+  check('the activation DISCLOSES the omission rather than staying quiet about it',
+    /were NOT written/.test(disclosure?.detail ?? ''), JSON.stringify(disclosure));
+  check(
+    'and it names the CONSEQUENCE — that this agent cannot call CrabCast at all. A capability ' +
+      'removed silently is worse than one refused loudly',
+    /CANNOT CALL CRABCAST AT ALL/.test(disclosure?.detail ?? '') &&
+      /send_to_agent/.test(disclosure?.detail ?? ''),
+    disclosure?.detail
+  );
+}
+
+// An agent whose ONLY server is the builtin: nothing is written at all, and the
+// reason has to say which of the two non-writes this was.
+const w8b = newWorld('builtin-only');
+const a8b = w8b.ownedDir('agent-a');
+{
+  const { activated } = await w8b.bringUp(a8b, { mcpServers: { crabcast: 'builtin' } });
+  check('(precondition) it activated', activated?.success === true, activated?.error);
+  check('no file was created at all, because there was nothing writable to put in it',
+    !fs.existsSync(w8b.agyFile), readIfPresent(w8b.agyFile));
+
+  const disclosure = (activated?.provisioned ?? []).find((d) => d.artifact === 'agy-mcp-config');
+  check(
+    'and the caller is STILL told, even though there is no file change to describe — "you asked ' +
+      'for nothing" and "the one thing you asked for cannot be delivered" are different positions',
+    /CANNOT CALL CRABCAST AT ALL/.test(disclosure?.detail ?? ''),
+    JSON.stringify(disclosure)
+  );
+  check(
+    'and it is disclosed as `preexisting` with nothing to undo, because CrabCast did not touch ' +
+      'the file',
+    disclosure?.origin === 'preexisting' && /Nothing to undo/.test(disclosure?.reversal ?? ''),
+    JSON.stringify(disclosure)
+  );
+}
+
+// ===========================================================================
+section('8. A sibling claiming the same key with a DIFFERENT definition refuses (KAN-235)');
+
+// §4 established that a SIBLING's key is CrabCast's and merges. That is right
+// about ownership and silent about VALUE, and one file holds one value per name.
+// So the sibling case splits in two, and only one half may merge.
+const w9 = newWorld('conflicting-sibling');
+const a9 = w9.ownedDir('agent-a');
+const b9 = w9.ownedDir('agent-b');
+{
+  const first = await w9.bringUp(a9, { mcpServers: { [SHARED_KEY]: OUR_DEFINITION } });
+  check('(precondition) agent A activated and its definition is in the shared file',
+    first.activated?.success === true &&
+      JSON.stringify(w9.agyServers()?.[SHARED_KEY]) === JSON.stringify(OUR_DEFINITION),
+    first.activated?.error);
+
+  const second = await w9.bringUp(b9, { mcpServers: { [SHARED_KEY]: OTHER_DEFINITION } });
+  const error = second.activated?.error ?? '';
+  console.log(`    the refusal:\n      ${error}`);
+
+  check(
+    'AGENT B IS REFUSED. Merging would not share the server with A, it would REDIRECT A\'s — A ' +
+      'keeps running, believing it has what it was configured with, while its calls go elsewhere',
+    second.activated?.success === false,
+    JSON.stringify({ success: second.activated?.success, error })
+  );
+  check('and the refusal names the KEY', new RegExp(`'${SHARED_KEY}'`).test(error), error);
+  check('and names the SIBLING by path, so the caller knows which agent it is up against',
+    error.includes(a9), error);
+  check(
+    'and says the file holds only one definition per name, which is WHY this is a conflict rather ' +
+      'than an ownership problem',
+    /only one definition per server name/.test(error),
+    error
+  );
+  check(
+    "A's definition is untouched — the refusal did not half-apply",
+    JSON.stringify(w9.agyServers()?.[SHARED_KEY]) === JSON.stringify(OUR_DEFINITION),
+    JSON.stringify(w9.agyServers())
+  );
+}
+
+// THE POSITIVE CONTROL THE DECISION ASKED FOR BY NAME, and this section is worth
+// nothing without it: every assertion above would also pass against a build that
+// refused EVERY sibling, which is precisely the behaviour §4 exists to forbid.
+const w9b = newWorld('agreeing-sibling');
+const a9b = w9b.ownedDir('agent-a');
+const b9b = w9b.ownedDir('agent-b');
+{
+  const first = await w9b.bringUp(a9b, { mcpServers: { [SHARED_KEY]: OUR_DEFINITION } });
+  check('(precondition) agent A activated', first.activated?.success === true,
+    first.activated?.error);
+
+  const second = await w9b.bringUp(b9b, { mcpServers: { [SHARED_KEY]: OUR_DEFINITION } });
+  check(
+    'AGENT B IS NOT REFUSED when it asks for the SAME definition. Two agents sharing one server ' +
+      'is the ordinary case the reference count exists to support, and refusing it would make the ' +
+      'second agy agent on a machine unstartable',
+    second.activated?.success === true,
+    second.activated?.error
+  );
+  check('and both agents claim the key, so the reference count still works',
+    parseIfPresent(path.join(w9b.sidecarOf(b9b), 'provisioned.json'))?.agyMcp?.keys?.[SHARED_KEY] !==
+      undefined);
+}
+
+// ===========================================================================
+section('9. The refusals above can actually fail (mutation)');
 
 // A CHECK THAT CANNOT FAIL IS NOT A CHECK, and a refusal is the easiest kind of
 // assertion to write in a way that cannot fail. Each mutation below backs one
 // refusal out of a COPY of the compiled daemon and requires the property the
 // section above asserted to go red against it.
 //
-// §7a IS THE IMPORTANT ONE and it is not merely "the check goes red": it runs
+// §9a IS THE IMPORTANT ONE and it is not merely "the check goes red": it runs
 // §1's whole sequence end to end against a build without the foreign-key
 // refusal and watches the user's entry be DELETED. That is the damage this
 // ticket exists to prevent, observed rather than described — the pre-fix
@@ -799,7 +1094,7 @@ mutationForeignKey: {
 
   const w = newWorld('mutant-foreign', build);
   const a = w.ownedDir('agent-a');
-  const theirBytes = w.seedTheirKey('crabcast', THEIR_DEFINITION);
+  const theirBytes = w.seedTheirKey(SHARED_KEY, THEIR_DEFINITION);
 
   const { activated } = await w.bringUp(a);
   check(
@@ -828,7 +1123,7 @@ mutationForeignKey: {
     'AND THEIR ENTRY IS GONE. The whole sequence, against a build without the refusal: the user ' +
       'has lost their own `crabcast` server from their own global config, and every step that ' +
       'did it behaved exactly as designed. THIS is what §1 measures',
-    w.agyServers()?.crabcast === undefined,
+    w.agyServers()?.[SHARED_KEY] === undefined,
     JSON.stringify(w.agyServers())
   );
   check(
@@ -903,6 +1198,100 @@ mutationFailedWrite: {
       'find out',
     !(activated?.provisioned ?? []).some((d) => d.artifact === 'agy-mcp-config'),
     JSON.stringify(activated?.provisioned)
+  );
+}
+
+mutationBuiltinLeaks: {
+  // The build KAN-235 replaces, for §7: the launcher writes everything it is
+  // handed, including CrabCast's own definition. This is the exact state the
+  // corrected path would have shipped in had the omission not landed with it —
+  // and the reason the two could not be separate slices.
+  //
+  // TWO EDITS, AND THE SECOND IS NOT PADDING. Backing out only the omission
+  // does not reproduce the fabrication: the two agents' builtins differ (each
+  // bakes its own path), so §8's conflict refusal catches the second agent and
+  // no identity is overwritten. That is a real property worth knowing — the two
+  // guards overlap — but it means a one-edit mutant would demonstrate "B is
+  // refused" rather than the damage this section is about. The pre-fix world
+  // being reproduced is the one where the path is corrected and NEITHER guard
+  // exists, which is exactly what would have shipped had this been split into
+  // two slices.
+  const mutant = mutate('write-the-builtin-too', [
+    {
+      file: 'launchers.js',
+      find: 'const builtinNames = new Set(options.builtinNames ?? []);',
+      replace:
+        'const builtinNames = new Set(); // MUTANT: nothing is treated as ours, so the builtin is written'
+    },
+    {
+      file: 'launchers.js',
+      find: 'if (ownership.conflicting.length) {',
+      replace: 'if (false && ownership.conflicting.length) { // MUTANT: and no conflict guard either'
+    }
+  ]);
+  if (!mutant) break mutationBuiltinLeaks;
+
+  const build = await loadDaemon(mutant).catch((e) => ({ threw: e?.message ?? String(e) }));
+  check('(precondition) the mutant loaded rather than dying on import', build.threw === undefined,
+    build.threw);
+  if (build.threw) break mutationBuiltinLeaks;
+
+  const w = newWorld('mutant-builtin-leaks', build);
+  const a = w.ownedDir('agent-a');
+  const b = w.ownedDir('agent-b');
+  await w.bringUp(a, { mcpServers: { crabcast: 'builtin' } });
+  await w.bringUp(b, { mcpServers: { crabcast: 'builtin' } });
+
+  const text = readIfPresent(w.agyFile) ?? '';
+  check(
+    "§7's property goes RED: the builtin lands in the shared file",
+    w.agyServers()?.crabcast !== undefined,
+    JSON.stringify(w.agyServers())
+  );
+  check(
+    'AND THIS IS THE DAMAGE, not merely a red check: the file now carries agent B\'s identity ' +
+      'and NOT agent A\'s, so every agy agent on this machine — A included — would call ' +
+      '`send_to_agent` as B. A fabricated supervisor of record, in a file A also reads',
+    text.includes(b) && !text.includes(a),
+    JSON.stringify({ holdsB: text.includes(b), holdsA: text.includes(a) })
+  );
+}
+
+mutationConflict: {
+  // Back out §8's refusal: the differing-definition case merges again, and the
+  // sibling's server is redirected under it.
+  const mutant = mutate(
+    'conflicting-sibling-merges',
+    'launchers.js',
+    'if (ownership.conflicting.length) {',
+    'if (false && ownership.conflicting.length) { // MUTANT: a differing sibling definition merges'
+  );
+  if (!mutant) break mutationConflict;
+
+  const build = await loadDaemon(mutant).catch((e) => ({ threw: e?.message ?? String(e) }));
+  check('(precondition) the mutant loaded rather than dying on import', build.threw === undefined,
+    build.threw);
+  if (build.threw) break mutationConflict;
+
+  const w = newWorld('mutant-conflict', build);
+  const a = w.ownedDir('agent-a');
+  const b = w.ownedDir('agent-b');
+  await w.bringUp(a, { mcpServers: { [SHARED_KEY]: OUR_DEFINITION } });
+  const second = await w.bringUp(b, { mcpServers: { [SHARED_KEY]: OTHER_DEFINITION } });
+
+  check(
+    "§8's property goes RED: B is not refused",
+    second.activated?.success === true,
+    second.activated?.error
+  );
+  check(
+    "AND AGENT A'S SERVER HAS BEEN REDIRECTED — the definition in the shared file is now B's, " +
+      'while A goes on running with a provenance record claiming the bytes it no longer has. A ' +
+      'was never told, and nothing in the response would tell it',
+    JSON.stringify(w.agyServers()?.[SHARED_KEY]) === JSON.stringify(OTHER_DEFINITION) &&
+      parseIfPresent(path.join(w.sidecarOf(a), 'provisioned.json'))?.agyMcp?.keys?.[SHARED_KEY] ===
+        JSON.stringify(OUR_DEFINITION),
+    JSON.stringify(w.agyServers())
   );
 }
 
