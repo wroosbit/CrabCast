@@ -649,7 +649,17 @@ const PROOF_DEFENCES = [
       '0.3, which no weakening of the gate could pass; §4 requires count- and memory-bound ' +
       'refusals to still happen and to still name their own constraint. §1 and §5 carry rejection ' +
       'fixtures — malformed /proc/stat lines, backwards counters, an expired observation — that ' +
-      'must each produce null rather than a number. §7 is the POSITIVE CONTROL FOR THE WHOLE ' +
+      'must each produce null rather than a number. THE BACKWARDS FIXTURE IS DERIVED, NOT ' +
+      'HARD-CODED, AND ITS EXERCISE IS ASSERTED (KAN-245): it is read off this machine\'s live ' +
+      '/proc/stat plus a margin, and §5 then reads the counters back and requires the fixture to ' +
+      'be strictly above them on both legs. That second assertion is not a restatement of the ' +
+      'first — `null` is equally what a fixture that has STOPPED being backwards returns when it ' +
+      'is rejected for some other reason, which is exactly how the previous literal (9_999_999) ' +
+      'expired unnoticed as machines accumulated ticks: it went red on any host with about a day ' +
+      'of uptime while staying green on freshly-booted CI runners, and the message it printed ' +
+      'accused machine-cpu.ts rather than itself. The guard fails toward the fixture by name. ' +
+      'WHERE THE INSTRUMENT IS ABSENT the backwards case is not constructed and is announced as ' +
+      'NOT RUN rather than counted as a rejection. §7 is the POSITIVE CONTROL FOR THE WHOLE ' +
       'INSTRUMENT: it starts a real daemon, waits for its sampler, and requires the daemon\'s own ' +
       'capacity derivation to say `measured over Ns` rather than `not measured here` — with the ' +
       'unmeasured branch observed on the same process moments earlier, so the string it greps for ' +
