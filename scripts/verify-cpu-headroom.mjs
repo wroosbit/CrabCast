@@ -79,6 +79,7 @@ const { computeCapacity, describeCapacity, capacityRefusal, readMachineFacts, GI
   await import(path.join(distDir, 'capacity.js'));
 const {
   parseCpuTicks,
+  readCpuTicks,
   startCpuWindow,
   finishCpuWindow,
   setObservedCpu,
@@ -445,11 +446,27 @@ verdict(
 // And a window that closed without meaning anything is rejected rather than
 // published. The counters here go BACKWARDS, which is what a container hopping
 // hosts or a reset cgroup looks like.
+//
+// KAN-245: the backwards fixture is DERIVED from this machine's live counters
+// rather than hard-coded. It used to be the literal 9_999_999, which was
+// genuinely above any real counter when it was written and stopped being so as
+// machines accumulated ticks — on 4 cores, after roughly a day of uptime. The
+// fixture then moved FORWARDS, a valid observation came back, and the check
+// went red on every long-lived developer machine while staying green on
+// freshly-booted CI runners. Nothing was wrong with `finishCpuWindow`; the
+// fixture had expired, and the message accused the code. Deriving it from
+// `readCpuTicks() + margin` makes "backwards" backwards BY CONSTRUCTION, so
+// there is no fact about the machine left for it to depend on.
+const BACKWARDS_MARGIN_TICKS = 1_000_000;
+const ticksBefore = readCpuTicks();
 const impossible = [
-  ['counters moved backwards', { ticks: { busy: 9_999_999, idle: 9_999_999 }, startedAt: Date.now() - 60_000 }],
+  ticksBefore && ['counters moved backwards', {
+    ticks: { busy: ticksBefore.busy + BACKWARDS_MARGIN_TICKS, idle: ticksBefore.idle + BACKWARDS_MARGIN_TICKS },
+    startedAt: Date.now() - 60_000
+  }],
   ['no time passed at all', { ticks: { busy: 0, idle: 0 }, startedAt: Date.now() }],
   [`shorter than MIN_WINDOW_SECONDS (${MIN_WINDOW_SECONDS}s)`, { ticks: { busy: 0, idle: 0 }, startedAt: Date.now() - 200 }]
-];
+].filter(Boolean);
 console.log('');
 let windowsRejected = true;
 for (const [label, start] of impossible) {
@@ -463,6 +480,51 @@ verdict(
   '    observation means the load average takes over — labelled, as above.',
   'A MEANINGLESS WINDOW PRODUCED AN OBSERVATION — CHECK THIS.'
 );
+
+// The vacuity guard, which is the other half of KAN-245 and not a restatement
+// of the check above. `got === null` is satisfied by a fixture that is
+// backwards and equally by one that has quietly stopped being backwards while
+// being rejected for some unrelated reason — that is precisely how the literal
+// expired without anything saying so. So read the counters BACK and require
+// that the snapshot handed to `finishCpuWindow` really was strictly above them
+// on both legs: only then was the backwards branch the thing that ran. A
+// refactor that zeroed the fixture, or made the two sides equal, would still
+// see `null` and would fail here instead of passing silently.
+//
+// Note the direction it accuses. When this goes red the fault is in THIS FILE's
+// fixture, not in `machine-cpu.ts`, and it says so — the defect that produced
+// KAN-245 was a true statement about the code being reported as a false one.
+console.log('');
+if (!ticksBefore) {
+  console.log(
+    '  /proc/stat is not readable here (not Linux, or /proc is not mounted), so\n' +
+    '  the backwards case was NOT CONSTRUCTED and NOT RUN — it is absent from the\n' +
+    '  list above rather than silently passing as a rejection. The other two\n' +
+    '  impossible windows do not depend on the instrument and did run.'
+  );
+} else {
+  const ticksAfter = readCpuTicks();
+  const fixture = impossible[0][1].ticks;
+  const stillBackwards =
+    ticksAfter !== null &&
+    fixture.busy > ticksAfter.busy &&
+    fixture.idle > ticksAfter.idle;
+  console.log(
+    `  fixture   busy ${fixture.busy}, idle ${fixture.idle}\n` +
+    `  read back busy ${ticksAfter ? ticksAfter.busy : 'unreadable'}, ` +
+    `idle ${ticksAfter ? ticksAfter.idle : 'unreadable'}\n` +
+    `  margin    ${BACKWARDS_MARGIN_TICKS} ticks above the counters at window open`
+  );
+  verdict(
+    stillBackwards,
+    'and the backwards case was SHOWN to be backwards: the fixture is strictly\n' +
+    '    above the counters read back on both legs, so the rejection above came\n' +
+    '    from the branch it is named for and not from something else.',
+    'THE BACKWARDS FIXTURE IS NOT BACKWARDS — CHECK THIS FILE, NOT machine-cpu.ts.\n' +
+    '    The rejection above proved nothing: this fixture no longer exercises the\n' +
+    '    case it is named for.'
+  );
+}
 
 // --------------------------------------------------------------- 6. live --
 rule('6. LIVE — a real window on this machine, through the real path');
