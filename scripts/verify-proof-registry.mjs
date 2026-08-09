@@ -107,7 +107,18 @@ const EXCLUSIONS = [
       'agy agent received nothing). This one asserts that a real agy STARTS a server CrabCast ' +
       'defined, so the evidence is a process another program chose to spawn. It also carries the ' +
       'sabotage run: the same steps against a build using the pre-KAN-235 path, where agy starts ' +
-      'nothing.',
+      'nothing. ' +
+      'WHAT THE EXCLUSION COSTS, AND WHAT PARTIALLY COVERS IT — recorded here so this entry and ' +
+      'its counterpart point AT each other rather than each assuming the other has it. Because ' +
+      'nothing in the CI array runs a real agy, a silent revert of the path was invisible to CI: ' +
+      'measured, with `agyMcpConfigPath` reverted, verify-agy-mcp-write-refusals and ' +
+      'verify-agy-mcp-reversal both exited 0, ALL PASS. verify-agy-mcp-write-refusals §0 now ' +
+      'closes that specific hole by comparing the path against a LITERAL typed into the proof, so ' +
+      'a change to it goes red in CI. THAT GUARD DEPENDS ON THIS SCRIPT and does not replace it: ' +
+      'it makes a path change loud, while only a real agy starting a real server can say the ' +
+      'literal is RIGHT. A wrong path edited in both places at once passes the guard. So this ' +
+      'exclusion is the reason that hand-run remains obligatory before merging any change to the ' +
+      'path, and deleting this script would leave the literal an unverified assumption.',
     evidence:
       'scripts/verify-agy-reads-what-we-write.mjs:1 runs a real agy under a scratch $HOME; §1 exits non-zero when no agy is on PATH'
   },

@@ -32,6 +32,9 @@
 //
 // THE SECTIONS:
 //
+//   0. THE PATH ITSELF — `agyMcpConfigPath()` matches a LITERAL written in this
+//      file, so a change to it cannot pass CI unchallenged. It does NOT
+//      establish the path is right; see §0's own comment for that seam
 //   1. THE DATA-LOSS SEQUENCE, END TO END: a user's own key is in the global
 //      config BEFORE CrabCast sees it; activate; `forget`; their entry — their
 //      exact bytes — is still there
@@ -261,6 +264,84 @@ async function loadDaemon(distDir) {
 }
 
 const realBuild = await loadDaemon(dist);
+
+// ===========================================================================
+section('0. THE PATH ITSELF — changing it can no longer be silent (KAN-235)');
+
+// WHY THIS SECTION EXISTS, AND IT IS NOT WHAT IT LOOKS LIKE.
+//
+// Everything else in this file — and in `verify-agy-mcp-reversal` — derives the
+// path from `agyMcpConfigPath()` and then writes to it and reads back from it.
+// That is deliberate and correct for what those sections test, and it has one
+// consequence nobody noticed for three merged slices: THE PROOFS FOLLOW THE CODE
+// WHEREVER IT GOES. Point `agyMcpConfigPath` at any path at all and every
+// section here still passes, because every section is asking whether CrabCast is
+// internally consistent, and it always is.
+//
+// MEASURED, not theorised. `agyMcpConfigPath` was reverted to the pre-KAN-235
+// path, rebuilt, and both gating proofs were run against that build:
+// `verify-agy-mcp-write-refusals` exit 0, `verify-agy-mcp-reversal` exit 0, ALL
+// PASS on both. A silent revert of the exact defect KAN-235 fixes was invisible
+// to CI. This section is the smallest thing that makes it visible.
+//
+// THE COMPARISON IS AGAINST A LITERAL WRITTEN HERE, and that is the whole
+// design. Comparing against a constant imported from `src/` — or against the
+// function itself — would be tautological: it would assert that the code equals
+// the code, which is the same "our output is our own input" shape that made this
+// possible. The segments below are typed out in this file on purpose. If you
+// change the path in `src/`, this goes red until somebody changes it here too,
+// and that second edit is the moment a reviewer gets to ask why.
+//
+// WHAT THIS DOES **NOT** ESTABLISH, said plainly because the distinction is the
+// entire point of the ticket:
+//
+//   - IT DOES NOT ESTABLISH THAT THE PATH IS CORRECT. Nothing in CI can. This
+//     literal is just as capable of being wrong as the code was — and a wrong
+//     path changed in BOTH places at once passes this section without a murmur.
+//   - THE ONLY THING STANDING BEHIND THE LITERAL'S TRUTH is
+//     `verify-agy-reads-what-we-write.mjs`, which runs a REAL `agy` binary and
+//     requires it to actually START a server CrabCast defined. That proof is
+//     excluded from CI (no runner has agy) and is run by hand.
+//   - So: THIS SECTION MAKES THE CHANGE LOUD. THAT SCRIPT MAKES THE VALUE TRUE.
+//     Neither does the other's job, and if that hand-run proof is ever deleted
+//     or stubbed, this literal becomes an unverified assumption again — a
+//     confidently-asserted one, which is worse than the honest gap it replaced.
+{
+  const home = path.join(tmp, 'path-guard-home');
+  fs.mkdirSync(home, { recursive: true });
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+
+  const actual = realBuild.agyMcpConfigPath();
+  // The literal. Not imported, not derived — typed here.
+  const expected = path.join(home, '.gemini', 'config', 'mcp_config.json');
+  const preFix = path.join(home, '.gemini', 'antigravity-cli', 'mcp.json');
+
+  console.log(`    agyMcpConfigPath() → ${actual.replace(home, '$HOME')}`);
+  check(
+    'CrabCast writes the agy MCP config to `~/.gemini/config/mcp_config.json` — compared against ' +
+      'a literal in this file, so a change to the path in `src/` cannot pass CI unchallenged',
+    actual === expected,
+    actual === expected
+      ? undefined
+      : actual === preFix
+        ? `IT IS THE PRE-KAN-235 PATH (${actual}). The antigravity CLI does not read that file. ` +
+          'Every agy agent would be activated with servers it never receives, behind `success: ' +
+          'true`, and every other section in this file would still pass.'
+        : `expected ${expected}\n        actual   ${actual}`
+  );
+  // VACUITY GUARD. Without this, a function that returned a constant — or an
+  // empty string that some future refactor made both sides of the comparison
+  // agree on — would satisfy the check above while deriving nothing from $HOME.
+  check(
+    'and it is genuinely derived from the home directory rather than a constant that happens to ' +
+      'match, so the comparison above is measuring something',
+    actual.startsWith(home + path.sep) && actual !== home,
+    actual
+  );
+
+  process.env.HOME = previousHome;
+}
 
 // ---------------------------------------------------------------------------
 // Scaffolding.
