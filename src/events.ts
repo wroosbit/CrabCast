@@ -269,6 +269,16 @@ export const CAPACITY_FIELDS = {
   headroomByCpu: SCALAR,
   headroomByLoad: SCALAR,
   headroomByMemory: SCALAR,
+  // KAN-216. `stallPercent` is null where nothing measured, never 0, and
+  // `stallInstrument` distinguishes "this kernel has no PSI" from "PSI is here
+  // and would not answer" — a subscriber that treats a null as a quiet machine
+  // has made the mistake the term exists to prevent.
+  stallPercent: SCALAR,
+  stallSource: SCALAR,
+  stallInstrument: SCALAR,
+  stalled: SCALAR,
+  stallRefusePercent: SCALAR,
+  headroomBeforeStall: SCALAR,
   summary: SCALAR
 } satisfies Record<string, FieldShape>;
 
