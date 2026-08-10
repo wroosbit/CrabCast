@@ -181,6 +181,24 @@ const EXCLUSIONS = [
     evidence: 'scripts/verify-send-confirms-delivery-live.mjs:12 two facts a shimmed pane cannot hold: the real marker, and a recipient that is genuinely busy'
   },
   {
+    script: 'verify-tail-source-boundary-live',
+    reason:
+      'Needs a real herdr server and a real terminal pane, for the one fact its CI sibling ' +
+      'structurally cannot hold: THAT HERDR REALLY ANSWERS "" FOR A PANE WITH TEXT ON IT. ' +
+      '`verify-tail-asks-every-source` shims herdr, so every empty read it asserts on is a read ' +
+      'that script wrote — if the premise were false or had been fixed upstream, it would still ' +
+      'pass every section while the fallback in `tailAgent` guarded nothing. That is the KAN-145 ' +
+      'shape (two green scripts with the gap between them), and this exclusion is the reason the ' +
+      'hand-run is obligatory rather than nice to have. It also needs a real pane for the two ' +
+      'measurements no stub can supply: the GRID GEOMETRY that makes the boundary predictable ' +
+      '(`tput lines` in the pane, boundary = rows - content rows, predicted before it is ' +
+      'measured), and what herdr does to a pane whose process is KILLED — which is how the old ' +
+      'docblock\'s claim that `recent-unwrapped` shows a dead agent\'s frozen last frame was ' +
+      'refuted rather than argued with. Costs one shell pane and no tokens; output goes on the ' +
+      'PR (KAN-98).',
+    evidence: 'scripts/verify-tail-source-boundary-live.mjs:7 the premise its shimmed sibling cannot establish; §4 kills a pane process and reads all three sources'
+  },
+  {
     script: 'verify-fleet-switch-live',
     reason:
       'Uses `herdr agent list` as the ground truth for whether an agent is running, across daemon ' +

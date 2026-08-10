@@ -286,6 +286,53 @@ const TAIL_DEFAULT_LINES = 40;
 const TAIL_MAX_LINES = 200;
 
 /**
+ * The herdr read sources a tail may come from, in the order they are asked.
+ *
+ * WHY THERE ARE TWO, AND WHY THE FIRST IS STILL FIRST. Measured on herdr 0.6.4
+ * (KAN-98), and the measurement is the whole reason this is a fallback rather
+ * than a substitution:
+ *
+ *   `recent`/`recent-unwrapped --lines N` return THE LAST N ROWS OF THE GRID
+ *   (scrollback + screen). Rows below the cursor are blank, so when a pane's
+ *   content sits in the top C rows of an R-row grid, EVERY N <= R - C selects
+ *   nothing but blank rows and herdr answers `""` — for a pane that is alive
+ *   and plainly has text on it. Boundary predicted and hit exactly on two
+ *   panes: R=23,C=4 went empty at N<=19 and answered at N=20; R=24,C=4 went
+ *   empty at N<=20 and answered at N=40.
+ *
+ *   `visible` returns the screen's content and IS NOT AFFECTED BY N at all —
+ *   it answered identically at every N from 1 to 200 on both panes.
+ *
+ * So `recent-unwrapped` is asked first because it reaches back through
+ * SCROLLBACK, which `visible` cannot see, and that is genuinely more of the
+ * agent's history when the pane has scrolled. `visible` is asked only when the
+ * first came back empty, and its answer is trimmed to the caller's N so a
+ * fallback cannot quietly return more than was asked for.
+ *
+ * WHAT THIS DOES **NOT** BUY, stated because the docblock it replaces claimed
+ * it. The old comment justified `recent-unwrapped` as the source that shows
+ * "the frozen last frame of an agent whose process died". IT DOES NOT, AND
+ * NEITHER DOES `visible`: herdr destroys the pane with its process, so within
+ * ~500ms of the process dying every source stops returning a `read` object at
+ * all and the agent leaves `agent list`. There is no frozen frame to read on
+ * this build — measured by killing a pane's process and reading all three
+ * sources for 15s afterwards. That capability does not exist to be regressed,
+ * which is why this change cannot cost it.
+ */
+const TAIL_SOURCES = ['recent-unwrapped', 'visible'] as const;
+export type TailSource = (typeof TAIL_SOURCES)[number];
+
+/**
+ * The last `lines` lines of `text`, used to hold the `visible` fallback to the
+ * bound the caller asked for. `visible` ignores `--lines`, so without this a
+ * `--lines 8` request could be answered with a whole screen.
+ */
+function lastLines(text: string, lines: number): string {
+  const rows = text.split('\n');
+  return rows.length <= lines ? text : rows.slice(-lines).join('\n');
+}
+
+/**
  * What herdr prints to the attach it is evicting. We match on it to tell the
  * user *why* their terminal stopped, rather than showing a dead pane and
  * letting them guess.
@@ -1739,34 +1786,111 @@ export class HerdrBridge {
    */
 
   /**
-   * The tail of an agent's terminal, as plain text. `recent-unwrapped` is the
-   * source that shows what actually scrolled past — including the frozen last
-   * frame of an agent whose process died, which is the state this exists to
-   * make visible. Never throws; the caller owes its client a response.
+   * The tail of an agent's terminal, as plain text.
+   *
+   * NEVER REPORTS ABSENCE OFF A SINGLE READ. Both sources in {@link
+   * TAIL_SOURCES} are asked before this returns an empty string, because one of
+   * them answers `""` for a live pane that plainly has text on it — see that
+   * constant for the measurement and the exact boundary. An empty answer from
+   * ONE source is not evidence that the pane is empty; it is evidence about the
+   * source.
+   *
+   * The three outcomes are kept apart in the shape rather than in prose, since
+   * the defect this replaces was precisely that two of them were the same
+   * value:
+   *
+   *   * TEXT — `success: true`, `text` non-empty, `source` naming who answered.
+   *   * GENUINELY EMPTY — `success: true`, `text: ''`, `source: null`, with
+   *     `sourcesTried` listing both. The pane was read and there is nothing on
+   *     it. This is a real answer about the agent.
+   *   * COULD NOT LOOK — `success: false` with `error`. No claim about the pane
+   *     is made or may be inferred.
+   *
+   * `source: null` with `success: true` is therefore the assertion "both of
+   * these were asked and both said nothing", and a caller that treats an empty
+   * pane as meaningful — {@link readDeliveryEvidence} does — is entitled to it
+   * only because of that.
+   *
+   * Never throws; the caller owes its client a response.
    */
   public tailAgent(
     agentPath: string,
     lines?: number
-  ): { success: boolean; text?: string; truncated?: boolean; error?: string } {
+  ): {
+    success: boolean;
+    text?: string;
+    truncated?: boolean;
+    /** Which source the text came from; null when both were asked and both were empty. */
+    source?: TailSource | null;
+    /** Every source asked, in order, so "we looked twice" is auditable. */
+    sourcesTried?: TailSource[];
+    error?: string;
+  } {
     const paneName = paneNameFor(agentPath);
-    try {
-      const read = this.runHerdr([
-        'agent', 'read', paneName,
-        '--source', 'recent-unwrapped',
-        '--format', 'text',
-        '--lines', String(clampTailLines(lines))
-      ])?.result?.read;
+    const wanted = clampTailLines(lines);
+    const tried: TailSource[] = [];
+    const answeredEmpty: TailSource[] = [];
+    let firstError: string | undefined;
 
-      if (!read || typeof read.text !== 'string') {
-        throw new Error(`herdr returned no readable output for agent '${paneName}'`);
+    for (const source of TAIL_SOURCES) {
+      tried.push(source);
+      try {
+        const read = this.runHerdr([
+          'agent', 'read', paneName,
+          '--source', source,
+          '--format', 'text',
+          '--lines', String(wanted)
+        ])?.result?.read;
+
+        if (!read || typeof read.text !== 'string') {
+          throw new Error(`herdr returned no readable output for agent '${paneName}'`);
+        }
+
+        // An empty string is a string, which is exactly how the single-source
+        // version reported a pane it had not really seen. Keep asking.
+        if (read.text.length === 0) {
+          answeredEmpty.push(source);
+          continue;
+        }
+
+        return {
+          success: true,
+          // `visible` ignores --lines, so it is held to what was asked for.
+          text: source === 'visible' ? lastLines(read.text, wanted) : read.text,
+          truncated: read.truncated === true,
+          source,
+          sourcesTried: [...tried]
+        };
+      } catch (e: any) {
+        // A source that FAILS is not a source that said "empty". Remember the
+        // first failure and let the next source try: herdr answering one read
+        // and refusing another is a state we have seen, and the pane is
+        // readable if either of them answers.
+        const error = e?.message ?? String(e);
+        if (firstError === undefined) firstError = error;
       }
-
-      return { success: true, text: read.text, truncated: read.truncated === true };
-    } catch (e: any) {
-      const error = e?.message ?? String(e);
-      console.error(`[HerdrBridge] Failed to tail agent at '${agentPath}':`, error);
-      return { success: false, error };
     }
+
+    // "Empty" is only ever asserted when EVERY source was asked AND ANSWERED.
+    // A source that failed is not a source that said "empty", so one refusal
+    // is enough to make this a read we could not trust — reporting it as an
+    // empty pane would be the original defect wearing the fallback's clothes.
+    if (answeredEmpty.length !== TAIL_SOURCES.length) {
+      const error =
+        `Could not establish what is on agent '${paneName}': ` +
+        `${firstError ?? 'a source failed to answer'}. ` +
+        (answeredEmpty.length
+          ? `${answeredEmpty.join(', ')} answered empty, but ` +
+            `${tried.filter(s => !answeredEmpty.includes(s)).join(', ')} could not be read, so ` +
+            `whether the pane is empty is UNKNOWN rather than confirmed.`
+          : `no source could be read.`);
+      console.error(`[HerdrBridge] Failed to tail agent at '${agentPath}':`, error);
+      return { success: false, error, sourcesTried: tried };
+    }
+
+    // Both sources answered, and both were empty. That is a fact about the
+    // agent rather than about the read, and it is said as one.
+    return { success: true, text: '', truncated: false, source: null, sourcesTried: tried };
   }
 
   /**
@@ -1816,11 +1940,27 @@ export class HerdrBridge {
    * could not look" are the same value to every caller downstream; an assertion
    * that a message did NOT land is then satisfied just as well by a pane nobody
    * could read. Readability is asserted at the point absence is asserted.
+   *
+   * THAT INVARIANT USED TO BE DEFEATED FROM UNDERNEATH, and this comment is
+   * where it was defeated (KAN-98). `readable` means "herdr handed us a
+   * string", and one of herdr's read sources hands back `""` for a live pane
+   * with text on it — so a spurious empty read arrived here as `readable: true,
+   * count: 0`, which is a SUCCESSFUL read of NO OUTPUT. It then took the
+   * `not-delivered` branch at the caller rather than the `unverifiable` one,
+   * which is the single place this was supposed to end up: `crabcast send`
+   * could report a message as not delivered while it was sitting on the
+   * recipient's screen. The claim outran the mechanism inside the mechanism
+   * built to stop claims outrunning mechanisms.
+   *
+   * The repair is in {@link tailAgent} rather than here — it now asks every
+   * source before it will say "empty", so `readable: true` once again means the
+   * pane was seen. `source` is carried through so the verdict names what it was
+   * read from instead of asking anyone to trust that it looked twice.
    */
   private readDeliveryEvidence(
     agentPath: string,
     message: string
-  ): { readable: true; count: number; inComposer: boolean; tail: string }
+  ): { readable: true; count: number; inComposer: boolean; tail: string; source: TailSource | null }
     | { readable: false; error: string } {
     const tail = this.tailAgent(agentPath, DELIVERY_TAIL_LINES);
     if (!tail.success || typeof tail.text !== 'string') {
@@ -1830,7 +1970,8 @@ export class HerdrBridge {
       readable: true,
       count: landedCount(tail.text, message),
       inComposer: messageInComposer(tail.text, message),
-      tail: tail.text
+      tail: tail.text,
+      source: tail.source ?? null
     };
   }
 
@@ -1940,7 +2081,13 @@ export class HerdrBridge {
       const named = code === AGENT_NOT_FOUND || code === PANE_NOT_FOUND || /has no pane to send to/.test(error);
       return outcome(
         named ? 'not-delivered' : 'unverifiable',
-        { readable: true, landedBefore, landedAfter: landedBefore, tail: capTail(baseline.tail) },
+        {
+          readable: true,
+          landedBefore,
+          landedAfter: landedBefore,
+          tail: capTail(baseline.tail),
+          tailSource: baseline.source
+        },
         named
           ? `Nothing was delivered to '${paneName}': ${error}. herdr says there is no pane there, ` +
             `so no keystroke was issued.`
@@ -1977,7 +2124,8 @@ export class HerdrBridge {
           landedBefore,
           landedAfter: after.count,
           inComposer: after.inComposer,
-          tail: capTail(after.tail)
+          tail: capTail(after.tail),
+          tailSource: after.source
         },
         after.count > landedBefore ? undefined : error
       );
@@ -1992,6 +2140,7 @@ export class HerdrBridge {
         landedAfter: first.count,
         inComposer: first.inComposer,
         tail: capTail(first.tail),
+        tailSource: first.source,
         ...(first.error ? { readError: first.error } : {})
       }, first.verdict === 'delivered' ? undefined : unverifiableMessage(paneName, confirmTimeoutMs, first.error));
     }
@@ -2004,7 +2153,8 @@ export class HerdrBridge {
         landedBefore,
         landedAfter: first.count,
         inComposer: false,
-        tail: capTail(first.tail)
+        tail: capTail(first.tail),
+        tailSource: first.source
       }, notDeliveredMessage(paneName, confirmTimeoutMs, false));
     }
 
@@ -2018,6 +2168,7 @@ export class HerdrBridge {
       landedAfter: second.count,
       inComposer: second.inComposer,
       tail: capTail(second.tail),
+      tailSource: second.source,
       ...(second.error ? { readError: second.error } : {})
     }, second.verdict === 'delivered'
       ? undefined
@@ -2048,12 +2199,14 @@ export class HerdrBridge {
     count: number | null;
     inComposer: boolean;
     tail: string | null;
+    /** Which source the deciding reading came from; null when all were empty. */
+    source: TailSource | null;
     checks: number;
     error?: string;
   }> {
     const deadline = Date.now() + timeoutMs;
     let checks = 0;
-    let last: { readable: true; count: number; inComposer: boolean; tail: string } | undefined;
+    let last: { readable: true; count: number; inComposer: boolean; tail: string; source: TailSource | null } | undefined;
     let lastError: string | undefined;
 
     for (;;) {
@@ -2068,6 +2221,7 @@ export class HerdrBridge {
             count: reading.count,
             inComposer: reading.inComposer,
             tail: reading.tail,
+            source: reading.source,
             checks
           };
         }
@@ -2081,8 +2235,15 @@ export class HerdrBridge {
     }
 
     return last
-      ? { verdict: 'not-delivered', count: last.count, inComposer: last.inComposer, tail: last.tail, checks }
-      : { verdict: 'unverifiable', count: null, inComposer: false, tail: null, checks, error: lastError };
+      ? {
+          verdict: 'not-delivered',
+          count: last.count,
+          inComposer: last.inComposer,
+          tail: last.tail,
+          source: last.source,
+          checks
+        }
+      : { verdict: 'unverifiable', count: null, inComposer: false, tail: null, source: null, checks, error: lastError };
   }
 
   /**

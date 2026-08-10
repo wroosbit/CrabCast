@@ -1361,15 +1361,28 @@ function renderTail(reader: ResponseReader, request: Record<string, unknown>): s
   if (!reader.success) return lines(failure(reader, `tail ${key}`), residue(reader));
   const text = reader.take<string>('text');
   const truncated = reader.take('truncated');
+  const source = reader.take<string | null>('source');
+  const sourcesTried = reader.take<string[] | undefined>('sourcesTried');
+  const hasText = typeof text === 'string' && text.length > 0;
   return lines(
-    `pane text for ${key}${truncated ? ' (truncated by herdr)' : ''}:`,
+    `pane text for ${key}${truncated ? ' (truncated by herdr)' : ''}` +
+      // WHICH SOURCE ANSWERED IS PART OF THE ANSWER (KAN-98). One of herdr's
+      // sources reports "" for a live pane with text on it, so a reader who
+      // cannot see which one was used cannot tell a quiet pane from a bad
+      // read — which is the whole defect this line exists to close.
+      (hasText && source ? ` (read from herdr's \`${source}\`)` : '') + ':',
     // Verbatim: this is somebody's terminal, and a renderer that reflows it
     // is answering a different question than the one asked. An empty read is
     // said in words — an empty pane and a renderer that printed nothing look
     // identical otherwise, and only one of them is an answer.
-    typeof text === 'string' && text.length
+    hasText
       ? text
-      : `${INDENT}(the pane returned no text — herdr read it and it was empty)`,
+      : `${INDENT}(the pane is empty — ${
+          sourcesTried?.length
+            ? `herdr's ${sourcesTried.map(s => `\`${s}\``).join(' and ')} were BOTH asked and both ` +
+              `returned nothing, so this is the pane's state and not a failed read`
+            : 'herdr read it and it was empty'
+        })`,
     residue(reader)
   );
 }

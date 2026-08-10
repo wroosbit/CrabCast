@@ -1,3 +1,5 @@
+import type { TailSource } from './herdr.js';
+
 /**
  * Telling a message that LANDED from a message that was merely TYPED.
  *
@@ -261,6 +263,14 @@ export interface SendEvidence {
   waitedMs: number;
   /** The tail the verdict was read from, capped at {@link EVIDENCE_TAIL_CHARS}. */
   tail: string | null;
+  /**
+   * Which herdr read source the tail came from — `null` when every source was
+   * asked and every one of them was empty, which is what makes an empty pane a
+   * finding rather than a failed look (KAN-98). Absent when the pane could not
+   * be read at all. A `not-delivered` carrying `tailSource: null` is asserting
+   * that more than one source agreed there was nothing there.
+   */
+  tailSource?: TailSource | null;
   /** Why the pane could not be read, when it could not. */
   readError?: string;
 }
