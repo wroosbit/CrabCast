@@ -222,7 +222,7 @@ where these fields came from — read at 2026-08-05T13:01:36.686Z
   derived  (computed from the two):                 paneName, state, occupies, reason
   remembered (this daemon's memory, not durable):   statusSince
 
-config echo: every knob on every row is declared (priority, refusable, chargeable, preemptable, launcher, prompt, mcpServers, label)
+config echo: every knob echoed on this response is declared (priority, refusable, chargeable, preemptable, launcher, prompt, mcpServers, label)
 
 capacity:
   1/3 charged agents, room for 2 more (4 cores, load 1.47, 9.5 GiB available; bound by cap)
@@ -263,6 +263,8 @@ where these fields came from — read at 2026-08-05T13:01:42.798Z
   observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir
   derived  (computed from the two):                 paneName, state, occupies, reason
   remembered (this daemon's memory, not durable):   statusSince
+
+config echo: every knob echoed on this response is declared (priority, refusable, chargeable, preemptable, launcher, prompt, mcpServers, label)
 
 $ crabcast send /tmp/ac1-demo/notes cat /tmp/ac1-demo/.crabcast/agents/31e31d1b7540dabf/prompt.md
 delivered to /tmp/ac1-demo/notes — the message was seen in its transcript as submitted output

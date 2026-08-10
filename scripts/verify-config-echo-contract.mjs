@@ -1,26 +1,38 @@
 #!/usr/bin/env node
-// Live proof for KAN-166: the `config` echo on the POLL path has a declared-
-// field contract, and it is the SAME declaration the event path enforces.
+// Live proof for KAN-166 and KAN-168: the `config` echo on BOTH read paths —
+// `list_agents` and `agent_status` — has a declared-field contract, and it is
+// the SAME declaration the event path enforces.
 //
-// WHAT FAILURE THIS WOULD CATCH: a field travelling inside `config` on a
-// `list_agents` response with nothing looking at it. That is not hypothetical
-// and it was not old — KAN-164 made the MCP event projection walk `config`'s
-// interior, and for one day afterwards the SAME `AgentConfig` object was
-// guarded on the event surface and unguarded on the poll surface. The
-// asymmetry mattered because of which half is which: §2 of
-// `docs/event-contract.md` makes an authoritative `list` poll a CORRECTNESS
-// requirement for every consumer of our events, so the unguarded half was the
-// half a consumer is told to depend on. Remove the sweep this script exercises
-// and section 3 shows exactly what that looked like: the field on the wire, and
-// nothing on the response saying so.
+// WHAT FAILURE THIS WOULD CATCH: a field travelling inside `config` on a read
+// response with nothing looking at it. That is not hypothetical and it was not
+// old — KAN-164 made the MCP event projection walk `config`'s interior, and for
+// one day afterwards the SAME `AgentConfig` object was guarded on the event
+// surface and unguarded on the poll surface. The asymmetry mattered because of
+// which half is which: §2 of `docs/event-contract.md` makes an authoritative
+// `list` poll a CORRECTNESS requirement for every consumer of our events, so
+// the unguarded half was the half a consumer is told to depend on. Remove the
+// sweep this script exercises and section 3 shows exactly what that looked
+// like: the field on the wire, and nothing on the response saying so.
+//
+// AND THEN IT HAPPENED AGAIN ONE SURFACE OVER, which is why this script now
+// covers two (KAN-168). Closing the poll path left `agent_status` — the same
+// object, the same `configEcho`, one agent instead of a fleet — unswept for
+// four more days. It was named in §2 and in this header as a known hole, and a
+// named hole is still a hole: a consumer polling ONE agent got no block at all
+// and could not tell that from a clean sweep. The sections below read both
+// surfaces off the SAME daemon and the same injected knob, and §3's third
+// mutation removes the `agent_status` sweep while leaving `list_agents` swept —
+// so this proof cannot pass the single-agent read on the fleet read's evidence.
 //
 // Sections, against the ticket's acceptance criteria:
 //
 //   1. the ordinary read — a real fleet with every echo-carrying category
 //                          populated, on an UNMUTATED build: the block is on
-//                          the response, `declared` IS the declaration rather
-//                          than a copy of it, and `undeclared` is empty. Also
-//                          the declared hole, observed: the caller's own
+//                          the response — on BOTH read surfaces, with
+//                          `agent_status`'s `declared` identical to
+//                          `list_agents`'s — `declared` IS the declaration
+//                          rather than a copy of it, and `undeclared` is empty.
+//                          Also the declared hole, observed: the caller's own
 //                          `config.mcpServers` keys arrive and are NOT reported.
 //                          SECTION 1 CANNOT TELL "nothing was there" FROM
 //                          "nobody looked" — `undeclared: []` is what a daemon
@@ -37,13 +49,23 @@
 //                           STILL DELIVERED, because this surface reports and
 //                           does not drop. The same daemon's MCP event
 //                           notification DROPS it. (AC 1, AC 4)
-//   3. the red half       — two mutations, each watched going red. The sweep
+//                           The SAME knob on the SAME daemon read back through
+//                           `agent_status`, named `config.telemetryToken` —
+//                           relative to the one row that response is about —
+//                           and delivered there too (KAN-168 AC 1, AC 2).
+//   3. the red half       — three mutations, each watched going red. The sweep
 //                           removed: the field travels and the response says
 //                           nothing, which is what `main` did before this
 //                           change. The warning silenced with the sweep left
 //                           in: the response still reports, so which artifact
 //                           carries the answer is measured rather than
 //                           asserted. (AC 2)
+//                           And the `agent_status` sweep removed ALONE, with
+//                           `list_agents` left swept: the fleet read still
+//                           reports and the single-agent read goes silent,
+//                           which is the four-day defect KAN-168 closed and the
+//                           one a shared-call-site proof could not see
+//                           (KAN-168 AC 3).
 //   4. one declaration    — the same injected knob plus ONE edit adding it to
 //                           `CONFIG_FIELDS`, and both surfaces move: the event
 //                           notification publishes it and stops warning, the
@@ -84,11 +106,28 @@
 // → durable record → `configEcho` → response, and this script only reads the
 // far end.
 //
-// WHAT NOTHING HERE COVERS, named rather than left to be inferred:
-// `crabcast_agent_status` echoes the same `config` object for one agent and is
-// NOT swept — it carries no `configEchoContract` at all. That is stated in §2
-// of the document and tracked as KAN-168; no script in this suite covers it,
-// and this header is the edge of what this one claims.
+// WHAT NOTHING HERE COVERS, named rather than left to be inferred.
+//
+// This used to name `crabcast_agent_status` — the same object, one agent, no
+// block at all. That is now covered, in every section, and the sentence is
+// replaced rather than deleted because what it recorded is the pattern worth
+// keeping: the hole was NAMED here from KAN-166 (#29, 2026-08-04) until
+// KAN-168 and stayed open the whole time, so naming one is not closing one.
+//
+// What is genuinely outside this script today:
+//
+//   * The OTHER blocks on both read responses — `capacity`, `provenance`,
+//     `pages`, the `*Total`s on `list_agents`, and everything outside the echo
+//     on `agent_status`. They are contract by `docs/event-contract.md` and by
+//     their own proofs, never by a declared-field check, and nothing here
+//     examines them. KAN-166 named them as candidates and KAN-168 measured
+//     them: none is nearly free (see that ticket's PR), so none was absorbed.
+//   * `crabcast_daemon_status` (KAN-227), checked rather than assumed while
+//     KAN-168 was open: its response carries pid, config and registry paths,
+//     agent COUNTS, the event watermark, build and freshness — no `config`
+//     echo, no `configEcho()` call, nothing for this sweep to walk. It is not a
+//     fourth surface and needs no block. If it ever grows one, the sweep
+//     applies unchanged and this bullet is the thing to come back to.
 //
 // Everything on the daemon side is real: a real daemon process, real router,
 // bridge, registry and config loader, real NDJSON over a real unix socket, a
@@ -620,6 +659,27 @@ function categoriesOf(listed, fleet) {
 
 const listAgents = async (mcp) => parsedText(await mcp.callTool('crabcast_list_agents'));
 
+/**
+ * The OTHER read surface (KAN-168) — the same `config` object for one agent,
+ * through the same `configEcho`, and since KAN-168 through the same sweep.
+ *
+ * DRIVEN THROUGH THE REAL MCP TOOL, exactly as `listAgents` is, so what these
+ * sections read is what a consumer holds rather than a socket frame the tool
+ * layer might reshape.
+ */
+const agentStatus = async (mcp, p) =>
+  parsedText(await mcp.callTool('crabcast_agent_status', { path: p }));
+
+/**
+ * The two read surfaces' `declared` lists, compared to each other AND to the
+ * exported table. "One declaration" is the whole claim of this file, and two
+ * surfaces that each copied the same list would satisfy any check that only
+ * looked at one of them.
+ */
+const sameDeclaration = (a, b) =>
+  Array.isArray(a?.declared) && Array.isArray(b?.declared) &&
+  JSON.stringify([...a.declared].sort()) === JSON.stringify([...b.declared].sort());
+
 /** Every row on a response that carries a `config` echo, with where it was. */
 function echoRows(listed) {
   const rows = [];
@@ -717,6 +777,75 @@ verdict(
   `ordinary read wrong: block=${JSON.stringify(cleanContract)}, ` +
   `declaredIsTheDeclaration=${declaredIsTheDeclaration}, callerBytes=${callerBytesArrived}, ` +
   `rows=${cleanRows.length}`
+);
+
+// ---- the SAME block on the single-agent read, same daemon (KAN-168) ----
+//
+// A SEPARATE VERDICT rather than more clauses on the one above. These are two
+// surfaces, and a reader who sees one line go red needs to know which of them
+// it was — the failure this ticket closed was precisely one surface behaving
+// unlike the other while a single sentence covered both.
+//
+// THREE READS, because `agent_status` answers on branches `list_agents` does
+// not have: a live agent, a configured-and-stopped one, and a path that is
+// neither. The third is a REFUSAL, and it carries the block too — §2 makes the
+// block ride every response so "nothing was there" and "nobody looked" stay
+// apart, and a refusal exempted from that rule would be the one response whose
+// `extra` can carry an echo and say nothing about it.
+const statusRunning = await agentStatus(cleanMcp, cleanFleet.running);
+const statusStandby = await agentStatus(cleanMcp, cleanFleet.standby);
+// A REAL directory that was never configured, so this lands on the
+// neither-a-record-nor-a-pane branch — the refusal that carries an echo
+// (`config: null`) — rather than on the bad-address one that carries nothing.
+const statusNoSuch = await agentStatus(cleanMcp, owned('never-an-agent'));
+
+show('agent_status (running) — configEchoContract:', statusRunning.configEchoContract);
+show('agent_status (standby) — configEchoContract.undeclared:',
+  statusStandby.configEchoContract?.undeclared);
+console.log(
+  `\n   agent_status on a path that is neither a record nor a pane: ` +
+  `success=${statusNoSuch.success}, block ` +
+  `${statusNoSuch.configEchoContract ? 'PRESENT' : 'ABSENT'}`
+);
+
+given(
+  statusRunning.success === true && Boolean(statusRunning.config),
+  'the single-agent read answered with a non-null echo to sweep',
+  `success=${statusRunning.success}, config=${statusRunning.config ? 'present' : 'null'}`
+);
+given(
+  statusNoSuch.success === false,
+  'the third read really is the refusal branch — otherwise the block on it proves nothing',
+  `success=${statusNoSuch.success}`
+);
+
+verdict(
+  statusRunning.configEchoContract !== undefined &&
+    // THE SAME DECLARATION, compared surface-to-surface and then to the
+    // exported table. Two surfaces each holding their own copy of the same
+    // eight knobs would pass a check that only looked at one.
+    sameDeclaration(statusRunning.configEchoContract, cleanContract) &&
+    statusRunning.configEchoContract.declared.length === declaredKnobs.length &&
+    declaredKnobs.every((k) => statusRunning.configEchoContract.declared.includes(k)) &&
+    statusRunning.configEchoContract.drops === false &&
+    (statusRunning.configEchoContract.verbatim ?? []).includes('mcpServers') &&
+    statusRunning.configEchoContract.undeclared.length === 0 &&
+    // The caller's own bytes arrive here too, and are not reported here either.
+    JSON.stringify(statusRunning.config?.mcpServers) === JSON.stringify(CALLER_SERVERS) &&
+    // A stopped agent is still a record, so it still carries an echo and still
+    // gets swept.
+    statusStandby.configEchoContract?.undeclared.length === 0 &&
+    Boolean(statusStandby.config) &&
+    // …and the refusal.
+    statusNoSuch.configEchoContract !== undefined &&
+    statusNoSuch.configEchoContract.drops === false,
+  `the single-agent read carries the same block from the same declaration — identical \`declared\`\n` +
+  `    on both surfaces and identical to CONFIG_FIELDS, \`drops\` false, nothing undeclared — on a\n` +
+  `    running agent, on a stopped one, and on the REFUSAL for a path that was never an agent`,
+  `agent_status block wrong: running=${JSON.stringify(statusRunning.configEchoContract)}, ` +
+  `sameDeclaration=${sameDeclaration(statusRunning.configEchoContract, cleanContract)}, ` +
+  `standby=${JSON.stringify(statusStandby.configEchoContract?.undeclared)}, ` +
+  `refusal=${JSON.stringify(statusNoSuch.configEchoContract)}`
 );
 
 cleanMcp.kill();
@@ -841,6 +970,80 @@ mutation1: {
     `daemonWarnings=${daemonWarnings.length}/${warningsAfter.length}`
   );
 
+  // ---- the same injected knob, read back off `agent_status` (KAN-168) ----
+  //
+  // THE SAME DAEMON, THE SAME BUILD, THE SAME KNOB. Nothing is injected a
+  // second time and no payload is hand-built: the field went in once where
+  // `configure` assembles the config, and both surfaces are read off the far
+  // end of that one journey. That is what makes this "produced, not simulated"
+  // — the claim is that the field ARRIVES on this surface, and a probe that
+  // constructed its own row would have tested the sweep and not the arrival
+  // (KAN-145's defect, and this epic's central one).
+  //
+  // BY PATH, and the path is SHORTER here on purpose. `list_agents` names the
+  // row it found the field on (`agents[0].config.telemetryToken`) because it
+  // carries many; `agent_status` answers about ONE agent, so the same walker
+  // over a payload whose `config` sits at the top level yields
+  // `config.telemetryToken`. Asserting the fleet spelling here would be
+  // asserting a bug.
+  const driftStatusRunning = await agentStatus(driftMcp, driftFleet.running);
+  const driftStatusUnstarted = await agentStatus(driftMcp, driftFleet.unstarted);
+
+  show('AGENT_STATUS — configEchoContract.undeclared:',
+    driftStatusRunning.configEchoContract?.undeclared);
+  show('AGENT_STATUS — the echo (the field is STILL THERE):', driftStatusRunning.config);
+
+  // ONE DEFECT, NOT TWO. The daemon's warning is deduped per FIELD across both
+  // read surfaces, because the undeclared knob is on the record and the record
+  // is one object. Measured rather than asserted in prose: the log still holds
+  // exactly the one line it held after three polls, now that two more reads on
+  // a different surface have seen the same field.
+  const warningsAfterStatus = fs.readFileSync(daemonLogPath, 'utf8').split('\n')
+    .filter((l) => /echoed undeclared config field/.test(l));
+  console.log(
+    `\n   daemon.log lines after 3 list_agents + 2 agent_status reads: ` +
+    `${warningsAfterStatus.length} (one defect, one line)`
+  );
+
+  const statusNames = (list) =>
+    (list ?? []).some((p) => p === `config.${KNOB}`);
+
+  given(
+    Boolean(driftStatusRunning.config) && Boolean(driftStatusUnstarted.config),
+    'both single-agent reads carry a non-null echo — an absent echo would report no drift ' +
+      'for the wrong reason',
+    `running=${Boolean(driftStatusRunning.config)}, unstarted=${Boolean(driftStatusUnstarted.config)}`
+  );
+
+  verdict(
+    // Reported, by the path this surface uses…
+    statusNames(driftStatusRunning.configEchoContract?.undeclared) &&
+      statusNames(driftStatusUnstarted.configEchoContract?.undeclared) &&
+      // …and STILL DELIVERED, which is this surface's stated behaviour too.
+      driftStatusRunning.configEchoContract?.drops === false &&
+      driftStatusRunning.config?.[KNOB] === KNOB_VALUE &&
+      driftStatusUnstarted.config?.[KNOB] === KNOB_VALUE &&
+      // Every declared knob survived. A sweep that "found" the drift by
+      // mangling the echo would pass every line above.
+      driftStatusRunning.config?.launcher === LAUNCHER &&
+      // The two surfaces agree about what a config IS, while disagreeing about
+      // nothing: same declaration, same verdict, different path spellings.
+      sameDeclaration(driftStatusRunning.configEchoContract, driftContract) &&
+      // And the log did not grow a second complaint about the same knob.
+      warningsAfterStatus.length === 1,
+    `the SAME knob, injected once where \`configure\` assembles the config, came back named on\n` +
+    `    the single-agent read as \`config.${KNOB}\` — for a running agent and for a\n` +
+    `    never-started one — and was STILL DELIVERED there, off the same declaration the fleet\n` +
+    `    read used. The daemon's log still carries ONE line across both surfaces, because the\n` +
+    `    undeclared knob is one defect on one record rather than one per verb that echoes it`,
+    `agent_status drift not proven: running.undeclared=` +
+    `${JSON.stringify(driftStatusRunning.configEchoContract?.undeclared)}, ` +
+    `unstarted.undeclared=${JSON.stringify(driftStatusUnstarted.configEchoContract?.undeclared)}, ` +
+    `drops=${driftStatusRunning.configEchoContract?.drops}, ` +
+    `onWire=${JSON.stringify(driftStatusRunning.config?.[KNOB])}, ` +
+    `warnings=${warningsAfterStatus.length}`
+  );
+
   driftMcp.kill();
   driftSub.close();
   stopDaemon(driftStatus.pid);
@@ -890,7 +1093,9 @@ mutation2: {
     INJECT_KNOB,
     {
       file: 'router.js',
-      find: 'this.warnOnEchoDrift(echoDrift);',
+      // The surface argument is KAN-168's: one warning function now serves both
+      // read paths and names which one saw the field first.
+      find: "this.warnOnEchoDrift(echoDrift, 'list_agents');",
       replace: '/* KAN-166 section 3: the warning silenced, the sweep left alone */;'
     }
   ]);
@@ -943,6 +1148,99 @@ mutation2: {
   quietMcp.kill();
   stopDaemon(quietStatus.pid);
 
+}
+// ============ 3b. THE RED HALF, ONE SURFACE OVER — agent_status unswept alone --
+
+rule('3b. THE RED HALF for the single-agent read — its sweep removed, the fleet sweep left in');
+
+// WHY THIS MUTATION IS DIFFERENT FROM THE TWO ABOVE, and why the section is
+// worth its runtime. Mutations 1 and 2 remove machinery BOTH surfaces share, so
+// either would turn every assertion in this file red at once — which proves the
+// assertions can fail, and proves nothing about the two surfaces being
+// separately guarded. This one removes the `agent_status` call site ALONE and
+// leaves `list_agents` swept.
+//
+// THAT IS THE ACTUAL DEFECT KAN-168 CLOSED, reproduced rather than imagined:
+// from KAN-166 (#29, 2026-08-04) until KAN-168, `main` swept the fleet read and
+// not the single-agent read, and every proof here was green. So the build below is what
+// `main` was, and the section's whole job is to show that this file now
+// notices. A proof that could pass the single-agent read on the fleet read's
+// evidence would be exactly the artifact this epic keeps finding — one whose
+// sentence claims more than its mechanism covers.
+//
+// THE REPLACEMENT RESTORES THE PRE-FIX BEHAVIOUR EXACTLY, rather than
+// approximating it: `respond(payload)` with no sweep, no warning and NO BLOCK,
+// which is what a caller met before this change. Reporting `undeclared: []`
+// would be a weaker mutant and a different bug.
+mutation3: {
+  const statusUnsweptDist = mutatedBuild('status-unswept', [
+    INJECT_KNOB,
+    {
+      file: 'router.js',
+      find:
+        '            const drift = [];\n' +
+        "            sweepConfigEchoes(payload, '', drift);\n" +
+        "            this.warnOnEchoDrift(drift, 'agent_status');\n" +
+        '            respond({ ...payload, configEchoContract: configEchoContract(drift) });',
+      replace:
+        '            /* KAN-168 §3b: agent_status unswept — main from #29 to KAN-168 */\n' +
+        '            respond(payload);'
+    }
+  ]);
+  // Already a counted failure. Skip the rest of this section rather
+  // than asserting about a build that was never mutated.
+  if (!statusUnsweptDist) break mutation3;
+
+  const unsweptCfg = makeConfig('status-unswept');
+  const unsweptStatus = await startDaemon(unsweptCfg, statusUnsweptDist, 'status-unswept');
+  const unsweptMcp = new McpClient('status-unswept', { config: unsweptCfg.configPath });
+  await unsweptMcp.initialize();
+  const unsweptFleet = await buildFleet(unsweptMcp, 'status-unswept');
+
+  const unsweptList = await listAgents(unsweptMcp);
+  const unsweptStatusRead = await agentStatus(unsweptMcp, unsweptFleet.running);
+
+  show('fleet read on the mutant — still reports (this half is untouched):',
+    unsweptList.configEchoContract?.undeclared);
+  show('single-agent read on the mutant — configEchoContract:',
+    unsweptStatusRead.configEchoContract);
+  show('…and the field on the wire there anyway:', unsweptStatusRead.config?.[KNOB]);
+
+  given(
+    Boolean(unsweptStatusRead.config),
+    'the mutant answered the single-agent read with an echo to miss',
+    `config=${unsweptStatusRead.config ? 'present' : 'null'}`
+  );
+
+  verdict(
+    // THE SURVIVING HALF. If this went quiet too, the mutation was broader than
+    // designed and the section would be measuring mutation 1 again under a new
+    // name.
+    (unsweptList.configEchoContract?.undeclared ?? []).some(
+      (p) => p.endsWith(`.config.${KNOB}`)) &&
+      // THE REMOVED HALF: no block at all, which is what "not swept" looked
+      // like — indistinguishable, to a caller, from a daemon that had looked
+      // and found nothing, and that indistinguishability IS the defect.
+      unsweptStatusRead.configEchoContract === undefined &&
+      // The field travelled to that response regardless. Nothing was protecting
+      // anybody; the answer was simply not being given.
+      unsweptStatusRead.config?.[KNOB] === KNOB_VALUE,
+    `with the single-agent sweep removed ALONE, the fleet read still named the knob on all three\n` +
+    `    categories while agent_status carried NO configEchoContract at all — and the undeclared\n` +
+    `    field rode that response anyway. Those are the exact conditions §1 and §2 assert against\n` +
+    `    (\`configEchoContract !== undefined\`, \`undeclared\` naming config.${KNOB}), so this build is\n` +
+    `    the one that makes them fail. That is the state main was really in from KAN-166 (#29,\n` +
+    `    2026-08-04) until KAN-168, with every proof in this suite green, which is why this file\n` +
+    `    reads both surfaces rather than assuming one call site covers them. The whole-script red is\n` +
+    `    pasted in KAN-168's PR: this section shows the cause, that run shows §1 and §2 going red`,
+    `the single-surface red half did not go red: list.undeclared=` +
+    `${JSON.stringify(unsweptList.configEchoContract?.undeclared)}, ` +
+    `status.block=${JSON.stringify(unsweptStatusRead.configEchoContract)}, ` +
+    `onWire=${JSON.stringify(unsweptStatusRead.config?.[KNOB])}`
+  );
+
+  unsweptMcp.kill();
+  stopDaemon(unsweptStatus.pid);
 }
 // =========================== 4. ONE DECLARATION — one edit moves both surfaces --
 

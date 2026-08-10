@@ -327,6 +327,7 @@ and the response says which you are reading:**
 | --- | --- |
 | **MCP event notification** | **dropped** before it leaves, and named in the daemon's own log by its path |
 | **`list_agents` response** | **reported and still delivered.** `configEchoContract.drops` is `false` |
+| **`agent_status` response** | **the same**: reported by path, still delivered, `drops` is `false` (KAN-168) |
 
 ```json
 "configEchoContract": {
@@ -368,12 +369,24 @@ Four things that are contract rather than advice:
   socket. It is an internal value that has not been designed for you and can
   change or vanish without this document changing.
 
-**What is NOT covered, said here rather than left to be found.**
-`crabcast_agent_status` echoes the same `config` for one agent and is **not**
-swept — it carries no `configEchoContract` at all (KAN-168). `list_agents`'s other blocks
-(`capacity`, `provenance`, `pages`, the `*Total`s) are not swept either: they
-are contract by this document and by their own proofs, not by a declared-field
-check. Proven in `scripts/verify-config-echo-contract.mjs`.
+**Both read surfaces, one declaration.** `crabcast_agent_status` echoes the same
+`config` for one agent, through the same function, and carries the same
+`configEchoContract` built from the same `CONFIG_FIELDS` — no second list of
+knobs exists anywhere (KAN-168). Its paths are relative to the one row it
+answers about (`config.telemetry`) where `list_agents`'s name the row
+(`standbyAgents[2].config.telemetry`), and the block rides **every**
+`agent_status` response including its refusals, for the same reason it rides an
+empty `list_agents`: so "nothing was there" and "nobody looked" stay
+distinguishable. Until KAN-168 this paragraph said the opposite, and the
+asymmetry it recorded was real: the guard was on the fleet read and absent from
+the single-agent read from KAN-166 (#29, 2026-08-04) until KAN-168 closed it.
+
+**What is still NOT covered, said here rather than left to be found.**
+`list_agents`'s other blocks (`capacity`, `provenance`, `pages`, the `*Total`s)
+are not swept: they are contract by this document and by their own proofs, not
+by a declared-field check. The same is true of everything on an `agent_status`
+response outside the echo. Both surfaces are proven in
+`scripts/verify-config-echo-contract.mjs`.
 
 ### Across a daemon restart
 
@@ -799,9 +812,16 @@ reporting it, in the same build, with no second list touched. That is the claim
 undeclared field in an echoed config *is* reported; it does not prove none
 exists today. Its own no-drift section asserts that on an unmutated build over a
 real fleet with every category populated, which is a different claim about a
-different build. And it says nothing about `agent_status`, which echoes the same
-object for one agent and is **not** swept — that hole is named in §2 and tracked
-as KAN-168, not covered by anything here.
+different build.
+
+**It covers `agent_status` as well as `list_agents`, on the same daemons**
+(KAN-168). The knob injected once at the emission site is read back off both
+surfaces in the same sections, so "one declaration, two surfaces" is measured on
+one build rather than asserted twice; and its §3b removes the `agent_status`
+sweep **alone**, leaving `list_agents` swept. That mutation is what stops the
+single-agent read passing on the fleet read's evidence — the precise state this
+repository was in from KAN-166 (#29, 2026-08-04) until KAN-168, and one that
+every mutation removing shared machinery is blind to by construction.
 
 Read that 32s figure against §2's bound, which is **30s plus one census read**
 and not a flat 30s. The script's success line says so in full — "inside the
