@@ -654,13 +654,20 @@ function provenanceBlock(p: any): string | null {
  * A block for a response that does not carry one prints NOTHING rather than an
  * all-clear. An older daemon has no sweep, and rendering its silence as "no
  * undeclared fields" would be this CLI making the daemon's claim on its behalf.
+ *
+ * ONE RENDERER FOR BOTH READ SURFACES (KAN-168), which is why the all-clear
+ * says "on this response" rather than "on every row". `status` answers about
+ * one agent and has no rows; the old wording was written when `list` was the
+ * only caller and would have read as a fleet claim on a single-agent response.
+ * A second renderer differing only in that phrase is the shape this whole
+ * family of tickets exists to avoid.
  */
 function echoContractBlock(c: any): string | null {
   if (!c || typeof c !== 'object') return null;
   const undeclared: string[] = Array.isArray(c.undeclared) ? c.undeclared : [];
   const declared = Array.isArray(c.declared) ? c.declared.join(', ') : '(not reported)';
   if (!undeclared.length) {
-    return `\nconfig echo: every knob on every row is declared (${declared})`;
+    return `\nconfig echo: every knob echoed on this response is declared (${declared})`;
   }
   return lines(
     `\nconfig echo: ${undeclared.length} UNDECLARED field(s) on this response — ` +
@@ -1318,6 +1325,12 @@ function renderStatus(reader: ResponseReader, request: Record<string, unknown>):
       // "other fields in the daemon's response" — the guard doing its job, and
       // the job it was pointing at was mine.
       provenanceBlock(reader.take('provenance')),
+      // The same block `list` prints, from the same helper (KAN-168). On the
+      // refusal branch as well as the success one, because the daemon sweeps
+      // every `agent_status` answer and this branch is the one whose `extra`
+      // carries an echo — a refusal that printed no block would say "nobody
+      // looked" about a response that had.
+      echoContractBlock(reader.take('configEchoContract')),
       residue(reader)
     );
   }
@@ -1352,6 +1365,12 @@ function renderStatus(reader: ResponseReader, request: Record<string, unknown>):
     // second half of "configured and not running", rather than an error.
     field('herdr', reader.take('herdrNote')),
     provenanceBlock(reader.take('provenance')),
+    // What the echo's declared-field sweep found on THIS response — the same
+    // renderer `list` uses, because it is the same block from the same
+    // declaration (KAN-168). Taken rather than left to the residue for the
+    // reason the provenance block above records: a field a renderer does not
+    // claim gets dumped as raw JSON, which is the guard pointing at this line.
+    echoContractBlock(reader.take('configEchoContract')),
     residue(reader)
   );
 }

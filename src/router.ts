@@ -298,10 +298,20 @@ const VERBATIM_CONFIG_KNOBS = Object.entries(CONFIG_FIELDS)
  * So the answer to "is anything travelling unexamined" is a field on the
  * response rather than a silence, and acting on it is the reader's.
  *
- * WHERE THIS STOPS, so the sentence above is not read wider than it is.
- * `agent_status` echoes the SAME object for one agent through the same
- * {@link configEcho} and is NOT swept — no block, no sweep, KAN-168. And on
- * this response the sweep is the ECHO's, not the payload's: `capacity`,
+ * BOTH READ SURFACES CARRY IT (KAN-168). `agent_status` echoes the SAME object
+ * for one agent through the same {@link configEcho}, and it is swept by this
+ * same pair of functions at its own call site — same block, same `drops: false`,
+ * same reasons, because the three above are about the ECHO rather than about
+ * which verb asked for it.
+ *
+ * THIS PARAGRAPH USED TO SAY THE OPPOSITE, and it was accurate for the four
+ * days it stood: KAN-166 guarded the fleet read and stopped there deliberately,
+ * and the hole was written down here, in §2 of the document, and in the proof's
+ * own header. All three were honest and none of them closed it — which is the
+ * thing worth remembering from it. A named gap is documentation, not coverage.
+ *
+ * WHERE THIS STOPS, so the sentence above is not read wider than it is. On
+ * either response the sweep is the ECHO's, not the payload's: `capacity`,
  * `provenance`, `pages` and the `*Total`s are contract by
  * `docs/event-contract.md` and by their own proofs, and nothing here examines
  * them.
@@ -4619,8 +4629,32 @@ export class MessageRouter {
    * caller mistyped.
    */
   private handleAgentStatus(data: any, respond: Respond) {
+    // THE SWEEP, over whatever this handler is about to answer with (KAN-168).
+    //
+    // WRAPPED RATHER THAN REPEATED AT EACH `respond`. This handler answers on
+    // four branches — a bad address, no-record-and-no-pane, sessionless, and a
+    // live session — and three of them carry the echo. Three copies of the
+    // sweep would be three places for a fifth branch to be added without one,
+    // which is the same shape of defect as the missing surface this call site
+    // exists to close: `list_agents` was guarded, `agent_status` was not, and
+    // nothing structural said so. Every answer leaves through here instead, so
+    // a branch added later is swept the day it ships rather than the day
+    // somebody remembers.
+    //
+    // ON THE FAILURE BRANCHES TOO, and that is deliberate. §2's rule is that
+    // the block rides EVERY response so `undeclared: []` and "nobody looked"
+    // stay distinguishable — a rule an absent block on a refusal would break
+    // for exactly the response whose `extra` carries an echo (the
+    // no-record-and-no-pane branch does).
+    const respondSwept: Respond = (payload) => {
+      const drift: ConfigEchoFinding[] = [];
+      sweepConfigEchoes(payload, '', drift);
+      this.warnOnEchoDrift(drift, 'agent_status');
+      respond({ ...payload, configEchoContract: configEchoContract(drift) });
+    };
+
     const fail = (error: string, extra: Record<string, unknown> = {}) =>
-      respond({ action: 'agent_status_response', success: false, error, ...extra });
+      respondSwept({ action: 'agent_status_response', success: false, error, ...extra });
 
     const address = this.addressOfRequest(data.path, false);
     if ('error' in address) {
@@ -4654,7 +4688,7 @@ export class MessageRouter {
       // which is exactly the ambiguity a caller diffing against us cannot
       // resolve. It also drops a subprocess from every status call.
       const pane = census.agents.find((a) => a.name === session.paneName);
-      respond({
+      respondSwept({
         action: 'agent_status_response',
         success: true,
         sessionless: false,
@@ -4709,7 +4743,7 @@ export class MessageRouter {
       return;
     }
 
-    respond({
+    respondSwept({
       action: 'agent_status_response',
       success: true,
       sessionless: true,
@@ -5051,7 +5085,7 @@ export class MessageRouter {
     // it walks the response.
     const echoDrift: ConfigEchoFinding[] = [];
     sweepConfigEchoes(payload, '', echoDrift);
-    this.warnOnEchoDrift(echoDrift);
+    this.warnOnEchoDrift(echoDrift, 'list_agents');
 
     respond({ ...payload, configEchoContract: configEchoContract(echoDrift) });
   }
@@ -5068,18 +5102,29 @@ export class MessageRouter {
    * every time the same knob appeared on another row or the fleet reordered.
    * One line per undeclared knob per daemon boot is a bug report; the response
    * itself is what reports it on every poll.
+   *
+   * AND THE DEDUPE IS SHARED ACROSS SURFACES, which is why `surface` names
+   * where the field was FIRST seen rather than keying the set (KAN-168). The
+   * defect is a knob on the record that nobody declared, and the record is one
+   * object: `list_agents` and `agent_status` echo it from the same
+   * {@link configEcho}, so a per-surface key would report one defect twice and
+   * a reader would go looking for two. What the fix is — declare it or stop
+   * writing it — is identical whichever verb happened to observe it, and the
+   * RESPONSE is what tells a caller about the surface in front of it.
    */
-  private warnOnEchoDrift(found: readonly ConfigEchoFinding[]): void {
+  private warnOnEchoDrift(found: readonly ConfigEchoFinding[], surface: string): void {
     const fresh = [...new Set(found.map((f) => f.field))]
       .filter((field) => !this.warnedEchoDrift.has(field));
     if (!fresh.length) return;
     for (const field of fresh) this.warnedEchoDrift.add(field);
     console.error(
-      `[MessageRouter] list_agents echoed undeclared config field(s) ${fresh.join(', ')}; ` +
-      `REPORTED on the response as configEchoContract.undeclared and still delivered — the poll ` +
-      `path does not drop (docs/event-contract.md §2). The MCP event path DROPS the same field. ` +
+      `[MessageRouter] ${surface} echoed undeclared config field(s) ${fresh.join(', ')}; ` +
+      `REPORTED on the response as configEchoContract.undeclared and still delivered — the read ` +
+      `paths do not drop (docs/event-contract.md §2). The MCP event path DROPS the same field. ` +
       `Declare it in CONFIG_FIELDS in src/events.ts or stop putting it on the record. ` +
-      `Said once per field per boot; the response says it every time.`
+      `Said once per field per boot ACROSS BOTH read surfaces — the same record is echoed by ` +
+      `list_agents and agent_status, so this is one defect and not two; the response says it ` +
+      `every time.`
     );
   }
 
