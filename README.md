@@ -229,6 +229,7 @@ capacity:
   cap 3 (bound by cpu) · running 1 · exempt 0 · headroom 2 (bound by cap)
   reason: 1 charged agent is already running against a cap of 3
   cap terms: cpu allows 2500, memory allows 13376  ·  headroom terms: count allows 2, cpu allows 1698, load would allow 1570 (reported only), memory allows 6895
+  io/memory stall: 0% io (worst of /proc/pressure io and memory, `full avg10`) against a 50% threshold — under, so it does not bind
   machine: 4 cores, 1.3 in use over 3s to 2026-08-07T22:47:54.292Z, load 1.43, 9256 MB available of 15737 MB
   agent cost: 650 MB (seed), 0.75 core (seed)
 
@@ -502,6 +503,7 @@ started past the cap on purpose (--override) at 2026-08-05T14:50:46.743Z —
   cap 0 (bound by configured) · running 0 · exempt 0 · headroom 0 (bound by cap) · AT CAPACITY
   reason: 0 charged agents are already running against a cap of 0
   cap terms: cpu allows 3, memory allows 20  ·  headroom terms: count allows 0, cpu allows 2, load would allow 2 (reported only), memory allows 10
+  io/memory stall: 0% io (worst of /proc/pressure io and memory, `full avg10`) against a 50% threshold — under, so it does not bind
   machine: 4 cores, 1.33 in use over 3s to 2026-08-07T22:48:00.137Z, load 1.32, 9236 MB available of 15737 MB
   agent cost: 650 MB (seed), 0.75 core (seed)
 
@@ -510,6 +512,7 @@ machine: 4 cores, 15.4 GiB RAM (9.0 GiB available), load average 1.32
 cpu in use: 1.33 of 4 cores, measured over 3s ending 2026-08-07T22:48:00.137Z — this is the CPU-side bound; the load average above is reported and does not gate
 agent cost: 650 MB resident (seed), 0.75 core while active (seed)
   no live measurement; seed figures are the 2026-07-31 constants, not a measurement of this fleet
+io/memory stall: 0.00% io, 0.00% memory (/proc/pressure `full avg10`, the share of the last 10s in which every non-idle task was stalled); worst is 0.00% on io, against a 50% threshold — under, so this term does not bind
 reserved for you: 1 core(s), 2.3 GiB
 cap: 0 charged agents (set by CRABCAST_MAX_AGENTS, derivation skipped)
 running: 0 charged agent(s)
@@ -632,6 +635,7 @@ machine: 4 cores, 15.4 GiB RAM (9.0 GiB available), load average 1.53
 cpu in use: 1.40 of 4 cores, measured over 3s ending 2026-08-07T22:48:06.131Z — this is the CPU-side bound; the load average above is reported and does not gate
 agent cost: 650 MB resident (seed), 0.75 core while active (seed)
   no live measurement; seed figures are the 2026-07-31 constants, not a measurement of this fleet
+io/memory stall: 0.00% io, 0.00% memory (/proc/pressure `full avg10`, the share of the last 10s in which every non-idle task was stalled); worst is 0.00% on io, against a 50% threshold — under, so this term does not bind
 reserved for you: 1 core(s), 2.3 GiB
 cap: 0 charged agents (set by CRABCAST_MAX_AGENTS, derivation skipped)
 running: 0 charged agent(s)
@@ -648,6 +652,7 @@ capacity:
   cap 0 (bound by configured) · running 0 · exempt 0 · headroom 0 (bound by cap) · AT CAPACITY
   reason: 0 charged agents are already running against a cap of 0
   cap terms: cpu allows 3, memory allows 20  ·  headroom terms: count allows 0, cpu allows 2, load would allow 1 (reported only), memory allows 10
+  io/memory stall: 0% io (worst of /proc/pressure io and memory, `full avg10`) against a 50% threshold — under, so it does not bind
   machine: 4 cores, 1.4 in use over 3s to 2026-08-07T22:48:06.131Z, load 1.53, 9167 MB available of 15737 MB
   agent cost: 650 MB (seed), 0.75 core (seed)
 [exit 1]
@@ -657,11 +662,15 @@ Every term is reproducible by hand, and the headline names the *binding* constra
 
 **There are four headroom terms and the smallest wins**, which is why the derivation prints all of them and then says `bound by`. `count` is the cap minus what is running. `memory` is what the kernel says it could still hand out, less your reserve. `cpu` is **cores actually in use**, measured over a real window from `/proc/stat`. And `load` is the 1-minute load average, printed on every line and — since the transcript above — **not what gates**.
 
+**And there is a fifth thing that is not a term at all — a veto.** `/proc/pressure` (Linux PSI) reports the share of the last ten seconds in which *every* non-idle task was stalled waiting on I/O or on memory reclaim. When that reaches **50%** no agent is admitted, whatever the four terms above computed, because a machine making no forward progress does not have room for a fraction of an agent — it has no room. It is a veto rather than a term precisely because there is no per-agent I/O cost to divide by, and inventing one would be the dimensional confusion the CPU change above exists to have removed. The derivation prints what the counting terms allowed before it fired, so the veto's effect is visible rather than looking like a machine that was simply full, and no agent is offered for preemption on a stall — standing one down frees a slot, and slots are not what a stalled machine is short of.
+
+**Where there is no PSI, that term is inert and says so in words.** An absent or unreadable `/proc/pressure` is never reported as `0.00%`, which would be an all-clear from an instrument that never looked; the report distinguishes *no PSI on this machine* from *PSI is here and would not answer*, and on either the page says plainly that nothing is bounding I/O saturation. There is deliberately no environment override for the threshold — the escape hatch is `override: true` on the activation, which is recorded with the arithmetic that refused it.
+
 That last split is worth a paragraph, because the figures can disagree loudly and the disagreement is the point. On Linux the load average counts processes blocked in uninterruptible sleep as well as processes running, so a machine grinding through disk I/O reports a high load with its cores sitting idle. CrabCast used to divide that number, and refused activations it had the capacity to serve — `load too high`, in figures that were internally consistent and about the wrong thing. It now divides observed CPU, and a report where `load would allow 0` sits beside `cpu allows 2` is a machine that is queued, not busy.
 
 Two consequences to know about:
 
-* **A refusal says which instrument refused it.** `cpu too busy` means the cores are full. `load too high` means *nothing measured this machine's CPU* and the load average is standing in — you will see it on anything without `/proc/stat`, and for the first few seconds of a daemon's life, because a window needs two readings separated in time. The derivation says `not measured here` in words for exactly that period.
+* **A refusal says which instrument refused it.** `machine stalled on io` (or `on memory`) means the machine is getting nothing done — its cores may well be idle — and is the one constraint that can refuse a machine every other term says has room. `cpu too busy` means the cores are full. `load too high` means *nothing measured this machine's CPU* and the load average is standing in — you will see it on anything without `/proc/stat`, and for the first few seconds of a daemon's life, because a window needs two readings separated in time. The derivation says `not measured here` in words for exactly that period.
 * **The load average was accidentally a signal about more than CPU**, and dropping it as the bound gives that up. A machine thrashing on swap, or blocked on a disk that is dying, has a high load and idle cores — CrabCast will now start agents on it. Memory pressure is still caught by the memory term; I/O saturation on a machine with memory to spare is not caught by anything, and `load1` staying on every line is so you can see it yourself.
 
 **What an agent is worth is its own `priority`,** frozen on by `configure` — it used to be a property of its workspace type. And the single `gateExempt` flag that type carried is now three: `refusable` (may the gate refuse this agent), `chargeable` (does it occupy a slot), `preemptable` (may anything take it). They were always three different decisions, and bundling them meant you could not have an agent that costs a slot but can never be taken.

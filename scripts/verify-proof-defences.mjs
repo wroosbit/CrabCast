@@ -717,6 +717,46 @@ const PROOF_DEFENCES = [
       'only §7 proves anything in production ever writes one.'
   },
   {
+    script: 'verify-io-stall-gate',
+    defence: 'guard',
+    central:
+      'a machine that is stalled admits nothing however free its cores and memory read, and a ' +
+      'machine nobody could measure is never reported as a quiet one — the two halves being that ' +
+      'a stall REFUSES and that an absent instrument does NOT.',
+    anchor: 'VACUITY: §3 never observed',
+    note:
+      'NEGATIVE CASES IN BOTH DIRECTIONS, and for this term the second is the one that matters. ' +
+      '§3 requires a refusal at and above the threshold AND an admission below it, so a gate ' +
+      'welded shut fails as loudly as one welded open; it then runs the COUNTERFACTUAL — the same ' +
+      'MachineFacts with the stall reading removed must admit — so a refusal caused by anything ' +
+      'else fails rather than passing as this term working. §2 is the guard against the defect ' +
+      'this term is most likely to grow: it requires an unreadable or absent /proc/pressure to ' +
+      'produce a NULL percentage, no refusal, and a derivation containing no figure at all, ' +
+      'asserted by grepping the rendered line for `0.00%` and requiring its absence — an ' +
+      'all-clear from an instrument that never looked would otherwise be indistinguishable from ' +
+      'a healthy machine on every report. §1 drives the REAL parser against REAL files, including ' +
+      'a real ENOENT and a real chmod-000 EACCES, and asserts structurally that no failing branch ' +
+      'carries a percentage FIELD at all — which is what makes the defect unrepresentable rather ' +
+      'than merely unwritten. THE THRESHOLD FIXTURES ARE DERIVED, NOT HARD-CODED (KAN-245): §3 ' +
+      'builds its under/at/over figures from the shipped STALL_REFUSE_PERCENT, so a change to the ' +
+      'constant cannot leave the "saturated" case quietly below the boundary. THE VACUITY GUARD ' +
+      'THIS ANCHOR CITES is the second assertion that is not a restatement of the first: it holds ' +
+      'four observations to the end of the run — admitted, refused-over, refused-at, and a veto ' +
+      'that had NON-ZERO headroom to cancel — and fails by name if any went unobserved, because a ' +
+      'fixture that has stopped being saturated and a machine that was full anyway both produce ' +
+      'the same clean pass. The `>=` boundary is pinned to a literal for the same reason: a ' +
+      'one-character weakening to `>` is invisible to every other assertion here and it fired in ' +
+      'the mutation run. WHAT THIS ENTRY DOES NOT CLAIM, and it is the honest limit: §3-§6 ' +
+      'CONSTRUCT the stalled machine, so they defend the arithmetic and the words and not the ' +
+      'wiring. §7 reads this machine\'s real /proc/pressure into a real Capacity and requires the ' +
+      'reported state to be the state the files are actually in, which is what establishes a ' +
+      'reading ARRIVES — but NOTHING here drives the live gate over the threshold, because the ' +
+      'hardest load safely inducible on this shared machine reached 30.48% against a 50% ' +
+      'threshold. That seam is covered by nobody and §8 prints it on every run rather than ' +
+      'leaving it in a comment. The memory branch is fixture-only for the same reason: this ' +
+      'machine has never swapped.'
+  },
+  {
     script: 'verify-agent-preemption',
     defence: 'guard',
     central:

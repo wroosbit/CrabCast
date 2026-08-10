@@ -45,6 +45,7 @@ import {
   Capacity,
   capacityReason,
   capacityRefusal,
+  preemptionCanHelp,
   describeCapacity,
   readCapacity,
   summarizeCapacity
@@ -689,6 +690,19 @@ function capacityDto(c: Capacity) {
     headroomByCpu: c.headroomByCpu,
     headroomByLoad: c.headroomByLoad,
     headroomByMemory: c.headroomByMemory,
+    // The stall veto (KAN-216). `stallPercent` is null when nothing measured —
+    // NOT 0 — and `stallInstrument` says which kind of nothing: `absent` is a
+    // kernel without PSI, `unreadable` is a machine whose PSI would not answer.
+    // A caller that reads a percentage without reading that field can be
+    // misled, which is why the field is on the wire rather than only in prose.
+    stallPercent: c.stallPercent === null ? null : Math.round(c.stallPercent * 100) / 100,
+    stallSource: c.stallSource,
+    stallInstrument: c.stallInstrument,
+    stalled: c.stalled,
+    stallRefusePercent: c.stallRefusePercent,
+    // What the counting terms allowed before the veto zeroed them. Equal to
+    // `headroom` unless `stalled`.
+    headroomBeforeStall: c.headroomBeforeStall,
     summary: summarizeCapacity(c)
   };
 }
@@ -3240,11 +3254,33 @@ export class MessageRouter {
 
     if (!capacity.atCapacity) return pass(capacity);
 
+    // NO PREEMPTION ON A STALL (KAN-216). Preemption exists to free a SLOT, and
+    // a stalled machine is not short of slots — three counting terms had room
+    // and a veto zeroed them. Standing an agent down here would destroy its
+    // work and then start a replacement onto the same stalled disk, which is
+    // the one outcome worse than refusing. So the whole preemption path is
+    // skipped rather than being asked for a victim it must not take: no offer,
+    // no `preempt` honoured, and a refusal that says what to do instead.
+    //
+    // Only when the veto is what bound. A stalled machine whose board is ALSO
+    // full binds on `cap`, and preemption there is the ordinary case that has
+    // nothing to do with this term.
+    // Only when the veto is what bound. A stalled machine whose board is ALSO
+    // full binds on `cap`, and preemption there is the ordinary case that has
+    // nothing to do with this term.
+    //
+    // It suppresses the VICTIM and not the rest of the gate, deliberately: an
+    // early return here would also have skipped the `override` branch below and
+    // made a stall the one refusal an operator could not override, which is a
+    // veto with no way out. `override: true` still starts the agent, and is
+    // still recorded with the arithmetic that refused it.
+    const stallBound = !preemptionCanHelp(capacity);
+
     // Everything running that this activation could conceivably displace, and
     // the one it would take. `victim` is null in the ordinary case — an agent
     // on a machine full of agents of its own priority outranks nothing.
-    const candidates = this.preemptionCandidates(agents, agentPath);
-    const victim = selectVictim(candidates, priority);
+    const candidates = stallBound ? [] : this.preemptionCandidates(agents, agentPath);
+    const victim = stallBound ? null : selectVictim(candidates, priority);
     const derivation = describeCapacity(capacity);
     const offer = (v: PreemptionCandidate): PreemptionOfferDto => ({
       path: v.path,
@@ -3334,7 +3370,18 @@ export class MessageRouter {
       // is survivable; not being able to see who you lost it to is not.
       const refusal =
         `${capacityRefusal(capacity, agentPath)}\n` +
-        (victim ? preemptionOffer(victim, priority) : noVictimReason(candidates, priority));
+        (stallBound
+          // Not `noVictimReason`: that explains which running agents outranked
+          // this one, which is true here and beside the point. On a stall there
+          // is nothing to take, and saying why is what stops the reader going
+          // looking for a victim to free by hand.
+          ? `No agent is offered for preemption: standing one down frees a slot, and slots ` +
+            `are not what this machine is short of — the counting terms had room for ` +
+            `${capacity.headroomBeforeStall} and a stalled disk is what refused. Wait for ` +
+            `the stall to clear, or start it anyway with override.`
+          : victim
+            ? preemptionOffer(victim, priority)
+            : noVictimReason(candidates, priority));
       return {
         capacity,
         refusal,

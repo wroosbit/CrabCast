@@ -352,7 +352,8 @@ const CAPACITY_FIELDS = [
   'agentMemoryMb', 'agentCores', 'agentMemorySource', 'agentCoresSource',
   'measuredAt', 'measuredWindowSeconds', 'measuredAgentTrees', 'capByCpu',
   'capByMemory', 'headroomByCap', 'headroomByCpu', 'headroomByLoad',
-  'headroomByMemory', 'summary'
+  'headroomByMemory', 'stallPercent', 'stallSource', 'stallInstrument',
+  'stalled', 'stallRefusePercent', 'headroomBeforeStall', 'summary'
 ] as const;
 
 function capacityBlock(capacity: any): string | null {
@@ -382,6 +383,28 @@ function capacityBlock(capacity: any): string | null {
   const terms = `${INDENT}cap terms: cpu allows ${capacity.capByCpu}, memory allows ${capacity.capByMemory}` +
     `  ·  headroom terms: count allows ${capacity.headroomByCap}, ` +
     `${cpuSide}, memory allows ${capacity.headroomByMemory}`;
+  // The stall veto (KAN-216), which `list` needs rendered because `list` ships
+  // no derivation — the sentence that would otherwise carry this only exists on
+  // `capacity` and on a refusal. Three states, and none of them prints a bare
+  // number for a machine nobody could read: `stallPercent` is null there, and a
+  // null rendered as `0` is the all-clear this whole term exists to avoid.
+  const stall =
+    capacity.stallInstrument === 'measured'
+      ? `${INDENT}io/memory stall: ${capacity.stallPercent}% ${capacity.stallSource} ` +
+        `(worst of /proc/pressure io and memory, \`full avg10\`) against a ` +
+        `${capacity.stallRefusePercent}% threshold — ` +
+        (capacity.stalled
+          ? `AT OR OVER, so nothing is admitted (the counting terms allowed ` +
+            `${capacity.headroomBeforeStall})`
+          : 'under, so it does not bind')
+      : capacity.stallInstrument === 'unreadable'
+        ? `${INDENT}io/memory stall: /proc/pressure EXISTS AND COULD NOT BE READ — this term ` +
+          `is inert and I/O saturation is bounded by nothing. Not an all-clear.`
+        : capacity.stallInstrument === 'absent'
+          ? `${INDENT}io/memory stall: no /proc/pressure here, so this term is inert and ` +
+            `nothing bounds a stalled disk or a machine thrashing on swap`
+          : null;
+
   const machine =
     `${INDENT}machine: ${capacity.cores} cores, ` +
     (measuredCpu
@@ -402,6 +425,7 @@ function capacityBlock(capacity: any): string | null {
     numbers,
     capacity.reason ? `${INDENT}reason: ${capacity.reason}` : null,
     terms,
+    stall,
     machine,
     `${INDENT}agent cost: ${capacity.agentMemoryMb} MB (${capacity.agentMemorySource}), ` +
       `${capacity.agentCores} core (${capacity.agentCoresSource})` +
