@@ -279,7 +279,7 @@ delivered to /tmp/ac1-demo/notes — the message was seen in its transcript as s
     brooswit@kchb-ThinkPad-X1-Carbon-5th:/tmp/ac1-demo/notes$
 
 $ crabcast tail /tmp/ac1-demo/notes --lines 20
-pane text for /tmp/ac1-demo/notes:
+pane text for /tmp/ac1-demo/notes (read from herdr's `recent-unwrapped`):
 bcast/agents/31e31d1b7540dabf/prompt.md
 You are a CrabCast agent working in the notes directory.
 

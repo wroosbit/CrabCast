@@ -792,6 +792,7 @@ jobs:
             verify-reconfiguration-refuses
             verify-event-contract
             verify-send-confirms-delivery
+            verify-tail-asks-every-source
             verify-proof-cleans-up-when-interrupted
             verify-event-durability
             verify-fleet-enumeration

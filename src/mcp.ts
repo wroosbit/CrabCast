@@ -462,7 +462,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "crabcast_tail_agent",
         description:
-          "Reads the recent terminal output of an agent without attaching to it. Use this to find out what an agent is actually doing — or why it stopped — when its reported status alone is not enough.",
+          "Reads the recent terminal output of an agent without attaching to it. Use this to find out what an agent is actually doing — or why it stopped — when its reported status alone is not enough. AN EMPTY ANSWER IS A REAL ANSWER, AND IT IS NOT THE SAME AS A FAILED READ: herdr is asked through more than one read source and `text` comes back empty only when EVERY source was asked and every one of them returned nothing, which is reported as `source: null` with `sourcesTried` listing them. `source` names which source answered when there was text. If the pane could not be read at all you get `success: false` with an error and NO claim about what is on the pane — do not read that as an idle agent. This distinction is load-bearing rather than cosmetic: one of herdr's sources returns \"\" for a pane that is alive and plainly has text on it (it windows the last N ROWS OF THE GRID, and the rows below a short pane's cursor are blank), so a single-source read once reported a working agent's terminal as blank.",
         inputSchema: {
           type: "object",
           properties: {

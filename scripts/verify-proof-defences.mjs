@@ -469,6 +469,51 @@ const PROOF_DEFENCES = [
       'is covered only by verify-send-confirms-delivery-live. Both headers say so.'
   },
   {
+    script: 'verify-tail-asks-every-source',
+    defence: 'guard',
+    central:
+      'a tail never reports a pane EMPTY off one read source — every source is asked first — so a ' +
+      'spurious empty read can no longer reach `readDeliveryEvidence` as `readable: true, ' +
+      'count: 0` and become a false `not-delivered`.',
+    anchor: 'visible was NOT asked — one read, not two, when the first one answers',
+    note:
+      'NEGATIVE CASE ON THE FIELD THAT CARRIES THE CLAIM: `source` is required to be `visible` in ' +
+      "§2, `recent-unwrapped` in §3 and `null` in §4, on the same pane shape at three different " +
+      '--lines, so it is observed MOVING and a hardcoded value fails two of the three. §5 is the ' +
+      'other direction — one source empty and the other REFUSING must not be reported as an empty ' +
+      'pane, which is the defect wearing the fallback\'s clothes. §7 requires the composed verdict ' +
+      'to move too: `delivered` when the message is on the pane, `not-delivered` when both Enters ' +
+      'are swallowed and it sits in the composer, `unverifiable` when no source answers. ' +
+      'WHAT IS NOT GUARDED HERE: that real herdr ever answers "" for a pane with text on it. This ' +
+      'file writes its own herdr, so that premise is asserted by nothing in CI — ' +
+      'verify-tail-source-boundary-live carries it, and both headers say so. The pre-fix sabotage ' +
+      '(the fallback disabled, 18 of 36 checks red) was run by hand and pasted on the PR rather ' +
+      'than automated, so it is evidence in the record and not a mechanism in this file.'
+  },
+  {
+    script: 'verify-tail-source-boundary-live',
+    defence: 'guard',
+    central:
+      'real herdr answers the EMPTY STRING for a live pane that has text on it, by a rule that is ' +
+      'exact — `recent`/`recent-unwrapped --lines N` window the last N ROWS OF THE GRID — and no ' +
+      'source shows a dead agent\'s frozen last frame.',
+    anchor: 'the measured boundary is the predicted one',
+    note:
+      'THE GUARD IS THAT THE BOUNDARY IS PREDICTED BEFORE IT IS MEASURED. §1 asks the pane\'s own ' +
+      'shell for the grid height, counts the content rows, computes `rows - contentRows`, prints ' +
+      'the prediction, and only then sweeps --lines to find where the answer flips. A rule that ' +
+      'was wrong — or a herdr that had changed — gives a different boundary and the check fails; ' +
+      'it cannot be satisfied by describing whatever happened to occur. §4 is the negative case ' +
+      'in the other direction: it asserts NO source shows a killed pane\'s final frame, and names ' +
+      'in its own failure detail that a source which DID show it would mean the docblock this ' +
+      'change deleted was right and the fix needs re-examining. WHAT IS NOT COVERED: the ' +
+      'composition with `sendToAgent`. Reaching a false `not-delivered` live needs a blank window ' +
+      'at least DELIVERY_TAIL_LINES (60) rows deep, which the 23-row panes measured here cannot ' +
+      'produce; verify-tail-asks-every-source §7 carries it on a modelled 100-row grid, and ' +
+      'NOBODY HAS OBSERVED ONE IN PRODUCTION. That is a mechanism derived from two measured ' +
+      'facts, and the header says so rather than letting a reader infer coverage.'
+  },
+  {
     script: 'verify-spawn-failure-legibility',
     defence: 'mutation',
     central:
