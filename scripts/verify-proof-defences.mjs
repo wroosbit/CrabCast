@@ -388,12 +388,18 @@ const PROOF_DEFENCES = [
     script: 'verify-config-echo-contract',
     defence: 'mutation',
     central:
-      'the `config` echo on the poll path is swept against the same declaration the event ' +
-      'projection enforces, so a field cannot travel on `list_agents` with nothing looking at it.',
+      'the `config` echo on BOTH read paths — `list_agents` and `agent_status` — is swept ' +
+      'against the same declaration the event projection enforces, so a field cannot travel ' +
+      'on either with nothing looking at it.',
     note:
       'Its §1 is the claim over an unmutated build on a populated fleet; §2 supplies its own ' +
       'undeclared field, so together they say "drift WOULD be caught" and "none is present" ' +
-      'separately. Its own header says nothing covers `agent_status`, which echoes the same object.'
+      'separately. §3b is the defence that matters for the second surface (KAN-168): it removes ' +
+      'the `agent_status` sweep ALONE and leaves the fleet sweep in, because a mutation that ' +
+      'removes machinery both surfaces share reddens everything at once and so cannot tell a ' +
+      'proof that reads two surfaces from one that reads one twice. That single-surface gap is ' +
+      'what main really shipped from KAN-166 (#29, 2026-08-04) until KAN-168, with this file green ' +
+      'throughout.'
   },
   {
     script: 'verify-event-contract',
