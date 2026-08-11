@@ -93,7 +93,7 @@ import type { StallSource } from './machine-pressure.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 1;
+export const READ_CONTRACT_VERSION = 2;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -347,6 +347,19 @@ const CAPACITY_BUCKETS: { [K in keyof typeof CAPACITY_FIELDS]: ProvenanceBucket 
   stalled: 'derived',
   stallRefusePercent: 'derived',
   headroomBeforeStall: 'derived',
+  // The starts-in-flight charge (KAN-263): what the CPU-side reading cannot
+  // have contained, because those agents did not exist for the window it
+  // averaged. ALL FIVE ARE `derived` AND NONE IS `observed`, which is the whole
+  // point of the term rather than a filing detail — these figures exist
+  // precisely because no instrument observed the thing they describe. They are
+  // arithmetic over a ledger of start instants this process kept, and the ledger
+  // is not durable either: it is module state, and a daemon that restarts
+  // correctly starts with none.
+  startsCharged: 'derived',
+  startsConsidered: 'derived',
+  startsChargeCores: 'derived',
+  startsChargeBasis: 'derived',
+  startsChargeBecause: 'derived',
   summary: 'derived'
 };
 
@@ -642,7 +655,15 @@ export const VALUE_SETS = {
   /** `capacity.stallSource` — which pressure was worst. Null when nothing measured. */
   stallSource: ['io', 'memory'],
   /** `capacity.stallInstrument` — and the two kinds of "nobody looked". */
-  stallInstrument: ['measured', 'absent', 'unreadable']
+  stallInstrument: ['measured', 'absent', 'unreadable'],
+  /**
+   * `capacity.startsChargeBasis` (KAN-263) — which instrument's blind spot the
+   * starts charge was measured against. It is NOT a second way of saying which
+   * term bound: it tracks whichever instrument filled the CPU-side slot, so it
+   * reads `load1-period` on a machine where nothing measured CPU even when the
+   * count or memory term is what refused.
+   */
+  startsChargeBasis: ['cpu-window', 'load1-period']
 } as const;
 
 // `state` and `sessionStatus` are bound in `src/router.ts` instead, beside the
