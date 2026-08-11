@@ -402,6 +402,28 @@ const PROOF_DEFENCES = [
       'throughout.'
   },
   {
+    script: 'verify-read-contract',
+    defence: 'mutation',
+    central:
+      'the read path is a published contract: `docs/read-path-contract.md`, `src/read-contract.ts` ' +
+      'and a REAL daemon\'s `list_agents` and `agent_status` responses carry the same fields with ' +
+      'the same provenance buckets, in both directions, and the version is on the wire in exactly ' +
+      'one place.',
+    note:
+      'THREE ARTIFACTS, AND THE MUTATIONS ARE WHY IT NEEDS TO BE THREE. §6a adds a field to a REAL ' +
+      '`list_agents` payload in a compiled build and requires the check to name it — which is the ' +
+      'ticket\'s own acceptance experiment, run rather than described. §6b deletes a row from a ' +
+      'document table and requires the same; it needs no daemon because the reconciliation is a ' +
+      'pure function of (declaration, document text), which is the whole reason it was written as ' +
+      'one — a checker that can only be pointed at the real file cannot be shown to fail. §6c ' +
+      'bumps the declared version without its table row. SEAM: this asserts the document AGREES ' +
+      'with the daemon\'s own provenance legend; whether a bucket is the RIGHT bucket — durable ' +
+      'fields really surviving a restart, observed ones really moving with the census — is ' +
+      'verify-state-read-echoes-config §7, which makes each bucket demonstrate its claimed ' +
+      'property. Two honest mechanisms, and if the legend and the document were wrong the SAME ' +
+      'way, §4 here would be green and that one would be what noticed.'
+  },
+  {
     script: 'verify-event-contract',
     defence: 'mutation',
     central:

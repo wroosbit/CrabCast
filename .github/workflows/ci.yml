@@ -707,6 +707,51 @@ jobs:
       #                                      unconditionally, which is how
       #                                      KAN-197 exists.
       #
+      # And one whose subject is the OTHER user-facing document — the read path,
+      # published for the first time by KAN-277:
+      #
+      #   verify-read-contract               `docs/read-path-contract.md`,
+      #                                      `src/read-contract.ts` and a REAL
+      #                                      daemon's responses, reconciled
+      #                                      pairwise in both directions.
+      #                                      Checking any two of the three
+      #                                      leaves the third free to be wrong,
+      #                                      and the pairs fail differently:
+      #                                      document against declaration is two
+      #                                      files agreeing about a daemon
+      #                                      neither has spoken to, and
+      #                                      declaration against the wire is a
+      #                                      contract nobody can read. It builds
+      #                                      a fleet with EVERY category
+      #                                      populated and asserts each
+      #                                      non-empty before asserting its
+      #                                      shape, produces all four
+      #                                      `agent_status` branches including
+      #                                      both refusals and asserts their
+      #                                      EXACT key sets, and joins the
+      #                                      document's provenance buckets
+      #                                      against the legend the daemon
+      #                                      actually publishes — the one
+      #                                      comparison neither side owns.
+      #                                      Its §6 mutates a compiled build to
+      #                                      add an undocumented field to
+      #                                      `list_agents` and requires the
+      #                                      check to name it, deletes a row
+      #                                      from a document table and requires
+      #                                      the same, and bumps the declared
+      #                                      version without its table row.
+      #                                      WHAT IT CANNOT SEE: whether a
+      #                                      bucket is the RIGHT bucket (that is
+      #                                      verify-state-read-echoes-config §7,
+      #                                      which makes each bucket
+      #                                      demonstrate its claimed property),
+      #                                      whether the version was
+      #                                      INCREMENTED when it should have
+      #                                      been, and whether a consumer notice
+      #                                      was actually sent. All three are
+      #                                      named in its header and in the
+      #                                      document.
+      #
       # And one whose subject is the only USER-FACING document, which until now
       # had no proof at all:
       #
@@ -820,6 +865,7 @@ jobs:
             verify-status-since
             verify-daemon-started-at
             verify-daemon-status-over-mcp
+            verify-read-contract
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,
