@@ -125,6 +125,7 @@ would be N chances for the copy that goes stale.
 | --- | --- | --- | --- |
 | 1 | 2026-08-11 | initial publication (KAN-277) — `list_agents` and `agent_status` field by field, the four provenance buckets, the closed vocabularies, and the version itself | `810f3da2b106` |
 | 2 | 2026-08-11 | KAN-263 — five fields added to `capacity`: `startsCharged`, `startsConsidered`, `startsChargeCores`, `startsChargeBasis`, `startsChargeBecause`, and a new closed vocabulary [startsChargeBasis](#startschargebasis). **Additive: no documented field changed meaning, was removed, or changed type.** They carry what the CPU-side reading could not have contained — the term that makes `cpuBusyCores` and `headroomByCpu` reconcile. A consumer that ignores them reads the same numbers it read at version 1 and is not wrong, only unable to explain a refusal | `c17cf3570018` |
+| 3 | 2026-08-11 | KAN-281 — one field added to `agent_status`: [channelEnabled](#channelenabled), on three of its four branches, saying whether the spawn an agent is running from was channel-enabled. **Additive: no documented field changed meaning, was removed, or changed type.** `durable`, sourced from the activation that made the decision rather than recomputed from config at response time, so it survives a restart. The same field is on `activate_response`, which this document does not otherwise cover — the field's own section says so and names what holds that half. Note `null` there means *no spawn to be about*, never *no channel* | `264ecca9f603` |
 
 The digest is `sha256(readContractCanonical())`, first 12 hex characters, over
 `src/read-contract.ts`'s declarations. **What it buys:** changing a documented
@@ -673,9 +674,9 @@ record nor a pane fails, and only that one means the caller mistyped.
 
 | branch | when | keys |
 | --- | --- | --- |
-| `live-session` | `success: true`, this daemon holds the session | `action` `success` `sessionless` `path` `paneName` `paneId` `sessionId` `createdAt` `status` `herdrStatus` `label` `configured` `state` `config` `configVersion` `configuredAt` `everActivated` `activatedBy` `provenance` `configEchoContract` |
-| `sessionless` | `success: true`, no session of ours — every agent that outlived a daemon restart, and every stopped one | `action` `success` `sessionless` `path` `paneName` `paneId` `sessionId` `createdAt` `status` `workDir` `herdrStatus` `label` `configured` `state` `config` `configVersion` `configuredAt` `everActivated` `activatedBy` `provenance` `configEchoContract` |
-| `no-record-no-pane` | `success: false` — nothing here has ever been an agent | `action` `success` `error` `path` `paneName` `configured` `state` `config` `configVersion` `configuredAt` `everActivated` `activatedBy` `provenance` `configEchoContract` |
+| `live-session` | `success: true`, this daemon holds the session | `action` `success` `sessionless` `path` `paneName` `paneId` `sessionId` `createdAt` `status` `herdrStatus` `label` `configured` `state` `config` `configVersion` `configuredAt` `everActivated` `activatedBy` `channelEnabled` `provenance` `configEchoContract` |
+| `sessionless` | `success: true`, no session of ours — every agent that outlived a daemon restart, and every stopped one | `action` `success` `sessionless` `path` `paneName` `paneId` `sessionId` `createdAt` `status` `workDir` `herdrStatus` `label` `configured` `state` `config` `configVersion` `configuredAt` `everActivated` `activatedBy` `channelEnabled` `provenance` `configEchoContract` |
+| `no-record-no-pane` | `success: false` — nothing here has ever been an agent | `action` `success` `error` `path` `paneName` `configured` `state` `config` `configVersion` `configuredAt` `everActivated` `activatedBy` `channelEnabled` `provenance` `configEchoContract` |
 | `bad-address` | `success: false` — the address itself was rejected (relative, empty, not a directory) | `action` `success` `error` `configEchoContract` |
 
 **`workDir` appears on the sessionless branch and nowhere else**, and on that
@@ -714,8 +715,68 @@ not evidence.
 | `configured` | durable, optional | |
 | `state` | derived, optional | [state](#state) |
 | *config echo* | durable, optional | the five fields [above](#configecho) |
+| `channelEnabled` | durable, optional | whether the spawn this agent is running from was **channel-enabled** — see [below](#channelenabled). Absent on **bad-address** only |
 | `provenance` | derived, optional | [Provenance](#provenance) |
 | `configEchoContract` | derived | **every branch**, refusals included |
+
+### `channelEnabled` — was this spawn channel-enabled
+
+**Three values, and `false` and `null` are different claims.**
+
+| value | what it means |
+| --- | --- |
+| `true` | the spawn this agent is running from was given the channel |
+| `false` | it was **not** — this agent cannot reach CrabCast |
+| `null` | **there is no spawn to be about**: no record at this path, or an agent that has been configured and never activated. It is *not* a way of saying "no channel" |
+
+**What the channel is here.** It is the `crabcast` builtin MCP server being
+provisioned into the agent — not a command-line switch, because CrabCast has
+none for it. An agent configured without that server has no channel and
+therefore no identity: it cannot reach this daemon, so it cannot activate
+anything and has nothing to be the parent of. `channelEnabled` is the published
+form of that one fact.
+
+**Where the value comes from, and why it is `durable`.** It is written by the
+activation that made the decision, read off the resolution's own output at the
+moment `builtinMcpServer` supplies the server — not recomputed later by asking
+`config.mcpServers` again. It then lives on the agent registry, so it survives a
+daemon restart unchanged and `agent_status` answers the same value afterwards
+that the spawn recorded.
+
+That choice is what makes the field safe on the branch you are most likely to
+read it on. Every agent that outlived a restart answers on the **sessionless**
+branch, where this daemon holds no session for it and never watched it start; a
+value kept in process memory would be `null` for the entire surviving fleet, and
+one read from the live session object would be `false` — indistinguishable from
+an agent genuinely spawned without a channel. A wrong `false` is the only value
+here that is actively damaging, because `false` is what you would branch on to
+conclude the channel is unavailable.
+
+**It does not change while the agent runs.** A `configure` that moves a knob on
+a running agent carries the value forward rather than recomputing it, and an
+idempotent `activate` on an already-running agent does not overwrite it — that
+call did not spawn anything, so it has no verdict to record. The value changes
+only when the agent is genuinely spawned again.
+
+**It is also on `activate_response`, which this document does not otherwise
+cover.** That surface is outside the contract — §4 and §7 describe `list_agents`
+and `agent_status`, and nothing here enumerates `activate_response`'s fields —
+so read the following as a statement about behaviour rather than as a row this
+document's machinery holds:
+
+* `activate_response` carries `channelEnabled` on **both** successful branches,
+  the one that spawns and the idempotent one that finds the agent already
+  running, with the same three-value meaning as above.
+* Both surfaces answer it from the same durable record, so they agree for the
+  same agent. `activate_response` exists for the case a poll cannot serve: it
+  tells you about *the spawn you just made*, where a later `agent_status` could
+  be describing a different one.
+* **What holds it:** `scripts/verify-channel-enabled.mjs` asserts the value on
+  both surfaces and that they agree. **`verify-read-contract.mjs` does not** — it
+  reconciles this document against `list_agents` and `agent_status` only. So a
+  future change to `channelEnabled` on `activate_response` is caught by the
+  first script and by no document check. That asymmetry is named here rather
+  than left to be discovered, in the same spirit as §9's *"where it stops"*.
 
 **No `statusSince` here, and that is deliberate rather than an omission.** The
 memory is keyed on the sweep's census of our *live* agents, so this response

@@ -103,12 +103,35 @@ export const BUILTIN_MCP_SERVERS = ['crabcast'] as const;
  * The paths are absolute and rewritten on every activation, like the two above,
  * so a directory that moves does not leave an agent claiming its old identity.
  */
+/**
+ * THE ONE SERVER THAT IS THE CHANNEL, named once so that "is this spawn
+ * channel-enabled" and "what does `builtinMcpServer` supply" cannot drift apart
+ * (KAN-281).
+ *
+ * It is a constant rather than a second predicate deliberately. The consumer
+ * that asked for the boolean was avoiding exactly one thing — "a second read of
+ * a switch that anything may have rewritten in between" — and a *second copy of
+ * the decision* is that hazard in its other form: two places that agree today
+ * and are edited once. So the resolution below and the field on the wire are
+ * both written in terms of this name, and there is no path by which one can say
+ * channel-enabled while the other declines to supply the server.
+ *
+ * WHY THE CHANNEL IS AN MCP SERVER AND NOT A FLAG, since the requesting
+ * consumer's own runtime reads a command line for this: CrabCast has no
+ * command-line switch for it. The capability IS this server being provisioned —
+ * see the note on `builtinMcpServer` below, and the paragraph above it about an
+ * agent configured without it having no channel and therefore no identity. That
+ * is why the field can be sourced from the decision rather than pattern-matched
+ * out of an argv.
+ */
+export const CHANNEL_MCP_SERVER = 'crabcast';
+
 export function builtinMcpServer(
   name: string,
   daemonConfigPath?: string,
   agentPath?: string
 ): Record<string, unknown> | null {
-  if (name !== 'crabcast') return null;
+  if (name !== CHANNEL_MCP_SERVER) return null;
   const env: Record<string, string> = {
     ...(daemonConfigPath ? { CRABCAST_CONFIG: daemonConfigPath } : {}),
     ...(agentPath ? { CRABCAST_AGENT_PATH: agentPath } : {})

@@ -745,6 +745,42 @@ const PROOF_DEFENCES = [
       'only §7 proves anything in production ever writes one.'
   },
   {
+    script: 'verify-channel-enabled',
+    defence: 'mutation',
+    central:
+      '`channelEnabled` reports what the LAUNCHER decided about the spawn, on both ' +
+      '`activate_response` and `agent_status`, and the two agree for the same agent — rather ' +
+      'than being a constant, or a re-read of `config.mcpServers` that happens to agree today.',
+    anchor: 'AGENT_STATUS MOVED TOO',
+    note:
+      'THE VACUITY CASE IS THE WHOLE POINT, and §6a is the only section that rules it out. Every ' +
+      'positive assertion in this file — the field is present, it is a boolean, both surfaces ' +
+      'match — passes PERFECTLY against a daemon answering a hardcoded `true`, which is exactly ' +
+      'what the commissioning ticket asked to be defended against. §6a changes ONE statement, the ' +
+      'launcher\'s own `session.channelEnabled = builtinNames.includes(CHANNEL_MCP_SERVER)`, and ' +
+      'requires BOTH surfaces to move to `false`. It asserts first that the mutant STILL ' +
+      'provisions the channel — the `.mcp.json` is still written — so what moved is the report ' +
+      'and not the behaviour, which is what makes it a test of the field\'s SOURCE rather than of ' +
+      'the spawn. §6b is a second mechanism, not a restatement: it makes the CONVERGING activate ' +
+      'record a verdict it did not earn, and watches a `true` decay to `false` across an ' +
+      'idempotent call — the regression a reconciler would cause fleet-wide within minutes, and ' +
+      'the one §5 exists to hold. §2 is the cheap non-vacuity check §6 does not replace: two ' +
+      'agents on one daemon at one moment must get DIFFERENT answers. §3 defends the three-way ' +
+      'domain, because `false` and `null` are different claims here and a `null` coerced to ' +
+      '`false` would tell a consumer the channel is unavailable on every agent that has never ' +
+      'been spawned. §4 is the durability claim TESTED rather than labelled — a real daemon is ' +
+      'stopped and restarted, and the value is asked for again on both the re-attached ' +
+      'live-session branch (whose session object holds no verdict, so a session-sourced field ' +
+      'would answer `false` at its most plausible) and the sessionless branch of a stopped agent. ' +
+      'WHAT THIS ENTRY DOES NOT CLAIM: the script writes the `mcpServers: {crabcast: "builtin"}` ' +
+      'configuration it later asserts on, so it does not test that a channel provisioned this way ' +
+      'is one a real agent can talk over. That seam is named in the file\'s header and covered by ' +
+      'verify-activated-by §1, which does not assert a channel exists but USES one — it spawns ' +
+      'the real MCP server out of the `.mcp.json` the daemon wrote and builds a supervisor chain ' +
+      'through it. Neither file covers the other, and the gap between them would be a truthful ' +
+      '`channelEnabled: true` about a server nothing can reach.'
+  },
+  {
     script: 'verify-restore-admission',
     defence: 'mutation',
     central:
