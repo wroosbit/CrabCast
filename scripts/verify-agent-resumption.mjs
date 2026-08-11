@@ -85,9 +85,31 @@ function section(title) {
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crabcast-kan21-work-'));
 const registryFile = path.join(tmp, 'agents.jsonl');
 
-/** The knobs a caller freezes onto an agent; `configure` requires the first two. */
+/**
+ * The knobs a caller freezes onto an agent; `configure` requires the first two.
+ *
+ * `refusable: false` IS DELIBERATE AND IT IS NEW (KAN-263). Boot restoration
+ * used to activate with `override: true`, so the capacity gate returned no
+ * verdict at all and reconcile respawned whatever it was asked to regardless of
+ * the machine. It does not any more — a restore the machine has no room for is
+ * DEFERRED — and this file's subject is what an agent is TOLD when it comes
+ * back, not whether there was room for it.
+ *
+ * Left refusable, the section that asserts "a herdr blip that CLEARS costs one
+ * extra pass rather than an agent" is decided by the runner's load average
+ * instead: with no daemon in this process there is no CPU sampler, so the gate
+ * falls back to `os.loadavg()[0]` — the pre-KAN-208 instrument production does
+ * not use — and on a machine at load 3.2 of 4 cores it defers the retry and
+ * this file reports a resumption failure that is nothing of the kind. Observed
+ * exactly that way before this line was changed.
+ *
+ * Nothing else about the path changes: `capacityGate` returns early on this
+ * flag, and the spawn, the resume decision and the nudge are all untouched. The
+ * gate's own behaviour under a restore sequence is asserted where it is the
+ * subject rather than the weather — scripts/verify-restore-admission.mjs.
+ */
 const knobs = (over = {}) => ({
-  priority: 1, refusable: true, chargeable: true, preemptable: true,
+  priority: 1, refusable: false, chargeable: true, preemptable: true,
   launcher: 'claude', ...over
 });
 

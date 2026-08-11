@@ -54,6 +54,28 @@
 //   NOT SUPPLIED EITHER — THE REFUSAL. §4 does not construct a `Capacity` and
 //   ask it a question; it counts what a restore pass actually did.
 //
+// AND THE SEAM BETWEEN THIS FILE AND ITS SIBLING, named because two scripts
+// that are each honest about what they test can still leave a hole between
+// them, and this is where ours is:
+//
+//   * THIS FILE proves that a restore pass divides whatever observation is
+//     published — through the real router, the real gate and the real
+//     reconciler — but it publishes that observation itself.
+//   * `verify-cpu-headroom` §7 proves the other half: a REAL daemon, over a
+//     real socket, runs its sampler and publishes a real figure into the same
+//     module slot this file writes. It is what makes "the sampler is alive" a
+//     claim rather than an assumption.
+//
+//   NOTHING RUNS BOTH AT ONCE — a real daemon's sampler, a real reconcile pass,
+//   and a machine genuinely short of CPU — and nothing will, on a shared
+//   desktop, because the third ingredient is the incident this ticket was filed
+//   after. WHO COVERS IT: nobody. That is stated rather than left to be
+//   inferred. What narrows it is that the value is the only thing supplied:
+//   the READ path from the module slot to a refusal is the production one and
+//   runs here in full, and §8c is the assertion that the WRITE path is wired,
+//   since deleting the ledger write turns this file red while leaving the
+//   arithmetic sections green.
+//
 // NO AGENT WITH A MODEL BEHIND IT IS STARTED, and that is structural rather
 // than careful: `herdr` is a stub on PATH, so `herdr agent start` appends a row
 // to a JSON file and no launcher command is ever executed. The only processes

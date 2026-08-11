@@ -353,8 +353,34 @@ const CAPACITY_FIELDS = [
   'measuredAt', 'measuredWindowSeconds', 'measuredAgentTrees', 'capByCpu',
   'capByMemory', 'headroomByCap', 'headroomByCpu', 'headroomByLoad',
   'headroomByMemory', 'stallPercent', 'stallSource', 'stallInstrument',
-  'stalled', 'stallRefusePercent', 'headroomBeforeStall', 'summary'
+  'stalled', 'stallRefusePercent', 'headroomBeforeStall', 'summary',
+  // KAN-263. These arrived as five raw `key: value` lines out of the unknown
+  // -field fallback below before they were rendered, which is that fallback
+  // doing its job — and is also why they are here rather than left to it.
+  'startsCharged', 'startsConsidered', 'startsChargeCores', 'startsChargeBasis',
+  'startsChargeBecause'
 ] as const;
+
+/**
+ * The starts-in-flight charge, in one line (KAN-263).
+ *
+ * Null only where the daemon did not send the fields at all — an older daemon,
+ * which is a real case this CLI already handles everywhere else — because a
+ * line reading `0 of 0` about a daemon that never looked would be the one thing
+ * this term must not say.
+ */
+function startsChargeLine(capacity: any): string | null {
+  if (typeof capacity.startsCharged !== 'number') return null;
+  const against =
+    capacity.startsChargeBasis === 'cpu-window' ? 'the CPU window' : "load1's minute";
+  return (
+    `${INDENT}starts in flight: ${capacity.startsCharged} of ${capacity.startsConsidered} ` +
+    `charged against ${against}, costing ${capacity.startsChargeCores} core(s)` +
+    (capacity.startsCharged > 0 && capacity.startsChargeBecause
+      ? `\n${INDENT}  ${capacity.startsChargeBecause}`
+      : '')
+  );
+}
 
 function capacityBlock(capacity: any): string | null {
   if (!capacity || typeof capacity !== 'object') return null;
@@ -433,6 +459,14 @@ function capacityBlock(capacity: any): string | null {
         ? `, measured over ${capacity.measuredWindowSeconds}s across ` +
           `${capacity.measuredAgentTrees} tree(s) ending ${capacity.measuredAt}`
         : ''),
+    // KAN-263: the CPU-side term's missing subtrahend. PRINTED WHEN INERT, for
+    // the reason the stall line is: `list_agents` ships no derivation, so on
+    // `crabcast list` this line is the only place the term appears at all, and
+    // a correction that is silent while doing nothing is one a reader assumes
+    // is protecting them. The counts say inert-and-looking (`0 of 0`); the
+    // sentence is added only when it charged something, because when it did not
+    // the counts have already said everything the prose would.
+    startsChargeLine(capacity),
     ...unknown.map((key) => `${INDENT}${key}: ${compact(capacity[key])}`)
   );
 }

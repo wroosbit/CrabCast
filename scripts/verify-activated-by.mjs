@@ -645,8 +645,26 @@ function harness(logName, RouterCtor = MessageRouter, RegistryCtor = AgentRegist
 // purpose, for torn-tail tolerance. A fixture that gets this wrong produces
 // empty categories, which is the vacuous pass this file is arranged against;
 // the non-empty GIVENs are what caught it.
+//
+// `refusable: false` IS ALSO DELIBERATE, and it is new (KAN-263). Boot
+// restoration used to activate with `override: true`, so the capacity gate
+// returned no verdict and reconcile respawned whatever it was asked to
+// regardless of the machine. It does not any more — a restore that the machine
+// has no room for is now DEFERRED — and this file's §2b restores THREE agents
+// and then asserts on their parentage. Left refusable, those assertions would
+// be decided by the runner's load average: a busy machine defers the third, the
+// GIVEN about all three having gone through the mint site goes unmet, and the
+// file reports a parentage failure that is nothing of the kind.
+//
+// So the fixture says what it means — these agents are not the capacity gate's
+// business — rather than arranging a quiet machine it cannot guarantee. Nothing
+// else about the activation path changes: `capacityGate` returns early on this
+// flag and the spawn, the mint site and the registry write are all unchanged.
+// The gate's own behaviour under a restore sequence is asserted in
+// scripts/verify-restore-admission.mjs, where it is the subject rather than the
+// weather.
 const KNOBS = {
-  priority: 5, launcher: 'shell', refusable: true, chargeable: true, preemptable: true
+  priority: 5, launcher: 'shell', refusable: false, chargeable: true, preemptable: true
 };
 
 // ===========================================================================
@@ -1633,11 +1651,20 @@ mutation7: {
   // a path that does not resolve would become `null` — which is the correct
   // answer and would make the mutant behave like the real thing for the wrong
   // reason. That is the vacuous pass this whole section exists to rule out.
+  //
+  // THE ANCHOR MOVED IN KAN-263 and is recorded here so the next reader knows
+  // it drifted rather than was chosen loosely. It used to be
+  // `'override: true\n            }, (msg) => {'` — the last property of the
+  // activate request. Boot restoration no longer passes `override` at all (a
+  // restore is now gated like any other activation, and a refusal is deferred),
+  // so `resume: cause` is the last property and is what this appends after.
+  // The exact-count guard in scripts/mutation.mjs is what turned that drift
+  // into a named failure instead of a silently unmutated build.
   const stampDir = ownedDir('s8g', 'the-boot-daemon');
   const dir = mutantDist(
     'reconcile-stamps-itself', 'reconcile.js',
-    ['override: true\n            }, (msg) => {',
-     `override: true,\n                agentPath: ${JSON.stringify(stampDir)}\n            }, (msg) => {`]
+    ['resume: cause',
+     `resume: cause,\n                agentPath: ${JSON.stringify(stampDir)}`]
   );
   // Already a counted failure. Skip the section rather than
   // asserting about a build that was never mutated.

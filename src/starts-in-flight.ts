@@ -122,11 +122,24 @@ export function startsInFlight(): readonly AgentStart[] {
 /**
  * Forget a start.
  *
- * Used where an agent is known to have gone — a spawn herdr refused, an
- * activation that failed confirmation. An agent that stopped normally is NOT
- * forgotten here and that is deliberate: its cost really was in the window the
- * gate is dividing, so removing it would understate, and understating is the
- * direction that took a machine down. It ages out of the horizon on its own.
+ * ONLY WHERE NO AGENT WAS EVER THERE — a spawn herdr refused, an activation
+ * that failed confirmation. Those cost the machine nothing, and charging for
+ * them would refuse the next activation on the strength of an agent that does
+ * not exist.
+ *
+ * AN AGENT THAT STOPPED IS NOT FORGOTTEN, INCLUDING A PREEMPTED ONE, and that
+ * is a decision rather than an omission — it is worth naming because the
+ * obvious reading is that a dead agent should stop being charged. Both answers
+ * are slightly wrong and in opposite directions: keeping it charges cores
+ * nothing is now spending, and dropping it under-charges the work it really did
+ * inside a window the observation has not yet been replaced. The error either
+ * way is bounded by one agent and by the length of one window, and the
+ * tie-break is that under-charging is the direction that took a machine down.
+ * It ages out on its own, so nothing accumulates.
+ *
+ * Note this is not the lever that makes room after a stand-down: `running`
+ * drops immediately in the count term, and the CPU-side charge clears itself at
+ * the next observation.
  */
 export function forgetAgentStart(path: string): void {
   starts = starts.filter((s) => s.path !== path);

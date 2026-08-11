@@ -760,7 +760,14 @@ const PROOF_DEFENCES = [
       'NOT CLAIM: §3 constructs its MachineFacts and §4 publishes its own CpuObservation — a ' +
       'proof may not saturate a shared machine\'s cores on demand, and that half is a fixture. ' +
       'What is NOT supplied is the LEDGER: every start §4 charges for was produced by a real ' +
-      'activation through the real spawn path, which is the assertion §3 cannot make.'
+      'activation through the real spawn path, which is the assertion §3 cannot make. AND THE ' +
+      'SEAM IS NAMED: this file proves a restore pass divides whatever observation is published ' +
+      'and publishes that observation itself; verify-cpu-headroom §7 proves a real daemon ' +
+      'publishes a real one into the same module slot. NOTHING RUNS BOTH AT ONCE — a live ' +
+      'sampler, a live reconcile pass, and a machine genuinely short of CPU — and on a shared ' +
+      'desktop nothing can, because the third ingredient is the incident this was filed after. ' +
+      'Who covers that: nobody, said here rather than left to be inferred from two files that ' +
+      'are each honest about their own half.'
   },
   {
     script: 'verify-io-stall-gate',

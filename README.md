@@ -232,6 +232,8 @@ capacity:
   io/memory stall: 0% io (worst of /proc/pressure io and memory, `full avg10`) against a 50% threshold — under, so it does not bind
   machine: 4 cores, 1.3 in use over 3s to 2026-08-07T22:47:54.292Z, load 1.43, 9256 MB available of 15737 MB
   agent cost: 650 MB (seed), 0.75 core (seed)
+  starts in flight: 1 of 1 charged against the CPU window, costing 0 core(s)
+    1 of 1 start(s) began after the CPU window opened at 2026-08-11T15:40:52.657Z (3s, closed 2026-08-11T15:40:55.658Z), so the 1.86 cores it observed cannot contain 1 agent(s) of work — weighted by the share of the window each was absent for, and charged 1 × 0.001 core/agent = 0 cores
 
 priorities — what an activation would have to strictly outrank:
   /tmp/ac1-demo/notes  priority 1  [unknown]
@@ -508,10 +510,12 @@ started past the cap on purpose (--override) at 2026-08-05T14:50:46.743Z —
   io/memory stall: 0% io (worst of /proc/pressure io and memory, `full avg10`) against a 50% threshold — under, so it does not bind
   machine: 4 cores, 1.33 in use over 3s to 2026-08-07T22:48:00.137Z, load 1.32, 9236 MB available of 15737 MB
   agent cost: 650 MB (seed), 0.75 core (seed)
+  starts in flight: 0 of 0 charged against the CPU window, costing 0 core(s)
 
 the derivation the override bypassed:
 machine: 4 cores, 15.4 GiB RAM (9.0 GiB available), load average 1.32
 cpu in use: 1.33 of 4 cores, measured over 3s ending 2026-08-07T22:48:00.137Z — this is the CPU-side bound; the load average above is reported and does not gate
+starts in flight: 0 core(s) charged against the CPU window — no agent started after the CPU window opened at 2026-08-11T15:40:58.759Z, so this observation has already priced every agent it is being asked about
 agent cost: 650 MB resident (seed), 0.75 core while active (seed)
   no live measurement; seed figures are the 2026-07-31 constants, not a measurement of this fleet
 io/memory stall: 0.00% io, 0.00% memory (/proc/pressure `full avg10`, the share of the last 10s in which every non-idle task was stalled); worst is 0.00% on io, against a 50% threshold — under, so this term does not bind
@@ -635,6 +639,7 @@ FAILED: activate /tmp/kan174/cap/notes
 Refusing to activate /tmp/kan174/cap/notes: at capacity — 0 charged agents are already running against a cap of 0.
 machine: 4 cores, 15.4 GiB RAM (9.0 GiB available), load average 1.53
 cpu in use: 1.40 of 4 cores, measured over 3s ending 2026-08-07T22:48:06.131Z — this is the CPU-side bound; the load average above is reported and does not gate
+starts in flight: 0 core(s) charged against the CPU window — no agent started after the CPU window opened at 2026-08-11T15:41:05.081Z, so this observation has already priced every agent it is being asked about
 agent cost: 650 MB resident (seed), 0.75 core while active (seed)
   no live measurement; seed figures are the 2026-07-31 constants, not a measurement of this fleet
 io/memory stall: 0.00% io, 0.00% memory (/proc/pressure `full avg10`, the share of the last 10s in which every non-idle task was stalled); worst is 0.00% on io, against a 50% threshold — under, so this term does not bind
@@ -657,6 +662,7 @@ capacity:
   io/memory stall: 0% io (worst of /proc/pressure io and memory, `full avg10`) against a 50% threshold — under, so it does not bind
   machine: 4 cores, 1.4 in use over 3s to 2026-08-07T22:48:06.131Z, load 1.53, 9167 MB available of 15737 MB
   agent cost: 650 MB (seed), 0.75 core (seed)
+  starts in flight: 0 of 0 charged against the CPU window, costing 0 core(s)
 [exit 1]
 ```
 
