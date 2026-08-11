@@ -490,6 +490,63 @@ record(
   'the session named was valid, and the refusal says so'
 );
 
+// --- 5b. THE PRECEDENCE, asserted rather than described ----------------------
+banner('5b. a request wrong in BOTH ways reports the SESSION — the dangerous condition wins');
+
+// WHY THIS SECTION EXISTS, AND IT WAS ADDED IN REVIEW. The handlers carry a
+// comment saying the session is checked first and that validating the payload
+// first "would have quietly swapped which of the two a caller is told about".
+// That paragraph names the exact refactor that breaks the property — and until
+// this section, nothing went red when somebody performed it. The reviewer of
+// PR #72 did perform it, by adding `&& this.ptyInputRefusal(data) === null` to
+// the session-check condition, and this proof stayed green at 19/19. A comment
+// warning about a change, with no assertion behind the warning, is a claim
+// outrunning its mechanism, which is the defect this whole suite is organised
+// against.
+//
+// AND THE CONSEQUENCE IS NOT COSMETIC. Under the swap, a caller who sends a
+// fabricated session id AND a malformed payload is told the PAYLOAD is wrong.
+// They fix the payload, retry, and are still writing at a session that does not
+// exist — which is the condition `handlePtyInput`'s own comment calls the most
+// dangerous of the three, because keystrokes sent to a session picked on the
+// client's behalf land in some other agent's terminal. The precedence exists so
+// that the dangerous condition is the one reported, and it is exactly the one
+// that goes unreported under the swap.
+//
+// Asserted for BOTH handlers. `handlePtyResize` carries the same precedence by
+// reference ("Session first, for the reason given in handlePtyInput above"), so
+// a proof that pinned it on only one of them would leave the sibling free to
+// drift — which is the AC 3 lesson of this ticket applied to its own proof.
+const bothWrongInput = await call('pty_input', { sessionId: 'kan-280-no-such-session' });
+console.log('\n  pty_input, fabricated session AND no `data` →');
+console.log('  ' + JSON.stringify(bothWrongInput));
+const bothWrongResize = await call('pty_resize', { sessionId: 'kan-280-no-such-session' });
+console.log('\n  pty_resize, fabricated session AND no cols/rows →');
+console.log('  ' + JSON.stringify(bothWrongResize));
+
+record(
+  'PRECEDENCE: pty_input wrong in both ways reports unknown_session, not invalid_payload',
+  bothWrongInput.success === false && bothWrongInput.refusal === 'unknown_session',
+  bothWrongInput.refusal === 'unknown_session'
+    ? undefined
+    : `got refusal=${JSON.stringify(bothWrongInput.refusal)} — the payload check has been moved in front of the session check, and a caller with a dead session is being told to fix its payload`
+);
+record(
+  'PRECEDENCE: pty_resize wrong in both ways reports unknown_session, not invalid_payload',
+  bothWrongResize.success === false && bothWrongResize.refusal === 'unknown_session',
+  bothWrongResize.refusal === 'unknown_session'
+    ? undefined
+    : `got refusal=${JSON.stringify(bothWrongResize.refusal)} — same swap on the sibling handler`
+);
+// The refusal must also SAY the session is the problem, not merely be tagged
+// with it: a swap that moved the code but kept the tag would pass the two
+// checks above while telling the caller to fix its payload in prose.
+record(
+  'PRECEDENCE: and the doubly-wrong refusal names the session in its text, not the payload',
+  /does not have/.test(bothWrongInput.error ?? '') && !/`data`/.test(bothWrongInput.error ?? ''),
+  /does not have/.test(bothWrongInput.error ?? '') ? undefined : `error was ${JSON.stringify(bothWrongInput.error)}`
+);
+
 // --- 6. the positive control: valid input still reaches the terminal ---------
 banner('6. a well-formed pty_input still works, and its keystrokes really arrive');
 
