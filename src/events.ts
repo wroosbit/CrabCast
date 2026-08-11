@@ -254,6 +254,20 @@ export const CAPACITY_FIELDS = {
   cpuBusyCores: SCALAR,
   cpuWindowSeconds: SCALAR,
   cpuObservedAt: SCALAR,
+  // KAN-263. What the CPU-side reading could not have contained. A subscriber
+  // that renders `cpuBusyCores` beside `headroomByCpu` is showing a subtraction
+  // with a term missing, and these are it: `startsChargeCores` is the term,
+  // `startsChargeBasis` says which instrument's blind spot it was measured
+  // against, and `startsChargeBecause` is the sentence that makes the whole
+  // thing checkable by hand. `startsCharged: 0` with `startsConsidered: 0` is a
+  // settled fleet; a persistent `startsConsidered: 0` on a daemon that keeps
+  // starting agents is a ledger that has stopped being written to, which is why
+  // both counts are on the wire rather than only the charge.
+  startsCharged: SCALAR,
+  startsConsidered: SCALAR,
+  startsChargeCores: SCALAR,
+  startsChargeBasis: SCALAR,
+  startsChargeBecause: SCALAR,
   totalMb: SCALAR,
   availableMb: SCALAR,
   agentMemoryMb: SCALAR,

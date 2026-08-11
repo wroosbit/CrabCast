@@ -56,6 +56,7 @@ import {
   readCapacity,
   summarizeCapacity
 } from './capacity.js';
+import { forgetAgentStart, recordAgentStart } from './starts-in-flight.js';
 import {
   PreemptionCandidate,
   PreemptionRecord,
@@ -734,6 +735,19 @@ function capacityDto(c: Capacity) {
     cpuBusyCores: c.cpu ? Math.round(c.cpu.busyCores * 100) / 100 : null,
     cpuWindowSeconds: c.cpu ? Math.round(c.cpu.windowSeconds) : null,
     cpuObservedAt: c.cpu ? new Date(c.cpu.sampledAt).toISOString() : null,
+    // KAN-263: what the CPU-side reading could not have contained, and what it
+    // cost. On the wire rather than only in the derivation because a client
+    // showing `cpuBusyCores` beside `headroomByCpu` and nothing else is showing
+    // a subtraction that does not come out — the charge is the missing term,
+    // and `startsChargeBecause` is the sentence that makes it checkable.
+    // `startsCharged: 0` is a settled fleet; `startsConsidered` is how many the
+    // ledger held, so a caller can tell that state from an instrument that
+    // stopped writing.
+    startsCharged: c.startsCharge.charged,
+    startsConsidered: c.startsCharge.considered,
+    startsChargeCores: c.startsCharge.cores,
+    startsChargeBasis: c.startsCharge.basis,
+    startsChargeBecause: c.startsCharge.because,
     totalMb: Math.round(c.machine.totalBytes / (1024 * 1024)),
     availableMb: Math.round(c.machine.availableBytes / (1024 * 1024)),
     agentMemoryMb: Math.round(c.cost.residentBytes / (1024 * 1024)),
@@ -4295,6 +4309,16 @@ export class MessageRouter {
       // conversation on disk there is not ours — at a caller-owned directory,
       // very often the human's own — and the launcher starts a new session
       // instead of continuing it. See resume.ts.
+      // THE START IS RECORDED BEFORE IT IS ISSUED (KAN-263), and the order is
+      // the point rather than an accident. This is the only place in the daemon
+      // that brings a new agent into being, so it is the only place the ledger
+      // the capacity gate divides can be written from; recording it after the
+      // spawn would leave a window — short, and exactly the window a 3-second
+      // restore stagger lands in — where an agent exists and no term charges
+      // for it. A spawn that then fails is removed below, which is the
+      // direction that costs a spurious refusal rather than a missed one.
+      recordAgentStart(agentPath);
+
       session = herdrBridge.spawnSession(
         agentPath,
         config,
@@ -4316,12 +4340,21 @@ export class MessageRouter {
     // leave no agent behind, and that case is answered by looking rather than
     // by trusting.
     if (session.spawnError) {
+      // KAN-263: herdr said no, so nothing was started and nothing is spending
+      // this machine's cores. Charging for it would refuse the NEXT activation
+      // on the strength of an agent that does not exist — the one direction in
+      // which this ledger can do harm, and the only one it is unwound for.
+      forgetAgentStart(agentPath);
       fail(session.spawnError, { path: agentPath });
       return;
     }
 
     const confirmed = await this.confirmActivation(session);
     if ('error' in confirmed) {
+      // Same reasoning, one step later: confirmation is the check that herdr
+      // reported success and left no agent behind, and an agent that was never
+      // there costs nothing to run.
+      forgetAgentStart(agentPath);
       fail(confirmed.error, { path: agentPath, verified: false });
       return;
     }

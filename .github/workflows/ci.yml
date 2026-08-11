@@ -832,6 +832,7 @@ jobs:
             verify-agent-capacity
             verify-cpu-headroom
             verify-io-stall-gate
+            verify-restore-admission
             verify-agent-preemption
             verify-agent-power-controls
             verify-agent-resumption

@@ -15,6 +15,7 @@ import {
   stallInstrument,
   worstStall
 } from './machine-pressure.js';
+import { AgentStart, startsInFlight } from './starts-in-flight.js';
 
 export type { CpuObservation, StallFacts, StallSource };
 export { STALL_REFUSE_PERCENT };
@@ -322,6 +323,259 @@ export interface MeasuredAgentCost extends AgentCost {
  */
 export const HERDR_OVERHEAD_CORES = 0.5;
 
+// ---------------------------------------------------------------------------
+// KAN-263: CHARGING FOR STARTS THE CPU-SIDE INSTRUMENT CANNOT HAVE SEEN
+// ---------------------------------------------------------------------------
+//
+// Every activation is gated correctly and the gate was blind in aggregate. The
+// mechanism, the terms that are and are not affected, and the decision not to
+// charge memory are all in `starts-in-flight.ts`; what is here is the
+// arithmetic and the words it produces.
+//
+// THE ONE SENTENCE: a window average cannot contain an agent that did not exist
+// for the window. So a restore sequence of ten agents three seconds apart is
+// ten decisions taken against one reading of a machine that held none of them.
+//
+// WHAT THIS IS NOT. It is not a staleness fix and `MAX_OBSERVATION_AGE_MS` is
+// not the cause: a perfectly fresh observation, taken one millisecond ago, is
+// equally incapable of containing an agent that started after its window
+// closed. The cause is the SAMPLE CADENCE relative to the START CADENCE, and
+// the correction below is expressed against the window's own edges rather than
+// against any age threshold, which is why it needs no new constant on the CPU
+// branch.
+//
+// HOW IT WEIGHS A START, and this is where we diverge from wroosbit/butchr's
+// KAN-258 (`a888fdd`), which fixed the same defect from a different diagnosis
+// and is evidence rather than specification. Their `unobservedStartsAmong`
+// charges a FULL agent for every start after the window's opening edge — a step
+// function — and their reasoning for the edge is exactly ours: a window from t0
+// to t1 contains the full cost only of an agent that existed for all of it.
+//
+// We keep their edge and drop their step, because their sampler closes a window
+// every 5 seconds and ours closes one every 30. A step over-charges an agent
+// that was present for 29 of a 30-second window by a whole agent, and it does
+// so for up to a minute — on a 4-core box whose derived cap is 3, that is a
+// third of the machine refused on arithmetic we know to be wrong. It also puts
+// a cliff at the sample boundary: the same fleet is charged 3 agents at t=59
+// and 0 at t=61, so the gate's answer jumps by a third of the machine for no
+// change in the machine. At their cadence the same step costs ten seconds and
+// the cliff is invisible; at ours neither is.
+//
+// So a start inside the window is charged the fraction of the window it was
+// ABSENT for, which is one minus the fraction the average already contains. It
+// is continuous at both edges — a start at the opening edge weighs 0, one at
+// the closing edge weighs 1, one after the close weighs 1 — and it introduces
+// no assumption the model was not already making, because "an agent costs
+// `cost.cores` while it is alive" is what every other line of this file divides
+// by.
+//
+// THE ONE THING IT UNDER-CHARGES, named because it is the dangerous direction:
+// an agent's first seconds are its most expensive — a node process, an MCP
+// server or two and a model connection — so a linear weight understates a start
+// that is mostly inside the window. The understatement is bounded by one agent
+// and it shrinks as the start ages. Against it: a start AFTER the window is
+// charged in full, and that is the case the incident was made of.
+
+/** Which instrument's blind spot a charge was measured against. */
+export type ChargeBasis = 'cpu-window' | 'load1-period';
+
+/**
+ * What the starts in flight cost the CPU-side budget, with the arithmetic that
+ * produced it — the same bargain every other figure here strikes.
+ */
+export interface StartsCharge {
+  /** Starts the ledger offered for consideration. */
+  considered: number;
+  /** Of those, how many carried a non-zero weight. */
+  charged: number;
+  /** The weights summed — a fleet-equivalent, so 2.4 means "two and a bit
+   *  agents' worth of work no instrument has priced". */
+  agentEquivalents: number;
+  /** `agentEquivalents × rateCores`, subtracted from the budget. */
+  cores: number;
+  /**
+   * What one start was charged at — see {@link startingAgentCores}. NOT
+   * necessarily `cost.cores`, and reported separately for exactly that reason:
+   * a reader reproducing this figure from the `agent cost:` line on the same
+   * report would otherwise get a different answer and have no way to see why.
+   */
+  rateCores: number;
+  /** Which instrument this was measured against. */
+  basis: ChargeBasis;
+  /** The derivation in one sentence, for a refusal to quote. */
+  because: string;
+}
+
+/**
+ * The period `os.loadavg()[0]` averages over.
+ *
+ * A constant, and it is the one number here nobody measured — but it is not a
+ * tuning knob either: it is the DEFINITION of the instrument. `load1` is the
+ * one-minute load average, so one minute is how far back a start can be and
+ * still be under-represented in it. Changing it would not tune the gate, it
+ * would make this arithmetic describe a different quantity from the one it
+ * divides.
+ */
+export const LOAD1_PERIOD_MS = 60_000;
+
+/**
+ * What one STARTING agent is charged, which is not what one running agent
+ * costs.
+ *
+ * THIS IS THE HOLE THE OTHER PROJECT FOUND AND WE HAD NOT (KAN-258, and it is
+ * the single most valuable thing reading their work produced). Their live
+ * capacity report on this machine at the time of writing reads
+ * `agentCores: 0.117 (measured)` beside `unobservedStarts.chargedCores: 0.75`
+ * — they charge the seed and not the divisor, deliberately.
+ *
+ * The argument is short and it is right. Both cost figures in this file are
+ * STEADY-STATE BY CONSTRUCTION: {@link MEASURED_AGENT_COST} is calibrated on
+ * "the configuration that was observed to be fine" and the live figure is
+ * damped over a 60-second window, and its own header says most of an agent's
+ * life is spent waiting on an API. Neither describes the first few seconds of
+ * one — a node process, an MCP server or two and a model connection, all being
+ * built at once. Charging a start at the settled rate is charging the burst at
+ * the price of the idle: with the measured 0.117 in force, ten simultaneous
+ * starts would be charged 1.17 cores, and ten simultaneously-booting agent
+ * trees are not 1.17 cores. That charge would have refused nothing, and this
+ * whole term would have shipped inert.
+ *
+ * So the rate is the LARGER of the divisor in force and the seed — the seed
+ * being the one figure here calibrated on a whole agent's share of a machine
+ * rather than on its CPU samples.
+ *
+ * WHERE WE DIVERGE FROM THEM, and it is a small deliberate one: an explicit
+ * operator override is honoured outright rather than being raised to the seed.
+ * This file's precedence rule is stated as an argument and not a convenience —
+ * "someone who typed a number into their environment has re-measured or
+ * decided, and a fleet that argues with its operator gets turned off" — and a
+ * `max` that silently overrides `CRABCAST_AGENT_CORES` is exactly that
+ * argument. The measurement is what gets raised, because nobody decided it.
+ */
+export function startingAgentCores(cost: AgentCost, costSource: CostSource): number {
+  if (costSource === 'override') return cost.cores;
+  return Math.max(cost.cores, MEASURED_AGENT_COST.cores);
+}
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * How much of a start the CPU window can already see, as a weight in [0, 1]
+ * where 1 is "this observation contains none of it".
+ *
+ * Continuous at both edges; see the header above for why it is a ramp rather
+ * than a step, and why the edge is the window's OPENING and not its close.
+ */
+function unobservedWeight(startedAt: number, cpu: CpuObservation): number {
+  const windowMs = cpu.windowSeconds * 1000;
+  if (startedAt >= cpu.sampledAt) return 1;
+  // A window with no duration cannot contain anything; it is rejected upstream
+  // by MIN_WINDOW_SECONDS, and this is what keeps the division safe rather than
+  // relying on that.
+  if (!(windowMs > 0)) return 1;
+  const openedAt = cpu.sampledAt - windowMs;
+  if (startedAt <= openedAt) return 0;
+  return (startedAt - openedAt) / windowMs;
+}
+
+/**
+ * The charge against the observed-CPU term.
+ *
+ * Every figure in the sentence it returns is reproducible by hand from the
+ * observation the report already prints, which is the property AC3 asks for:
+ * the reader can check the charge without being handed the ledger.
+ */
+export function chargeAgainstCpuWindow(
+  starts: readonly AgentStart[],
+  cpu: CpuObservation,
+  cost: AgentCost,
+  costSource: CostSource
+): StartsCharge {
+  const rate = startingAgentCores(cost, costSource);
+  const weights = starts.map((s) => unobservedWeight(s.at, cpu));
+  const agentEquivalents = weights.reduce((a, b) => a + b, 0);
+  const charged = weights.filter((w) => w > 0).length;
+  const openedAt = new Date(cpu.sampledAt - cpu.windowSeconds * 1000).toISOString();
+  const closedAt = new Date(cpu.sampledAt).toISOString();
+  return {
+    considered: starts.length,
+    charged,
+    agentEquivalents: round2(agentEquivalents),
+    cores: round2(agentEquivalents * rate),
+    rateCores: rate,
+    basis: 'cpu-window',
+    because:
+      charged === 0
+        ? `no agent started after the CPU window opened at ${openedAt}, so this observation ` +
+          `has already priced every agent it is being asked about` +
+          (starts.length ? ` (${starts.length} start(s) considered)` : '')
+        : `${charged} of ${starts.length} start(s) began after the CPU window opened at ` +
+          `${openedAt} (${cpu.windowSeconds.toFixed(0)}s, closed ${closedAt}), so the ` +
+          `${cpu.busyCores.toFixed(2)} cores it observed cannot contain ` +
+          `${round2(agentEquivalents)} agent(s) of work — weighted by the share of the window ` +
+          `each was absent for, and charged ${round2(agentEquivalents)} × ${rate} ` +
+          `core/agent = ${round2(agentEquivalents * rate)} cores` +
+          startingRateNote(cost, costSource, rate)
+  };
+}
+
+/**
+ * Why the charge divides by a different figure from the one on the `agent
+ * cost:` line, said only when it does.
+ *
+ * Without this clause the report contains two numbers that do not reconcile and
+ * nothing connecting them, which is the shape of every capacity figure this
+ * project has had to go back and explain.
+ */
+function startingRateNote(cost: AgentCost, costSource: CostSource, rate: number): string {
+  if (rate === cost.cores) return '';
+  return (
+    ` — charged at the ${MEASURED_AGENT_COST.cores} core seed rather than the ` +
+    `${cost.cores} core ${costSource} divisor, because both cost figures here describe a ` +
+    `SETTLED agent and a starting one is spending the most CPU it ever will`
+  );
+}
+
+/**
+ * The charge against the load-average term, which fills the CPU-side slot only
+ * where nothing measured this machine's CPU.
+ *
+ * A STEP RATHER THAN A RAMP, and the reason is the instrument: `load1` is an
+ * EXPONENTIAL mean, so it weights the last few seconds far more heavily than
+ * the first few of its minute. A linear ramp over that would understate a
+ * recent start — the direction that took a machine down — so anything inside
+ * the period is charged in full. The load average is already the conservative
+ * fallback (it counts uninterruptible sleep as demand); this keeps it so.
+ */
+export function chargeAgainstLoad1(
+  starts: readonly AgentStart[],
+  cost: AgentCost,
+  costSource: CostSource,
+  now: number
+): StartsCharge {
+  const rate = startingAgentCores(cost, costSource);
+  const since = now - LOAD1_PERIOD_MS;
+  const charged = starts.filter((s) => s.at > since).length;
+  return {
+    considered: starts.length,
+    charged,
+    agentEquivalents: charged,
+    cores: round2(charged * rate),
+    rateCores: rate,
+    basis: 'load1-period',
+    because:
+      charged === 0
+        ? `no agent started in the last ${LOAD1_PERIOD_MS / 1000}s, so the 1-minute load ` +
+          `average has had time to reflect the whole fleet` +
+          (starts.length ? ` (${starts.length} start(s) considered)` : '')
+        : `${charged} of ${starts.length} start(s) began inside the ${LOAD1_PERIOD_MS / 1000}s ` +
+          `the load average means over, and it is an exponential mean that weights the newest ` +
+          `work least — each is charged in full at ${rate} core/agent = ` +
+          `${round2(charged * rate)} cores` +
+          startingRateNote(cost, costSource, rate)
+  };
+}
+
 /** What the machine looks like right now, or what we pretend it looks like. */
 export interface MachineFacts {
   cores: number;
@@ -452,6 +706,25 @@ export interface Capacity {
   cpu: CpuObservation | null;
 
   /**
+   * What agents started too recently to be in the CPU-side reading cost that
+   * reading's budget (KAN-263).
+   *
+   * ALWAYS THE CHARGE THAT BOUND — against the CPU window where one was
+   * observed, against the load average's minute where the load term stood in —
+   * so a reader never has to work out which instrument this belongs to. Both
+   * are computed; `startsChargeByLoad` carries the other one for the same
+   * reason `headroomByLoad` is computed when it does not bind.
+   *
+   * `charged: 0` is the ordinary state of a settled fleet and is NOT the same
+   * as "nobody looked": `considered` says how many starts were on the ledger,
+   * and `because` says in words why they cost nothing.
+   */
+  startsCharge: StartsCharge;
+  /** The load-average charge, computed always so it can be printed beside the
+   *  CPU one. It BINDS only when `headroomByCpu` is null. */
+  startsChargeByLoad: StartsCharge;
+
+  /**
    * What the three counting terms agreed on BEFORE the stall veto (KAN-216).
    * Equal to `headroom` in the ordinary case; when `stalled` is true it is the
    * room the machine would otherwise have had. Printing it is what makes the
@@ -503,6 +776,19 @@ export interface CapacityOptions {
   /** Gate-exempt agents observed running. Reported only; it changes no
    * arithmetic. */
   exemptRunning?: number;
+  /**
+   * When each live agent was started (KAN-263), so the CPU-side term can charge
+   * for the ones its reading cannot contain. `readCapacity` fills this from the
+   * process-wide ledger; a caller reasoning about hardware it does not own —
+   * the portability sections of the proofs — leaves it out, and absent means
+   * exactly what an empty ledger means: nothing is mid-start.
+   */
+  startedAt?: readonly AgentStart[];
+  /**
+   * The instant to reckon the load-average charge against. Defaults to now;
+   * pinned by proofs so a charge can be asserted without racing the clock.
+   */
+  now?: number;
 }
 
 /**
@@ -583,17 +869,41 @@ export function computeCapacity(
   // cannot see two agents started seconds apart. That is exactly the gap the
   // count term covers, which is why both are computed and the smaller wins
   // rather than one replacing the other.
+  //
+  // AND BOTH FORMS ARE NOW CHARGED FOR WHAT THEY CANNOT HAVE SEEN (KAN-263).
+  // The paragraph above was right that neither is asked not to lag, and wrong
+  // that the count term covers it: the count term covers the case where the
+  // machine is bound by how many agents there are, and says nothing at all
+  // about a machine bound by how busy they make it. On a CPU-bound machine —
+  // which the one this was written on is, repeatedly — the term that binds is
+  // the blind one, and ten restores three seconds apart were ten decisions
+  // taken against one reading of a machine that contained none of them.
+  const starts = options.startedAt ?? [];
+  const now = options.now ?? Date.now();
   const cpu = machine.cpu ?? null;
+  const startsChargeByLoad = chargeAgainstLoad1(starts, cost, costSource.cores, now);
+  const startsChargeByCpu =
+    cpu === null ? null : chargeAgainstCpuWindow(starts, cpu, cost, costSource.cores);
   const headroomByCpu =
-    cpu === null
+    cpu === null || startsChargeByCpu === null
       ? null
-      : Math.max(0, Math.floor((machine.cores - reservedCores - cpu.busyCores) / cost.cores));
+      : Math.max(
+          0,
+          Math.floor(
+            (machine.cores - reservedCores - cpu.busyCores - startsChargeByCpu.cores) / cost.cores
+          )
+        );
 
   // Computed unconditionally so every report can print it beside the CPU term
   // — the divergence between the two IS the KAN-208 finding, and a figure you
   // have to recompute by hand to see it is a figure nobody sees. It binds only
   // where headroomByCpu is null.
-  const loadBudget = machine.cores - reservedCores - machine.load1;
+  //
+  // It carries its OWN charge rather than the CPU one, because the two are
+  // measured against different periods and printing a term beside an
+  // adjustment that was not applied to it is how a reader checks the
+  // arithmetic and finds it does not add up.
+  const loadBudget = machine.cores - reservedCores - machine.load1 - startsChargeByLoad.cores;
   const headroomByLoad = Math.max(0, Math.floor(loadBudget / cost.cores));
 
   const headroomByMemory = Math.max(
@@ -657,6 +967,8 @@ export function computeCapacity(
     headroomByMemory,
     headroomBoundBy,
     cpu,
+    startsCharge: startsChargeByCpu ?? startsChargeByLoad,
+    startsChargeByLoad,
     headroomBeforeStall,
     stallPercent: worst ? worst.percent : null,
     stallSource: worst ? worst.source : null,
@@ -787,7 +1099,12 @@ export function readCapacity(running: number, exempt = 0): Capacity {
   return computeCapacity(readMachineFacts(), running, {
     ...optionsFromEnv(),
     measured: liveMeasuredCost,
-    exemptRunning: exempt
+    exemptRunning: exempt,
+    // The process-wide ledger, read here for the same reason `liveMeasuredCost`
+    // and `freshObservedCpu()` are read here: every capacity answer in this
+    // daemon must charge the same starts, and a caller that assembled its own
+    // list would be a second opinion about how much of the fleet is new.
+    startedAt: startsInFlight()
   });
 }
 
@@ -838,6 +1155,26 @@ export function stallLine(c: Capacity): string {
 }
 
 /**
+ * The starts-in-flight charge in one line, printed whether or not it bound
+ * (KAN-263).
+ *
+ * PRINTED WHEN INERT, for the reason `stallLine` is: a correction that is
+ * silent while it is doing nothing is a correction a reader assumes is
+ * protecting them, and this one is exactly the sort that can quietly stop —
+ * the ledger stops being written to, every charge goes to zero, every
+ * assertion about the arithmetic stays green, and the gate is back to
+ * admitting ten agents on one reading. `considered: 0` on a machine that has
+ * just started five agents is a visible contradiction; a blank line is not.
+ */
+export function startsLine(c: Capacity): string {
+  const which =
+    c.startsCharge.basis === 'cpu-window'
+      ? 'against the CPU window'
+      : 'against the load average\'s minute (nothing measured CPU here)';
+  return `starts in flight: ${c.startsCharge.cores} core(s) charged ${which} — ${c.startsCharge.because}`;
+}
+
+/**
  * The derivation in words, with the numbers that produced it.
  *
  * This is the whole point: an agent refused for capacity has to say why, in
@@ -866,6 +1203,7 @@ export function describeCapacity(c: Capacity): string {
         'CPU-side bound (fallback) — it counts uninterruptible sleep as well ' +
         'as running work, so it can refuse a machine with idle cores'
   );
+  lines.push(startsLine(c));
   // Every cost figure carries its provenance, because the divisor can now be
   // a measurement: a reader must be able to tell a number this fleet produced
   // from the 2026-07-31 seed and from a number the operator typed in.
@@ -929,13 +1267,24 @@ export function describeCapacity(c: Capacity): string {
   // they have to take on trust. The load term keeps its arithmetic for the
   // same reason it is still computed: seeing `load allows 0` next to `cpu
   // allows 3` is how KAN-208 was found in the first place.
+  //
+  // EACH CPU-SIDE TERM PRINTS ITS OWN STARTS CHARGE (KAN-263), inside its own
+  // parentheses rather than as a footnote. A term whose adjustment is described
+  // somewhere else on the page is a term the reader cannot check by adding up
+  // the numbers in front of them — and checking it by hand is the entire
+  // contract this function exists to keep.
+  const loadCharge = c.startsChargeByLoad.cores;
   const loadTerm =
     `load ${c.cpu ? 'would allow' : 'allows'} ${c.headroomByLoad} ` +
-    `((${m.cores} cores − ${c.reservedForHuman.cores} reserved − ${m.load1.toFixed(2)} load) ` +
-    `÷ ${c.cost.cores}${c.cpu ? '; reported, does not bind' : '; fallback, nothing measured CPU'})`;
+    `((${m.cores} cores − ${c.reservedForHuman.cores} reserved − ${m.load1.toFixed(2)} load` +
+    (loadCharge > 0 ? ` − ${loadCharge} starting` : '') +
+    `) ÷ ${c.cost.cores}${c.cpu ? '; reported, does not bind' : '; fallback, nothing measured CPU'})`;
+  const cpuCharge = c.cpu ? c.startsCharge.cores : 0;
   const cpuTerm = c.cpu
     ? `cpu allows ${c.headroomByCpu} ((${m.cores} cores − ${c.reservedForHuman.cores} reserved ` +
-      `− ${c.cpu.busyCores.toFixed(2)} in use) ÷ ${c.cost.cores}), `
+      `− ${c.cpu.busyCores.toFixed(2)} in use` +
+      (cpuCharge > 0 ? ` − ${cpuCharge} starting` : '') +
+      `) ÷ ${c.cost.cores}), `
     : '';
   lines.push(
     `headroom: ${c.headroom} more — ` +
@@ -1015,7 +1364,16 @@ export function capacityReason(c: Capacity): string {
     return (
       `${c.cpu.busyCores.toFixed(2)} cores are in use, against the ` +
       `${forAgents} cores this machine leaves to agents ` +
-      `(measured over ${c.cpu.windowSeconds.toFixed(0)}s)`
+      `(measured over ${c.cpu.windowSeconds.toFixed(0)}s)` +
+      // AC3 (KAN-263): where starts in flight were part of what refused, the
+      // refusal says so and says how much. Silence here would leave the reader
+      // subtracting the printed `busyCores` from the printed budget, getting a
+      // different answer from the one they were given, and concluding the gate
+      // is broken — the charge is not a detail, it is a term of the sum.
+      (c.startsCharge.cores > 0
+        ? `, plus ${c.startsCharge.cores} cores charged for ${c.startsCharge.charged} agent(s) ` +
+          `that started too recently for that measurement to contain them`
+        : '')
     );
   }
   if (c.headroomBoundBy === 'load') {
@@ -1026,7 +1384,11 @@ export function capacityReason(c: Capacity): string {
     return (
       `nothing here measured CPU, so the load average stands in: it is ` +
       `${c.machine.load1.toFixed(2)}, against the ${forAgents} cores this machine ` +
-      `leaves to agents`
+      `leaves to agents` +
+      (c.startsCharge.cores > 0
+        ? `, plus ${c.startsCharge.cores} cores charged for ${c.startsCharge.charged} agent(s) ` +
+          `that started inside the minute it averages over`
+        : '')
     );
   }
   if (c.headroomBoundBy === 'memory') {

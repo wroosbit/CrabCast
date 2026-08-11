@@ -1445,9 +1445,18 @@ rule('6. THE RED HALF — the checks above, watched failing');
 
 // ---- 6c. the version bumped without its table row ----
 {
+  // THE ANCHOR IS DERIVED FROM THE SHIPPED VERSION, not written as a literal
+  // (KAN-263). It was `= 1;` → `= 2;`, which meant the first real version bump
+  // this contract ever took broke its own proof: the mutation stopped applying,
+  // §6c did not run, and the failure named itself rather than the contract.
+  // That is the exact-count guard in scripts/mutation.mjs working — it refused
+  // to hand back an unmutated build — but the friction is unnecessary, because
+  // "one past whatever is current" is what this section actually means and can
+  // be computed. Now a bump costs nothing here.
+  const nextVersion = READ_CONTRACT_VERSION + 1;
   const mutant = mutatedBuild('bumped-version', 'read-contract.js',
-    'export const READ_CONTRACT_VERSION = 1;',
-    'export const READ_CONTRACT_VERSION = 2;');
+    `export const READ_CONTRACT_VERSION = ${READ_CONTRACT_VERSION};`,
+    `export const READ_CONTRACT_VERSION = ${nextVersion};`);
 
   if (mutant) {
     const bumped = await import(path.join(mutant, 'read-contract.js'));
@@ -1457,11 +1466,16 @@ rule('6. THE RED HALF — the checks above, watched failing');
     console.log(`   the document's table has rows for: ${versions?.map((v) => v.version).join(', ')}`);
     console.log(`   row for the declared version: ${row ? row.digest : '(none)'}`);
 
+    // `=== nextVersion` rather than `=== 2`, for the reason above and for one
+    // more: this conjunct is not decoration. It is the precondition that the
+    // MUTANT is what is being asked, not the original — without it a build that
+    // silently failed to mutate would satisfy `!row` only by accident, and the
+    // section would report the strongest available result having tested nothing.
     verdict(
-      bumped.READ_CONTRACT_VERSION === 2 && !row,
+      bumped.READ_CONTRACT_VERSION === nextVersion && !row,
       '§3 goes red on a version bumped without a row in the document\'s version table — so a\n' +
       '    version can be raised, but not silently',
-      `declared=${bumped.READ_CONTRACT_VERSION}, row=${JSON.stringify(row)}`
+      `declared=${bumped.READ_CONTRACT_VERSION}, expected=${nextVersion}, row=${JSON.stringify(row)}`
     );
   }
 }

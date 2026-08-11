@@ -124,6 +124,7 @@ would be N chances for the copy that goes stale.
 | version | date | what changed | digest |
 | --- | --- | --- | --- |
 | 1 | 2026-08-11 | initial publication (KAN-277) — `list_agents` and `agent_status` field by field, the four provenance buckets, the closed vocabularies, and the version itself | `810f3da2b106` |
+| 2 | 2026-08-11 | KAN-263 — five fields added to `capacity`: `startsCharged`, `startsConsidered`, `startsChargeCores`, `startsChargeBasis`, `startsChargeBecause`, and a new closed vocabulary [startsChargeBasis](#startschargebasis). **Additive: no documented field changed meaning, was removed, or changed type.** They carry what the CPU-side reading could not have contained — the term that makes `cpuBusyCores` and `headroomByCpu` reconcile. A consumer that ignores them reads the same numbers it read at version 1 and is not wrong, only unable to explain a refusal | `c17cf3570018` |
 
 The digest is `sha256(readContractCanonical())`, first 12 hex characters, over
 `src/read-contract.ts`'s declarations. **What it buys:** changing a documented
@@ -523,6 +524,11 @@ sentence: a caller that ignores every number still cannot ignore that one.**
 | `stalled` | derived | whether the veto fired |
 | `stallRefusePercent` | derived | the threshold it fired against |
 | `headroomBeforeStall` | derived | what the counting terms allowed before the veto zeroed them. Equal to `headroom` unless `stalled` |
+| `startsCharged` | derived | agents that started too recently for the CPU-side reading to contain them, and were therefore charged against it. **`0` is a settled fleet, not an instrument that stopped** — read it beside `startsConsidered`. **Added 2026-08-11 (KAN-263)** |
+| `startsConsidered` | derived | how many starts the ledger held at all. A daemon that keeps starting agents while this stays `0` has a ledger that has stopped being written to, which is the one failure the charge cannot report about itself |
+| `startsChargeCores` | derived | cores subtracted from the CPU-side budget for those starts. **This is the term that makes the subtraction come out**: a caller rendering `cpuBusyCores` against `headroomByCpu` without it is showing arithmetic that does not add up |
+| `startsChargeBasis` | derived | which instrument's blind spot it was measured against — [startsChargeBasis](#startschargebasis) |
+| `startsChargeBecause` | derived | the derivation in one sentence, with the window's own edges in it, so the charge is reproducible by hand from the response alone |
 | `summary` | derived | |
 
 <a id="fleetpage"></a>
@@ -801,6 +807,16 @@ of ours.
 | `load` | `cpuBusyCores` was null and the load average stood in |
 | `memory` | |
 | `stall` | the veto: the counting terms allowed room and pressure vetoed it. `headroomBeforeStall` is what they allowed. **Added 2026-08-11 (KAN-216)** |
+
+<a id="startschargebasis"></a>
+### `capacity.startsChargeBasis`
+
+<!-- contract-values: startsChargeBasis -->
+
+| value | what it means |
+| --- | --- |
+| `cpu-window` | charged against the observed CPU window's own edges — a start is weighted by the share of the window it was **absent** for, so a start after the window closed costs a whole agent and one at its opening edge costs nothing |
+| `load1-period` | nothing measured CPU, so the load average stands in and anything started inside the minute it means over is charged in full. **Not a second way of saying which term bound**: this names the instrument filling the CPU-side slot, so it reads `load1-period` even when count or memory is what refused |
 
 <a id="costsource"></a>
 ### `capacity.agentMemorySource`, `capacity.agentCoresSource`

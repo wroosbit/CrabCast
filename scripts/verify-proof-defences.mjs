@@ -745,6 +745,53 @@ const PROOF_DEFENCES = [
       'only §7 proves anything in production ever writes one.'
   },
   {
+    script: 'verify-restore-admission',
+    defence: 'mutation',
+    central:
+      'a restore sequence of N agents cannot admit more agents than the machine has room for — ' +
+      'the capacity gate composes across a staggered pass, rather than being sound per ' +
+      'activation and blind in aggregate.',
+    anchor: '8. the red: three ways',
+    note:
+      'THREE MUTATIONS, EACH AGAINST A DIFFERENT MECHANISM, and the third is the one that makes ' +
+      'this coverage rather than repetition. §8a restores `override: true` in reconcile.js — the ' +
+      'BYPASS, which made `capacityGate` return `refusal: null` unconditionally and left the ' +
+      'number of agents a restore pass could admit bounded by nothing. §8b zeroes the CPU charge ' +
+      'in capacity.js — the ticket\'s own defect, a gate that still runs and still refuses in ' +
+      'principle while measuring ten restores against one observation none of them is in. §8c ' +
+      'deletes the LEDGER WRITE in router.js and leaves the arithmetic perfectly intact: that is ' +
+      'the KAN-145 shape, a mechanism that is correct and permanently fed nothing, and §1-§3 ' +
+      'stay green against that build because they construct their own ledger. Only §4, which ' +
+      'PRODUCES its starts by driving the real reconciler through the real router, catches it. ' +
+      'All three admit 5 of 5 against a machine with room for 2, observed. §3 additionally runs ' +
+      'the COUNTERFACTUAL — the same MachineFacts with an EMPTY ledger must ADMIT — so a charge ' +
+      'welded on fails as loudly as one deleted. THE SATURATED FIXTURE IS DERIVED, NOT HARD-CODED ' +
+      '(KAN-245): the busy figure is `cores − reserved − (K + 0.5) × costCores`, computed at run ' +
+      'time from this machine\'s core count and the shipped divisor, so there is no /proc/stat ' +
+      'tick literal anywhere in the file to expire as machines accumulate uptime — the quantity ' +
+      'it derives from is a core count, which does not accumulate. ITS EXERCISE IS ASSERTED ' +
+      'SEPARATELY, which is not a restatement: §4 requires the pre-drive capacity to be CPU-bound ' +
+      'with headroom exactly K, §6 requires the busy figure to lie strictly inside (0, cores), ' +
+      'requires BOTH verdicts to have been observed in the drive (at least one admitted, at least ' +
+      'one refused), requires the published observation to have still been FRESH when the pass ' +
+      'ended — otherwise the run silently measured the load-average fallback — and requires ' +
+      'neither the count nor the memory term to have bound, since a memory-bound refusal would ' +
+      'look exactly like the term under test working. §7 asserts the ledger horizon EXCEEDS the ' +
+      'oldest instant any term can charge, because a prune that crept below it would stop ' +
+      'charging real starts while every other assertion here stayed green. WHAT THIS ENTRY DOES ' +
+      'NOT CLAIM: §3 constructs its MachineFacts and §4 publishes its own CpuObservation — a ' +
+      'proof may not saturate a shared machine\'s cores on demand, and that half is a fixture. ' +
+      'What is NOT supplied is the LEDGER: every start §4 charges for was produced by a real ' +
+      'activation through the real spawn path, which is the assertion §3 cannot make. AND THE ' +
+      'SEAM IS NAMED: this file proves a restore pass divides whatever observation is published ' +
+      'and publishes that observation itself; verify-cpu-headroom §7 proves a real daemon ' +
+      'publishes a real one into the same module slot. NOTHING RUNS BOTH AT ONCE — a live ' +
+      'sampler, a live reconcile pass, and a machine genuinely short of CPU — and on a shared ' +
+      'desktop nothing can, because the third ingredient is the incident this was filed after. ' +
+      'Who covers that: nobody, said here rather than left to be inferred from two files that ' +
+      'are each honest about their own half.'
+  },
+  {
     script: 'verify-io-stall-gate',
     defence: 'guard',
     central:

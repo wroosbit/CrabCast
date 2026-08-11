@@ -72,6 +72,22 @@ export interface RestoreOutcome {
    *   started holds no sessions.
    */
   result: 'already-running' | 'reattached' | 'restored' | 'failed' | 'deferred';
+  /**
+   * Which of the two things a deferral was about, present only on `deferred`.
+   *
+   * `herdr` — the occupancy census went unanswered, so nothing could be
+   *   verified. Waiting is the whole remedy.
+   * `capacity` — the machine has no room for it right now. Waiting may be the
+   *   remedy and standing something else down may be; the log line carries the
+   *   gate's derivation so the reader can tell which.
+   *
+   * A DISCRIMINATOR RATHER THAN TWO RESULTS, because everything downstream of
+   * `deferred` — nothing recorded, still `expected()`, retried once, swept
+   * afterwards — is identical for both, and a second result value would be a
+   * second thing every `switch` on this union has to remember to handle in
+   * order to behave the same way.
+   */
+  deferredBy?: 'herdr' | 'capacity';
   /** True when the agent's prior conversation was there to continue. */
   resumedConversation?: boolean;
   /** Whether the interrupted-work message was delivered, and why not. */
@@ -143,6 +159,26 @@ async function waitForHerdr(herdrBridge: HerdrBridge, timeoutMs: number): Promis
  *     sweep, broadcast as `agent.lost`, and reported in every
  *     `list_agents` poll. So it cannot be a silent skip either: two
  *     independent channels report it until somebody acts.
+ *
+ * A SECOND REFUSAL NOW ARRIVES HERE, AND IT TOOK THE SAME ANSWER (KAN-263).
+ * This pass used to activate with `override: true`, which made `capacityGate`
+ * return no verdict at all — so a restore sequence could admit any number of
+ * agents onto a machine that could carry three. The override is gone (see the
+ * call site for the two lapsed premises behind it), which means a restore can
+ * now be refused for CAPACITY, and the three wrong answers enumerated above are
+ * wrong about that refusal for word-for-word the same reasons. So it is
+ * `deferred` too, with `deferredBy` saying which of the two it was, and
+ * everything from point 2 down applies to it unchanged.
+ *
+ * THE SHAPE OF THE ORIGINAL DEFECT, because it is worth stating once where the
+ * loop is rather than only in capacity.ts: this pass restores serially, awaited,
+ * and staggered by `RESTORE_STAGGER_MS`, and every one of those restores IS
+ * gated. That is not enough. The gate's CPU term divides an observation the
+ * daemon refreshes every 30 seconds, and at a 3-second stagger roughly ten
+ * restores happen between two samples — each measured against a reading taken
+ * before any of them existed. True alone, false in composition. A stagger
+ * spaces starts; it does not make the instrument notice them, and the fix is in
+ * `starts-in-flight.ts` rather than in a longer stagger here.
  */
 export async function reconcileAgents(opts: {
   registry: AgentRegistry;
@@ -266,18 +302,49 @@ export async function reconcileAgents(opts: {
       await router.handleActivate(
         {
           path: agentPath,
-          resume: cause,
-          // These agents were being carried when the power went out, so the
-          // machine has already demonstrated it can hold them. Refusing them at
-          // boot on a load average that is high *because the machine is
-          // booting* would recreate exactly the silent loss the registry
-          // exists to remove. The override is still recorded and broadcast, so
-          // over-staffing stays deliberate and visible.
+          resume: cause
+          // NO `override` HERE, AND THAT IS THE CHANGE (KAN-263). It used to be
+          // `override: true`, on this reasoning:
           //
-          // It does NOT override the occupancy guard, and must not: `override`
-          // is a decision about the machine's capacity, not a licence to put a
-          // second agent into a directory somebody else's is working in.
-          override: true
+          //   "These agents were being carried when the power went out, so the
+          //    machine has already demonstrated it can hold them. Refusing them
+          //    at boot on a load average that is high *because the machine is
+          //    booting* would recreate exactly the silent loss the registry
+          //    exists to remove."
+          //
+          // Both halves of that have lapsed, and neither lapsed quietly.
+          //
+          // THE INSTRUMENT IT FEARED IS NO LONGER THE INSTRUMENT THAT GATES.
+          // When it was written the CPU-side bound WAS `os.loadavg()[0]`, which
+          // is inflated at boot by every service starting at once and by
+          // uninterruptible sleep besides. Since KAN-208 the load average does
+          // not bind wherever CPU was observed, and daemon.ts opens a
+          // deliberately short first window (CPU_FIRST_WINDOW_MS = 3s) exactly
+          // so that boot-time activations are decided by a measurement rather
+          // than by the fallback. This pass additionally waits up to 60s for
+          // herdr before its first restore, so by the time anything is started
+          // the sampler has published. The residual case is a machine with no
+          // readable /proc/stat, where the load average still stands in — and
+          // there the argument above is still true, which is why it is quoted
+          // rather than deleted.
+          //
+          // AND THE PREMISE IS ABOUT A MACHINE THAT IS GONE. "It has already
+          // demonstrated it can hold them" is a claim about the machine before
+          // the event that made this pass necessary. A hard power-off is the
+          // machine demonstrating the opposite, and a fleet that was over
+          // capacity is a plausible reason for the reboot rather than an
+          // exception to it.
+          //
+          // WHAT THE OVERRIDE ACTUALLY BOUGHT was not a relaxed gate: with it
+          // set, `capacityGate` returns `refusal: null` unconditionally
+          // (router.ts, the `if (!override)` branch), so the number of agents a
+          // restore pass could admit was bounded by NOTHING. That is the shape
+          // of the incident this ticket was filed after.
+          //
+          // The occupancy guard is untouched by any of this and always was:
+          // `override` is a decision about the machine's capacity, never a
+          // licence to put a second agent into a directory somebody else's is
+          // working in.
         },
         (msg: any) => {
           response = msg;
@@ -291,15 +358,51 @@ export async function reconcileAgents(opts: {
 
     if (!response?.success) {
       const error = response?.error ?? 'activation returned no response';
-      // The one refusal that is about US rather than about this agent. See the
-      // header: it is deferred, not failed, and nothing is recorded.
+      // The refusals that are about US rather than about this agent. See the
+      // header: they are deferred, not failed, and nothing is recorded.
       if (response?.refused === 'unverifiable') {
         log(
           `[reconcile] Deferring ${agentPath}: herdr did not answer the occupancy check, so ` +
           `nothing was started. Its record still says it should be running.`
         );
-        return { path: agentPath, paneName, result: 'deferred', error };
+        return { path: agentPath, paneName, result: 'deferred', deferredBy: 'herdr', error };
       }
+
+      // THE MACHINE, NOT THE AGENT (KAN-263). Since the override came off this
+      // pass, a restore can be refused for capacity — and it belongs on the
+      // same branch as the herdr refusal, for the same three reasons the header
+      // gives. Calling it `failed` would put the word "failed" beside an agent
+      // that is perfectly restorable and will restore itself the moment the
+      // machine has room; recording anything would take it out of `expected()`
+      // and turn a busy minute into a permanent disappearance.
+      //
+      // WHAT MAKES THIS SAFE TO DEFER RATHER THAN A SILENT SHORTFALL, and it is
+      // the whole reason the override could be removed at all: nothing is
+      // written, so the agent stays `expected()`; the deferred pass retries it
+      // once; and anything still unrestored afterwards is reported by the
+      // missing-agent sweep every 30s and in every `list_agents` poll. Two
+      // independent channels keep saying so until somebody acts. The override's
+      // fear was silent loss, and the answer to loss is retry-and-say-so, not a
+      // gate that cannot refuse.
+      //
+      // THE GATE'S OWN WORDS GO IN THE LOG, VERBATIM, rather than a summary of
+      // them or a re-assembly from the pieces. `error` is what `capacityRefusal`
+      // produced: the binding constraint as a HEADLINE (`cpu too busy`, `not
+      // enough memory`, `machine stalled on io`) followed by the whole
+      // derivation. A reader looking at a boot that came back three agents short
+      // needs the headline to know what to do and the arithmetic to check that
+      // it is true, and quoting the gate is the only way those two cannot drift
+      // from what the gate actually decided.
+      if (response?.refusedBy === 'capacity') {
+        log(
+          `[reconcile] Deferring ${agentPath}: this machine has no room for it right now. ` +
+          `Nothing was started and nothing was recorded, so it is still expected and will be ` +
+          `retried; if it is still refused it is reported as missing every 30s rather than ` +
+          `forgotten.\n${error}`
+        );
+        return { path: agentPath, paneName, result: 'deferred', deferredBy: 'capacity', error };
+      }
+
       log(`[reconcile] Could not restore ${agentPath}: ${error}`);
       return { path: agentPath, paneName, result: 'failed', error };
     }
@@ -390,11 +493,19 @@ export async function reconcileAgents(opts: {
   // whose refusal was about herdr rather than about them.
   const deferred = outcomes.filter((o) => o.result === 'deferred');
   if (deferred.length) {
+    // Counted by reason, because "3 deferred" reads as one condition and is
+    // two: a herdr blip clears on its own and a full machine may not.
+    const byHerdr = deferred.filter((o) => o.deferredBy !== 'capacity').length;
+    const byCapacity = deferred.filter((o) => o.deferredBy === 'capacity').length;
+    const reasons = [
+      byHerdr ? `${byHerdr} because herdr could not confirm their directories were free` : '',
+      byCapacity ? `${byCapacity} because this machine had no room for them` : ''
+    ].filter(Boolean).join(', and ');
     log(
-      `[reconcile] ${deferred.length} agent(s) were deferred because herdr could not confirm ` +
-      `their directories were free. Waiting up to ${DEFERRED_RETRY_WAIT_MS / 1000}s for it to ` +
-      `answer, then retrying them once. Nothing has been recorded for them, so they are still ` +
-      `expected either way.`
+      `[reconcile] ${deferred.length} agent(s) were deferred — ${reasons}. Waiting up to ` +
+      `${DEFERRED_RETRY_WAIT_MS / 1000}s for herdr to answer, then retrying them once — a ` +
+      `restore needs herdr whichever refused it. Nothing has been recorded for them, so they ` +
+      `are still expected either way.`
     );
     if (await waitForHerdr(herdrBridge, DEFERRED_RETRY_WAIT_MS)) {
       for (const entry of deferred) {
@@ -416,6 +527,30 @@ export async function reconcileAgents(opts: {
         `so this is visible rather than silent, and re-activating them is one call.`
       );
     }
+  }
+
+  // THE SHORTFALL, SAID OUT LOUD (KAN-263). Before the override came off, this
+  // pass restored everything it was asked to and had nothing to report. It can
+  // now come back short on purpose, and a boot that quietly returns three of ten
+  // agents is indistinguishable — from the log, which is all anybody reads at
+  // boot — from a machine that had room for ten and only ever had three. So the
+  // count is named, with the reason beside it, at the one moment a reader is
+  // looking. Silence here would be the KAN-21 shape this whole file exists to
+  // remove, reintroduced by its own fix.
+  const stillDeferred = outcomes.filter((o) => o.result === 'deferred');
+  if (stillDeferred.length) {
+    const heldForCapacity = stillDeferred.filter((o) => o.deferredBy === 'capacity');
+    log(
+      `[reconcile] ${outcomes.filter((o) => o.result === 'restored').length} restored, ` +
+      `${outcomes.filter((o) => o.result === 'reattached').length} re-attached, ` +
+      `${stillDeferred.length} still deferred of ${expected.length} expected` +
+      (heldForCapacity.length
+        ? ` — ${heldForCapacity.length} of them held back because this machine had no room: ` +
+          `${heldForCapacity.map((o) => o.path).join(', ')}. They are still expected, nothing ` +
+          `was recorded against them, and the missing-agent sweep reports them every 30s. ` +
+          `Stand an agent down or wait for the machine to quieten, then re-activate.`
+        : '.')
+    );
   }
 
   return { expected: expected.length, outcomes };

@@ -26,7 +26,7 @@ import { ensureDataDir, onJsonLines, socketPathFor, writeJsonLine } from './ipc.
 import { describeContract, describeEvent, events } from './events.js';
 import { resolveUserPath, which } from './env.js';
 import { AgentRegistry, describeUnreadableLog, registryPathFor, scanLogVersions } from './agent-registry.js';
-import { reconcileAgents } from './reconcile.js';
+import { RestoreOutcome, reconcileAgents } from './reconcile.js';
 import { snapshotBuild } from './provenance.js';
 
 // The single long-lived CrabCast daemon. Owns all sessions and the workspace
@@ -728,6 +728,23 @@ function onListen() {
 
   log(`Agent registry: ${registryPathFor(config.dataDir)}`);
 
+  // Why a deferral happened, in the boot summary's own parenthesis (KAN-263).
+  //
+  // Built from what the outcomes actually say rather than from a sentence about
+  // what deferrals used to mean, which is the drift this replaced: a mixed pass
+  // names both reasons with their counts, so a reader is never told about herdr
+  // when it was the machine, or the other way round.
+  const describeDeferrals = (deferred: RestoreOutcome[]): string => {
+    if (!deferred.length) return '';
+    const capacity = deferred.filter((o) => o.deferredBy === 'capacity').length;
+    const herdr = deferred.length - capacity;
+    const parts = [
+      herdr ? `${herdr} because herdr could not confirm their directories were free` : '',
+      capacity ? `${capacity} because this machine had no room for them` : ''
+    ].filter(Boolean);
+    return ` (${parts.join('; ')})`;
+  };
+
   // Restoration runs after the socket is listening, not before: an activation
   // takes minutes for a fleet, and a daemon that answered nothing until it
   // finished would look exactly like a daemon that never came up.
@@ -766,7 +783,16 @@ function onListen() {
         // refused on its own merits and nothing about it was recorded, so it
         // is still expected and still restorable. Folding it into "failed"
         // would read as a verdict this pass never reached.
-        `${deferred.length} deferred (herdr could not confirm their directories were free).` +
+        //
+        // AND SPLIT BY REASON (KAN-263). This clause used to read "(herdr could
+        // not confirm their directories were free)" unconditionally, which was
+        // the only reason a deferral existed when it was written. Since boot
+        // restoration stopped overriding the capacity gate there is a second,
+        // and the two have different remedies — a herdr blip clears on its own,
+        // a full machine wants an agent stood down or time. A summary that
+        // names the wrong one sends the reader to look at herdr while the
+        // machine is what refused.
+        `${deferred.length} deferred${describeDeferrals(deferred)}.` +
         (deferred.length
           ? ` Still expected and unrestored: ${deferred.map((o) => o.path).join(', ')} — ` +
             `reported by the missing-agent sweep until they come back.`
