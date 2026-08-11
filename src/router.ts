@@ -6122,6 +6122,121 @@ export class MessageRouter {
   }
 
   /**
+   * Which condition a PTY refusal reports, as a value rather than as prose.
+   *
+   * Both refusals answer `success: false` and both carry an `error` written for
+   * a human, so without this field the only way to tell them apart is to match
+   * on the message text — which makes every word of those sentences a
+   * load-bearing API surface, and breaks the caller the first time one is
+   * reworded. The two conditions have different remedies and a caller acts on
+   * that difference:
+   *
+   * - `unknown_session` — the session id is not one this daemon holds. Re-resolve
+   *   the agent and use the id that comes back; retrying this one cannot work.
+   * - `invalid_payload` — the session is fine and the request is not. Fix the
+   *   request and retry it against the same session.
+   *
+   * Additive: every refusal that carried an `error` before carries the same
+   * `error` now, and this alongside it (KAN-280).
+   */
+  private readonly PTY_UNKNOWN_SESSION = 'unknown_session';
+  private readonly PTY_INVALID_PAYLOAD = 'invalid_payload';
+
+  /**
+   * How a malformed field is described back to its sender.
+   *
+   * NOTHING FROM A `pty_input` PAYLOAD IS QUOTED BACK, and that is a rule about
+   * secrets rather than about brevity: `data` is keystrokes — it carries
+   * whatever the caller's user typed, which includes passwords — and a refusal
+   * is written to a log and pasted into bug reports. So a caller is told the
+   * TYPE it sent and never the value. `cols` and `rows` are terminal
+   * dimensions, carry nothing private, and are echoed in full because knowing
+   * that it sent `"80"` rather than `80` is the whole of what the caller needs.
+   */
+  private describeType(value: unknown): string {
+    if (value === undefined) return 'no such field';
+    if (value === null) return 'null';
+    if (Array.isArray(value)) return 'an array';
+    return `a value of type ${typeof value}`;
+  }
+
+  /**
+   * The refusal a `pty_input` gets when it carries no keystrokes to write, or
+   * `null` when its payload is one this daemon can act on.
+   *
+   * WHY THIS EXISTS AT ALL (KAN-280). `data.data` used to be handed to
+   * `writePty` unexamined, so a request without it reached node-pty's `write`
+   * and threw — and the caller was answered with the dependency's own sentence,
+   * *"The first argument must be of type string or an instance of Buffer …
+   * Received undefined"*, carrying no `action` field because it came from the
+   * daemon's catch-all rather than from this handler. Two things were wrong
+   * with that and only one of them was cosmetic: a Node type error reads like
+   * an internal fault, so the caller's correct response — fix my payload — is
+   * the one the message does not suggest. It was reported by the first real
+   * consumer to build against this socket, and it is the failure a new
+   * integrator meets first, because sending a partial payload is what you do
+   * while still learning a shape.
+   *
+   * A STRING, BECAUSE THAT IS WHAT THE WIRE CAN CARRY. `writePty` accepts what
+   * node-pty accepts, which includes a Buffer — but this is the NDJSON
+   * boundary, and JSON has no Buffer. Anything that arrives here is a string, a
+   * number, a boolean, null, an array or an object, and only the first is
+   * keystrokes.
+   *
+   * The empty string is allowed through deliberately. Writing nothing to a PTY
+   * is a no-op rather than an error, and refusing it would be this handler
+   * inventing a constraint the terminal does not have.
+   */
+  private ptyInputRefusal(data: any): string | null {
+    if (typeof data.data === 'string') return null;
+    return (
+      `pty_input requires a \`data\` field carrying the keystrokes to write, as a string; ` +
+      `this request carried ${this.describeType(data.data)}. The session named is valid — ` +
+      'nothing was written to it, and nothing about it needs re-resolving. Send the same ' +
+      'request again with `data` set to the text to type.'
+    );
+  }
+
+  /**
+   * The refusal a `pty_resize` gets when it names dimensions that are not
+   * dimensions, or `null` when both are usable.
+   *
+   * SIBLING OF THE ABOVE, AND IT FAILED IN THE OPPOSITE DIRECTION (KAN-280).
+   * `resizePty` guards its call with `cols > 0 && rows > 0`, and that comparison
+   * is false for `undefined` and false for `"wide"` — so a resize carrying
+   * neither field skipped the resize, returned `true`, and was answered
+   * `success: true`. Nothing threw and nothing leaked; the caller was simply
+   * told its window had been resized when no resize had been attempted. That is
+   * the worse of the two failures — a legible error at least tells you to look
+   * — and it is why this handler validates rather than only the one that was
+   * reported.
+   *
+   * INTEGERS, NOT MERELY POSITIVE NUMBERS. A terminal is a whole number of
+   * cells. `80.5` would have passed the old guard and been rounded by somebody
+   * further down; a caller computing a fractional column count has a bug this
+   * is the cheapest place to tell it about. JSON parses `80.0` to `80`, so the
+   * only values this newly refuses are ones no caller means to send.
+   */
+  private ptyResizeRefusal(data: any): string | null {
+    const bad = (['cols', 'rows'] as const).filter(
+      field => !Number.isInteger(data[field]) || data[field] <= 0
+    );
+    if (bad.length === 0) return null;
+    const named = bad
+      .map(field =>
+        data[field] === undefined
+          ? `no \`${field}\` field`
+          : `\`${field}\` = ${typeof data[field] === 'number' ? data[field] : this.describeType(data[field])}`
+      )
+      .join(' and ');
+    return (
+      `pty_resize requires \`cols\` and \`rows\` to be positive whole numbers of character ` +
+      `cells; this request carried ${named}. The session named is valid and was NOT resized. ` +
+      'Send the same request again with both dimensions set.'
+    );
+  }
+
+  /**
    * The refusal a PTY request gets when it names a session this daemon does not
    * hold.
    *
@@ -6153,6 +6268,7 @@ export class MessageRouter {
         action: 'pty_init_response',
         success: false,
         sessionId,
+        refusal: this.PTY_UNKNOWN_SESSION,
         error: this.unknownPtySession('pty_init', sessionId)
       });
       return;
@@ -6189,11 +6305,47 @@ export class MessageRouter {
     // The most dangerous of the three to answer approximately: keystrokes sent
     // to a session picked on the client's behalf land in some other agent's
     // terminal, and get executed there.
-    if (!this.deps.herdrBridge.writePty(sessionId ?? undefined, data.data)) {
+    //
+    // THE SESSION IS CHECKED FIRST, AND THAT ORDER IS DELIBERATE. `writePty`
+    // returns false on an unknown session before it touches `data`, so a
+    // request that is wrong in both ways has always been answered with the
+    // session refusal. Validating the payload first would have quietly swapped
+    // which of the two a caller is told about; this keeps the precedence the
+    // session check has always had, and adds the payload check underneath it
+    // rather than in front of it (KAN-280).
+    if (sessionId === null || this.deps.herdrBridge.getSession(sessionId) === undefined) {
       ack({
         action: 'pty_input_response',
         success: false,
         sessionId,
+        refusal: this.PTY_UNKNOWN_SESSION,
+        error: this.unknownPtySession('pty_input', sessionId)
+      });
+      return;
+    }
+
+    const payloadRefusal = this.ptyInputRefusal(data);
+    if (payloadRefusal !== null) {
+      ack({
+        action: 'pty_input_response',
+        success: false,
+        sessionId,
+        refusal: this.PTY_INVALID_PAYLOAD,
+        error: payloadRefusal
+      });
+      return;
+    }
+
+    // Still checked, and it is not redundant with the lookup above: the session
+    // can end between the two, and a write to one that has is a "no such
+    // session" as truly as a fabricated id is. Answering it the same way is
+    // what keeps a race from being reported as a payload problem.
+    if (!this.deps.herdrBridge.writePty(sessionId, data.data)) {
+      ack({
+        action: 'pty_input_response',
+        success: false,
+        sessionId,
+        refusal: this.PTY_UNKNOWN_SESSION,
         error: this.unknownPtySession('pty_input', sessionId)
       });
       return;
@@ -6203,11 +6355,36 @@ export class MessageRouter {
 
   private handlePtyResize(data: any, ack: Respond) {
     const sessionId = this.ptySessionId(data);
-    if (!this.deps.herdrBridge.resizePty(sessionId ?? undefined, data.cols, data.rows)) {
+    // Session first, for the reason given in `handlePtyInput` above.
+    if (sessionId === null || this.deps.herdrBridge.getSession(sessionId) === undefined) {
       ack({
         action: 'pty_resize_response',
         success: false,
         sessionId,
+        refusal: this.PTY_UNKNOWN_SESSION,
+        error: this.unknownPtySession('pty_resize', sessionId)
+      });
+      return;
+    }
+
+    const payloadRefusal = this.ptyResizeRefusal(data);
+    if (payloadRefusal !== null) {
+      ack({
+        action: 'pty_resize_response',
+        success: false,
+        sessionId,
+        refusal: this.PTY_INVALID_PAYLOAD,
+        error: payloadRefusal
+      });
+      return;
+    }
+
+    if (!this.deps.herdrBridge.resizePty(sessionId, data.cols, data.rows)) {
+      ack({
+        action: 'pty_resize_response',
+        success: false,
+        sessionId,
+        refusal: this.PTY_UNKNOWN_SESSION,
         error: this.unknownPtySession('pty_resize', sessionId)
       });
       return;

@@ -1095,6 +1095,32 @@ const PROOF_DEFENCES = [
       'which is the reconnect shape. A refusal that had widened to everything fails the positive.'
   },
   {
+    script: 'verify-pty-payload-refusal',
+    defence: 'guard',
+    central:
+      'a PTY request whose PAYLOAD the daemon cannot act on is refused in the daemon\'s own words, ' +
+      'and a caller tells that refusal from the unknown-session one by value rather than by ' +
+      'reading either sentence.',
+    anchor: 'and its keystrokes reach the real terminal — the refusal did not widen to everything',
+    note:
+      'NEGATIVE/POSITIVE PAIR plus a VALUE assertion, on a predicate whose vacuous version is ' +
+      'named in the header. Five malformed pty_input payloads and three malformed resizes must be ' +
+      'refused, while a well-formed pty_input must be accepted AND its keystrokes read back off ' +
+      'the real pane — acceptance alone would not do, since `success: true` for something that ' +
+      'never happened is exactly the defect this proof catches on the resize path. §5 requires the ' +
+      'two refusal CODES to differ, so a daemon refusing everything with one code passes every ' +
+      '"was it refused?" check and fails that one. Run against a build of the merge base it scores ' +
+      '8/22, and the 8 are precisely the well-formed cases. ' +
+      '§5b IS A WATCHED MUTATION rather than a described property, and it was added in review ' +
+      'because the gap it closes was real: the handlers carried a comment saying the session is ' +
+      'checked before the payload and naming the refactor that would swap them, and nothing went ' +
+      'red when PR #72\'s reviewer performed exactly that refactor — the proof stayed green at ' +
+      '19/19. Both swaps have since been applied and watched failing, one per handler: moving the ' +
+      'payload check in front of the session check makes a doubly-wrong request answer ' +
+      'invalid_payload, and §5b goes red naming which handler drifted. It is the difference ' +
+      'between a comment warning about a change and a check that notices one.'
+  },
+  {
     script: 'verify-refuses-occupied-directory',
     defence: 'guard',
     central:
