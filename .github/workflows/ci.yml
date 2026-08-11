@@ -707,6 +707,28 @@ jobs:
       #                                      unconditionally, which is how
       #                                      KAN-197 exists.
       #
+      # And one that is about a single field on those same two responses, added
+      # because a consumer asked for it and specified it (KAN-281):
+      #
+      #   verify-channel-enabled             `channelEnabled` on
+      #                                      `activate_response` AND
+      #                                      `agent_status`: whether the spawn
+      #                                      an agent is running from was
+      #                                      channel-enabled. The check that
+      #                                      earns its place is §6a, which
+      #                                      mutates the LAUNCHER'S DECISION —
+      #                                      one statement — and requires BOTH
+      #                                      surfaces to move, having first
+      #                                      asserted the mutant still writes
+      #                                      the same `.mcp.json`. Everything
+      #                                      else in the file is green against
+      #                                      a hardcoded `true`, which is the
+      #                                      vacuity case the ticket named. §4
+      #                                      restarts a real daemon and asks
+      #                                      again, because the field is
+      #                                      `durable` and that is a claim
+      #                                      rather than a label.
+      #
       # And one whose subject is the OTHER user-facing document — the read path,
       # published for the first time by KAN-277:
       #
@@ -867,6 +889,7 @@ jobs:
             verify-daemon-started-at
             verify-daemon-status-over-mcp
             verify-read-contract
+            verify-channel-enabled
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

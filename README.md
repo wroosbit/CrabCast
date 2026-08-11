@@ -180,6 +180,9 @@ activated /tmp/ac1-demo/notes
   verified:      true
   conversation:  started a NEW one — CrabCast has not run an agent in this directory before, so nothing on disk here was continued
 
+other fields in the daemon's response:
+  channelEnabled: false
+
 $ crabcast list
 agents (1)
   /tmp/ac1-demo/notes  [unknown]  runtime (none reported)
@@ -267,6 +270,9 @@ where these fields came from — read at 2026-08-05T13:01:42.798Z
   remembered (this daemon's memory, not durable):   statusSince
 
 config echo: every knob echoed on this response is declared (priority, refusable, chargeable, preemptable, launcher, prompt, mcpServers, label)
+
+other fields in the daemon's response:
+  channelEnabled: false
 
 $ crabcast send /tmp/ac1-demo/notes cat /tmp/ac1-demo/.crabcast/agents/31e31d1b7540dabf/prompt.md
 delivered to /tmp/ac1-demo/notes — the message was seen in its transcript as submitted output
@@ -524,6 +530,9 @@ cap: 0 charged agents (set by CRABCAST_MAX_AGENTS, derivation skipped)
 running: 0 charged agent(s)
 headroom: 0 more — count allows 0 (0 cap − 0 running), cpu allows 2 ((4 cores − 1 reserved − 1.33 in use) ÷ 0.75), load would allow 2 ((4 cores − 1 reserved − 1.32 load) ÷ 0.75; reported, does not bind), memory allows 10 ((9.0 GiB available − 2.3 GiB reserved) ÷ 650 MB); bound by cap
 
+other fields in the daemon's response:
+  channelEnabled: false
+
 $ crabcast activate /tmp/kan174/idem/probe-a                 # call #2, no --override
 /tmp/kan174/idem/probe-a is already running — nothing was started
   pane:          crabcast-probe-a-9eec866d8e3e12c7 (w65702dcc803d94-10)
@@ -537,6 +546,7 @@ other fields in the daemon's response:
   sessionId: crabcast-probe-a-9eec866d8e3e12c7-1785941446744
   status: active
   createdAt: 2026-08-05T14:50:46.744Z
+  channelEnabled: false
 
 $ crabcast activate /tmp/kan174/idem/probe-a                 # call #3, no --override
 /tmp/kan174/idem/probe-a is already running — nothing was started
@@ -551,6 +561,7 @@ other fields in the daemon's response:
   sessionId: crabcast-probe-a-9eec866d8e3e12c7-1785941446744
   status: active
   createdAt: 2026-08-05T14:50:46.744Z
+  channelEnabled: false
 
 $ crabcast activate /tmp/kan174/idem/probe-a --json
 {
@@ -576,6 +587,7 @@ $ crabcast activate /tmp/kan174/idem/probe-a --json
   "configuredAt": "2026-08-05T14:50:46.533Z",
   "everActivated": true,
   "activatedBy": null,
+  "channelEnabled": false,
   "id": "cli-1392266-1"
 }
 

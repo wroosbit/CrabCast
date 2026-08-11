@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import { execSync, spawnSync } from 'child_process';
 import {
   PROMPT_FILENAME,
+  CHANNEL_MCP_SERVER,
   builtinMcpServer,
   launcherDeliversRuntime,
   promptInstruction,
@@ -118,6 +119,25 @@ export interface HerdrSession {
    * captured where the `'builtin'` sentinel still exists.
    */
   mcpBuiltinNames?: string[];
+  /**
+   * WHETHER THIS SPAWN GOT THE CHANNEL (KAN-281) — the launcher's own record of
+   * what it decided, captured where it decided it.
+   *
+   * `undefined` HERE MEANS "THIS DAEMON DID NOT PERFORM THE SPAWN", and the
+   * distinction is load-bearing rather than a nullable-field formality.
+   * {@link HerdrBridge.attachSession} builds a session for an agent that was
+   * ALREADY running — one that outlived a daemon restart, or that a converging
+   * `activate` re-took the terminal of — and it resolves no MCP servers because
+   * there is no spawn to resolve them for. So this field is absent on exactly
+   * the sessions whose spawn happened somewhere this process cannot see.
+   *
+   * That is why the field on the wire is durable rather than read from here.
+   * A response sourcing it from a session would answer `false` for every
+   * re-attached agent — indistinguishable from an agent genuinely spawned
+   * without a channel, and wrong. This is the WRITE side; the registry is what
+   * the read side answers from. See `rememberActivated` in router.ts.
+   */
+  channelEnabled?: boolean;
 }
 
 /**
@@ -950,6 +970,12 @@ export class HerdrBridge {
     // everything can be.
     const requested = config.mcpServers ?? {};
     const requestedNames = Object.keys(requested);
+    // THE SPAWN'S CHANNEL DECISION, and this line is where it is made rather
+    // than where it is later noticed (KAN-281). An agent that asked for no MCP
+    // servers at all asked for no channel, so the default is the answer for it
+    // — stated here rather than left to `undefined`, which on this session means
+    // the different thing described at the field: that no spawn happened.
+    session.channelEnabled = false;
     if (requestedNames.length > 0) {
       // `Object.create(null)` — see the note in router.ts's `parseAgentConfig`.
       // A server named `__proto__` assigned into a plain literal vanishes
@@ -1021,6 +1047,13 @@ export class HerdrBridge {
       }
       session.mcpDefinitions = definitions;
       session.mcpBuiltinNames = builtinNames;
+      // READ OFF THE RESOLUTION, NOT OFF THE REQUEST. `builtinNames` holds what
+      // `builtinMcpServer` actually SUPPLIED; `requested` holds what the caller
+      // asked for. They differ precisely when a name could not be filled in —
+      // and that case refuses above, so this is the resolution's own verdict on
+      // a spawn that is going to happen. Asking `requested` instead would be the
+      // config re-read this field exists to replace.
+      session.channelEnabled = builtinNames.includes(CHANNEL_MCP_SERVER);
     }
 
     // Agent-specific provisioning, on every activation: it is idempotent, and

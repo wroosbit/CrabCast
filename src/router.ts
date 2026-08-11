@@ -67,7 +67,13 @@ import {
   preemptionOffer,
   selectVictim
 } from './priority.js';
-import { AgentIntent, AgentRecord, AgentRegistry, RecordOutcome } from './agent-registry.js';
+import {
+  AgentIntent,
+  AgentRecord,
+  AgentRegistry,
+  RecordOutcome,
+  toChannelEnabled
+} from './agent-registry.js';
 import { nudgeResumedAgent } from './nudge.js';
 import { BuildSnapshot, buildProvenanceReport } from './provenance.js';
 
@@ -2265,6 +2271,43 @@ function configEcho(intent: AgentIntent | undefined): ConfigEcho {
 }
 
 /**
+ * The spawn's channel verdict for a read response (KAN-281): `true`, `false`,
+ * or `null` when nothing was ever spawned here to have one.
+ *
+ * DELIBERATELY NOT PART OF `configEcho` ABOVE, though it is durable and sits
+ * beside `activatedBy` on the same record. That block is spread into every row
+ * of `list_agents` — eight shapes — and is bound field-for-field to
+ * `ROW_SHAPES` in the read contract. Adding a field to it would publish this
+ * boolean on eight surfaces to satisfy a request for two, which is the
+ * compatibility-surface creep this ticket was scoped against: every one of
+ * those fields is then a promise, and the ones nobody asked for are the ones
+ * nobody maintains. It is spelled out at the two response sites instead.
+ *
+ * `null` FOR NO RECORD IS THE SAME SENTENCE `configEcho` SAYS WITH `config:
+ * null` — no record, so nothing is claimed. It is not "this agent has no
+ * channel", and the document says so in as many words, because `false` is what
+ * a consumer branches on to conclude the channel is unavailable and a wrong
+ * `false` is the only genuinely damaging value this field can take.
+ */
+function channelEnabledOf(intent: AgentIntent | undefined): boolean | null {
+  // THE `??` IS A TYPE NARROWING, NOT A SECOND NORMALIZATION, and the
+  // difference is worth stating because `activatedBy` directly above makes a
+  // point of NOT having one — a defensive re-normalization there would hide the
+  // registry's own coercer having stopped working.
+  //
+  // The same argument applies here and is not violated: `toChannelEnabled` runs
+  // on both edges of the log, so a value that reached a record is already
+  // `boolean | null` and this expression cannot change it. What it handles is
+  // the `undefined` the OPTIONAL FIELD lets the compiler see — `activatedBy` is
+  // required on `AgentRecord` and this is not, because a row written before the
+  // field existed genuinely has no key. So a `null` arriving here still comes
+  // from the coercer; only an `undefined` that never reached the log is
+  // narrowed, and there is no reading of `undefined` other than "no value" for
+  // it to paper over.
+  return intent ? intent.record.channelEnabled ?? null : null;
+}
+
+/**
  * The three facts about the ANSWERING PROCESS that a caller needs before it can
  * read the rest of a response: `bootId`, the current `seq`, and when this
  * daemon started.
@@ -2995,7 +3038,19 @@ export class MessageRouter {
         target: agentPath,
         caller: existing ? null : callerIdentity(data),
         current: existing?.record.activatedBy
-      })
+      }),
+      // CARRIED FORWARD, NEVER MINTED HERE (KAN-281). `configure` freezes knobs;
+      // it does not spawn, so it has no channel verdict of its own and must not
+      // invent one. T4 made this something you may call on a RUNNING agent to
+      // move a priority — so recomputing the field from the new
+      // `config.mcpServers` would let a knob move rewrite a fact about a spawn
+      // that already happened, and it would rewrite it from a config re-read,
+      // which is the exact substitution AC1 forbids.
+      //
+      // `null` for a brand-new agent is the honest value and not a placeholder:
+      // it has never been spawned, so there is no spawn to be channel-enabled.
+      // The first `activate` is what fills it in.
+      channelEnabled: toChannelEnabled(existing?.record.channelEnabled)
     };
 
     // A RECONFIGURATION DOES NOT CHANGE WHICH LIFECYCLE EVENT IS LAST, and
@@ -3677,8 +3732,30 @@ export class MessageRouter {
    * in is no longer written down (see AgentRecord). So an activation of an
    * already-activated agent whose config has not changed genuinely changes
    * nothing, and appending would be a restatement.
+   *
+   * `spawnChannelEnabled` IS THE SPAWN'S CHANNEL DECISION, or `undefined` for
+   * "this call did not spawn anything, so I have nothing to say about it"
+   * (KAN-281). The two activate paths differ here, and that difference is the
+   * whole reason it is a parameter rather than something read inside. The path
+   * that SPAWNS has just watched the launcher decide, so it passes the verdict.
+   * The CONVERGING path found the agent already running — its session may have
+   * come from `attachSession`, which resolves nothing — so it passes nothing,
+   * and the value already on the record stands.
+   *
+   * Overwriting on the converging path is the bug this shape exists to make
+   * unavailable: a reconciler calls `activate` on running agents constantly, and
+   * each of those calls would otherwise stamp a fresh `false` over a `true` that
+   * was correctly recorded at the real spawn. The field would decay across the
+   * fleet within minutes of the first reconcile — a durable field changing
+   * without the thing it describes changing, which is worse than not publishing
+   * it at all. `verify-channel-enabled.mjs` §6b is that regression, mutated in
+   * and watched happening.
    */
-  private rememberActivated(record: AgentRecord, caller: string | null): RecordOutcome {
+  private rememberActivated(
+    record: AgentRecord,
+    caller: string | null,
+    spawnChannelEnabled?: boolean
+  ): RecordOutcome {
     const current = this.deps.agentRegistry.intents().get(record.path);
     // THE ONE PLACE AN ACTIVATION DECIDES PARENTAGE. Both activate paths — the
     // one that spawns and the converging one that finds the agent already
@@ -3690,12 +3767,26 @@ export class MessageRouter {
       caller,
       current: record.activatedBy
     });
+    // `undefined` carries the record's own value forward; a boolean replaces it.
+    // `??` rather than `||` is load-bearing: `false` is a real verdict here and
+    // `||` would discard it in favour of whatever the record already held.
+    const channelEnabled =
+      spawnChannelEnabled ?? toChannelEnabled(record.channelEnabled);
     const toWrite: AgentRecord =
-      activatedBy === record.activatedBy ? record : { ...record, activatedBy };
+      activatedBy === record.activatedBy && channelEnabled === record.channelEnabled
+        ? record
+        : { ...record, activatedBy, channelEnabled };
 
     if (
       current?.event === 'activated' &&
       JSON.stringify(current.record.config) === JSON.stringify(toWrite.config) &&
+      // PART OF "EXACTLY THIS" for the same reason `activatedBy` is (KAN-281).
+      // The first activation to record a channel decision against an agent whose
+      // row predates the field changes something real, and a short-circuit that
+      // did not compare it would swallow precisely that write — leaving the
+      // durable answer `null` forever while every response claimed to be
+      // reading it from the record.
+      current.record.channelEnabled === toWrite.channelEnabled &&
       // PART OF "EXACTLY THIS", and leaving it out would have been a quiet
       // defect: a supervisor activating an agent that is already up would be
       // told yes, write nothing, and the agent would keep the parent it had —
@@ -4076,6 +4167,15 @@ export class MessageRouter {
       // spawn path below may mint one. See `parentFor`, and
       // `verify-activated-by.mjs` §5, which activates as A, converges as B, and
       // asserts it still says A.
+      //
+      // NO CHANNEL VERDICT EITHER, AND IT IS THE SAME ARGUMENT ONE FIELD OVER
+      // (KAN-281). This branch did not spawn the agent, so it did not watch the
+      // launcher decide; the session it is holding may have come from
+      // `attachSession`, which resolves no MCP servers at all. Passing a verdict
+      // from here would be reporting a decision this call never made — and,
+      // because a reconciler runs this path constantly, it would overwrite the
+      // real spawn's `true` with a manufactured `false` on every poll. Omitted,
+      // so the record's own value carries forward.
       const durable = this.rememberActivated(intent.record, null);
 
       // THE SECOND QUESTION, ASKED SEPARATELY (KAN-136). `occupancy.ours`
@@ -4187,6 +4287,14 @@ export class MessageRouter {
         // replaces: it made a field the legend calls durable change with the
         // census and revert on restart.
         ...configEcho(this.deps.agentRegistry.intents().get(agentPath)),
+        // ON THIS BRANCH TOO (KAN-281), and it is the branch that decides
+        // whether the field is worth having. An idempotent `activate` is the
+        // read a reconciling caller makes most often, and it is what a consumer
+        // gets for an agent that was already up — so a field present only on the
+        // spawning branch would be absent exactly when it is asked for most.
+        // The value is the one the REAL spawn recorded: this branch passed no
+        // verdict to `rememberActivated`, so nothing here overwrote it.
+        channelEnabled: channelEnabledOf(this.deps.agentRegistry.intents().get(agentPath)),
         // Present only when THIS call took the terminal back — the agent was
         // running and unreachable, and now is not. Silent on the steady-state
         // no-op, where the session was already ours.
@@ -4372,7 +4480,14 @@ export class MessageRouter {
     // activation would then write a row whose version had silently reset,
     // which is exactly the compare-and-set-goes-backwards failure the field
     // exists to avoid.
-    const durable = this.rememberActivated(intent.record, callerIdentity(data));
+    // THE SPAWNING PATH, and the one call that has a channel verdict to record:
+    // `spawnSession` has just run the resolution, so `session.channelEnabled` is
+    // the launcher's own output for the spawn this response is about (KAN-281).
+    const durable = this.rememberActivated(
+      intent.record,
+      callerIdentity(data),
+      session.channelEnabled
+    );
 
     this.deps.broadcast({
       action: 'agent.activated',
@@ -4415,6 +4530,20 @@ export class MessageRouter {
       // that write failed, this correctly still reads `false` — and `durable:
       // false` below says why, which is better than a `true` nothing backs.
       ...configEcho(this.deps.agentRegistry.intents().get(agentPath)),
+      // THE CONSTRAINT THE REQUESTING CONSUMER CALLED LOAD-BEARING (KAN-281):
+      // the channel verdict at the MOMENT OF THE SPAWN, not only on a later
+      // poll — "by the time we polled we could be looking at a different spawn."
+      // This is that moment.
+      //
+      // RE-READ FROM THE RECORD, exactly like the echo above it and for the same
+      // reason, rather than echoed back from `session.channelEnabled`. The
+      // session is where the value came from; the record is what a later
+      // `agent_status` will answer from, so reading it here is what makes the
+      // two surfaces agree BY CONSTRUCTION rather than by both being handed the
+      // same variable. If the durable write failed, this reads what the disk
+      // actually holds — and `durable: false` below says why — instead of
+      // reporting a decision no later call will be able to confirm.
+      channelEnabled: channelEnabledOf(this.deps.agentRegistry.intents().get(agentPath)),
       // Not decoration: it is the difference between this response and the
       // KAN-23 (in the extraction source) false success. `true` means the
       // agent was found in herdr's census before this was sent, and success is
@@ -4958,6 +5087,12 @@ export class MessageRouter {
         configured: Boolean(intent),
         state,
         ...echo,
+        // KAN-281. From the RECORD, not from `session` — this handler is holding
+        // a live session and could read `session.channelEnabled` off it, and
+        // that is the trap. A session obtained by `attachSession` carries no
+        // verdict, so the live branch is exactly where a session-sourced answer
+        // would look most authoritative and be least reliable.
+        channelEnabled: channelEnabledOf(intent),
         provenance: stateReadProvenance(census)
       });
       return;
@@ -4992,6 +5127,11 @@ export class MessageRouter {
           configured: false,
           state: 'unconfigured' as AgentState,
           ...echo,
+          // Always `null` on this branch — it is reached only when there is no
+          // record — and stated rather than omitted for the reason the branch
+          // itself exists: a refusal that answered nothing about where it looked
+          // would be indistinguishable from a daemon that did not look.
+          channelEnabled: channelEnabledOf(intent),
           provenance: stateReadProvenance(census)
         }
       );
@@ -5014,6 +5154,13 @@ export class MessageRouter {
       configured: Boolean(intent),
       state,
       ...echo,
+      // THE BRANCH THIS FIELD'S DURABILITY WAS CHOSEN FOR (KAN-281). Every agent
+      // that outlived a daemon restart answers here, with no session of ours to
+      // ask — so a `remembered` field would be `null` for the whole surviving
+      // fleet, and a session-sourced one would be absent. Read from the log, it
+      // is the same value the spawn recorded, which is what makes `agent_status`
+      // and `activate_response` agree for the same agent across a restart.
+      channelEnabled: channelEnabledOf(intent),
       provenance: stateReadProvenance(census)
     });
   }

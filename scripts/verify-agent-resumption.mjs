@@ -130,8 +130,16 @@ const dirFor = (name) => {
 // back WITH it, and the round-trip assertion below is a deep equality. Saying
 // it here keeps that assertion honest in the strong direction — it now checks
 // that parentage round-trips too, rather than being relaxed to ignore it.
+// `activatedBy` and `channelEnabled` are spelled out rather than omitted, for
+// the same reason: the registry normalizes BOTH edges of the log, so every row
+// comes back carrying them explicitly. A fixture that left either out would
+// round-trip into something that differs from what it wrote — which is a fact
+// about this fixture, not about the registry, and the round-trip check below
+// would report it as the latter. (`channelEnabled: null` is KAN-281's: these
+// records are written straight to the registry rather than by a spawn, so no
+// activation ever decided one, and `null` is the true value for them.)
 const record = (name, over = {}, activatedBy = null) => ({
-  path: dirFor(name), config: knobs(over), activatedBy
+  path: dirFor(name), config: knobs(over), activatedBy, channelEnabled: null
 });
 
 // ---------------------------------------------------------------------------

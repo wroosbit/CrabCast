@@ -93,7 +93,7 @@ import type { StallSource } from './machine-pressure.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 2;
+export const READ_CONTRACT_VERSION = 3;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -551,6 +551,14 @@ export const AGENT_STATUS_FIELDS = {
   configuredAt: { bucket: 'durable', optional: true },
   everActivated: { bucket: 'durable', optional: true },
   activatedBy: { bucket: 'durable', optional: true },
+  /**
+   * Whether the spawn this agent is running from was channel-enabled (KAN-281).
+   * `durable` — written by the activation that made the decision, so it survives
+   * a restart unchanged and this response answers the same value after one.
+   * Absent only on `bad-address`, where no path was resolved to look anything up
+   * for.
+   */
+  channelEnabled: { bucket: 'durable', optional: true },
   provenance: { bucket: 'derived', optional: true, block: 'Provenance' },
   /** On EVERY branch, refusals included — see §2 of docs/event-contract.md. */
   configEchoContract: { bucket: 'derived', block: 'ConfigEchoContract' }
@@ -576,7 +584,7 @@ export const AGENT_STATUS_BRANCHES = {
     'action', 'success', 'sessionless', 'path', 'paneName', 'paneId', 'sessionId',
     'createdAt', 'status', 'herdrStatus', 'label', 'configured', 'state',
     'config', 'configVersion', 'configuredAt', 'everActivated', 'activatedBy',
-    'provenance', 'configEchoContract'
+    'channelEnabled', 'provenance', 'configEchoContract'
   ],
   /**
    * `success: true`, no session of ours — every agent that outlived a daemon
@@ -587,13 +595,13 @@ export const AGENT_STATUS_BRANCHES = {
     'action', 'success', 'sessionless', 'path', 'paneName', 'paneId', 'sessionId',
     'createdAt', 'status', 'workDir', 'herdrStatus', 'label', 'configured', 'state',
     'config', 'configVersion', 'configuredAt', 'everActivated', 'activatedBy',
-    'provenance', 'configEchoContract'
+    'channelEnabled', 'provenance', 'configEchoContract'
   ],
   /** `success: false` — neither a record nor a pane. `state` is `unconfigured`. */
   'no-record-no-pane': [
     'action', 'success', 'error', 'path', 'paneName', 'configured', 'state',
     'config', 'configVersion', 'configuredAt', 'everActivated', 'activatedBy',
-    'provenance', 'configEchoContract'
+    'channelEnabled', 'provenance', 'configEchoContract'
   ],
   /**
    * `success: false` — the address itself was rejected (relative, empty, not a

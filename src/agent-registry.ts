@@ -176,6 +176,41 @@ export interface AgentRecord {
    * belongs to the consumer that asked for it.
    */
   activatedBy: string | null;
+  /**
+   * WHETHER THE SPAWN THIS AGENT IS RUNNING FROM WAS CHANNEL-ENABLED (KAN-281):
+   * `true`, `false`, or `null` when this agent has never been spawned and there
+   * is therefore no spawn for the field to be about.
+   *
+   * WHY IT IS ON THE RECORD AT ALL, rather than answered from the live session
+   * or recomputed from `config`. Both alternatives were tried on paper and both
+   * lie in a case that happens every day:
+   *
+   *  - FROM THE SESSION: `attachSession` resolves no MCP servers, so every agent
+   *    that outlived a daemon restart would read `false` — the same value as an
+   *    agent genuinely spawned without a channel. A field that cannot tell "no"
+   *    from "I was not there" is worse than no field.
+   *  - FROM `config.mcpServers` AT RESPONSE TIME: that is a second
+   *    implementation of `builtinMcpServer`'s decision, sitting in a different
+   *    file from the one that made it. It is right until one of them is edited.
+   *    The requesting consumer's whole reason for wanting this published was to
+   *    stop re-reading a switch after the fact; answering them with a re-read
+   *    wearing a better name would be that defect reimplemented on our side.
+   *
+   * So it is written by the activation that made the decision and read back
+   * from the log — `durable`, in the four-bucket sense the read-path contract
+   * publishes, and it survives a restart unchanged because it never lived in
+   * memory. That is the same shape and the same argument as {@link activatedBy}
+   * one field above: a fact the daemon ISSUED at activation, not a knob the
+   * caller froze on.
+   *
+   * OPTIONAL ON THE TYPE, AND `null` IS A REAL VALUE RATHER THAN A GAP. A row
+   * written before this field existed carries nothing, and a `configured` agent
+   * that has never run has no spawn to describe; both read back as `null` via
+   * {@link toChannelEnabled}. The read path emits it as an explicit `null` for
+   * the reason the contract gives for every nullable field on that surface —
+   * over JSON an absent key reads as "not answered", and this one is answered.
+   */
+  channelEnabled?: boolean | null;
 }
 
 /**
@@ -217,6 +252,28 @@ export function toActivatedBy(value: unknown): string | null {
   const trimmed = value.trim();
   if (!trimmed || !path.isAbsolute(trimmed)) return null;
   return trimmed;
+}
+
+/**
+ * {@link AgentRecord.channelEnabled} through the same both-edges coercer
+ * {@link toActivatedBy} is, and for the same reason: a row that is not a
+ * boolean becomes NO ANSWER rather than a half-answer that later reads as one.
+ *
+ * The three-way domain is what makes this worth a function. `false` and `null`
+ * are DIFFERENT CLAIMS on this field — "spawned without a channel" versus "no
+ * spawn to be about" — so the JavaScript reflex of coercing everything through
+ * `Boolean()` would silently turn every pre-field row, and every agent that has
+ * only ever been configured, into a confident `false`. That is the one wrong
+ * answer this field must not give, because `false` is precisely what a consumer
+ * would branch on to decide the channel is unavailable.
+ *
+ * Anything that is not a boolean is therefore `null`, including a hand-edited
+ * `"true"`. Same trade as `activatedBy`: garbled input never becomes a
+ * confident wrong answer, and it is per-row rather than fleet-wide, so one bad
+ * row cannot stop a daemon booting.
+ */
+export function toChannelEnabled(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
 }
 
 /**
@@ -753,6 +810,10 @@ export class AgentRegistry {
       // record, and it is the write-side half of the coercer. See
       // {@link toActivatedBy}.
       activatedBy: toActivatedBy(record.activatedBy),
+      // Same treatment, same position, same reason (KAN-281): after the spread
+      // so it wins, so that every row on disk carries an explicit three-way
+      // answer rather than an absent key that a later reader has to guess at.
+      channelEnabled: toChannelEnabled(record.channelEnabled),
       event,
       at: at ?? new Date().toISOString(),
       ...(preemption ? { preemption } : {})
@@ -865,7 +926,16 @@ export class AgentRegistry {
       // written by versions of this file that did not have the field, and rows
       // in it will be read by versions that have moved on.
       if (isUsableEntry(parsed)) {
-        entries.push({ ...parsed, activatedBy: toActivatedBy(parsed.activatedBy) });
+        entries.push({
+          ...parsed,
+          activatedBy: toActivatedBy(parsed.activatedBy),
+          // KAN-281. Every row written before this field existed is exactly the
+          // "rows in it were written by versions of this file that did not have
+          // the field" case named above, and each one is an agent whose spawn
+          // predates the decision being recorded — so `null` is the true answer
+          // for them rather than a placeholder.
+          channelEnabled: toChannelEnabled(parsed.channelEnabled)
+        });
       }
     }
 
