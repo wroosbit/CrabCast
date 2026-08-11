@@ -73,6 +73,61 @@ function startDaemon(cfg) {
   return spawn(process.execPath, [daemonJs, cfg], { stdio: ['ignore', 'ignore', 'inherit'] });
 }
 
+/**
+ * Boot a daemon that is EXPECTED TO COME UP, collect its stderr, and stop it
+ * (KAN-302).
+ *
+ * §§1b–1d used `startDaemonSync` because the daemon they were about exited on
+ * its own. It does not any more: an unreadable registry row is a notice now
+ * rather than a refusal, so `spawnSync` would sit on a running daemon until its
+ * timeout and report `status: null` — a hang dressed as a failure. This waits
+ * for the socket instead, which is the thing those sections now assert.
+ */
+async function bootAndCapture(cfg, dir, whileUp) {
+  const child = spawn(process.execPath, [daemonJs, cfg], { stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', (d) => { stderr += d; });
+  const sock = path.join(dir, 'crabcast.sock');
+  const deadline = Date.now() + 8000;
+  let started = false;
+  while (Date.now() < deadline && !started) {
+    if (child.exitCode !== null) break;
+    started = await new Promise((resolve) => {
+      const probe = net.connect(sock);
+      probe.once('connect', () => { probe.end(); resolve(true); });
+      probe.once('error', () => resolve(false));
+    });
+    if (!started) await sleep(100);
+  }
+  // Asked while it is still up, because the socket goes with the process.
+  let probed;
+  if (started && whileUp) {
+    try { probed = await whileUp(sock); } catch (err) { probed = { error: String(err) }; }
+  }
+  child.kill();
+  await sleep(200);
+  return { started, stderr, exitCode: child.exitCode, probed };
+}
+
+/** {@link roundTrip} against a socket other than this script's own. */
+function roundTripTo(socket, request, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const sock = net.connect(socket);
+    let buf = '';
+    const timer = setTimeout(() => { sock.destroy(); reject(new Error('timed out')); }, timeoutMs);
+    sock.on('connect', () => sock.write(JSON.stringify(request) + '\n'));
+    sock.on('data', (d) => {
+      buf += d;
+      const nl = buf.indexOf('\n');
+      if (nl < 0) return;
+      clearTimeout(timer);
+      sock.end();
+      try { resolve(JSON.parse(buf.slice(0, nl))); } catch (e) { reject(e); }
+    });
+    sock.on('error', (e) => { clearTimeout(timer); reject(e); });
+  });
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function waitForSocket(timeoutMs = 5000) {
@@ -164,7 +219,7 @@ console.log('=== 1. The daemon refuses rather than repairs ===');
   );
 }
 
-console.log('\n=== 1b. A durable log this daemon cannot fully read (KAN-124 AC 5) ===');
+console.log('\n=== 1b. A durable log this daemon cannot fully read (KAN-124 AC 5, KAN-302) ===');
 {
   // The pre-migration case, end to end. Old rows carry `type`/`key`/`workDir`
   // and no `path`; `path` derives from `workDir`, but `priority`, the gate
@@ -172,13 +227,26 @@ console.log('\n=== 1b. A durable log this daemon cannot fully read (KAN-124 AC 5
   // from — so a converted row would be a *configured* agent missing three
   // required `configure` parameters, which the API could not have produced.
   //
-  // The failure being defended against is not the refusal, it is the
-  // ALTERNATIVE: if the version check had gone inside `readLog`'s filter,
-  // every one of these rows would be dropped SILENTLY (that filter is silent
-  // on purpose, for torn-tail tolerance), the daemon would come up, and
-  // reconcile would print "the agent registry records no agents that should be
-  // running" — indistinguishable from a healthy empty fleet. So this section
-  // asserts BOTH that the daemon refuses AND that it did not partially load.
+  // THIS SECTION ASSERTED A REFUSAL UNTIL KAN-302, AND NOW ASSERTS A NOTICE.
+  // What it was defending against has not changed and is worth restating,
+  // because it is the reason the replacement is not simply a relaxation: if the
+  // version check had gone inside `readLog`'s filter, these rows would be
+  // dropped SILENTLY (that filter is silent on purpose, for torn-tail
+  // tolerance), the daemon would come up, and reconcile would print "the agent
+  // registry records no agents that should be running" — indistinguishable from
+  // a healthy empty fleet.
+  //
+  // The daemon now starts, and the defence is the DISCLOSURE rather than the
+  // exit: the rows are published on `list_agents` and `daemon_status`, so the
+  // fleet is not silently short. What made the old behaviour untenable was its
+  // remedy — "delete the registry and configure the fleet again", i.e. discard
+  // every other agent record to recover from one row — and one dead row taking
+  // the whole daemon off the machine. So this section keeps every assertion
+  // that is still true (the file is named, the count is named, the rows are
+  // identified in their own vocabulary, nothing is rewritten) and swaps the
+  // exit-1 assertion for the two that replaced it. The full behaviour is
+  // `verify-registry-survives-retired-rows.mjs`; what stays here is this
+  // file's own subject, which is what the daemon does at BOOT.
   const preMigrationDir = path.join(tmp, 'old-data');
   fs.mkdirSync(preMigrationDir, { recursive: true, mode: 0o700 });
   const oldLog = path.join(preMigrationDir, 'agents.jsonl');
@@ -194,25 +262,41 @@ console.log('\n=== 1b. A durable log this daemon cannot fully read (KAN-124 AC 5
   const before = fs.readFileSync(oldLog, 'utf8');
 
   const oldConfig = writeConfig('old.config.json', (c) => { c.dataDir = preMigrationDir; });
-  const result = startDaemonSync(oldConfig);
+  const result = await bootAndCapture(oldConfig, preMigrationDir);
   console.log(result.stderr.trim());
-  check(result.status === 1, 'pre-migration log: daemon refuses to start, exit 1', `exit ${result.status}`);
+  check(
+    result.started,
+    'pre-migration log: the daemon STARTS — one dead row does not take the daemon off the ' +
+      'machine (KAN-302)',
+    `exitCode ${result.exitCode}`
+  );
   check(
     result.stderr.includes(oldLog),
-    'the refusal names the file',
+    'the notice names the file',
     oldLog
   );
   check(
     /3 of 3 record\(s\)/.test(result.stderr),
-    'the refusal names the count — how many rows, out of how many'
+    'the notice names the count — how many rows, out of how many'
   );
   check(
     result.stderr.includes('task/KAN-93') || result.stderr.includes('crabcast-task-kan-93'),
     'and identifies rows in the vocabulary those rows actually use, so a human can find them'
   );
   check(
-    result.stderr.includes('Delete') && result.stderr.includes('Hand-edit'),
-    'both supported remedies are named'
+    /line 1:/.test(result.stderr) && /line 3:/.test(result.stderr),
+    'naming each offending LINE, which is what makes a repair targeted rather than wholesale'
+  );
+  check(
+    !/\bDelete\b|\bdelete\b/.test(result.stderr),
+    'and NEVER tells the operator to delete the registry — that was the first remedy this ' +
+      'replaces, and it discarded every other record to recover from one row'
+  );
+  check(
+    /HAVE NOT BEEN RESTORED/.test(result.stderr),
+    'while saying plainly that the agents in those rows are not running — starting is not the ' +
+      'same as pretending the rows were readable, and the silence is what made half-loading ' +
+      'unacceptable in the first place'
   );
   check(
     result.stderr.includes('no `migrate-log`') || result.stderr.includes('no \\`migrate-log\\`') ||
@@ -220,12 +304,8 @@ console.log('\n=== 1b. A durable log this daemon cannot fully read (KAN-124 AC 5
     'and the absence of a migration tool is stated rather than left to be discovered'
   );
   check(
-    !fs.existsSync(path.join(preMigrationDir, 'crabcast.sock')),
-    'NO partial load: the daemon never bound a socket'
-  );
-  check(
     fs.readFileSync(oldLog, 'utf8') === before,
-    'the log is untouched — the daemon refuses to read it, and does not rewrite it either'
+    'the log is untouched — the daemon cannot read those rows, and does not rewrite them either'
   );
 }
 
@@ -254,30 +334,47 @@ console.log('\n=== 1c. A hand-edit that follows the refusal\'s own advice and dr
   ].join('\n') + '\n');
 
   const cfg = writeConfig('handedit.config.json', (c) => { c.dataDir = dir; });
-  const result = startDaemonSync(cfg);
+  const result = await bootAndCapture(cfg, dir, (sock) =>
+    roundTripTo(sock, { action: 'daemon_status', id: 77 }));
   console.log(result.stderr.trim());
 
-  check(result.status === 1, 'a version-current row the loader would drop refuses the boot too', `exit ${result.status}`);
+  check(
+    result.started,
+    'a version-current row the loader would drop is disclosed rather than fatal (KAN-302)',
+    `exitCode ${result.exitCode}`
+  );
   check(
     /1 row\(s\) are version v1 and still unreadable/.test(result.stderr),
-    'the refusal counts them separately from pre-migration rows — different problem, different fix'
+    'the notice counts them separately from pre-migration rows — different problem, different fix'
   );
   check(
     /kan124-handedited/.test(result.stderr) && /unusable/.test(result.stderr),
     'and names the offending row rather than only the count'
   );
   check(
-    /"chargeable"/.test(result.stderr) && /hand-edit/.test(result.stderr),
-    'naming the exact fields a row needs, because this is reached BY hand-editing'
+    /"config\.chargeable"/.test(result.stderr) && /hand-edit/.test(result.stderr),
+    'naming the exact field THIS row is missing — not the whole list of what a row needs, ' +
+      'because the operator already believes they supplied them all'
   );
   check(
     !/were written by a CrabCast that addressed agents by/.test(result.stderr),
     'and it does NOT describe a v1 row as a pre-migration <type>/<key> log, which would ' +
       'send the operator to the wrong remedy'
   );
+  // The half that used to be "no partial load". The good row IS loaded now —
+  // that is the point — so what has to hold is that the dropped one is not
+  // silently absent, which is the property the refusal was buying.
+  const status = result.probed;
   check(
-    !fs.existsSync(path.join(dir, 'crabcast.sock')),
-    'no partial load: the good row was not loaded on its own either'
+    status?.configuredAgents === 1,
+    'the good row was loaded on its own — the fleet is not held hostage by the bad one',
+    `configuredAgents=${status?.configuredAgents}`
+  );
+  check(
+    status?.unreadableRecordsTotal === 1 &&
+      status?.unreadableRecords?.[0]?.claimsPath === '/tmp/kan124-handedited',
+    'and the dropped one is disclosed on the wire, so the hole in the fleet is visible to a ' +
+      'caller rather than only to whoever reads daemon.log'
   );
 }
 
@@ -291,13 +388,20 @@ console.log('\n=== 1d. A log from a NEWER daemon ===');
   fs.writeFileSync(path.join(dir, 'agents.jsonl'),
     JSON.stringify({ v: 99, event: 'activated', path: '/tmp/kan124-future', config: {}, at: 'x' }) + '\n');
   const cfg = writeConfig('newer.config.json', (c) => { c.dataDir = dir; });
-  const result = startDaemonSync(cfg);
+  const before = fs.readFileSync(path.join(dir, 'agents.jsonl'), 'utf8');
+  const result = await bootAndCapture(cfg, dir);
   console.log(result.stderr.trim().split('\n').slice(0, 8).join('\n'));
-  check(result.status === 1, 'a newer-format log refuses the boot', `exit ${result.status}`);
+  check(result.started, 'a newer-format log is disclosed rather than fatal (KAN-302)',
+    `exitCode ${result.exitCode}`);
   check(
     /NEWER than this daemon writes/.test(result.stderr) && /downgrading/.test(result.stderr),
     'and says so — it names downgrading as what put you here, rather than calling it a ' +
-      'pre-migration log and sending you to the wrong remedy'
+      'pre-migration log and sending you to the wrong repair'
+  );
+  check(
+    fs.readFileSync(path.join(dir, 'agents.jsonl'), 'utf8') === before,
+    'AND LEAVES THE NEWER ROWS ALONE, which is the whole of why starting here is safe: the ' +
+      'newer daemon still finds its own log intact when it comes back'
   );
 }
 

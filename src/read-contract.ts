@@ -93,7 +93,7 @@ import type { StallSource } from './machine-pressure.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 3;
+export const READ_CONTRACT_VERSION = 4;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -272,6 +272,42 @@ export const ROW_SHAPES = {
     activatedBy: { bucket: 'durable' },
     since: { bucket: 'durable' },
     reason: { bucket: 'derived' }
+  } satisfies FieldTable,
+
+  /**
+   * A registry row this daemon could not read — `list_agents.unreadableRecords[]`
+   * and `daemon_status.unreadableRecords[]` (KAN-302).
+   *
+   * THE ONE ROW SHAPE THAT IS NOT AN AGENT, and the only one carrying no config
+   * echo. Every other shape here describes something that WAS read; this one
+   * describes a line that was not, which is why it has no `path` (a
+   * pre-migration row may name none), no `state` and nothing to switch on.
+   *
+   * THE SPLIT BETWEEN `durable` AND `derived` HERE IS EXACT RATHER THAN
+   * APPROXIMATE, and it is worth reading because three of these look durable
+   * and are not. `identity`, `raw` and `claimsPath` are the row's own bytes,
+   * read off the append-only registry and surviving a restart unchanged — the
+   * bucket's definition. The other four are this daemon's account OF that row
+   * rather than anything the row says about itself:
+   *
+   *   - `problem` and `reason` are a VERDICT, and it is this daemon's verdict.
+   *     A newer CrabCast reading the same line may classify it differently —
+   *     `from-newer` is the case that makes that concrete — so a consumer must
+   *     not cache either across a `bootId` change.
+   *   - `line` is a count of newlines, and compaction rewrites the file, so it
+   *     moves without the row changing at all.
+   *   - `rawTruncated` and `promptRedacted` describe what this response did to
+   *     the bytes, which is a fact about the response.
+   */
+  UnreadableRecord: {
+    line: { bucket: 'derived' },
+    problem: { bucket: 'derived' },
+    identity: { bucket: 'durable' },
+    reason: { bucket: 'derived' },
+    raw: { bucket: 'durable' },
+    rawTruncated: { bucket: 'derived' },
+    promptRedacted: { bucket: 'derived' },
+    claimsPath: { bucket: 'durable' }
   } satisfies FieldTable,
 
   /** A live pane that is not ours — `list_agents.foreignPanes[]`. */
@@ -477,6 +513,14 @@ export const LIST_AGENTS_FIELDS = {
   unstartedTotal: { bucket: 'derived' },
   foreignPanesTotal: { bucket: 'derived' },
 
+  /**
+   * Registry rows this daemon could not read (KAN-302). Present-and-empty on a
+   * wholly readable registry; NOT paged, and `UNREADABLE_DISCLOSURE_LIMIT` in
+   * `src/router.ts` says why a fault report is bounded rather than walkable.
+   */
+  unreadableRecords: { bucket: 'durable', rows: 'UnreadableRecord' },
+  unreadableRecordsTotal: { bucket: 'derived' },
+
   /** One entry per paged category. `nextCursor: null` is the only "you have everything". */
   pages: { bucket: 'derived', block: 'FleetPage' },
 
@@ -614,17 +658,29 @@ export const AGENT_STATUS_BRANCHES = {
 // ------------------------------------------------------- daemon_status's half
 
 /**
- * The one field this ticket adds to `daemon_status`, declared here so the
- * version's home is stated by the contract rather than only by the code.
+ * The `daemon_status` fields this contract covers, declared here so their home
+ * is stated by the contract rather than only by the code.
  *
  * The rest of that response is out of this contract's scope on purpose: it is
  * about the DAEMON rather than about an agent's state, it has its own proof
  * (`verify-daemon-provenance.mjs`, `verify-daemon-status-over-mcp.mjs`), and
  * widening this document to cover it would be the compatibility-surface creep
- * this ticket was scoped against.
+ * KAN-277 scoped against.
+ *
+ * THE SECOND AND THIRD ENTRIES ARE AN EXCEPTION TO THAT AND ARE ARGUED FOR
+ * RATHER THAN SLIPPED IN (KAN-302). `unreadableRecords` is not a fact about the
+ * daemon; it is a fact about the durable registry that qualifies
+ * `configuredAgents` and `expectedAgents` sitting beside it — both of which
+ * count only rows that parsed, and would therefore both read `0` on a registry
+ * that has rows in it. It is the same field, with the same shape, that
+ * `list_agents` carries, and a consumer that branches on one must be able to
+ * branch on the other; publishing it on one surface and not the other is how
+ * the two come to disagree.
  */
 export const DAEMON_STATUS_CONTRACT_FIELDS = {
-  contractVersion: { bucket: 'derived' }
+  contractVersion: { bucket: 'derived' },
+  unreadableRecords: { bucket: 'durable', rows: 'UnreadableRecord' },
+  unreadableRecordsTotal: { bucket: 'derived' }
 } as const satisfies FieldTable;
 
 // ------------------------------------------------------------- the value sets

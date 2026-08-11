@@ -402,6 +402,30 @@ const PROOF_DEFENCES = [
       'throughout.'
   },
   {
+    script: 'verify-registry-survives-retired-rows',
+    defence: 'mutation',
+    central:
+      'a registry row this daemon cannot read does not stop it starting; the row is disclosed on ' +
+      '`list_agents` and `daemon_status` rather than only in a log, it survives compaction ' +
+      'byte-for-byte, and no repair the daemon offers destroys the durable record.',
+    anchor: 'MUTANT-REFUSED',
+    note:
+      '§6 restores the pre-KAN-302 boot refusal in a compiled copy of the build and requires §1\'s ' +
+      'central assertion — the daemon comes up and answers — to go red against it. The mutant ' +
+      'prints its own fingerprint and the section asserts THAT before reading anything else: an ' +
+      'earlier run of this proof had the mutant die on an unresolved bare import, which produced ' +
+      '"no socket was bound" — exactly the evidence the section is looking for, from a build that ' +
+      'never reached the code under test. The precondition caught it. ' +
+      'SEAM, AND IT IS THE ONE `prompts/task.md` NAMES: every registry in this file is one the ' +
+      'script WROTE, so it tests what the daemon does with such a row and NOT that a row of this ' +
+      'shape ever reaches a registry. Nothing in CI can own that half — the specimen is eight ' +
+      'days of a real machine\'s history and CI starts from an empty directory — so it is covered ' +
+      'by observation pasted into the PR (the real file, the real daemon, before and after) ' +
+      'rather than by a sibling script. §3 carries its own precondition for a different reason: ' +
+      '"the unreadable rows survived compaction" is trivially true of a compaction that never ' +
+      'ran, so the section requires the log to have visibly collapsed first.'
+  },
+  {
     script: 'verify-read-contract',
     defence: 'mutation',
     central:
