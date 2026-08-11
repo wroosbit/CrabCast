@@ -1358,8 +1358,14 @@ mutation2: {
     // and this script REFUSED TO RUN rather than skipping the section, which is
     // the guard doing its job for the second time; the fix is to follow the
     // signature, not to loosen the match.
-    'rememberActivated(record, caller) {\n        const current',
-    'rememberActivated(record, caller) {\n        record = { path: record.path, config: record.config };\n        const current'
+    //
+    // RE-ANCHORED AGAIN FOR KAN-281, which added `spawnChannelEnabled` — the
+    // spawn's channel verdict, passed by the spawning activate path and omitted
+    // by the converging one. Third time, same fix, same reason: the anchor
+    // FOLLOWS the signature. Loosening it to match any argument list would
+    // remove exactly the property that has now caught three separate drifts.
+    'rememberActivated(record, caller, spawnChannelEnabled) {\n        const current',
+    'rememberActivated(record, caller, spawnChannelEnabled) {\n        record = { path: record.path, config: record.config };\n        const current'
   );
   // Already a counted failure. Skip the section rather than
   // asserting about a build that was never mutated.

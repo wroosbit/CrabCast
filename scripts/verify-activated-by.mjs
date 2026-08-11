@@ -1558,7 +1558,17 @@ mutation5: {
     const agent = ownedDir(logName, 'agent');
     const seeded = {
       path: agent, config: { ...KNOBS }, configVersion: 1,
-      configuredAt: new Date().toISOString(), activatedBy: first
+      configuredAt: new Date().toISOString(), activatedBy: first,
+      // KAN-281 ADDED A SECOND FIELD THE SHORT-CIRCUIT COMPARES, and this
+      // scenario's whole requirement — stated four lines up — is that the
+      // PARENT is the only thing differing between the row on disk and the row
+      // to write. `KNOBS` asks for no MCP servers, so the spawn below decides
+      // `channelEnabled: false`; a row seeded without the field reads back as
+      // `null`, which is a real difference and correctly defeats the no-op.
+      // Seeding the value the spawn will produce keeps the parent the only
+      // variable, which is what makes mutation E measure the parent comparison
+      // rather than an unrelated one.
+      channelEnabled: false
     };
     h.agentRegistry.recordConfigured(seeded);
     h.agentRegistry.recordActivated(seeded);

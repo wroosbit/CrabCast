@@ -3722,29 +3722,28 @@ export class MessageRouter {
    * in is no longer written down (see AgentRecord). So an activation of an
    * already-activated agent whose config has not changed genuinely changes
    * nothing, and appending would be a restatement.
+   *
+   * `spawnChannelEnabled` IS THE SPAWN'S CHANNEL DECISION, or `undefined` for
+   * "this call did not spawn anything, so I have nothing to say about it"
+   * (KAN-281). The two activate paths differ here, and that difference is the
+   * whole reason it is a parameter rather than something read inside. The path
+   * that SPAWNS has just watched the launcher decide, so it passes the verdict.
+   * The CONVERGING path found the agent already running — its session may have
+   * come from `attachSession`, which resolves nothing — so it passes nothing,
+   * and the value already on the record stands.
+   *
+   * Overwriting on the converging path is the bug this shape exists to make
+   * unavailable: a reconciler calls `activate` on running agents constantly, and
+   * each of those calls would otherwise stamp a fresh `false` over a `true` that
+   * was correctly recorded at the real spawn. The field would decay across the
+   * fleet within minutes of the first reconcile — a durable field changing
+   * without the thing it describes changing, which is worse than not publishing
+   * it at all. `verify-channel-enabled.mjs` §6b is that regression, mutated in
+   * and watched happening.
    */
   private rememberActivated(
     record: AgentRecord,
     caller: string | null,
-    /**
-     * THE SPAWN'S CHANNEL DECISION, or `undefined` for "this call did not spawn
-     * anything, so I have nothing to say about it" (KAN-281).
-     *
-     * The two activate paths differ here and the difference is the whole reason
-     * this is a parameter rather than something read inside. The path that
-     * SPAWNS has just watched the launcher decide, so it passes the verdict.
-     * The CONVERGING path found the agent already running — its session came
-     * from `attachSession`, which resolves nothing — so it passes nothing, and
-     * the value already on the record stands.
-     *
-     * Overwriting on the converging path is the bug this shape exists to make
-     * unavailable: a reconciler calls `activate` on running agents constantly,
-     * and each of those calls would otherwise stamp a fresh `false` over a
-     * `true` that was correctly recorded at the real spawn. The field would
-     * decay to `false` across the fleet within minutes of the first reconcile,
-     * which is worse than never having published it — it would be a durable
-     * field that changes without the thing it describes changing.
-     */
     spawnChannelEnabled?: boolean
   ): RecordOutcome {
     const current = this.deps.agentRegistry.intents().get(record.path);
