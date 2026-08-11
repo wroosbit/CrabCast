@@ -1749,6 +1749,10 @@ function renderDaemonStatus(reader: ResponseReader): string {
     // is meaningless and the fleet must be re-read from `list`.
     field('events', `bootId ${reader.take('bootId')}, ` +
       `${reader.take('eventSeq')} published since boot`),
+    // Which revision of docs/read-path-contract.md the responses of THIS
+    // process obey (KAN-277). One line rather than a block: it is one integer,
+    // and the document is where its meaning lives.
+    field('read contract', `v${reader.take('contractVersion')} (docs/read-path-contract.md)`),
     buildBlock(reader.take('build')),
     freshnessBlock(reader.take('freshness')),
     residue(reader)

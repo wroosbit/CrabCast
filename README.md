@@ -731,6 +731,8 @@ The CLI is a client, not a second brain: it parses arguments, sends one action, 
 
 `crabcast --help` is rendered from the command table exported by `src/cli.ts`, so every command it lists exists. `node scripts/verify-cli-refusal.mjs` is the live proof of the refusal, the exit codes, `--json`, and the `--override`/`--preempt` round trip.
 
+**What `--json` prints is a published shape.** `list` and `status` return the daemon's `list_agents` and `agent_status` responses unchanged, and **[`docs/read-path-contract.md`](docs/read-path-contract.md) is the contract**: every field, which of the four provenance buckets it is in, and what an absence means. `crabcast daemon-status` prints the revision of it the running daemon implements, as `read contract`.
+
 ## The daemon
 
 One long-lived daemon per machine, listening on a Unix socket (`<dataDir>/crabcast.sock`, newline-delimited JSON, id-correlated). Nothing needs to start it: the CLI spawns a detached one on first need. From a repository checkout it can also be run in the foreground:
@@ -761,6 +763,14 @@ The daemon announces fleet changes to every connected client — nine of them, `
 Read the delivery section before you build on them. Events are **at-most-once** and are a latency optimisation over an authoritative `list` poll, never a replacement for one: **a subscriber that does not independently poll `list` on a timer is not entitled to convergence.** For a subscriber that polls, a missed event costs slower convergence; for one with no timer it costs correctness. `bootId` on every event — and on `list_agents` and `daemon_status`, so a reconnecting subscriber need not wait for an event — is how you find out the daemon restarted and your sequence watermark is meaningless.
 
 `node scripts/verify-event-contract.mjs` is the live proof.
+
+### The read path
+
+The socket's two state reads — `list_agents` for the fleet and `agent_status` for one agent — are published field by field in **[`docs/read-path-contract.md`](docs/read-path-contract.md)**, with the **provenance bucket** of every field: whether it came off the durable registry, was observed from herdr just now, was computed, or is this process's own memory. That is what tells you whether an absence means *not known* or *not true*.
+
+Read it beside the event contract, not instead of it: events are the latency optimisation and `list_agents` is the authoritative read, so the delivery guarantees stay over there while the shape lives here.
+
+Three things worth knowing before you build on it. **The stability statement is a notice promise, not a freeze**: below 1.0 no field is guaranteed not to change, and what is promised is that a change to a documented field arrives with a consumer notice naming it — *you will not find out by breaking*. **The version is on the wire in exactly one place**, `daemon_status.contractVersion`; read it once and re-read it when `bootId` moves. And **the document is checked against the code**: `node scripts/verify-read-contract.mjs` reconciles it, `src/read-contract.ts` and a real daemon's responses in both directions, so a field added to a response and not to the document goes red in CI.
 
 ### Which build is running
 

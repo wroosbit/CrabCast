@@ -18,6 +18,12 @@ import {
   events,
   undeclaredFields
 } from './events.js';
+import {
+  BLOCK_SHAPES,
+  READ_CONTRACT_VERSION,
+  ROW_SHAPES,
+  VALUE_SETS
+} from './read-contract.js';
 import { AgentConfig, DaemonResponse, McpServerSpec } from './types.js';
 import { removeProvisionedArtifacts } from './provisioning.js';
 import {
@@ -491,6 +497,52 @@ const STATE_READ_PROVENANCE = {
    */
   remembered: ['statusSince']
 } as const;
+
+/**
+ * The legend that says which fields of a read response are durable, which were
+ * observed just now, which this daemon computed, and which it merely remembers.
+ *
+ * On the response rather than only in the docs, because conflating durable
+ * state with a live observation is precisely the ambiguity the config echo
+ * exists to remove — and `paneId` is a value that a consumer would otherwise
+ * quite reasonably store.
+ *
+ * NOT THE SAME PROVENANCE AS `provenance.ts`, and the two are worth telling
+ * apart because they arrived within an hour of each other. That module answers
+ * "which BUILD is this daemon running", on `daemon_status` as `build` and
+ * `freshness`. This answers "where did each FIELD of this agent's state come
+ * from", on `agent_status` and `list_agents`. Different question, different
+ * response, no shared field name on the wire.
+ *
+ * A FUNCTION RATHER THAN A METHOD SINCE KAN-277, and the move is mechanical
+ * rather than cosmetic: it reads no instance state, and a private method cannot
+ * be reached by an indexed-access type, so the binding below could not be
+ * written while it was one. Nothing about the block on the wire changed.
+ */
+function stateReadProvenance(census: HerdrCensus) {
+  return {
+    ...STATE_READ_PROVENANCE,
+    /** When the census behind every `observed` field answered. */
+    observedAt: new Date().toISOString(),
+    /**
+     * Whether herdr answered at all. `false` means every `observed` field is
+     * this daemon's last resort rather than a reading — an empty census from an
+     * unreachable herdr is silence, not evidence, and a reader must not take an
+     * absent pane as proof the agent is down.
+     */
+    censusReachable: census.reachable,
+    note:
+      'durable fields come from the append-only agent registry and survive a daemon ' +
+      'restart unchanged; observed fields were read from herdr for THIS response and ' +
+      'are true as of observedAt; derived fields are computed from the two. paneId is ' +
+      'observed, never durable — herdr pane ids are positions in a list that compacts. ' +
+      'remembered fields are this daemon\'s own accumulated observation, held in memory ' +
+      'and NOT surviving a restart: statusSince is when this process first saw the agent ' +
+      'in the status beside it, and is null when it has not watched it change (which is ' +
+      'every agent on a freshly started daemon). Null there is an answer, not a gap — ' +
+      'a consumer wanting a window longer than one daemon\'s life keeps its own.'
+  };
+}
 
 /**
  * One row of `list_agents`. Two kinds of entry share this shape, and the
@@ -1263,6 +1315,111 @@ function decodeFleetCursor(raw: string): FleetCursor | null {
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// THE READ-PATH CONTRACT, BOUND TO THE SHAPES IT DESCRIBES (KAN-277)
+//
+// `docs/read-path-contract.md` publishes `list_agents` and `agent_status` field
+// by field, and `src/read-contract.ts` is its executable half. These assertions
+// are the half that fires at BUILD time: a row interface above that grows a
+// field without a line in `ROW_SHAPES` does not compile, and neither does a
+// contract entry naming a field the interface no longer has. Both directions,
+// which is what `Exact` is for.
+//
+// THEY LIVE HERE RATHER THAN IN `read-contract.ts` for the reason
+// `CAPACITY_FIELDS`'s binding already lives here: that file must not import the
+// router — the router imports it — and a check reads best beside the thing that
+// would drift.
+//
+// WHAT THIS DOES NOT REACH, stated so the coverage is not read wider than it
+// is. The RESPONSE OBJECTS are assembled inline in `handleListAgents` and
+// `handleAgentStatus` and spread into `respond({…})`, and TypeScript has no
+// exact type for an object literal, so no assertion here can hold the top-level
+// field sets, the four `agent_status` branches, the `herdrHealth` block or the
+// `priorities` rows. Those are held by `scripts/verify-read-contract.mjs`,
+// against the keys of a REAL response off a real daemon — which is the stronger
+// evidence of the two and the only one available for them. `FleetCategories`
+// says the same thing about a category added straight into `respond`; this is
+// that residue, one surface wider.
+// ---------------------------------------------------------------------------
+
+const _listedAgentMatchesTheContract: Exact<
+  keyof ListedAgent,
+  keyof typeof ROW_SHAPES.ListedAgent
+> = true;
+const _unbackedPaneMatchesTheContract: Exact<
+  keyof UnbackedPane,
+  keyof typeof ROW_SHAPES.UnbackedPane
+> = true;
+const _missingAgentMatchesTheContract: Exact<
+  keyof MissingAgent,
+  keyof typeof ROW_SHAPES.MissingAgent
+> = true;
+const _preemptedAgentMatchesTheContract: Exact<
+  keyof PreemptedAgentDto,
+  keyof typeof ROW_SHAPES.PreemptedAgent
+> = true;
+const _standbyAgentMatchesTheContract: Exact<
+  keyof StandbyAgent,
+  keyof typeof ROW_SHAPES.StandbyAgent
+> = true;
+const _unstartedAgentMatchesTheContract: Exact<
+  keyof UnstartedAgent,
+  keyof typeof ROW_SHAPES.UnstartedAgent
+> = true;
+const _foreignPaneMatchesTheContract: Exact<
+  keyof ForeignPane,
+  keyof typeof ROW_SHAPES.ForeignPane
+> = true;
+
+const _configEchoMatchesTheContract: Exact<
+  keyof ConfigEcho,
+  keyof typeof BLOCK_SHAPES.ConfigEcho
+> = true;
+const _fleetPageMatchesTheContract: Exact<
+  keyof FleetPageDto,
+  keyof typeof BLOCK_SHAPES.FleetPage
+> = true;
+const _configEchoContractMatchesTheContract: Exact<
+  keyof ConfigEchoContract,
+  keyof typeof BLOCK_SHAPES.ConfigEchoContract
+> = true;
+const _provenanceMatchesTheContract: Exact<
+  keyof ReturnType<typeof stateReadProvenance>,
+  keyof typeof BLOCK_SHAPES.Provenance
+> = true;
+const _preemptedByMatchesTheContract: Exact<
+  keyof PreemptedAgentDto['by'],
+  keyof typeof BLOCK_SHAPES.PreemptedBy
+> = true;
+const _occupiedAgentMatchesTheContract: Exact<
+  keyof NonNullable<ForeignPane['occupiedAgent']>,
+  keyof typeof BLOCK_SHAPES.OccupiedAgent
+> = true;
+
+// The two closed vocabularies whose unions are declared in this file and in
+// `herdr.ts`. The other six are bound in `read-contract.ts`, beside the list.
+const _stateValuesMatchTheContract: Exact<AgentState, (typeof VALUE_SETS.state)[number]> = true;
+const _sessionStatusValuesMatchTheContract: Exact<
+  NonNullable<HerdrSession['status']>,
+  (typeof VALUE_SETS.sessionStatus)[number]
+> = true;
+
+void _listedAgentMatchesTheContract;
+void _unbackedPaneMatchesTheContract;
+void _missingAgentMatchesTheContract;
+void _preemptedAgentMatchesTheContract;
+void _standbyAgentMatchesTheContract;
+void _unstartedAgentMatchesTheContract;
+void _foreignPaneMatchesTheContract;
+void _configEchoMatchesTheContract;
+void _fleetPageMatchesTheContract;
+void _configEchoContractMatchesTheContract;
+void _provenanceMatchesTheContract;
+void _preemptedByMatchesTheContract;
+void _occupiedAgentMatchesTheContract;
+void _stateValuesMatchTheContract;
+void _sessionStatusValuesMatchTheContract;
 
 /**
  * Newest first, then the row's key, so the order is TOTAL rather than merely
@@ -2374,6 +2531,24 @@ export class MessageRouter {
           // question is "did the daemon restart" should not have to survey the
           // whole fleet to find out.
           ...eventWatermark(daemonStartedAt),
+          // WHICH READ-PATH CONTRACT THIS PROCESS IMPLEMENTS (KAN-277), and
+          // this response is its ONE home on the wire.
+          //
+          // It sits beside `build` and `freshness` because the three answer one
+          // question — "which CrabCast am I talking to" — and this is the
+          // response that exists to answer it. `build` names the commit;
+          // `contractVersion` names the revision of
+          // `docs/read-path-contract.md` the responses below obey, which is the
+          // half a consumer can act on without a checkout to diff against.
+          //
+          // NOT ON `list_agents`, and the objection to that is answered rather
+          // than ignored: a consumer polling the fleet does not have to
+          // remember to ask, because the thing that invalidates this number is
+          // already on every response it reads. The version is a property of
+          // the PROCESS, and a process change is announced by `bootId`. Read it
+          // once; re-read it when `bootId` moves. The whole argument, including
+          // why there is no hello to put it on, is on READ_CONTRACT_VERSION.
+          contractVersion: READ_CONTRACT_VERSION,
           build,
           freshness
         });
@@ -4783,7 +4958,7 @@ export class MessageRouter {
         configured: Boolean(intent),
         state,
         ...echo,
-        provenance: this.provenance(census)
+        provenance: stateReadProvenance(census)
       });
       return;
     }
@@ -4817,7 +4992,7 @@ export class MessageRouter {
           configured: false,
           state: 'unconfigured' as AgentState,
           ...echo,
-          provenance: this.provenance(census)
+          provenance: stateReadProvenance(census)
         }
       );
       return;
@@ -4839,7 +5014,7 @@ export class MessageRouter {
       configured: Boolean(intent),
       state,
       ...echo,
-      provenance: this.provenance(census)
+      provenance: stateReadProvenance(census)
     });
   }
 
@@ -4887,46 +5062,6 @@ export class MessageRouter {
     return intent.everActivated ? 'standby' : 'unstarted';
   }
 
-  /**
-   * The legend that says which fields of this response are durable, which were
-   * observed just now, and which this daemon computed.
-   *
-   * On the response rather than only in the docs, because conflating durable
-   * state with a live observation is precisely the ambiguity the config echo
-   * exists to remove — and `paneId` is a value that a consumer would otherwise
-   * quite reasonably store.
-   *
-   * NOT THE SAME PROVENANCE AS `provenance.ts`, and the two are worth telling
-   * apart because they arrived within an hour of each other. That module
-   * answers "which BUILD is this daemon running", on `daemon_status` as
-   * `build` and `freshness`. This answers "where did each FIELD of this agent's
-   * state come from", on `agent_status` and `list_agents`. Different question,
-   * different response, no shared field name on the wire.
-   */
-  private provenance(census: HerdrCensus) {
-    return {
-      ...STATE_READ_PROVENANCE,
-      /** When the census behind every `observed` field answered. */
-      observedAt: new Date().toISOString(),
-      /**
-       * Whether herdr answered at all. `false` means every `observed` field is
-       * this daemon's last resort rather than a reading — an empty census from
-       * an unreachable herdr is silence, not evidence, and a reader must not
-       * take an absent pane as proof the agent is down.
-       */
-      censusReachable: census.reachable,
-      note:
-        'durable fields come from the append-only agent registry and survive a daemon ' +
-        'restart unchanged; observed fields were read from herdr for THIS response and ' +
-        'are true as of observedAt; derived fields are computed from the two. paneId is ' +
-        'observed, never durable — herdr pane ids are positions in a list that compacts. ' +
-        'remembered fields are this daemon\'s own accumulated observation, held in memory ' +
-        'and NOT surviving a restart: statusSince is when this process first saw the agent ' +
-        'in the status beside it, and is null when it has not watched it change (which is ' +
-        'every agent on a freshly started daemon). Null there is an answer, not a gap — ' +
-        'a consumer wanting a window longer than one daemon\'s life keeps its own.'
-    };
-  }
 
   /**
    * Everything running, from herdr's view joined against the durable registry.
@@ -5130,7 +5265,7 @@ export class MessageRouter {
       ...eventWatermark(this.deps.daemonStartedAt),
       // Which fields above are durable, which were observed just now, and
       // which this daemon computed. See MessageRouter.provenance.
-      provenance: this.provenance(census),
+      provenance: stateReadProvenance(census),
       capacity: capacityDto(capacity),
       // What each running agent is worth, and therefore what a would-be
       // activation would have to outrank. "There is no room" and "there is no
