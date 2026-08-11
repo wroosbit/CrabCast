@@ -1566,7 +1566,16 @@ rule('12. ONE REGISTRY READ PER POLL, AND EVERY CATEGORY CAPPED');
   // A registry that counts what the response actually costs. Every one of
   // these entry points reads and parses the whole log once, so the tally is
   // the number of whole-file parses this one response paid for.
-  const reads = { readLog: 0, intents: 0, preempted: 0 };
+  //
+  // `read` joined the list in KAN-302 and the section's claim did not change.
+  // `handleListAgents` needs two answers from the log now — the rows it can
+  // load and the rows it cannot, published as `unreadableRecords` — and takes
+  // both from ONE parse through `read()`, which is the same one-read-per-poll
+  // property this section has always asserted. Adding it here is what keeps
+  // the instrument pointed at the cost: without it this tally reads 0, which
+  // would report a response that reads the log zero times as though that were
+  // an improvement, and the section's own `=== 1` assertion is what caught it.
+  const reads = { read: 0, readLog: 0, intents: 0, preempted: 0 };
   const counting = new Proxy(reg, {
     get(target, prop, receiver) {
       if (prop in reads) {
@@ -1586,11 +1595,9 @@ rule('12. ONE REGISTRY READ PER POLL, AND EVERY CATEGORY CAPPED');
   });
 
   const records = reg.readLog().length;
-  reads.readLog = 0;
-  reads.intents = 0;
-  reads.preempted = 0;
+  for (const k of Object.keys(reads)) reads[k] = 0;
   router12.handle({ action: 'list_agents' });
-  const wholeLogReads = reads.readLog + reads.intents + reads.preempted;
+  const wholeLogReads = Object.values(reads).reduce((a, b) => a + b, 0);
 
   console.log(`  seeded: ${N} missing, ${N} preempted, ${N} standby (${records} records)`);
   console.log(`  whole-log reads for one list_agents response: ${wholeLogReads} ${JSON.stringify(reads)}`);
