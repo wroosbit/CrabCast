@@ -234,6 +234,20 @@ const EXCLUSIONS = [
     evidence: 'scripts/verify-pty-init-rejects-unknown-session.mjs:7 isolates a real daemon by HERDR_SOCKET_PATH'
   },
   {
+    script: 'verify-pty-payload-refusal',
+    reason:
+      'Private herdr server plus a real PTY, and unlike its sibling it cannot degrade to a ' +
+      'herdr-less mode. The payload check sits BEHIND the session check — a request wrong in both ' +
+      'ways is still answered with the session refusal, as it always was — so the refusal this ' +
+      'proof is about is unreachable until the daemon holds a session it really issued. Without ' +
+      'herdr there is no session, nothing to refuse, and a "skipped" run would be a green one that ' +
+      'checked the subject not at all; it exits non-zero instead. Its §6 also reads keystrokes ' +
+      'back off a real pane, which is the check that separates "malformed payloads are refused" ' +
+      'from "everything is refused", and a pane is the only thing that can answer it.',
+    evidence:
+      'scripts/verify-pty-payload-refusal.mjs:163 the payload refusal is unreachable without a real session, so §1 exits non-zero rather than skipping when no herdr is on PATH'
+  },
+  {
     script: 'verify-herdr-release',
     reason:
       'Needs a herdr release BINARY that the caller downloaded, named on the command line, plus a ' +

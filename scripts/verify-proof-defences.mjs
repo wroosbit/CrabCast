@@ -1095,6 +1095,24 @@ const PROOF_DEFENCES = [
       'which is the reconnect shape. A refusal that had widened to everything fails the positive.'
   },
   {
+    script: 'verify-pty-payload-refusal',
+    defence: 'guard',
+    central:
+      'a PTY request whose PAYLOAD the daemon cannot act on is refused in the daemon\'s own words, ' +
+      'and a caller tells that refusal from the unknown-session one by value rather than by ' +
+      'reading either sentence.',
+    anchor: 'and its keystrokes reach the real terminal — the refusal did not widen to everything',
+    note:
+      'NEGATIVE/POSITIVE PAIR plus a VALUE assertion, on a predicate whose vacuous version is ' +
+      'named in the header. Five malformed pty_input payloads and three malformed resizes must be ' +
+      'refused, while a well-formed pty_input must be accepted AND its keystrokes read back off ' +
+      'the real pane — acceptance alone would not do, since `success: true` for something that ' +
+      'never happened is exactly the defect this proof catches on the resize path. §5 requires the ' +
+      'two refusal CODES to differ, so a daemon refusing everything with one code passes every ' +
+      '"was it refused?" check and fails that one. Run against a build of the merge base it scores ' +
+      '7/18, and the 7 are precisely the well-formed cases.'
+  },
+  {
     script: 'verify-refuses-occupied-directory',
     defence: 'guard',
     central:
