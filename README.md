@@ -220,9 +220,9 @@ unstarted agents (0)
   (none)
 
 where these fields came from — read at 2026-08-05T13:01:36.686Z
-  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent
+  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, identity, raw, claimsPath
   observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir
-  derived  (computed from the two):                 paneName, state, occupies, reason
+  derived  (computed from the two):                 paneName, state, occupies, reason, line, problem, rawTruncated, promptRedacted
   remembered (this daemon's memory, not durable):   statusSince
 
 config echo: every knob echoed on this response is declared (priority, refusable, chargeable, preemptable, launcher, prompt, mcpServers, label)
@@ -264,9 +264,9 @@ $ crabcast status /tmp/ac1-demo/notes
   created:       2026-08-05T13:01:31.515Z
 
 where these fields came from — read at 2026-08-05T13:01:42.798Z
-  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent
+  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, identity, raw, claimsPath
   observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir
-  derived  (computed from the two):                 paneName, state, occupies, reason
+  derived  (computed from the two):                 paneName, state, occupies, reason, line, problem, rawTruncated, promptRedacted
   remembered (this daemon's memory, not durable):   statusSince
 
 config echo: every knob echoed on this response is declared (priority, refusable, chargeable, preemptable, launcher, prompt, mcpServers, label)

@@ -86,17 +86,31 @@ no other, and `crabcast daemon-status` prints it as `read contract`.
 | field | bucket | what it is |
 | --- | --- | --- |
 | `contractVersion` | derived | the revision of this document the answering process implements. An integer, incrementing by one |
+| `unreadableRecords` | durable | registry rows this daemon could not read — [UnreadableRecord](#unreadablerecord) rows, the same shape `list_agents` carries |
+| `unreadableRecordsTotal` | derived | how many there are, whatever this response carried |
 
 ```json
 { "action": "daemon_status_response", "success": true,
   "pid": 81234, "bootId": "…", "eventSeq": 41, "startedAt": "…",
-  "contractVersion": 1,
+  "contractVersion": 4,
+  "configuredAgents": 0, "expectedAgents": 0,
+  "unreadableRecords": [ … ], "unreadableRecordsTotal": 1,
   "build": { … }, "freshness": { … } }
 ```
 
 The rest of `daemon_status` is out of this contract's scope on purpose: it is
 about the **daemon** rather than about an agent's state, and it has its own
 proofs (`verify-daemon-provenance.mjs`, `verify-daemon-status-over-mcp.mjs`).
+
+**The two `unreadable*` fields are an exception to that, and it is argued for
+rather than assumed.** They are not facts about the daemon; they qualify
+`configuredAgents` and `expectedAgents` sitting beside them on that same
+response. Both of those count only rows that *parsed* — so on the machine
+KAN-302 was found on they read `0` and `0`, which is exactly what an empty
+registry reads, on a registry that had a row in it. A count that silently
+excludes what it could not read is the whole defect, one field to the left.
+They are the same shape `list_agents` carries, deliberately: a consumer that
+branches on one must be able to branch on the other.
 
 **How to read it: once per boot.** The version is a property of the *process*,
 and a process change is announced by **`bootId`**, which rides every
@@ -126,6 +140,7 @@ would be N chances for the copy that goes stale.
 | 1 | 2026-08-11 | initial publication (KAN-277) — `list_agents` and `agent_status` field by field, the four provenance buckets, the closed vocabularies, and the version itself | `810f3da2b106` |
 | 2 | 2026-08-11 | KAN-263 — five fields added to `capacity`: `startsCharged`, `startsConsidered`, `startsChargeCores`, `startsChargeBasis`, `startsChargeBecause`, and a new closed vocabulary [startsChargeBasis](#startschargebasis). **Additive: no documented field changed meaning, was removed, or changed type.** They carry what the CPU-side reading could not have contained — the term that makes `cpuBusyCores` and `headroomByCpu` reconcile. A consumer that ignores them reads the same numbers it read at version 1 and is not wrong, only unable to explain a refusal | `c17cf3570018` |
 | 3 | 2026-08-11 | KAN-281 — one field added to `agent_status`: [channelEnabled](#channelenabled), on three of its four branches, saying whether the spawn an agent is running from was channel-enabled. **Additive: no documented field changed meaning, was removed, or changed type.** `durable`, sourced from the activation that made the decision rather than recomputed from config at response time, so it survives a restart. The same field is on `activate_response`, which this document does not otherwise cover — the field's own section says so and names what holds that half. Note `null` there means *no spawn to be about*, never *no channel* | `264ecca9f603` |
+| 4 | 2026-08-11 | KAN-302 — one row shape added, [UnreadableRecord](#unreadablerecord), and two fields carrying it on each of `list_agents` and `daemon_status`: `unreadableRecords` and `unreadableRecordsTotal`. **Additive on the wire: no documented field changed meaning, was removed, or changed type.** What changed is BEHAVIOUR the document did not previously describe — a registry row this daemon cannot read used to stop it starting, and now it starts, skips the row and publishes it here. A consumer that ignores both fields reads exactly what it read at version 3, and is not wrong; it is unable to tell a registry that is wholly readable from one that is not, which before this version no consumer could do at all | `f8716f6b789e` |
 
 The digest is `sha256(readContractCanonical())`, first 12 hex characters, over
 `src/read-contract.ts`'s declarations. **What it buys:** changing a documented
@@ -206,6 +221,8 @@ on a timer, and that five of its categories are **paged** and must be walked to
 | `standbyTotal` | derived | as above |
 | `unstartedTotal` | derived | as above |
 | `foreignPanesTotal` | derived | as above |
+| `unreadableRecords` | durable | rows in the durable registry this daemon **could not read** — [UnreadableRecord](#unreadablerecord) rows. Present-and-empty on a wholly readable registry. **Not paged**: bounded at 25, and `unreadableRecordsTotal` is never clipped |
+| `unreadableRecordsTotal` | derived | how many there are, whatever this response carried |
 | `pages` | derived | one [FleetPage](#fleetpage) per paged category, keyed by category name |
 | `bootId` | remembered | this daemon's boot identity. A different one means your `seq` watermark is meaningless and this response is your new baseline |
 | `eventSeq` | remembered | the highest sequence number stamped so far. Ahead of your last `seq` under the same `bootId` means you missed events |
@@ -474,6 +491,49 @@ something needs both.
 | `herdrStatus` | observed | |
 
 No config echo: this row is an ordering, not a state read.
+
+<a id="unreadablerecord"></a>
+### `unreadableRecords[]` — UnreadableRecord
+
+**A line in the durable registry that this daemon could not read.** On
+`list_agents` and on `daemon_status`, and it is the one row shape here that is
+not an agent: it has no path you can act on, no state, no pane, and no config to
+echo — because it describes a record that was *not* read, which is precisely the
+claim every other category is structurally unable to make.
+
+**Why it exists** ([KAN-302](https://wroosbit.atlassian.net/browse/KAN-302)). A
+row written by an older CrabCast used to stop the daemon booting outright, and
+the first remedy it printed was *delete the registry and configure the fleet
+again* — every other agent record discarded to recover from one line. The daemon
+now **skips the row and starts**, which is only honest if something says what
+was skipped: a fleet surface built from rows that parsed cannot report a row that
+did not, and the operator who first met this had every dashboard green. This is
+that something. The rows themselves are left in the file untouched and are
+carried across compaction verbatim.
+
+<!-- contract-table: ROW_SHAPES.UnreadableRecord -->
+
+| field | bucket | what it is |
+| --- | --- | --- |
+| `line` | derived | 1-based line number in the registry file — what `sed -n '<n>p'` takes. Moves when compaction rewrites the file |
+| `problem` | derived | `pre-migration` (an older `<type>/<key>` row), `from-newer` (a newer daemon wrote it; you downgraded), or `unusable` (this version, and still malformed — almost always a hand-edit) |
+| `identity` | durable | however the row names itself: its `agentName`, else `<type>/<key>`, else its `path`. **In the row's own vocabulary**, because an old row does not know the word `path` |
+| `reason` | derived | what could not be read about *this* row, naming fields. On `unusable` it names the exact field that is wrong rather than listing what a row needs |
+| `raw` | durable | the row's own bytes, so the operator need not open the file. Clipped at 2048 characters, and see `promptRedacted` |
+| `rawTruncated` | derived | whether `raw` was clipped |
+| `promptRedacted` | derived | whether a `prompt` was removed from `raw` before publishing it. `config.prompt` is the one configured field the ordinary config echo does **not** carry, so publishing it here would widen the surface by the back door. When true, `raw` is re-serialized with a marker naming the withheld length; every other field survives, so the row is still repairable from the disclosure |
+| `claimsPath` | durable | a directory this row names — its `path`, else the retired `workDir` — or null when it names none. **A skipped row's path is not claimed by anything**, so `configure` on that directory will now succeed and create a second record for it; this field is what lets a caller see that coming |
+
+**What this list is not.** It is a fault report, not an inventory, so it is
+bounded at 25 rather than paged — the five paged categories grow with the fleet
+and have to be walkable, and this one is bounded by how badly one file has been
+hand-edited. `unreadableRecordsTotal` is never clipped, and `daemon.log` carries
+the full detail for whoever is repairing them.
+
+**A torn final line is not one of these.** A power cut can leave a partial
+record at the end of the log; that is expected, it is dropped, and reporting it
+here would make an ordinary crash look like data loss. Only lines that parse as
+JSON objects and are still unreadable appear.
 
 ---
 

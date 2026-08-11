@@ -50,28 +50,40 @@ try {
   throw err;
 }
 
-// THE DURABLE LOG PRE-FLIGHT, and its placement is the design.
+// THE DURABLE LOG PRE-FLIGHT — A NOTICE, AND NO LONGER A REFUSAL (KAN-302).
 //
 // Before the socket, before the logger, before anything reads the registry:
-// count the rows this daemon's format does not cover. Non-zero and it refuses
-// to start, naming the file, the count and the two remedies.
+// count the rows this daemon's format does not cover, and SAY SO. This used to
+// `process.exit(1)`, and the two sentences that justified exiting are the two
+// this replacement had to answer rather than ignore:
 //
-// The check is OUTSIDE `readLog`, deliberately, and tightening `readLog`'s own
-// filter instead would have been the obvious move and the wrong one.
-// Pre-migration rows carry `type`/`key`/`workDir` and no `path`, so a tightened
-// filter would drop every one of them SILENTLY — that filter is silent on
-// purpose, for torn-tail tolerance — and the daemon would come up reporting an
-// empty fleet, indistinguishable from a healthy one. A whole fleet vanishing
-// with no line anywhere saying so is the exact failure this registry exists to
-// remove, so the version question is asked in a different place, out loud, and
-// answered by refusing rather than by half-loading.
+//   "Loading the file part-way is not offered: the agents in those rows would
+//    simply not exist, AND NOTHING WOULD SAY SO."
 //
-// stderr, like a ConfigError: the operator who just upgraded is looking there,
-// and daemon.log does not exist yet at this point.
+// The objection is to the silence, not to the starting — a daemon that comes up
+// reporting a fleet with a hole in it, indistinguishable from a healthy one, is
+// the exact failure this registry exists to remove. Something now says so, in
+// two places: this notice, and `unreadableRecords` on `list_agents` and
+// `daemon_status`, which is the half a caller can actually read. The rows stay
+// in the file and survive compaction untouched (agent-registry.ts).
+//
+// What exiting cost was out of all proportion to what it bought. One row
+// written by a CrabCast eight days older — describing an agent that had already
+// been DEACTIVATED and was asking for nothing — took the whole daemon off the
+// machine, and the first remedy it printed was "delete the registry", i.e.
+// discard every other agent record to recover from that one row. The specimen
+// is real: `epic/KAN-203` met it trying to bring up a daemon for Butchr, with
+// every dashboard green and nothing anywhere saying CrabCast was unreachable.
+//
+// stderr AND the log, because the two reach different people: stderr is where
+// the operator who just ran the daemon in the foreground is looking, and it is
+// what lands in `daemon-spawn.err` for a detached spawn — which is where this
+// defect was eventually found. The log line is written once the logger exists,
+// a few lines below.
 const logScan = scanLogVersions(registryPathFor(config.dataDir));
-if (logScan.preMigration + logScan.fromNewer + logScan.unusable > 0) {
+const unreadableAtBoot = logScan.preMigration + logScan.fromNewer + logScan.unusable;
+if (unreadableAtBoot > 0) {
   process.stderr.write(`crabcast: ${describeUnreadableLog(logScan)}\n`);
-  process.exit(1);
 }
 
 const SOCKET_PATH = socketPathFor(config.dataDir);
@@ -94,6 +106,13 @@ const log = (...args: any[]) => {
 // The daemon normally runs detached; shared modules log via console.
 console.log = log;
 console.error = log;
+
+// The same notice again, now that there is a log to put it in. Both copies are
+// deliberate: the stderr one is gone the moment the terminal scrolls, and this
+// one is what an operator finds when they come looking a week later.
+if (unreadableAtBoot > 0) {
+  log(`[AgentRegistry] ${describeUnreadableLog(logScan)}`);
+}
 
 process.on('uncaughtException', (err) => {
   log('Uncaught exception:', err);

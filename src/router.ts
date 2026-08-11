@@ -72,6 +72,7 @@ import {
   AgentRecord,
   AgentRegistry,
   RecordOutcome,
+  UnreadableRecord,
   toChannelEnabled
 } from './agent-registry.js';
 import { nudgeResumedAgent } from './nudge.js';
@@ -445,7 +446,14 @@ const STATE_READ_PROVENANCE = {
     'path', 'config', 'configVersion', 'configuredAt', 'everActivated', 'activatedBy', 'configured',
     'label', 'refusable', 'chargeable', 'preemptable', 'launcher', 'priority',
     'since', 'at', 'wasPreempted', 'by', 'derivation', 'herdrStatusWhenPreempted',
-    'occupiedAgent'
+    'occupiedAgent',
+    // `unreadableRecords[]` (KAN-302). These three are the row's OWN bytes, read
+    // off the log and unchanged by a restart, which is this bucket's definition
+    // applied to a row that is not an agent. The other four fields of that shape
+    // are this daemon's account of the row rather than the row, and are in
+    // `derived` below — see ROW_SHAPES.UnreadableRecord for why the split falls
+    // where it does.
+    'identity', 'raw', 'claimsPath'
   ],
   /**
    * Read live, from the census or the session that answered THIS call. True
@@ -467,7 +475,14 @@ const STATE_READ_PROVENANCE = {
    * join the record against the census, and `reason` is the sentence that
    * explains the result.
    */
-  derived: ['paneName', 'state', 'occupies', 'reason'],
+  // `line`, `problem`, `rawTruncated` and `promptRedacted` are
+  // `unreadableRecords[]`'s (KAN-302) — a verdict, a newline count and two facts
+  // about what this response did to the bytes. `reason` was already here and
+  // covers that shape's sentence too, which is the same word doing the same job.
+  derived: [
+    'paneName', 'state', 'occupies', 'reason',
+    'line', 'problem', 'rawTruncated', 'promptRedacted'
+  ],
   /**
    * REMEMBERED BY THIS PROCESS: neither on the record nor in the census that
    * answered this call, but accumulated by this daemon's own fleet sweep and
@@ -1208,6 +1223,26 @@ type CarriesEcho<T extends Record<keyof T, ConfigEcho[]>> = T;
 type FleetCategoriesCarryTheEcho = CarriesEcho<FleetCategories>;
 
 /**
+ * How many unreadable registry rows `list_agents` and `daemon_status` carry
+ * before they stop listing and let `unreadableRecordsTotal` speak (KAN-302).
+ *
+ * A BOUND RATHER THAN A PAGE, and the difference is the point. The five paged
+ * categories are inventories that grow with the fleet, so a consumer has to be
+ * able to walk them to the end — KAN-163 is what happens when it cannot. This
+ * list is a FAULT REPORT: it is bounded by how badly one file has been
+ * hand-edited, every entry carries the row's own bytes, and a registry with
+ * three hundred unreadable rows does not need three hundred delivered on every
+ * poll to be understood. The count is never clipped, so a consumer always knows
+ * the true size, and `daemon.log` carries the full detail for the operator
+ * repairing them.
+ *
+ * If a real deployment ever exceeds this, the answer is a paged category rather
+ * than a bigger number — but that is a change worth making on evidence, and
+ * there is none yet.
+ */
+const UNREADABLE_DISCLOSURE_LIMIT = 25;
+
+/**
  * How many rows a paged `list_agents` category carries when the caller does
  * not ask for a size. The default is what a fleet UI polling continuously
  * gets, and it stays cheap on purpose.
@@ -1376,6 +1411,14 @@ const _unstartedAgentMatchesTheContract: Exact<
 const _foreignPaneMatchesTheContract: Exact<
   keyof ForeignPane,
   keyof typeof ROW_SHAPES.ForeignPane
+> = true;
+// KAN-302. The row shape whose interface lives in `agent-registry.ts` rather
+// than in this file — it is a fact about the durable log, and the registry is
+// what produces it — but bound here with the rest, because this is where the
+// binding belongs and a shape held somewhere else is a shape nobody re-checks.
+const _unreadableRecordMatchesTheContract: Exact<
+  keyof UnreadableRecord,
+  keyof typeof ROW_SHAPES.UnreadableRecord
 > = true;
 
 const _configEchoMatchesTheContract: Exact<
@@ -2537,7 +2580,9 @@ export class MessageRouter {
     switch (data.action) {
       case 'daemon_status': {
         const { config, daemonStartedAt, agentRegistry, bootBuild } = this.deps;
-        const intents = agentRegistry.intents();
+        // One read, both answers — see the same call in `handleListAgents`.
+        const { entries, unreadable } = agentRegistry.read();
+        const intents = AgentRegistry.intentsFrom(entries);
         // What this process was built from, and whether that is still what is
         // on disk (KAN-122). Computed per request rather than cached, because
         // half the answer is about the tree as it is RIGHT NOW — a daemon that
@@ -2569,6 +2614,19 @@ export class MessageRouter {
           registryPath: agentRegistry.path,
           configuredAgents: intents.size,
           expectedAgents: Array.from(intents.values()).filter((i) => i.event === 'activated').length,
+          // THE REGISTRY ROWS THIS DAEMON COULD NOT READ (KAN-302), on the
+          // cheapest call on the socket as well as on the fleet read.
+          //
+          // Here BECAUSE of what the two counts above are. `configuredAgents`
+          // and `expectedAgents` are answers to "what is in my registry", and
+          // both are computed only from rows that parsed — so on the machine
+          // that commissioned this work they would have read `0` and `0`, which
+          // is indistinguishable from an empty registry and was in fact a
+          // registry with a row in it. A count that silently excludes what it
+          // could not read is the whole defect, one field to the left. These
+          // two say what was excluded from those two.
+          unreadableRecords: unreadable.slice(0, UNREADABLE_DISCLOSURE_LIMIT),
+          unreadableRecordsTotal: unreadable.length,
           // The same two fields `list_agents` carries. Here too because this is
           // the cheapest call on the socket, and a subscriber whose only
           // question is "did the daemon restart" should not have to survey the
@@ -5243,7 +5301,12 @@ export class MessageRouter {
     // below are derived from it, and asking it repeatedly was both several
     // whole-file parses per poll and several chances for an append landing
     // mid-response to make the categories contradict each other.
-    const intents = this.deps.agentRegistry.intents();
+    // ONE read, TWO answers (KAN-302): the rows this daemon could load, and the
+    // rows it could not. Taken from the same parse rather than two, so the
+    // disclosure below cannot describe a different revision of the file from
+    // the agent rows beside it.
+    const { entries, unreadable } = this.deps.agentRegistry.read();
+    const intents = AgentRegistry.intentsFrom(entries);
 
     const { agents, unbackedPanes, foreignPanes, staleSessions, census } =
       this.surveyAgents(intents);
@@ -5372,6 +5435,38 @@ export class MessageRouter {
       // `standbyAgents` is in `categories` above — where a fleet client's On
       // button gets its candidates.
       standbyTotal: paged.standbyAgents.page.total,
+      // ROWS IN THE DURABLE REGISTRY THAT THIS DAEMON COULD NOT READ (KAN-302),
+      // and the reason this is on the fleet read rather than only in a log.
+      //
+      // These rows are not agents and are deliberately not a sixth category:
+      // nothing here has a `config` to echo, a pane, a status or a path that
+      // can be acted on, and putting them among the agent categories would
+      // make `FleetCategories`' echo contract a lie. What they are is a fact
+      // ABOUT the fleet — "the registry claims something here and I cannot
+      // read it" — which is precisely the claim `agents`, `standbyAgents` and
+      // the rest cannot carry, because each of them is a list of things that
+      // WERE read.
+      //
+      // WHY A RESPONSE FIELD IS THE REQUIREMENT AND A LOG LINE IS NOT. The
+      // specimen that commissioned this was found by hand, by an operator who
+      // went looking in `~/.local/share/crabcast/` while writing something
+      // else. Every fleet surface was green, because a surface built only from
+      // rows that parsed cannot report a row that did not. An unreadable
+      // record has to be reachable by the same poll that reads everything else
+      // or it is reachable by nobody.
+      //
+      // Present-and-empty rather than absent, for the reason `missingAgents`
+      // is: a caller distinguishing "this registry is wholly readable" from
+      // "this daemon does not track that" cannot do it from a missing key.
+      unreadableRecords: unreadable.slice(0, UNREADABLE_DISCLOSURE_LIMIT),
+      // How many there are, whatever this response carried. NOT paged, and the
+      // asymmetry with the five paged categories is deliberate: paging exists
+      // because an agent list grows with the fleet and a consumer needs to walk
+      // it, whereas this list is bounded by how badly one file has been
+      // hand-edited and is a fault report rather than an inventory. A registry
+      // with more unreadable rows than fit here has one problem, not twenty-six
+      // — the count says so, and the full set is spelled out in `daemon.log`.
+      unreadableRecordsTotal: unreadable.length,
       // Agents that exist and have NEVER run — the fifth answer to "not
       // running", and the one that used to belong to no list at all. Kept
       // separate from standby because the difference is behavioural: switching

@@ -309,6 +309,48 @@ function provisionedBlock(value: unknown): string | null {
   );
 }
 
+/**
+ * Registry rows the daemon could not read (KAN-302), printed where the person
+ * looking at the fleet is looking.
+ *
+ * WHY THIS IS RENDERED RATHER THAN LEFT TO {@link residue}. The catch-all below
+ * would show these — it shows everything nobody claimed, and that is a good
+ * mechanism — but it shows them as a JSON blob under "other fields in the
+ * daemon's response", which reads as debug output rather than as a fault. This
+ * ticket exists because an operator with every dashboard green had no way to
+ * learn that CrabCast's registry had a row in it nothing could read; putting
+ * the answer in a blob would be that same defect one layer up, technically
+ * disclosed and practically invisible.
+ *
+ * PRINTED ONLY WHEN THERE IS SOMETHING TO SAY, which is the opposite of the
+ * rule the fleet categories follow, and the difference is worth stating because
+ * it looks like an inconsistency. An empty category is suppressed nowhere in
+ * this renderer — "standby agents (0)" is printed, because a heading that
+ * vanishes at zero is indistinguishable from a daemon that does not track the
+ * thing. That argument is about a category a reader is ASKING about. This is a
+ * fault report, and a permanent "unreadable registry rows (0)" on every list
+ * would train exactly the blindness the block exists to break.
+ */
+function unreadableBlock(rows: unknown, total: unknown): string | null {
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const shown = rows.length;
+  const count = typeof total === 'number' ? total : shown;
+  return lines(
+    `\nUNREADABLE REGISTRY ROWS (${count}) — these are NOT running, and nothing has restored them`,
+    `${INDENT}the rows are still in the registry and are left untouched; repair the named line, ` +
+      `or \`configure\` the directory afresh`,
+    ...rows.flatMap((r: any) => [
+      `${INDENT}line ${r.line}: ${r.identity} (${r.problem})` +
+        (r.claimsPath ? ` — claims ${r.claimsPath}` : ''),
+      `${INDENT}${INDENT}${r.reason}`,
+      `${INDENT}${INDENT}${r.raw}` +
+        (r.rawTruncated ? ' …[clipped]' : '') +
+        (r.promptRedacted ? '  [a prompt was withheld from this line]' : '')
+    ]),
+    count > shown ? `${INDENT}…and ${count - shown} more; the full set is in daemon.log` : null
+  );
+}
+
 /** Whatever the renderer above did not claim. */
 function residue(reader: ResponseReader): string | null {
   const rest = reader.leftovers();
@@ -1360,6 +1402,11 @@ function renderList(reader: ResponseReader, request: Record<string, unknown>): s
         )
       : null,
 
+    // Last, and deliberately after `herdr health`: it is the loudest thing on
+    // the page when it fires, and a reader scrolling to the bottom of a fleet
+    // list should not have to have noticed it at the top.
+    unreadableBlock(reader.take('unreadableRecords'), reader.take('unreadableRecordsTotal')),
+
     residue(reader)
   );
 }
@@ -1755,6 +1802,11 @@ function renderDaemonStatus(reader: ResponseReader): string {
     field('read contract', `v${reader.take('contractVersion')} (docs/read-path-contract.md)`),
     buildBlock(reader.take('build')),
     freshnessBlock(reader.take('freshness')),
+    // Directly beneath the two counts it qualifies (KAN-302). `agents` above
+    // counts only rows that PARSED, so on a registry this daemon cannot fully
+    // read it says "0 configured" for a file with rows in it — which is exactly
+    // what an empty registry says, and is how this defect stayed invisible.
+    unreadableBlock(reader.take('unreadableRecords'), reader.take('unreadableRecordsTotal')),
     residue(reader)
   );
 }

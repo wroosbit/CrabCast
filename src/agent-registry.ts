@@ -97,6 +97,59 @@ export function registryPathFor(dataDir: string): string {
 export const LOG_VERSION = 1;
 
 /**
+ * EVERY RETIRED ROW SHAPE, ENUMERATED — the answer to "what ELSE could be
+ * sitting in somebody's registry?" (KAN-302 AC5).
+ *
+ * It is a CLOSED set, and that is the useful half. `LOG_VERSION` has been `1`
+ * in every commit that has ever declared it, so this format has broken exactly
+ * once: KAN-124 (`5657bfb`, 2026-08-04) deleted the `{type, key}` addressing
+ * model and re-keyed onto the path. Every change since is an OPTIONAL field
+ * added to a v1 row, which is why rows written the day after that migration
+ * still load unchanged today. So "what else is out there" is not a question
+ * about the future; it is a question about one commit, and this is its diff.
+ *
+ * A PRE-MIGRATION ROW (no `v`) COULD CARRY EXACTLY THESE, and nothing else:
+ *
+ *   agentName       DELETED. A derived display name; there is no equivalent.
+ *   type            DELETED with `workspaceTypes`.
+ *   key             DELETED with `workspaceTypes`.
+ *   workDir         RENAMED to `path`, and tightened: absolute and canonical.
+ *                   The one field that converts cleanly.
+ *   url             DELETED. Caller page metadata; nothing reads it.
+ *   defaultAgent    RENAMED to `config.launcher`.
+ *   mcpServers      SHAPE-CHANGED: was `string[]` (names to look up in the
+ *                   deleted config), is now `config.mcpServers`, a record of
+ *                   literal server DEFINITIONS. The values are not recoverable
+ *                   from a list of names — this is the second field that looks
+ *                   convertible and is not.
+ *   event/at        UNCHANGED, and still read: it is how the notice dates a
+ *                   row and names what happened to it.
+ *   preemption      UNCHANGED shape.
+ *   wasPreempted    UNCHANGED shape.
+ *
+ * WHAT HAS NO SOURCE AT ALL, which is why these rows are skipped rather than
+ * migrated: `priority` and the three gate flags were looked up from
+ * `workspaceTypes` at every use and were never written to the log, and
+ * `prompt` came from a `promptFile` through an interpolator that is deleted.
+ *
+ * TWO EVENTS WERE ADDED (`configured`, `forgotten`) AND NONE WAS RETIRED, so no
+ * registry can hold an event name this daemon does not know.
+ *
+ * **`reset` IS NOT ONE OF THESE, and the ticket that asked for this enumeration
+ * assumed it might be.** `reset` was an API VERB, removed by the same commit;
+ * it never named a log event and never wrote a row. Searched across every
+ * revision of this file rather than recalled: the only occurrences of the word
+ * are in prose. So it cannot be sitting in anybody's registry, and an operator
+ * who goes looking for one will not find it.
+ *
+ * THE FIELDS ADDED SINCE, all optional and all readable when absent —
+ * `configVersion`, `configuredAt` (KAN-126), `activatedBy` (KAN-113),
+ * `everActivated` (KAN-125), `channelEnabled` (KAN-281). None is a retired
+ * shape and none refuses a row that lacks it; {@link AgentIntent.configVersion}
+ * spells out why reading an absent one is a reading rather than an invention.
+ */
+
+/**
  * Records past which the log is compacted. High enough that ordinary use never
  * triggers it, low enough that a pathological activate/deactivate loop cannot
  * grow the file without bound.
@@ -556,7 +609,145 @@ function isUsableEntry(value: any): value is AgentLogEntry {
   );
 }
 
-/** What {@link scanLogVersions} found, in the shape the boot refusal prints. */
+/**
+ * WHY A ROW THIS DAEMON CANNOT READ IS NOT A ROW THIS DAEMON MAY FORGET
+ * (KAN-302).
+ *
+ * This block and the four that follow it replace a refusal to boot. The
+ * reasoning that produced that refusal was right about the danger and wrong
+ * about one word, and the word is worth naming because the rest of the argument
+ * survives intact.
+ *
+ * The refusal said: *"Loading the file part-way is not offered: the agents in
+ * those rows would simply not exist, AND NOTHING WOULD SAY SO."* Every clause
+ * of that is true, and the load-bearing one is the last. A half-loaded registry
+ * is intolerable because it is SILENT — the daemon comes up reporting a fleet
+ * with a hole in it, indistinguishable from a healthy one, which is the exact
+ * failure this registry exists to remove. So the objection is not to starting.
+ * It is to starting without saying what was dropped.
+ *
+ * What the refusal offered instead cost more than the disease. Its first
+ * remedy was *"delete the registry and configure the fleet again"* — on a
+ * machine with a real fleet, that is every agent record destroyed to recover
+ * from one row, and the registry is the one artifact whose entire purpose is
+ * surviving that. A recovery instruction that discards the thing being
+ * recovered is not a remedy. And the refusal is total: one row written by a
+ * CrabCast eight days older, describing an agent that had ALREADY been stood
+ * down and was commanding nothing, took the whole daemon off the machine.
+ *
+ * SO: skip the ROW, not the BOOT — under three guarantees, and the design is
+ * only honest if all three hold together.
+ *
+ *  1. **Nothing is deleted, moved or rewritten.** The unreadable rows stay in
+ *     the file, byte for byte. {@link AgentRegistry.compact} carries them
+ *     across verbatim — see the note there, because without it this fix
+ *     reintroduces on a 500-record timer exactly the destruction it removes.
+ *  2. **The fleet says so, on a surface a caller reads.** Every unreadable row
+ *     is published as an {@link UnreadableRecord} on `list_agents` and
+ *     `daemon_status`: line number, what could not be read about it, and the
+ *     row's own bytes. That is what answers "and nothing would say so" on its
+ *     own terms, and it is why the disclosure is a response field rather than
+ *     a log line — the operator who met this had every dashboard green.
+ *  3. **No remedy destroys the record.** {@link describeUnreadableLog} names
+ *     the row and the repair; the word "delete" is gone from it, and
+ *     `verify-registry-survives-retired-rows.mjs` §5 fails the build if it
+ *     comes back.
+ *
+ * The one thing that has NOT changed is the refusal to invent. A pre-migration
+ * row's `priority`, gate flags and `prompt` came from the deleted
+ * `workspaceTypes` and have nowhere to come from; this daemon still will not
+ * make them up. It declines to RESTORE such an agent and says which one, which
+ * is a different act from pretending the row was never there.
+ */
+
+/**
+ * How much of a row's own text the disclosure carries before it clips.
+ *
+ * A bound rather than the whole line, because this rides on `list_agents`,
+ * which a fleet client polls continuously, and a hand-edited row can be any
+ * size at all. Clipping is stated per record ({@link
+ * UnreadableRecord.rawTruncated}) rather than left to be inferred from a
+ * suspiciously round length.
+ */
+export const UNREADABLE_RAW_LIMIT = 2048;
+
+/** Why a row could not be read. Three problems, three different repairs. */
+export type UnreadableProblem = 'pre-migration' | 'from-newer' | 'unusable';
+
+/**
+ * One row this daemon could not read, in the shape a CALLER receives it —
+ * `list_agents.unreadableRecords[]` and `daemon_status.unreadableRecords[]`.
+ *
+ * THE FIELDS ARE CHOSEN SO THAT THE OPERATOR NEVER HAS TO OPEN THE FILE TO
+ * KNOW WHAT IS IN IT, and never has to guess which of the three repairs
+ * applies. The refusal this replaces printed a count and a sample line; a
+ * count is not something a caller can act on.
+ */
+export interface UnreadableRecord {
+  /**
+   * 1-based line number in the registry file — the number `sed -n '<n>p'`
+   * takes, so the disclosure names a thing the operator can address.
+   *
+   * The refusal this replaces named the FILE and offered to delete it. Naming
+   * the line is the whole difference between "one row is wrong" and "your
+   * registry is wrong", and it is what makes a targeted repair sayable.
+   */
+  line: number;
+  problem: UnreadableProblem;
+  /**
+   * However the row identifies itself: its `agentName`, else its retired
+   * `type`/`key` pair, else its `path`. Quoted back in the row's OWN
+   * vocabulary, because that is what lets a human find it in the file — an old
+   * row does not know the word `path`.
+   */
+  identity: string;
+  /** What could not be read about it, in one sentence, naming fields. */
+  reason: string;
+  /**
+   * The row's own bytes.
+   *
+   * Verbatim, except in the one case {@link promptRedacted} marks. Every row
+   * that reaches this type is valid JSON — a line that is not parses as
+   * nothing and is treated as a torn tail, never as an unreadable record — so
+   * "verbatim" here is the trimmed source line itself and not a
+   * re-serialization, in every case but that one.
+   */
+  raw: string;
+  /** Whether {@link raw} was clipped at {@link UNREADABLE_RAW_LIMIT}. */
+  rawTruncated: boolean;
+  /**
+   * Whether a `prompt` was removed from {@link raw} before publishing it.
+   *
+   * A REDACTION THAT IS STATED IS HONEST; A SURFACE THAT QUIETLY WIDENS IS
+   * NOT. `config.prompt` is the one field a caller froze onto an agent that
+   * this daemon does NOT echo on an ordinary `list_agents` row — the config
+   * echo is five fields and `prompt` is not among them. Publishing an
+   * unreadable row's bytes unfiltered would therefore hand back, on the same
+   * response, a value the surface beside it withholds, and a registry row is
+   * exactly where a caller's own bootstrap text sits. So a `prompt` is
+   * replaced by a marker naming its length, `raw` is re-serialized for that
+   * row only, and this flag says it happened.
+   */
+  promptRedacted: boolean;
+  /**
+   * A directory this row names — its `path`, else the retired `workDir` — or
+   * `null` when it names none.
+   *
+   * PUBLISHED BECAUSE OF WHAT STARTING RATHER THAN REFUSING MAKES POSSIBLE,
+   * and this is the honest edge of that trade. A skipped row's path is not
+   * claimed by anything the daemon can see, so `configure` on that same
+   * directory now succeeds and creates a second, readable record for it. That
+   * is the right default — refusing would re-brick the machine on a row nobody
+   * can repair — but it means a caller can silently end up with two records
+   * for one directory, one of which nothing will ever load. This field is what
+   * lets a caller see that coming instead of meeting it. `null` on the
+   * specimen that commissioned this work, whose `workDir` was the empty
+   * string.
+   */
+  claimsPath: string | null;
+}
+
+/** What {@link scanLogVersions} found, in the shape the boot notice prints. */
 export interface LogVersionScan {
   file: string;
   /** Lines that parsed as JSON objects. Torn and blank lines are not counted. */
@@ -569,37 +760,49 @@ export interface LogVersionScan {
    * Rows this daemon's own format claims, and that {@link AgentRegistry.readLog}
    * would nonetheless drop.
    *
-   * These are the hand-edit casualties. The refusal prints "hand-edit the
-   * file" as a supported remedy, and an operator following it who omits one of
+   * These are the hand-edit casualties. The notice prints "hand-edit the
+   * file" as a supported repair, and an operator following it who omits one of
    * the required `config` fields produces a row that passes a version check
    * and fails `isUsableEntry` — which drops it SILENTLY, on purpose, for
-   * torn-tail tolerance. The daemon would then start clean and report a fleet
+   * torn-tail tolerance. Without this count the daemon would report a fleet
    * with a hole in it, through the recovery procedure it recommended itself.
    */
   unusable: number;
-  /** A few offending rows, identified however they identify themselves. */
+  /** Every offending row, in file order. The disclosure and the notice share it. */
+  unreadable: UnreadableRecord[];
+  /** A few offending rows as one-liners, for the boot notice's text. */
   samples: string[];
 }
 
-/** How many pre-migration rows the refusal names before it says "and N more". */
+/** How many rows the boot notice names before it says "and N more". */
 const VERSION_SCAN_SAMPLES = 3;
 
 /**
  * Count rows this daemon's format does not cover, WITHOUT loading any of them.
  *
- * THE PLACEMENT IS THE DESIGN. This runs at boot, outside {@link
- * AgentRegistry.readLog}, and never inside `isUsableEntry`'s filter.
+ * THE BOOT-TIME CALLER. {@link AgentRegistry.read} asks the same question of
+ * the same classifier on every read; this is the one that runs before anything
+ * else exists, so the operator meets the notice at the top of `daemon.log`
+ * rather than only on a response they have to know to ask for.
  *
- * Tightening that filter instead would have been the obvious move and would
- * have produced the exact failure this daemon exists to remove. Pre-migration
- * rows carry `type`/`key`/`workDir` and no `path`, so the filter would drop
- * every one of them silently — `readLog` → `[]`, `intents()` → empty,
- * `expected()` → empty, and reconcile printing "the agent registry records no
- * agents that should be running", which is indistinguishable from a healthy
- * empty fleet. That is a silent fleet loss reached through an existing code
- * path rather than a hypothetical one.
+ * WHAT THIS PARAGRAPH USED TO SAY, and why the correction matters (KAN-302).
+ * It said the check runs "outside `readLog`, and never inside `isUsableEntry`'s
+ * filter", because tightening that filter would drop pre-migration rows
+ * SILENTLY — `readLog` → `[]`, `intents()` → empty, `expected()` → empty, and
+ * reconcile printing "the agent registry records no agents that should be
+ * running", indistinguishable from a healthy empty fleet.
  *
- * WHY REFUSE RATHER THAN MIGRATE. `path` derives cleanly from the old
+ * That danger is exactly right and the conclusion drawn from it was too narrow.
+ * Keeping the two questions in two places did not prevent the silence; it only
+ * moved it, and it cost a hand-maintained agreement between a boot gate and a
+ * loader that the code itself warned about. The rows ARE dropped from the load
+ * now — they always were, once the boot stopped exiting — and what stops that
+ * being silent is {@link UnreadableRecord}, published on two response surfaces
+ * and printed by the CLI. So the two questions are now ONE classifier
+ * ({@link classifyRow}), which is what makes "the rows disclosed" and "the rows
+ * dropped" the same set by construction rather than by vigilance.
+ *
+ * WHY SKIP RATHER THAN MIGRATE. `path` derives cleanly from the old
  * `workDir`. `priority`, the three gate flags and `prompt` lived in the
  * deleted `workspaceTypes` and have nowhere to come from — so a derived row
  * would be a *configured* agent missing three of `configure`'s required
@@ -613,92 +816,259 @@ const VERSION_SCAN_SAMPLES = 3;
  * cannot finish its own job.
  */
 export function scanLogVersions(file: string): LogVersionScan {
-  const scan: LogVersionScan = {
-    file, rows: 0, preMigration: 0, fromNewer: 0, unusable: 0, samples: []
-  };
-
+  const scan = emptyScan(file);
   let text: string;
   try {
     text = fs.readFileSync(file, 'utf8');
   } catch {
     // No file is the ordinary state on a fresh install, and an unreadable one
     // is readLog's problem to report — this scan must not turn either into a
-    // refusal to boot.
+    // fleet-wide claim about rows it never saw.
     return scan;
   }
+  classifyLog(text, scan);
+  return scan;
+}
 
+function emptyScan(file: string): LogVersionScan {
+  return { file, rows: 0, preMigration: 0, fromNewer: 0, unusable: 0, unreadable: [], samples: [] };
+}
+
+/**
+ * Exactly which of the five required `config` fields — plus the two optional
+ * ones that must still be well-formed — this row got wrong.
+ *
+ * NAMING THEM IS THE POINT. The refusal this replaces said a row was
+ * "unreadable" and then printed the whole list of what a row needs, leaving
+ * the operator to diff their line against a paragraph. This case is reached BY
+ * hand-editing, so the repair instruction has to be about THIS row: the
+ * operator already believes they supplied every field, and the useful sentence
+ * is which one they did not.
+ */
+function describeUnusable(value: any): string {
+  const missing: string[] = [];
+  if (!AGENT_EVENTS.includes(value.event)) {
+    missing.push(`"event" must be one of ${AGENT_EVENTS.join(', ')}`);
+  }
+  if (typeof value.path !== 'string' || !value.path.length) {
+    missing.push('"path" must be a non-empty string');
+  }
+  if (value.event !== 'forgotten') {
+    const config = value.config;
+    if (!config || typeof config !== 'object') {
+      missing.push('"config" must be an object');
+    } else {
+      if (typeof config.priority !== 'number' || !Number.isFinite(config.priority)) {
+        missing.push('"config.priority" must be a finite number');
+      }
+      if (typeof config.launcher !== 'string' || !config.launcher.length) {
+        missing.push('"config.launcher" must be a non-empty string');
+      }
+      for (const flag of ['refusable', 'chargeable', 'preemptable'] as const) {
+        if (typeof config[flag] !== 'boolean') missing.push(`"config.${flag}" must be a boolean`);
+      }
+    }
+    if (!hasValidProvenance(value)) {
+      missing.push(
+        '"configVersion" must be a whole number of at least 1 and "configuredAt" a non-empty ' +
+          'string — both may be omitted entirely, and omitting is safer than guessing'
+      );
+    }
+  }
+  return missing.length
+    ? `version v${LOG_VERSION} and still unreadable: ${missing.join('; ')}`
+    : `version v${LOG_VERSION} and rejected by the loader's own predicate`;
+}
+
+/**
+ * Whether one parsed row is one this daemon can act on, and if not, why.
+ *
+ * THE SINGLE CLASSIFIER, and its being single is the design rather than
+ * tidiness. The boot notice and {@link AgentRegistry.read} both ask this
+ * question, and the previous arrangement asked it twice — a version check at
+ * boot and `isUsableEntry` at load — with a comment explaining that they had to
+ * be kept in agreement by hand. They are now the same call, so a row disclosed
+ * as unreadable is exactly a row the loader dropped, and neither can drift into
+ * covering a case the other does not.
+ */
+function classifyRow(parsed: any, line: number, source: string): UnreadableRecord | null {
+  let problem: UnreadableProblem;
+  let reason: string;
+  if (typeof parsed.v === 'number' && parsed.v > LOG_VERSION) {
+    problem = 'from-newer';
+    reason =
+      `carries format version v${parsed.v}; this daemon writes v${LOG_VERSION} and cannot know ` +
+      `what a newer row means. It was not written by an older CrabCast — it was written by a ` +
+      `newer one, and downgrading is what put you here.`;
+  } else if (parsed.v !== LOG_VERSION) {
+    problem = 'pre-migration';
+    reason =
+      'was written by a CrabCast that addressed agents by <type>/<key>. Its `workDir` gives the ' +
+      'path, but `priority`, the gate flags and `prompt` came from the `workspaceTypes` config ' +
+      'that no longer exists, so they cannot be recovered from the row. Inventing them is the ' +
+      'one thing this daemon refuses to do about a value nobody decided.';
+  } else if (!isUsableEntry(parsed)) {
+    problem = 'unusable';
+    reason = describeUnusable(parsed);
+  } else {
+    return null;
+  }
+
+  // Identified in whatever vocabulary the row itself uses: an old row says
+  // `type`/`key`, and quoting it back is what lets a human find the line.
+  const identity =
+    typeof parsed.agentName === 'string'
+      ? parsed.agentName
+      : typeof parsed.type === 'string' && typeof parsed.key === 'string'
+        ? `${parsed.type}/${parsed.key}`
+        : typeof parsed.path === 'string' && parsed.path.length
+          ? parsed.path
+          : '(unidentifiable row)';
+
+  // See UnreadableRecord.promptRedacted. Re-serialized ONLY when there is a
+  // prompt to remove, so `raw` is the operator's own line in every other case.
+  const prompt = parsed?.config?.prompt ?? parsed?.prompt;
+  const promptRedacted = typeof prompt === 'string';
+  let raw = source;
+  if (promptRedacted) {
+    const marker = `[prompt withheld — ${prompt.length} characters]`;
+    const copy = { ...parsed };
+    if (typeof copy.prompt === 'string') copy.prompt = marker;
+    if (copy.config && typeof copy.config === 'object' && typeof copy.config.prompt === 'string') {
+      copy.config = { ...copy.config, prompt: marker };
+    }
+    raw = JSON.stringify(copy);
+  }
+  const rawTruncated = raw.length > UNREADABLE_RAW_LIMIT;
+  if (rawTruncated) raw = raw.slice(0, UNREADABLE_RAW_LIMIT);
+
+  const claimsPath =
+    typeof parsed.path === 'string' && parsed.path.length
+      ? parsed.path
+      : typeof parsed.workDir === 'string' && parsed.workDir.length
+        ? parsed.workDir
+        : null;
+
+  return { line, problem, identity, reason, raw, rawTruncated, promptRedacted, claimsPath };
+}
+
+/**
+ * Walk a registry's text once, filling in the counts and — when `entries` is
+ * supplied — the rows the loader accepts.
+ *
+ * ONE PASS ANSWERS BOTH QUESTIONS, which is what lets `list_agents` disclose
+ * unreadable rows without paying a second whole-file parse per poll. The same
+ * argument {@link AgentRegistry.intentsFrom} and {@link
+ * AgentRegistry.preemptedFrom} make one file over, applied to the read itself:
+ * two reads are also two DIFFERENT reads, and a response whose disclosure came
+ * from a later parse than its agent rows could contradict itself about the
+ * same line.
+ */
+function classifyLog(text: string, scan: LogVersionScan, entries?: AgentLogEntry[]): void {
   const lines = text.split('\n');
-  for (const line of lines) {
-    const trimmed = line.trim();
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
     if (!trimmed) continue;
+
     let parsed: any;
     try {
       parsed = JSON.parse(trimmed);
     } catch {
-      // A torn tail, or a line nothing here wrote. Not evidence of a version.
+      // A torn tail, or a line nothing here wrote. Not evidence of a version,
+      // and deliberately NOT disclosed as an unreadable record: the final line
+      // is the one a power cut tears, and reporting that as a fleet fact would
+      // make an ordinary crash look like data loss. Anything earlier is
+      // unexpected and worth saying out loud.
+      if (entries && i < lines.length - 1) {
+        console.error(`[AgentRegistry] Skipping unparseable record at line ${i + 1}`);
+      }
       continue;
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
     scan.rows++;
 
-    let problem: 'pre-migration' | 'newer' | 'unusable' | null = null;
-    if (typeof parsed.v === 'number' && parsed.v > LOG_VERSION) {
-      problem = 'newer';
-      scan.fromNewer++;
-    } else if (parsed.v !== LOG_VERSION) {
-      problem = 'pre-migration';
-      scan.preMigration++;
-    } else if (!isUsableEntry(parsed)) {
-      // Versioned as ours and still unreadable: the hand-edit case. Checked
-      // against the SAME predicate readLog applies, because a boot gate that
-      // validated less than the loader would let exactly the rows the loader
-      // silently drops through the gate that exists to catch them.
-      problem = 'unusable';
-      scan.unusable++;
+    const bad = classifyRow(parsed, i + 1, trimmed);
+    if (!bad) {
+      // NORMALIZED ON THE WAY OUT, so no consumer downstream has to know that a
+      // row written before a field existed carries no value for it, or that a
+      // hand-edited one might carry nonsense. See toActivatedBy.
+      entries?.push({
+        ...(parsed as AgentLogEntry),
+        activatedBy: toActivatedBy(parsed.activatedBy),
+        channelEnabled: toChannelEnabled(parsed.channelEnabled)
+      });
+      continue;
     }
-    if (problem === null) continue;
 
+    if (bad.problem === 'pre-migration') scan.preMigration++;
+    else if (bad.problem === 'from-newer') scan.fromNewer++;
+    else scan.unusable++;
+    scan.unreadable.push(bad);
     if (scan.samples.length < VERSION_SCAN_SAMPLES) {
-      // Identified in whatever vocabulary the row itself uses: an old row says
-      // `type`/`key`, and quoting it back is what lets a human find the line.
-      const who =
-        typeof parsed.agentName === 'string'
-          ? parsed.agentName
-          : typeof parsed.type === 'string' && typeof parsed.key === 'string'
-            ? `${parsed.type}/${parsed.key}`
-            : typeof parsed.path === 'string'
-              ? parsed.path
-              : '(unidentifiable row)';
       scan.samples.push(
-        `${who} — ${parsed.event ?? 'no event'} at ${parsed.at ?? 'no timestamp'} (${problem})`
+        `line ${bad.line}: ${bad.identity} — ${parsed.event ?? 'no event'} at ` +
+          `${parsed.at ?? 'no timestamp'} (${bad.problem})`
       );
     }
   }
-
-  return scan;
 }
 
+/** How many rows the boot notice spells out in full before pointing at the wire. */
+const NOTICE_DETAIL_LIMIT = 20;
+
 /**
- * What the daemon prints instead of starting, when the log holds rows it
- * cannot fully understand.
+ * What the daemon prints — while starting — when the log holds rows it cannot
+ * read.
  *
- * Names the file, the count and the two supported remedies. No partial load is
- * offered, because a partial load is the ghost-row outcome: some agents
- * restored, some silently absent, and no line anywhere saying which.
+ * IT IS A NOTICE, NOT A REFUSAL, and every sentence in it changed with that
+ * (KAN-302). The reasoning is on {@link UnreadableRecord} above; what matters
+ * here is the two properties this text is held to by
+ * `verify-registry-survives-retired-rows.mjs`, because both were violated by
+ * what it replaced:
+ *
+ *  - **It names the ROW, not the file.** Line number, identity, and which
+ *    field could not be read. The old text named the file and a count.
+ *  - **No repair it offers destroys a record.** "Delete the registry and
+ *    configure the fleet again" is gone. It was the FIRST remedy and was
+ *    recommended as "the right answer for every real deployment", which on a
+ *    machine with a real fleet is every agent record discarded to recover from
+ *    one row. §5 of the proof greps this function's output for the word and
+ *    fails the build if it returns.
+ *
+ * The daemon log is still not a surface a caller can read, and that is why
+ * this is the SECOND half of the disclosure rather than the whole of it: the
+ * same rows go out on `list_agents` and `daemon_status`. This text is for the
+ * operator who is already looking at the log; that field is for the operator
+ * whose dashboards are all green, which is the one this defect was found by.
  */
 export function describeUnreadableLog(scan: LogVersionScan): string {
   const bad = scan.preMigration + scan.fromNewer + scan.unusable;
+  const shown = scan.unreadable.slice(0, NOTICE_DETAIL_LIMIT);
   const parts: string[] = [
-    `refusing to start: ${bad} of ${scan.rows} record(s) in the agent registry cannot be ` +
-      `read by this daemon.`,
+    `${bad} of ${scan.rows} record(s) in the agent registry cannot be read by this daemon. ` +
+      `Starting without them.`,
     `  registry: ${scan.file}`,
-    ...scan.samples.map((line) => `    ${line}`),
-    ...(bad > scan.samples.length ? [`    …and ${bad - scan.samples.length} more`] : []),
+    ``,
+    `THE AGENTS IN THOSE ROWS HAVE NOT BEEN RESTORED AND ARE NOT RUNNING. Nothing has been`,
+    `deleted: the rows are still in the file, they are carried across compaction unchanged,`,
+    `and every one of them is published on \`list_agents\` and \`daemon_status\` as`,
+    `\`unreadableRecords\` — with its line number and its own bytes — so this is a fact about`,
+    `the fleet that a caller can read rather than a line in a log nobody opens.`,
     ``
   ];
 
-  // Three different problems with three different remedies. Saying
-  // "unreadable" over all of them would send an operator to the wrong fix.
+  for (const row of shown) {
+    parts.push(`  line ${row.line}: ${row.identity} (${row.problem})`, `      ${row.reason}`);
+  }
+  if (bad > shown.length) {
+    parts.push(
+      `  …and ${bad - shown.length} more, all of them on \`list_agents.unreadableRecords\`.`
+    );
+  }
+  parts.push(``);
+
+  // Three different problems with three different repairs. Saying "unreadable"
+  // over all of them would send an operator to the wrong one.
   if (scan.preMigration > 0) {
     parts.push(
       `${scan.preMigration} row(s) were written by a CrabCast that addressed agents by`,
@@ -706,7 +1076,9 @@ export function describeUnreadableLog(scan: LogVersionScan): string {
       `\`prompt\` came from the \`workspaceTypes\` config that no longer exists — so a converted`,
       `row would be a configured agent missing three required \`configure\` parameters, which`,
       `this API could not have produced. Inventing them is the one thing this daemon refuses`,
-      `to do about a value nobody decided.`,
+      `to do about a value nobody decided, and it is why these rows are skipped rather than`,
+      `migrated. To bring such an agent back, \`configure\` its directory with the knobs you`,
+      `want — the values are yours to decide, and nothing here can decide them for you.`,
       ``
     );
   }
@@ -715,45 +1087,29 @@ export function describeUnreadableLog(scan: LogVersionScan): string {
       `${scan.fromNewer} row(s) carry a format version NEWER than this daemon writes (this`,
       `daemon is at v${LOG_VERSION}). They were not written by an older CrabCast — they were`,
       `written by a newer one, and downgrading is what put you here. Run the newer daemon`,
-      `against this data directory, or start from an empty log.`,
+      `against this data directory and they become readable again; this one leaves them`,
+      `untouched, so nothing is lost by having started it.`,
       ``
     );
   }
   if (scan.unusable > 0) {
     parts.push(
-      `${scan.unusable} row(s) are version v${LOG_VERSION} and still unreadable: a row needs a`,
-      `non-empty "path" and a "config" carrying a finite "priority", a non-empty "launcher"`,
-      `and all three of "refusable", "chargeable" and "preemptable" as booleans.`,
-      ``,
-      `Two fields are OPTIONAL and must still be well-formed when present, because a`,
-      `malformed one travels into a caller's compare-and-set as though it were a version:`,
-      `"configVersion" must be a whole number of at least 1 (not "3", not 0, not 1.5), and`,
-      `"configuredAt" must be a non-empty string. Omitting them is fine — an absent version`,
-      `reads as 1 — so if you are hand-editing and unsure, leave them out rather than guess.`,
-      ``,
-      `This is almost always a hand-edit that dropped or mistyped a field; the offending rows`,
-      `are named above. It is caught HERE rather than at load`,
-      `because the loader drops such rows silently and on purpose — that silence is what`,
-      `makes a torn tail survivable — so an unnoticed hand-edit would otherwise come back as`,
-      `a fleet with a hole in it and nothing anywhere saying so.`,
+      `${scan.unusable} row(s) are version v${LOG_VERSION} and still unreadable — almost always a`,
+      `hand-edit that dropped or mistyped a field. The exact field is named against each row`,
+      `above. A row needs a non-empty "path" and a "config" carrying a finite "priority", a`,
+      `non-empty "launcher" and all three of "refusable", "chargeable" and "preemptable" as`,
+      `booleans. "configVersion" and "configuredAt" are OPTIONAL and must still be well-formed`,
+      `when present — an absent version reads as 1, so if you are unsure, leave them out`,
+      `rather than guess.`,
       ``
     );
   }
 
   parts.push(
-    `Loading the file part-way is not offered: the agents in those rows would simply not`,
-    `exist, and nothing would say so.`,
-    ``,
-    `Two remedies, both supported:`,
-    `  1. Delete ${scan.file} and \`configure\` the fleet again. This is the right answer`,
-    `     for every real deployment — the caller holds the desired state, and one`,
-    `     reconciler pass re-creates every record.`,
-    `  2. Hand-edit the file: each row needs "v": ${LOG_VERSION}, a "path" (the old`,
-    `     "workDir"), and a "config" object carrying priority, launcher, refusable,`,
-    `     chargeable and preemptable — the values you would pass to \`configure\`.`,
-    `     "configVersion" and "configuredAt" may be omitted entirely. Re-run the`,
-    `     daemon afterwards: it validates every row against the same predicate the loader`,
-    `     uses, so a field you miss is refused here rather than dropped later.`,
+    `To repair a row, edit THAT LINE — every other record in this file is fine and is`,
+    `already loaded. Re-run the daemon afterwards: it validates each row against the same`,
+    `predicate the loader uses, so a field you miss is named here rather than dropped`,
+    `silently later.`,
     ``,
     `There is deliberately no \`migrate-log\` command: it could recover the path and`,
     `sometimes the launcher, and would have to ask you for the rest regardless.`
@@ -883,6 +1239,31 @@ export class AgentRegistry {
    * earlier is logged — it would mean something worse than a crash.
    */
   public readLog(): AgentLogEntry[] {
+    return this.read().entries;
+  }
+
+  /**
+   * The log, in ONE pass: the records this daemon can act on, and the rows it
+   * cannot read.
+   *
+   * BOTH ANSWERS FROM ONE READ, and that is a correctness property before it is
+   * a cost one (KAN-302). `list_agents` publishes the unreadable rows beside
+   * the agents, and taking those from two separate parses of the same file
+   * would let an append landing between them produce one response whose
+   * disclosure and whose agent rows disagreed about the same line — the same
+   * argument {@link preemptedFrom} makes about the four questions one poll asks.
+   *
+   * The torn-tail rule lives here and applies to *any* unparseable line, not
+   * only the last one: a line that cannot be read is a line that says nothing,
+   * and skipping it is strictly better than refusing to read the file. Only a
+   * bad final line is expected (that is what a power cut produces), so anything
+   * earlier is logged — it would mean something worse than a crash. A torn line
+   * is deliberately NOT reported as an unreadable RECORD: see {@link
+   * classifyLog}.
+   */
+  public read(): { entries: AgentLogEntry[]; unreadable: UnreadableRecord[] } {
+    const scan = emptyScan(this.file);
+    const entries: AgentLogEntry[] = [];
     let text: string;
     try {
       text = fs.readFileSync(this.file, 'utf8');
@@ -891,55 +1272,24 @@ export class AgentRegistry {
       if (e?.code !== 'ENOENT') {
         console.error(`[AgentRegistry] Could not read ${this.file}: ${e?.message ?? String(e)}`);
       }
-      return [];
+      return { entries, unreadable: scan.unreadable };
     }
+    classifyLog(text, scan, entries);
+    return { entries, unreadable: scan.unreadable };
+  }
 
-    const lines = text.split('\n');
-    const entries: AgentLogEntry[] = [];
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
-
-      let parsed: any;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        // The final line is the one a power cut can tear. Anything earlier is
-        // unexpected and worth saying out loud, but is still skipped rather
-        // than allowed to discard the records around it.
-        if (i < lines.length - 1) {
-          console.error(`[AgentRegistry] Skipping unparseable record at line ${i + 1}`);
-        }
-        continue;
-      }
-
-      // NORMALIZED ON THE WAY OUT, so no consumer downstream of this function
-      // has to know that a row written before this field existed carries no
-      // parent, or that a hand-edited one might carry nonsense. Every entry
-      // leaves here with `activatedBy` present and either a usable absolute
-      // path or `null` — which is what lets the record type require it rather
-      // than making every reader decide what an absent value means.
-      //
-      // The read-side half of the coercer; {@link record} is the write-side
-      // one. Both, because the log outlives any one daemon: rows in it were
-      // written by versions of this file that did not have the field, and rows
-      // in it will be read by versions that have moved on.
-      if (isUsableEntry(parsed)) {
-        entries.push({
-          ...parsed,
-          activatedBy: toActivatedBy(parsed.activatedBy),
-          // KAN-281. Every row written before this field existed is exactly the
-          // "rows in it were written by versions of this file that did not have
-          // the field" case named above, and each one is an agent whose spawn
-          // predates the decision being recorded — so `null` is the true answer
-          // for them rather than a placeholder.
-          channelEnabled: toChannelEnabled(parsed.channelEnabled)
-        });
-      }
-    }
-
-    return entries;
+  /**
+   * The rows in this registry that this daemon cannot read — the disclosure
+   * `list_agents` and `daemon_status` publish.
+   *
+   * Re-read per call rather than cached from boot, deliberately: an operator
+   * who repairs a line must see the disclosure clear WITHOUT restarting the
+   * daemon, and a cached answer would go on reporting a row that is no longer
+   * there. Callers that are already reading the log for something else should
+   * take both from {@link read} instead of calling this.
+   */
+  public unreadable(): UnreadableRecord[] {
+    return this.read().unreadable;
   }
 
   /**
@@ -1350,13 +1700,70 @@ export class AgentRegistry {
    * @param intents the reduction of the log this compaction should preserve.
    *        Defaults to reading the log once, for callers that do not have one.
    */
+  /**
+   * The verbatim source lines of every row {@link read} could not read.
+   *
+   * Separate from {@link UnreadableRecord.raw} on purpose, and the two must not
+   * be confused: `raw` is a DISCLOSURE — capped at {@link UNREADABLE_RAW_LIMIT}
+   * and re-serialized when a prompt had to be withheld — while this is what
+   * goes back on disk, where a cap or a redaction would be data loss dressed as
+   * caution. One of these values is for a reader and the other is the record.
+   */
+  private unreadableSourceLines(): string[] {
+    let text: string;
+    try {
+      text = fs.readFileSync(this.file, 'utf8');
+    } catch {
+      return [];
+    }
+    const out: string[] = [];
+    const lines = text.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
+      if (!trimmed) continue;
+      let parsed: any;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        // A torn line. Not carried: it is the one thing compaction has always
+        // been allowed to drop, it holds no record anybody can name, and the
+        // append-only design's whole torn-tail story is that it says nothing.
+        continue;
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+      if (classifyRow(parsed, i + 1, trimmed)) out.push(trimmed);
+    }
+    return out;
+  }
+
   public compact(intents: Map<string, AgentIntent> = this.intents()): RecordOutcome {
     const kept: AgentLogEntry[] = [
       ...AgentRegistry.configuredToPreserve(intents),
       ...AgentRegistry.activatedToPreserve(intents),
       ...AgentRegistry.standbyToPreserve(intents)
     ];
-    const body = kept.map((entry) => JSON.stringify(entry)).join('\n');
+    // THE ROWS THIS DAEMON CANNOT READ GO BACK INTO THE FILE UNCHANGED, and
+    // this line is the half of KAN-302 that is easiest to leave out and worst
+    // to leave out.
+    //
+    // Compaction rewrites the log from the rows it could LOAD. Skipping an
+    // unreadable row at read time therefore does not merely hide it — it
+    // schedules its destruction, silently, at the 500th record. The daemon
+    // would start (good), disclose the row (good), and then permanently delete
+    // the durable record it was disclosing (the exact thing this ticket
+    // objected to, arriving later and with nobody watching). "We do not delete
+    // your registry" would have been true of the boot and false of the daemon.
+    //
+    // So they are carried across verbatim, ahead of the compacted rows: they
+    // are the oldest lines in the file and they are not this daemon's to
+    // reformat. Verbatim from the FILE rather than from the disclosure's
+    // `raw`, which is capped and may have had a prompt removed — writing that
+    // back would corrupt the very record this exists to protect.
+    //
+    // The extra read is paid only here, at most once per 500 records, on a
+    // path that is already rewriting the whole file. The hot path is untouched.
+    const preserved = this.unreadableSourceLines();
+    const body = [...preserved, ...kept.map((entry) => JSON.stringify(entry))].join('\n');
 
     const temp = `${this.file}.compact-${process.pid}`;
     let fd: number | undefined;
@@ -1364,7 +1771,7 @@ export class AgentRegistry {
     try {
       this.ensureDir();
       fd = fs.openSync(temp, 'w', 0o600);
-      writeFully(fd, kept.length ? body + '\n' : '');
+      writeFully(fd, body.length ? body + '\n' : '');
       fs.fsyncSync(fd);
       fs.closeSync(fd);
       fd = undefined;

@@ -890,6 +890,7 @@ jobs:
             verify-daemon-status-over-mcp
             verify-read-contract
             verify-channel-enabled
+            verify-registry-survives-retired-rows
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,
