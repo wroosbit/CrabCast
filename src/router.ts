@@ -2290,10 +2290,20 @@ function configEcho(intent: AgentIntent | undefined): ConfigEcho {
  * `false` is the only genuinely damaging value this field can take.
  */
 function channelEnabledOf(intent: AgentIntent | undefined): boolean | null {
-  // Straight off the record, no `??` — the registry normalizes both edges of
-  // the log (`toChannelEnabled`), so a second normalization here would only
-  // serve to hide the first one having stopped working. Same argument as
-  // `activatedBy` directly above.
+  // THE `??` IS A TYPE NARROWING, NOT A SECOND NORMALIZATION, and the
+  // difference is worth stating because `activatedBy` directly above makes a
+  // point of NOT having one — a defensive re-normalization there would hide the
+  // registry's own coercer having stopped working.
+  //
+  // The same argument applies here and is not violated: `toChannelEnabled` runs
+  // on both edges of the log, so a value that reached a record is already
+  // `boolean | null` and this expression cannot change it. What it handles is
+  // the `undefined` the OPTIONAL FIELD lets the compiler see — `activatedBy` is
+  // required on `AgentRecord` and this is not, because a row written before the
+  // field existed genuinely has no key. So a `null` arriving here still comes
+  // from the coercer; only an `undefined` that never reached the log is
+  // narrowed, and there is no reading of `undefined` other than "no value" for
+  // it to paper over.
   return intent ? intent.record.channelEnabled ?? null : null;
 }
 
