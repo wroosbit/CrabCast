@@ -1062,32 +1062,54 @@ function walk(text, node, ctx, out) {
       // without this would have turned that red into a green for exactly the
       // shape AC-3 names — the widening quietly gaining a live command.
       //
-      // THE CHAIN STOPS AT THE FIRST `||`, because that is where bash resumes:
-      // in `false && a || b`, `a` never runs and `b` does. Only `false` and a
-      // non-zero `exit` count as unable to succeed — that is `cannotSucceed`'s
-      // existing, deliberately narrow reading, and it is not widened here.
+      // THE QUESTION IS ABOUT THE CHAIN SO FAR, NOT ABOUT THE PART TO THE LEFT,
+      // and getting that wrong is what the first version of this did. `&&` and
+      // `||` are left-associative with EQUAL precedence, so `a || false && x`
+      // groups as `(a || false) && x`: when `a` succeeds, `false` never runs,
+      // the group succeeds, and `x` RUNS. Asking only whether the immediately
+      // preceding part can succeed reported `x` as dead — a false reason naming
+      // a real operand, which is worse than saying nothing. Measured against
+      // bash rather than argued from precedence:
+      //
+      //   true  || false && echo X   → X RAN
+      //   true  || exit 1 && echo X  → X RAN
+      //   false || false && echo X   → (nothing)
+      //   true  || echo b && false && echo C → (nothing)
+      //
+      // So `canSucceed` tracks the accumulated chain. A part joined by `&&`
+      // cannot run when the chain to its left cannot succeed; a part joined by
+      // `||` runs only when that chain FAILS, and nothing here can prove a
+      // chain always succeeds, so `||` is never blocked. Deliberately
+      // conservative in the direction that keeps a live command live.
+      //
+      // Only `false` and a non-zero `exit` count as unable to succeed — that is
+      // `cannotSucceed`'s existing, deliberately narrow reading, not widened.
       const blockedBy = new Array(node.parts.length).fill(null);
-      let blocker = null;
-      node.parts.forEach((part, k) => {
-        if (k > 0) {
-          if (part.op === '&&') {
-            if (blocker) blockedBy[k] = blocker;
-          } else {
-            blocker = null;                       // `||` runs whatever the left side did
-          }
+      let canSucceed = !cannotSucceed(node.parts[0].node);
+      for (let k = 1; k < node.parts.length; k += 1) {
+        const part = node.parts[k];
+        const partCanSucceed = !cannotSucceed(part.node);
+        if (part.op === '&&') {
+          if (!canSucceed) blockedBy[k] = k - 1;
+          canSucceed = canSucceed && partCanSucceed;
+        } else {
+          canSucceed = canSucceed || partCanSucceed;
         }
-        if (!blockedBy[k] && cannotSucceed(part.node)) blocker = part;
-      });
+      }
 
       node.parts.forEach((part, k) => {
         const next = node.parts[k + 1];
         let c = ctx;
-        if (blockedBy[k]) {
+        if (blockedBy[k] !== null) {
+          // Name the whole left-hand chain, because that is what cannot
+          // succeed. Naming only the adjacent operand is how the first version
+          // of this came to say something false about `a || false && x`.
+          const prefix = { start: node.parts[0].node.start, end: node.parts[blockedBy[k]].node.end };
           c = {
             ...c,
             reasons: [
               ...c.reasons,
-              `the command is joined by \`&&\` to \`${render(text, blockedBy[k].node)}\`, ` +
+              `the command is joined by \`&&\` to \`${render(text, prefix)}\`, ` +
                 'which cannot succeed, so it never runs'
             ]
           };

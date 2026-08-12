@@ -77,6 +77,19 @@
 // been a green reported as a successful red drive. The mutation that actually
 // removes the disabler and nothing else is emptying the recorded span.
 //
+// AND THE SECTION THAT EXISTS BECAUSE HAND-PICKED ROWS MISSED SOMETHING (§3c).
+// Review of this PR found that `a || false && x` was reported dead when bash
+// runs it: `&&` and `||` are left-associative with equal precedence, so that
+// groups as `(a || false) && x`, and the rule was asking about the adjacent
+// OPERAND rather than the CHAIN. Every §3b row happened to put the `&&` first,
+// so none of them reached it. §3c does not answer that with three more chosen
+// rows: it GENERATES every chain over `true`, `false` and `exit 1` to depth
+// three, joined by every combination of `&&` and `||` — 258 of them — runs each
+// through real bash, and asserts the one-directional invariant that matters:
+// the parser may stay quiet about a command bash does not run, but it must
+// never say "never runs" about one bash DOES run. §5b reinstates the defect and
+// requires §3c to go red, so that section is not a green nobody has seen fail.
+//
 // WHAT THIS SUPPLIES ITS OWN INPUT FOR, AND WHO COVERS THE REST. It rewrites
 // the invocation line in a COPY of ci.yml held in memory and never writes the
 // tree. So it proves the parser classifies those shapes correctly; it does NOT
@@ -89,6 +102,7 @@
 // Needs no daemon, no herdr, no network and no build: it imports one script and
 // reads one tracked file.
 
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -460,6 +474,109 @@ for (const row of STAY_LIVE) {
 }
 
 // ---------------------------------------------------------------------------
+// 3c. The `&&` rule against real bash, over a GENERATED chain space.
+//
+// WHY THIS SECTION EXISTS, and it is the review finding on this PR rather than
+// foresight. §3b's four rows all put the `&&` first, so none of them reached
+// `a || false && x`. That chain groups as `(a || false) && x` — `&&` and `||`
+// are left-associative with equal precedence — so when `a` succeeds, `false`
+// never runs and `x` DOES. The first version of this rule asked whether the
+// adjacent operand could succeed rather than whether the CHAIN could, and
+// reported `x` as dead by name. Fail-closed, so nothing could sneak past, but
+// the reason string was false about a real operand — and a wrong explanation
+// costs more than no explanation, which is the same defect §2's pin is about.
+//
+// HAND-PICKED ROWS ARE WHAT MISSED IT, so this does not add three more of them.
+// It generates every chain over `true`, `false` and `exit 1` up to three
+// operands deep, joined by every combination of `&&` and `||`, ending in a
+// marker command — 258 chains — runs each through REAL BASH, and compares.
+//
+// THE INVARIANT IS ONE-DIRECTIONAL, deliberately. The parser may say a command
+// runs when bash does not: it only ever blocks on what it can PROVE, and
+// `cannotSucceed` knows about exactly `false` and a non-zero `exit`. What it
+// must NEVER do is claim a command "never runs" when bash runs it. That is the
+// direction the review finding was in, and it is what this asserts.
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 3c. Every && / || chain to depth 3, against real bash ===\n');
+
+const MARKER = 'KAN354_RAN';
+const BLOCK_REASON = 'which cannot succeed, so it never runs';
+
+bashDifferential: {
+  const probe = spawnSync('bash', ['-c', `echo ${MARKER}`], { encoding: 'utf8' });
+  if (probe.error || probe.status !== 0 || !probe.stdout.includes(MARKER)) {
+    check(
+      false,
+      'NOT RUN — bash is unavailable, so this section asserted nothing',
+      'this is not a pass. The chain space is unverified on this machine'
+    );
+    break bashDifferential;
+  }
+
+  const OPERANDS = ['true', 'false', 'exit 1'];
+  const OPS = ['&&', '||'];
+  const chains = [];
+  for (let depth = 1; depth <= 3; depth += 1) {
+    const build = (parts, ops) => {
+      if (parts.length === depth) {
+        for (const tail of OPS) {
+          chains.push({ text: parts.map((p, i) => (i ? `${ops[i - 1]} ${p}` : p)).join(' ') + ` ${tail} echo ${MARKER}` });
+        }
+        return;
+      }
+      for (const p of OPERANDS) {
+        if (!parts.length) build([p], []);
+        else for (const op of OPS) build([...parts, p], [...ops, op]);
+      }
+    };
+    build([], []);
+  }
+
+  let compared = 0;
+  let blockedCount = 0;
+  const wrong = [];
+
+  for (const c of chains) {
+    const ran = spawnSync('bash', ['-c', c.text], { encoding: 'utf8' }).stdout.includes(MARKER);
+
+    const a = analyzeRunBody(`${c.text}\n`);
+    if (a.parseError) {
+      wrong.push(`${c.text} — parseError ${a.parseError}`);
+      continue;
+    }
+    const cls = a.classify(c.text.indexOf(`echo ${MARKER}`));
+    const saysNeverRuns =
+      cls.kind === 'command' && (cls.reasons ?? []).some((r) => r.includes(BLOCK_REASON));
+
+    compared += 1;
+    if (saysNeverRuns) blockedCount += 1;
+    // The one-directional invariant: never claim "never runs" about something
+    // bash runs. The converse — bash not running it while the parser stays
+    // quiet — is the conservative direction and is allowed.
+    if (saysNeverRuns && ran) wrong.push(`${c.text} — parser says it never runs; bash RAN it`);
+  }
+
+  check(
+    compared === chains.length,
+    `(setup) every generated chain parsed and was compared`,
+    `${compared}/${chains.length}`
+  );
+  check(
+    blockedCount > 0,
+    '(vacuity) the `&&` rule fired on some of them — a rule that blocked nothing would pass this section trivially',
+    `${blockedCount} of ${compared} chains reported "never runs"`
+  );
+  check(
+    wrong.length === 0,
+    'NO chain is reported "never runs" while bash runs it',
+    wrong.length === 0
+      ? `${compared} chains agree with bash in the direction that matters`
+      : `${wrong.length} disagreement(s): ${wrong.slice(0, 5).join(' | ')}`
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 4. RED DRIVE A — starve the widening.
 //
 // Put `skipParens(text, i + 2)` back and require §1, §2 and §3's parse
@@ -571,8 +688,8 @@ const SWALLOW = [
   {
     id: 'false-and',
     mechanism: 'the `&&` short-circuit added by KAN-354 is removed',
-    find: '        if (!blockedBy[k] && cannotSucceed(part.node)) blocker = part;',
-    replace: '        if (false && !blockedBy[k] && cannotSucceed(part.node)) blocker = part;'
+    find: '          if (!canSucceed) blockedBy[k] = k - 1;',
+    replace: '          if (false && !canSucceed) blockedBy[k] = k - 1;'
   },
   {
     id: 'or-true',
@@ -613,6 +730,75 @@ for (const s of SWALLOW) {
           'so it is not measuring what it claims'
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// 5b. RED DRIVE for §3c — reinstate the bug the review found.
+//
+// §5's `false-and` mutation starves the blocking entirely, which makes §3 go
+// red and leaves §3c green: a rule that blocks NOTHING never claims anything
+// "never runs", so it cannot disagree with bash in the direction §3c watches.
+// §3c therefore needs the opposite mutation — the ORIGINAL defect, which asked
+// whether the adjacent operand could succeed instead of whether the chain
+// could. Restoring it must make §3c report disagreements, or §3c is not the
+// thing that would have caught the review finding.
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 5b. RED DRIVE: the reviewed defect reinstated — §3c must go red ===\n');
+
+chainBug: {
+  const mutant = mutator.mutateScript(
+    'chain-asks-about-the-part',
+    PARSER,
+    [
+      {
+        find: '          canSucceed = canSucceed || partCanSucceed;',
+        replace: '          canSucceed = partCanSucceed;'
+      }
+    ]
+  );
+  if (!mutant) break chainBug;
+
+  const buggy = await import(`file://${mutant}`);
+  const probe = spawnSync('bash', ['-c', `echo ${MARKER}`], { encoding: 'utf8' });
+  if (probe.error || probe.status !== 0) {
+    check(false, 'NOT RUN — bash is unavailable, so this red drive asserted nothing', 'not a pass');
+    break chainBug;
+  }
+
+  // The chain the review found, plus the one that must keep blocking either way.
+  const cases = [
+    { text: `true || false && echo ${MARKER}`, mustRun: true },
+    { text: `true || exit 1 && echo ${MARKER}`, mustRun: true },
+    { text: `false || false && echo ${MARKER}`, mustRun: false }
+  ];
+
+  const falseDeaths = [];
+  let stillBlocksTheRightOne = false;
+
+  for (const c of cases) {
+    const ran = spawnSync('bash', ['-c', c.text], { encoding: 'utf8' }).stdout.includes(MARKER);
+    const cls = buggy.analyzeRunBody(`${c.text}\n`).classify(c.text.indexOf(`echo ${MARKER}`));
+    const saysNeverRuns =
+      cls.kind === 'command' && (cls.reasons ?? []).some((r) => r.includes(BLOCK_REASON));
+
+    check(ran === c.mustRun, `(setup) bash ${c.mustRun ? 'RUNS' : 'does not run'} \`${c.text}\``, `ran=${ran}`);
+    if (saysNeverRuns && ran) falseDeaths.push(c.text);
+    if (saysNeverRuns && !ran) stillBlocksTheRightOne = true;
+  }
+
+  check(
+    falseDeaths.length === 2,
+    'REINSTATED: the buggy rule calls two chains dead that bash runs — §3c\'s invariant goes red',
+    falseDeaths.length
+      ? falseDeaths.map((t) => `\`${t}\``).join(' and ')
+      : 'it did NOT — §3c would not have caught the defect this section reproduces'
+  );
+  check(
+    stillBlocksTheRightOne,
+    '…while `false || false && …` stays blocked under both rules, so the mutation is not just "block nothing"',
+    'a mutation that merely disabled the rule would pass §3c trivially'
+  );
 }
 
 // ---------------------------------------------------------------------------
