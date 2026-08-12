@@ -235,7 +235,7 @@ capacity:
   cap terms: cpu allows 2500, memory allows 13376  ·  headroom terms: count allows 2, cpu allows 1698, load would allow 1570 (reported only), memory allows 6895
   io/memory stall: 0% io (worst of /proc/pressure io and memory, `full avg10`) against a 50% threshold — under, so it does not bind
   machine: 4 cores, 1.3 in use over 3s to 2026-08-07T22:47:54.292Z, load 1.43, 9256 MB available of 15737 MB
-  agent cost: 650 MB (seed), 0.75 core (seed)
+  agent cost: 800 MB (seed), 0.75 core (seed)
   starts in flight: 1 of 1 charged against the CPU window, costing 0 core(s)
     1 of 1 start(s) began after the CPU window opened at 2026-08-11T15:40:52.657Z (3s, closed 2026-08-11T15:40:55.658Z), so the 1.86 cores it observed cannot contain 1 agent(s) of work — weighted by the share of the window each was absent for, and charged 1 × 0.001 core/agent = 0 cores
 
@@ -513,23 +513,23 @@ started past the cap on purpose (--override) at 2026-08-05T14:50:46.743Z —
   at capacity: 0/0 charged agents, room for 0 more (4 cores, load 2.23, 9.4 GiB available; bound by cap)
   cap 0 (bound by configured) · running 0 · exempt 0 · headroom 0 (bound by cap) · AT CAPACITY
   reason: 0 charged agents are already running against a cap of 0
-  cap terms: cpu allows 3, memory allows 20  ·  headroom terms: count allows 0, cpu allows 2, load would allow 2 (reported only), memory allows 10
+  cap terms: cpu allows 3, memory allows 16  ·  headroom terms: count allows 0, cpu allows 2, load would allow 2 (reported only), memory allows 8
   io/memory stall: 0% io (worst of /proc/pressure io and memory, `full avg10`) against a 50% threshold — under, so it does not bind
   machine: 4 cores, 1.33 in use over 3s to 2026-08-07T22:48:00.137Z, load 1.32, 9236 MB available of 15737 MB
-  agent cost: 650 MB (seed), 0.75 core (seed)
+  agent cost: 800 MB (seed), 0.75 core (seed)
   starts in flight: 0 of 0 charged against the CPU window, costing 0 core(s)
 
 the derivation the override bypassed:
 machine: 4 cores, 15.4 GiB RAM (9.0 GiB available), load average 1.32
 cpu in use: 1.33 of 4 cores, measured over 3s ending 2026-08-07T22:48:00.137Z — this is the CPU-side bound; the load average above is reported and does not gate
 starts in flight: 0 core(s) charged against the CPU window — no agent started after the CPU window opened at 2026-08-11T15:40:58.759Z, so this observation has already priced every agent it is being asked about
-agent cost: 650 MB resident (seed), 0.75 core while active (seed)
-  no live measurement; seed figures are the 2026-07-31 constants, not a measurement of this fleet
+agent cost: 800 MB resident (seed), 0.75 core while active (seed)
+  no live measurement; seed figures are constants re-derived on 2026-08-12, not a measurement of this fleet
 io/memory stall: 0.00% io, 0.00% memory (/proc/pressure `full avg10`, the share of the last 10s in which every non-idle task was stalled); worst is 0.00% on io, against a 50% threshold — under, so this term does not bind
 reserved for you: 1 core(s), 2.3 GiB
 cap: 0 charged agents (set by CRABCAST_MAX_AGENTS, derivation skipped)
 running: 0 charged agent(s)
-headroom: 0 more — count allows 0 (0 cap − 0 running), cpu allows 2 ((4 cores − 1 reserved − 1.33 in use) ÷ 0.75), load would allow 2 ((4 cores − 1 reserved − 1.32 load) ÷ 0.75; reported, does not bind), memory allows 10 ((9.0 GiB available − 2.3 GiB reserved) ÷ 650 MB); bound by cap
+headroom: 0 more — count allows 0 (0 cap − 0 running), cpu allows 2 ((4 cores − 1 reserved − 1.33 in use) ÷ 0.75), load would allow 2 ((4 cores − 1 reserved − 1.32 load) ÷ 0.75; reported, does not bind), memory allows 8 ((9.0 GiB available − 2.3 GiB reserved) ÷ 800 MB); bound by cap
 
 other fields in the daemon's response:
   channelEnabled: false
@@ -653,13 +653,13 @@ Refusing to activate /tmp/kan174/cap/notes: at capacity — 0 charged agents are
 machine: 4 cores, 15.4 GiB RAM (9.0 GiB available), load average 1.53
 cpu in use: 1.40 of 4 cores, measured over 3s ending 2026-08-07T22:48:06.131Z — this is the CPU-side bound; the load average above is reported and does not gate
 starts in flight: 0 core(s) charged against the CPU window — no agent started after the CPU window opened at 2026-08-11T15:41:05.081Z, so this observation has already priced every agent it is being asked about
-agent cost: 650 MB resident (seed), 0.75 core while active (seed)
-  no live measurement; seed figures are the 2026-07-31 constants, not a measurement of this fleet
+agent cost: 800 MB resident (seed), 0.75 core while active (seed)
+  no live measurement; seed figures are constants re-derived on 2026-08-12, not a measurement of this fleet
 io/memory stall: 0.00% io, 0.00% memory (/proc/pressure `full avg10`, the share of the last 10s in which every non-idle task was stalled); worst is 0.00% on io, against a 50% threshold — under, so this term does not bind
 reserved for you: 1 core(s), 2.3 GiB
 cap: 0 charged agents (set by CRABCAST_MAX_AGENTS, derivation skipped)
 running: 0 charged agent(s)
-headroom: 0 more — count allows 0 (0 cap − 0 running), cpu allows 2 ((4 cores − 1 reserved − 1.40 in use) ÷ 0.75), load would allow 1 ((4 cores − 1 reserved − 1.53 load) ÷ 0.75; reported, does not bind), memory allows 10 ((9.0 GiB available − 2.3 GiB reserved) ÷ 650 MB); bound by cap
+headroom: 0 more — count allows 0 (0 cap − 0 running), cpu allows 2 ((4 cores − 1 reserved − 1.40 in use) ÷ 0.75), load would allow 1 ((4 cores − 1 reserved − 1.53 load) ÷ 0.75; reported, does not bind), memory allows 8 ((9.0 GiB available − 2.3 GiB reserved) ÷ 800 MB); bound by cap
 Deactivate an agent to make room, or pass override: true to start it anyway (the override is recorded with these numbers).
 Nothing running is below priority 1, so there is nothing this activation may stand down. Running: nothing is running that could be stood down. Preemption is strictly-greater: an agent may not displace one of its own priority.
   refused by:    capacity
@@ -671,10 +671,10 @@ capacity:
   at capacity: 0/0 charged agents, room for 0 more (4 cores, load 2.64, 9.3 GiB available; bound by cap)
   cap 0 (bound by configured) · running 0 · exempt 0 · headroom 0 (bound by cap) · AT CAPACITY
   reason: 0 charged agents are already running against a cap of 0
-  cap terms: cpu allows 3, memory allows 20  ·  headroom terms: count allows 0, cpu allows 2, load would allow 1 (reported only), memory allows 10
+  cap terms: cpu allows 3, memory allows 16  ·  headroom terms: count allows 0, cpu allows 2, load would allow 1 (reported only), memory allows 8
   io/memory stall: 0% io (worst of /proc/pressure io and memory, `full avg10`) against a 50% threshold — under, so it does not bind
   machine: 4 cores, 1.4 in use over 3s to 2026-08-07T22:48:06.131Z, load 1.53, 9167 MB available of 15737 MB
-  agent cost: 650 MB (seed), 0.75 core (seed)
+  agent cost: 800 MB (seed), 0.75 core (seed)
   starts in flight: 0 of 0 charged against the CPU window, costing 0 core(s)
 [exit 1]
 ```
