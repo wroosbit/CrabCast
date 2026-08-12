@@ -639,10 +639,16 @@ function lexShell(text) {
         // arithmetic runs no commands, so nothing inside it is a command that
         // could be mistaken for a live one.
         //
-        // THE NEAREST LIMIT: an UNTERMINATED `$((` still runs to end-of-text,
-        // exactly as an unterminated `$(` does, and the block then fails to
-        // parse. That is the same fail-closed ending as before and is what
-        // boundary 3's "an unparsable block" row already covers.
+        // THE NEAREST LIMIT, measured rather than reasoned — the first draft of
+        // this comment said an unterminated `$((` makes the block fail to
+        // parse, and that is WRONG. `skipParens` runs to end-of-text, so
+        // `ms=$(( t1 - t0` swallows the whole rest of the block into one word:
+        // the block PARSES, as a single assignment, and anything after the
+        // unterminated `$((` reads as `argument` — "an argument to another
+        // command, not the command itself". Still fail-closed, since a caller
+        // needs position 'command' with an empty `disabled`, but closed by
+        // swallowing rather than by the unparsable-block row of boundary 3.
+        // scripts/verify-arithmetic-expansion-is-read.mjs §1b asserts it.
         const e = skipParens(text, i + 1);
         word.text += text.slice(i, e);
         i = e;

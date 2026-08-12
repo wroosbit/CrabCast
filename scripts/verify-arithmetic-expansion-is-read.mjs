@@ -232,6 +232,48 @@ for (const s of SHAPES) {
 }
 
 // ---------------------------------------------------------------------------
+// 1b. The shapes the fixture set above does not reach, and the one that
+//     corrected this change's own comment.
+//
+// The first draft of the note beside the fix in ci-workflow.mjs said an
+// UNTERMINATED `$((` makes the block fail to parse. It does not: `skipParens`
+// runs to end-of-text, so the rest of the block is swallowed into one word, the
+// block parses as a single assignment, and what follows reads as an argument.
+// Still fail-closed — a caller needs position 'command' with an empty
+// `disabled` — but closed by a different mechanism than the sentence claimed.
+// Asserted here because a comment nothing checks is how the next one drifts.
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 1b. Arithmetic shapes the §2/§3 fixtures do not reach ===\n');
+
+{
+  const UNTERMINATED = 'ms=$(( t1 - t0\nnode x\n';
+  const a = analyzeRunBody(UNTERMINATED);
+  check(
+    a.parseError === null,
+    'an UNTERMINATED `$((` does NOT fail to parse — it swallows the rest of the block into one word',
+    a.parseError === null ? 'parseError: null' : `parseError: ${a.parseError} — the comment beside the fix says otherwise`
+  );
+  const cls = a.parseError === null ? a.classify(UNTERMINATED.indexOf('node x')) : null;
+  check(
+    cls?.kind === 'argument',
+    '…and the command after it reads as `argument`, so it is still fail-closed',
+    cls ? `${cls.kind}: ${cls.note ?? ''}` : 'not classified'
+  );
+}
+
+for (const s of [
+  { what: 'arithmetic spanning several lines', text: 'ms=$((\n  t1 - t0\n))\nnode x\n' },
+  { what: 'a C-style `for (( … ))` loop header', text: 'for ((i=0; i<3; i++)); do\n  node x\ndone\n' },
+  { what: 'arithmetic containing `${#x}`', text: 'n=$(( ${#PATH} + 1 ))\nnode x\n' },
+  { what: 'two arithmetic expansions on one line', text: 'a=$(( 1 + 1 )); b=$(( 2 + 2 ))\nnode x\n' },
+  { what: 'arithmetic beside a real command substitution', text: 'a=$(( 1 + 1 ))\nb=$(date +%s)\nnode x\n' }
+]) {
+  const a = analyzeRunBody(s.text);
+  check(a.parseError === null, `parses: ${s.what}`, a.parseError ?? 'parseError: null');
+}
+
+// ---------------------------------------------------------------------------
 // 2. The real workflow, with real arithmetic added to the real step.
 //
 // §1 asks the parser about a string. This asks it about `.github/workflows/
@@ -376,6 +418,48 @@ for (const row of DISABLED) {
 }
 
 // ---------------------------------------------------------------------------
+// 3b. The other direction: the `&&` short-circuit must not OVER-block.
+//
+// §3 guards against the change gaining a live command. This guards against it
+// LOSING one, which is the same defect wearing the other coat: a rule that
+// blocked too much would report genuinely gating invocations as disabled, and
+// the loudest version of that — `false && a || node …`, where bash really does
+// run the invocation — is exactly the case the chain logic exists to get right.
+//
+// These rows fail in the safe direction if they break (a guard goes red rather
+// than green), which is precisely why they need asserting: nothing else in this
+// suite would notice a parser that had quietly become too strict, and a check
+// people route around is a check that gets weakened.
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 3b. …and the short-circuit does not over-block: these stay LIVE ===\n');
+
+const STAY_LIVE = [
+  { id: 'or-resumes', what: '`false && echo a || CMD` — `||` resumes, so it really runs', lines: [ARITHMETIC, `false && echo a || ${COMMAND}`] },
+  { id: 'true-and', what: '`true && CMD`', lines: [ARITHMETIC, `true && ${COMMAND}`] },
+  { id: 'cmd-and', what: '`echo hi && CMD`', lines: [ARITHMETIC, `echo hi && ${COMMAND}`] },
+  { id: 'and-trailer', what: '`CMD && echo done`', lines: [ARITHMETIC, `${COMMAND} && echo done`] }
+];
+
+for (const row of STAY_LIVE) {
+  const text = fixture(row.lines);
+  if (!text) {
+    check(false, `${row.id}: fixture built`, 'the invocation line was not replaced');
+    continue;
+  }
+  const { found, live } = readFixture(text);
+  check(
+    live.length === 1,
+    `${row.id}: ${row.what} — STILL live`,
+    live.length === 1
+      ? `ci.yml:${live[0].line}`
+      : `${live.length} live — the \`&&\` rule is over-blocking: ${found
+          .map((f) => `${f.position}${f.disabled.length ? ` (${f.disabled[0]})` : ''}`)
+          .join('; ')}`
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 4. RED DRIVE A — starve the widening.
 //
 // Put `skipParens(text, i + 2)` back and require §1, §2 and §3's parse
@@ -391,8 +475,8 @@ starveA: {
     PARSER,
     [
       {
-        find: 'row already covers.\n        const e = skipParens(text, i + 1);',
-        replace: 'row already covers.\n        const e = skipParens(text, i + 2);'
+        find: '§1b asserts it.\n        const e = skipParens(text, i + 1);',
+        replace: '§1b asserts it.\n        const e = skipParens(text, i + 2);'
       }
     ]
   );
