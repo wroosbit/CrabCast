@@ -398,6 +398,20 @@ function assertCases(mod, label) {
     'vacuity: the CONTROL row was readable — the fixtures are unreadable by construction, not by accident',
     scan.unreadable.map((u) => u.line).join(',')
   );
+  // THE FOURTH GUARD, AND IT WAS FOUND BY RUNNING THIS FILE AGAINST THE
+  // PRE-FIX BUILD RATHER THAN BY READING IT. `EXPECTED` is derived from the
+  // document's table, so on a tree where that table does not exist it is EMPTY
+  // — and every per-case standing comparison below silently became
+  // `undefined === undefined` and PASSED. Four assertions reported "standing is
+  // undefined — standing=undefined" as a pass. §1 still went red, so the run
+  // failed; but the section that is supposed to hold the classifier was hollow,
+  // which is this epic's own defect sitting inside its proof.
+  const underived = CASES.filter((c) => typeof c.standing !== 'string' || !c.standing.length);
+  say(
+    underived.length === 0,
+    'vacuity: every case carries a standing EXPECTATION derived from the document — an absent table must not turn these into undefined === undefined',
+    underived.length ? `${underived.length} case(s) with no expectation: ${underived.map((c) => c.name).join(', ')}` : `${CASES.length} expectations`
+  );
 
   for (let i = 0; i < CASES.length; i++) {
     const c = CASES[i];
