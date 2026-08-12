@@ -343,13 +343,22 @@ jobs:
       #                                      `set -euo pipefail`, `time` or
       #                                      `FOO=1 node …` is one people route
       #                                      around. Its section 2 loads the
-      #                                      PRE-FIX parser out of
-      #                                      `origin/main` and shows the eight
+      #                                      PRE-FIX parser out of the PINNED
+      #                                      commit before KAN-148 (dff2422)
+      #                                      and shows the eight
       #                                      shapes reading as LIVE there, so
       #                                      the greens measure a change rather
       #                                      than restate an intent; that is
       #                                      what the `fetch-depth: 0` above is
-      #                                      for. It restores ci.yml in a
+      #                                      for. This line read `origin/main`
+      #                                      until KAN-361. KAN-354 pinned the
+      #                                      ref and updated the comment at the
+      #                                      top of this job; this second
+      #                                      description of the same mechanism,
+      #                                      200 lines away, went on saying the
+      #                                      old thing. One mechanism described
+      #                                      in two places drifts in one of
+      #                                      them — see docs/moving-baselines.md. It restores ci.yml in a
       #                                      finally and on signals; it MARKS
       #                                      the file while it is mutated, so
       #                                      residue from a run that was
