@@ -444,7 +444,10 @@ const PROOF_DEFENCES = [
       'more mutations: §6d is §6a one response over, and §6e promotes a CONDITIONAL ' +
       '`activate_response` field to GUARANTEED in the document — a defect no field-set comparison ' +
       'can see, because no field is added or removed, and the reason that branch table carries two ' +
-      'lists rather than one. SEAM: this asserts the document AGREES ' +
+      'lists rather than one. §6f is the review\'s own finding kept as a guard: the document section ' +
+      'that states WHERE THE CONTRACT STOPS was prose, and deleting a covered surface from it left ' +
+      'this proof entirely green — the boundary is declared on both sides now, and both legs are ' +
+      'watched failing (the document losing a surface, and a declaration no surface claims). SEAM: this asserts the document AGREES ' +
       'with the daemon\'s own provenance legend; whether a bucket is the RIGHT bucket — durable ' +
       'fields really surviving a restart, observed ones really moving with the census — is ' +
       'verify-state-read-echoes-config §7, which makes each bucket demonstrate its claimed ' +

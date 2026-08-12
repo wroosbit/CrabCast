@@ -1090,6 +1090,61 @@ export const DAEMON_STATUS_CONTRACT_FIELDS = {
   unreadableRecordsTotal: { bucket: 'derived' }
 } as const satisfies FieldTable;
 
+// --------------------------------------------------------- the boundary ----
+
+/**
+ * WHICH RESPONSES THIS CONTRACT COVERS — the machine-readable half of §10 of
+ * `docs/read-path-contract.md` (KAN-287, hardened on review).
+ *
+ * WHY THIS EXISTS AS DATA. §10 opens by saying *"a contract that does not say
+ * where it stops is a claim outrunning its mechanism"*, and in its first draft
+ * it was exactly that: four rows of prose that no check read. Deleting the
+ * `agent_status` row left `verify-read-contract.mjs` entirely green — so the
+ * section whose whole purpose is to stop a reader inferring the boundary could
+ * silently disagree with it. That is this ticket's own thesis applied to its own
+ * deliverable, and it was found by starving the table rather than by reading it.
+ *
+ * Each entry names the declarations that back the surface, and
+ * `verify-read-contract.mjs` §1 asserts three things: the document's Covered
+ * table lists exactly these keys, every declaration named here exists, and every
+ * response-level declaration is claimed by exactly one surface. So a response
+ * added to this file and not to §10 is red, and a row deleted from §10 is red.
+ */
+export const COVERED_SURFACES = {
+  list_agents: ['LIST_AGENTS_FIELDS', 'LIST_AGENTS_REFUSAL_FIELDS'],
+  agent_status: ['AGENT_STATUS_FIELDS'],
+  activate_response: ['ACTIVATE_RESPONSE_FIELDS'],
+  daemon_status: ['DAEMON_STATUS_CONTRACT_FIELDS']
+} as const;
+
+/**
+ * The surfaces §10 DISCLOSES as uncovered, listed so the disclosure itself
+ * cannot drift.
+ *
+ * READ WHAT THIS ASSERTS, BECAUSE IT IS NARROWER THAN IT LOOKS AND THE
+ * DIFFERENCE IS THE WHOLE POINT OF THE SECTION. The proof holds this list and
+ * the document's Not-covered table to each other — membership consistency, in
+ * both directions. It does **NOT** assert that the list is COMPLETE: nothing
+ * here enumerates every response CrabCast can emit, and a tenth uncovered
+ * surface could exist tomorrow with nothing going red.
+ *
+ * So this guard stops the disclosure rotting; it does not turn the disclosure
+ * into a proof of exhaustiveness. Claiming otherwise would be the same defect
+ * one level further up — an artifact whose sentence covers more than its
+ * mechanism — which is the thing §10 exists to prevent, and it is said in the
+ * document in these words rather than only here.
+ */
+export const UNCOVERED_SURFACES = [
+  'deactivate_response',
+  'configure_response',
+  'forget_response',
+  'send_to_agent',
+  'pty_init',
+  'pty_input',
+  'pty_resize',
+  'tail_agent'
+] as const;
+
 // ------------------------------------------------------------- the value sets
 
 /**
@@ -1241,6 +1296,15 @@ export function readContractCanonical(): string {
       .join(';');
 
   return [
+    // THE BOUNDARY IS PART OF THE DIGEST, and it has to be: if coverage could
+    // change without moving the digest, §10 could gain or lose a surface with no
+    // version row and nothing to notice — which is the defect the digest exists
+    // to make loud, on the one section that is about where the contract stops.
+    `covered{${Object.keys(COVERED_SURFACES)
+      .sort()
+      .map((s) => `${s}:${[...COVERED_SURFACES[s as keyof typeof COVERED_SURFACES]].sort().join('|')}`)
+      .join(';')}}`,
+    `uncovered{${[...UNCOVERED_SURFACES].sort().join('|')}}`,
     `list_agents{${table(LIST_AGENTS_FIELDS)}}`,
     `list_agents_refusal{${table(LIST_AGENTS_REFUSAL_FIELDS)}}`,
     `agent_status{${table(AGENT_STATUS_FIELDS)}}`,

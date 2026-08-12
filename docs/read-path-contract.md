@@ -149,7 +149,7 @@ would be N chances for the copy that goes stale.
 | 2 | 2026-08-11 | KAN-263 — five fields added to `capacity`: `startsCharged`, `startsConsidered`, `startsChargeCores`, `startsChargeBasis`, `startsChargeBecause`, and a new closed vocabulary [startsChargeBasis](#startschargebasis). **Additive: no documented field changed meaning, was removed, or changed type.** They carry what the CPU-side reading could not have contained — the term that makes `cpuBusyCores` and `headroomByCpu` reconcile. A consumer that ignores them reads the same numbers it read at version 1 and is not wrong, only unable to explain a refusal | `c17cf3570018` |
 | 3 | 2026-08-11 | KAN-281 — one field added to `agent_status`: [channelEnabled](#channelenabled), on three of its four branches, saying whether the spawn an agent is running from was channel-enabled. **Additive: no documented field changed meaning, was removed, or changed type.** `durable`, sourced from the activation that made the decision rather than recomputed from config at response time, so it survives a restart. The same field is on `activate_response`, which this document does not otherwise cover — the field's own section says so and names what holds that half. Note `null` there means *no spawn to be about*, never *no channel* | `264ecca9f603` |
 | 4 | 2026-08-11 | KAN-302 — one row shape added, [UnreadableRecord](#unreadablerecord), and two fields carrying it on each of `list_agents` and `daemon_status`: `unreadableRecords` and `unreadableRecordsTotal`. **Additive on the wire: no documented field changed meaning, was removed, or changed type.** What changed is BEHAVIOUR the document did not previously describe — a registry row this daemon cannot read used to stop it starting, and now it starts, skips the row and publishes it here. A consumer that ignores both fields reads exactly what it read at version 3, and is not wrong; it is unable to tell a registry that is wholly readable from one that is not, which before this version no consumer could do at all | `f8716f6b789e` |
-| 5 | 2026-08-11 | KAN-287 — **a third response is now covered**: [activate_response](#8-activate_response), field by field over eleven branches, with two new row shapes ([PaneOccupant](#paneoccupant), [ProvisionedArtifact](#provisionedartifact)), three new blocks ([PreemptionOffer](#preemptionoffer), [Preempted](#preempted), [CapacityOverride](#capacityoverride)) and five new closed vocabularies ([activateRefused](#activaterefused), [activateRefusedBy](#activaterefusedby), [resumeCause](#resumecause), [artifactKind](#artifactkind), [artifactOrigin](#artifactorigin)). **Additive on the wire: not one byte of any response changed** — this version describes a surface that was already there and was published nowhere. What is new is the document's own [§10](#10-the-boundary--which-responses-this-contract-covers-and-which-it-does-not), which states which responses this contract covers **and which it does not**, so the boundary is readable rather than inferred from what happens to be listed. A consumer that ignores all of it reads exactly what it read at version 4 | `6ccf716ac362` |
+| 5 | 2026-08-11 | KAN-287 — **a third response is now covered**: [activate_response](#8-activate_response), field by field over eleven branches, with two new row shapes ([PaneOccupant](#paneoccupant), [ProvisionedArtifact](#provisionedartifact)), three new blocks ([PreemptionOffer](#preemptionoffer), [Preempted](#preempted), [CapacityOverride](#capacityoverride)) and five new closed vocabularies ([activateRefused](#activaterefused), [activateRefusedBy](#activaterefusedby), [resumeCause](#resumecause), [artifactKind](#artifactkind), [artifactOrigin](#artifactorigin)). **Additive on the wire: not one byte of any response changed** — this version describes a surface that was already there and was published nowhere. What is new is the document's own [§10](#10-the-boundary--which-responses-this-contract-covers-and-which-it-does-not), which states which responses this contract covers **and which it does not**, so the boundary is readable rather than inferred from what happens to be listed. A consumer that ignores all of it reads exactly what it read at version 4. **§10's two tables are themselves declared and reconciled** — `COVERED_SURFACES` / `UNCOVERED_SURFACES` — so the boundary cannot drift from the contract it describes | `0af7ded4dafc` |
 
 The digest is `sha256(readContractCanonical())`, first 12 hex characters, over
 `src/read-contract.ts`'s declarations. **What it buys:** changing a documented
@@ -1361,6 +1361,8 @@ was consumed and undescribed, and nothing said so.
 
 ### Covered — documented here, declared in `src/read-contract.ts`, and reconciled against a real daemon by `verify-read-contract.mjs`
 
+<!-- contract-covered-surfaces -->
+
 | response | where | held how |
 | --- | --- | --- |
 | `list_agents` | [§4](#4-list_agents), rows in [§5](#5-the-rows), blocks in [§6](#6-the-blocks) | document ↔ declaration ↔ wire, both directions; row buckets also checked against the live `provenance` legend |
@@ -1376,15 +1378,20 @@ notice promise applies to them.** They are listed rather than left silent
 because the listing is the only thing that makes the covered half readable as a
 boundary rather than as a habit.
 
+<!-- contract-uncovered-surfaces -->
+
 | response | what a consumer does with it | what holds it instead |
 | --- | --- | --- |
 | `deactivate_response` | reads `wasRunning` and `state` to tell a stand-down from a no-op | `verify-idempotent-lifecycle.mjs` — behaviour, not shape |
 | `configure_response` | reads the echo back and `configVersion` for compare-and-set | `verify-config-echo-contract.mjs`, `verify-reconfiguration-refuses.mjs` |
 | `forget_response` | reads the refusal when a live pane blocks the forget | `verify-refuses-occupied-directory.mjs` |
-| **`send_to_agent`'s verdict** | **branches on it** — `delivered` / `not-delivered` / `unverifiable`, plus `refused` on the response | `verify-send-confirms-delivery.mjs` and `-live.mjs`. It is a TypeScript union in `src/delivery.ts` with careful prose, and it is **published nowhere**: no document, no `VALUE_SETS`, nothing reconciled |
-| the pty responses | `pty_init`, `pty_input`, `pty_resize` — a terminal client reads all three | `verify-pty-payload-refusal.mjs`, `verify-pty-init-rejects-unknown-session.mjs` |
+| `send_to_agent` | **branches on its verdict** — `delivered` / `not-delivered` / `unverifiable`, plus `refused` on the response | `verify-send-confirms-delivery.mjs` and `-live.mjs`. It is a TypeScript union in `src/delivery.ts` with careful prose, and it is **published nowhere**: no document, no `VALUE_SETS`, nothing reconciled |
+| `pty_init` | a terminal client opens a session | `verify-pty-init-rejects-unknown-session.mjs` |
+| `pty_input` | writes to it | `verify-pty-payload-refusal.mjs` |
+| `pty_resize` | resizes it | `verify-pty-payload-refusal.mjs` |
 | `tail_agent` | reads the tail and which source answered | `verify-tail-asks-every-source.mjs` |
-| the rest of `daemon_status` | `pid`, `build`, `freshness`, the agent counts | `verify-daemon-provenance.mjs`, `verify-daemon-status-over-mcp.mjs` |
+
+**The rest of `daemon_status` is uncovered too** — `pid`, `build`, `freshness` and the agent counts — and it is not a row above because three of its fields *are* covered, which no single row can say. `verify-daemon-provenance.mjs` and `verify-daemon-status-over-mcp.mjs` hold it.
 
 **Read that table for what it says and not for more.** Every one of those
 surfaces has a proof, and several have better prose than some of what is
@@ -1398,6 +1405,31 @@ the exact hazard [§9](#9-the-closed-vocabularies)'s must-ignore clause exists t
 manage on the surfaces that do publish theirs. It is tracked as
 [KAN-329](https://wroosbit.atlassian.net/browse/KAN-329) and is not closed by
 version 5.
+
+### Both tables above are checked, and here is exactly what that check is worth
+
+**The two tables are not prose.** `src/read-contract.ts` declares
+`COVERED_SURFACES` and `UNCOVERED_SURFACES`, and `verify-read-contract.mjs` §1
+holds them to the tables above in both directions. So:
+
+* **Deleting a row from either table is red.** That is not hypothetical — the
+  first draft of this section *was* prose, and deleting the `agent_status` row
+  from the Covered table left the whole proof green. The section whose purpose
+  is to stop a reader inferring the boundary could silently disagree with it.
+* **Adding a response to `src/read-contract.ts` without a row here is red**, in
+  both directions: every response-level declaration must be claimed by exactly
+  one Covered surface, and every declaration a surface names must exist.
+* **The boundary is in the version digest**, so coverage cannot change without
+  the digest moving and the version table noticing.
+
+**And here is what it is NOT, stated because this is the section where a
+sentence outrunning its mechanism would be worst.** The Not-covered table is
+checked for *membership consistency* — the list and the document agree — and
+**not for completeness**. Nothing enumerates every response CrabCast can emit,
+so a ninth uncovered surface could exist tomorrow and nothing here would go red.
+The Covered half is the half that is mechanically complete, and it is the half a
+consumer is trusting. Read the Not-covered table as *"these are known to be
+uncovered"*, never as *"these are the only ones."*
 
 ### The rule for what belongs here
 

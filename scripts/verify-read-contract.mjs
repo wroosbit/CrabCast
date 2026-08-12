@@ -76,6 +76,9 @@
 //        6e. a CONDITIONAL `activate_response` field documented as GUARANTEED.
 //            No field is added or removed, so every check that compares field
 //            sets stays green; only the two-list branch table sees it
+//        6f. a covered surface deleted from §10's boundary table — the starve
+//            the reviewer ran, which printed ALL CHECKS PASSED before the
+//            boundary was data on both sides
 //
 // ---------------------------------------------------------------------------
 // WHAT THIS SCRIPT SUPPLIES ITSELF, AND WHAT THAT LEAVES UNCOVERED
@@ -333,6 +336,27 @@ function parseActivateBranches(text) {
   return branches;
 }
 
+/**
+ * §10's two boundary tables — the first backticked name in each row (KAN-287,
+ * hardened on review).
+ *
+ * WHY THIS PARSER EXISTS AT ALL. §10 says *"a contract that does not say where
+ * it stops is a claim outrunning its mechanism"*, and in the first draft it was
+ * one: four rows of prose no check read. Deleting the `agent_status` row from
+ * the Covered table left this entire proof green. The section is now data on
+ * both sides and this is the half that reads the document.
+ */
+function parseBoundary(text, anchor) {
+  const m = new RegExp(`<!--\\s*contract-${anchor}-surfaces\\s*-->`).exec(text);
+  if (!m) return null;
+  const names = [];
+  for (const cells of tableAfter(text, m.index + m[0].length)) {
+    const found = /`([A-Za-z0-9_]+)`/.exec(cells[0] ?? '');
+    if (found) names.push(found[1]);
+  }
+  return names;
+}
+
 /** Every `<!-- contract-values: NAME -->` — the first column of the table under it. */
 function parseValueSets(text) {
   const sets = {};
@@ -372,6 +396,8 @@ const {
   AGENT_STATUS_BRANCHES,
   ACTIVATE_RESPONSE_FIELDS,
   ACTIVATE_RESPONSE_BRANCHES,
+  COVERED_SURFACES,
+  UNCOVERED_SURFACES,
   DAEMON_STATUS_CONTRACT_FIELDS,
   VALUE_SETS,
   readContractCanonical
@@ -605,6 +631,63 @@ function reconcile(mod, docText) {
       if (!named.has(field)) {
         problems.push(`activate_response.${field}: declared, and on no branch`);
       }
+    }
+  }
+
+  // §10's BOUNDARY, in both directions and against the declarations (KAN-287,
+  // hardened on review). Three separate failures are possible and all three are
+  // checked, because the first draft of this section could lose a whole surface
+  // in silence.
+  const RESPONSE_DECLS = [
+    'LIST_AGENTS_FIELDS',
+    'LIST_AGENTS_REFUSAL_FIELDS',
+    'AGENT_STATUS_FIELDS',
+    'ACTIVATE_RESPONSE_FIELDS',
+    'DAEMON_STATUS_CONTRACT_FIELDS'
+  ];
+  for (const [anchor, declared] of [
+    ['covered', Object.keys(mod.COVERED_SURFACES)],
+    ['uncovered', [...mod.UNCOVERED_SURFACES]]
+  ]) {
+    const documented = parseBoundary(docText, anchor);
+    if (!documented) {
+      problems.push(`document: no contract-${anchor}-surfaces table`);
+      continue;
+    }
+    for (const s of declared) {
+      if (!documented.includes(s)) {
+        problems.push(`boundary ${anchor}: '${s}' is declared and absent from §10's table`);
+      }
+    }
+    for (const s of documented) {
+      if (!declared.includes(s)) {
+        problems.push(`boundary ${anchor}: §10's table lists '${s}', which is not declared`);
+      }
+    }
+  }
+
+  // Every response-level declaration is claimed by exactly ONE covered surface,
+  // and every declaration a surface names exists. This is the leg that makes
+  // "add a response and forget §10" red rather than merely untidy — without it
+  // the two lists could agree with each other while both ignoring a new surface.
+  const claimed = new Map();
+  for (const [surface, decls] of Object.entries(mod.COVERED_SURFACES)) {
+    for (const d of decls) {
+      if (!decls.length) continue;
+      if (!(d in mod)) {
+        problems.push(`boundary covered: ${surface} names declaration '${d}', which does not exist`);
+      }
+      if (claimed.has(d)) {
+        problems.push(
+          `boundary covered: declaration '${d}' is claimed by both ${claimed.get(d)} and ${surface}`
+        );
+      }
+      claimed.set(d, surface);
+    }
+  }
+  for (const d of RESPONSE_DECLS) {
+    if (!claimed.has(d)) {
+      problems.push(`boundary covered: declaration '${d}' is on no surface in §10 — a response the contract covers and the boundary does not mention`);
     }
   }
 
@@ -2026,6 +2109,76 @@ rule('6. THE RED HALF — the checks above, watched failing');
     applied
       ? `moved=${moved}, ${problems.length} problem(s), ${named.length} naming spawned/durable`
       : 'the anchor row did not match, so the document was NOT mutated and this section proved nothing'
+  );
+}
+
+// ---- 6f. a covered surface deleted from §10's boundary table ----
+//
+// THE REVIEWER'S OWN STARVE, KEPT. Reviewing this ticket, `epic/KAN-59` deleted
+// the `agent_status` row from §10's Covered table and reported
+// `MUTANT_PROOF_EXIT=0, ALL CHECKS PASSED` — the section whose entire purpose is
+// to stop a reader inferring the boundary could silently disagree with it, and
+// nothing noticed. That is this ticket's thesis applied to its own deliverable.
+//
+// The experiment that found the hole is now the experiment that guards it. It is
+// run against a document mutated IN MEMORY, for the reason §6b gives: the
+// reconciliation is a pure function of (declaration, document text), so the
+// check that fails here is the same code §1 runs rather than a copy of it.
+{
+  const before = parseBoundary(docText, 'covered');
+  const rowIndex = docText.split('\n').findIndex((l) => l.startsWith('| `agent_status` |'));
+  const applied = rowIndex !== -1;
+  let mutatedDoc = docText;
+  if (applied) {
+    const lines = docText.split('\n');
+    lines.splice(rowIndex, 1);
+    mutatedDoc = lines.join('\n');
+  }
+  const after = parseBoundary(mutatedDoc, 'covered');
+  const starved =
+    Boolean(before) && Boolean(after) &&
+    before.includes('agent_status') && !after.includes('agent_status');
+
+  const problems = reconcile(contract, mutatedDoc);
+  const named = problems.filter((p) => p.includes('boundary') && p.includes('agent_status'));
+  console.log(`   deleted the \`agent_status\` row from §10's Covered table: ${starved}`);
+  console.log(`   §10 Covered, before: ${before?.join(', ')}`);
+  console.log(`   §10 Covered, after : ${after?.join(', ')}`);
+  for (const p of named) console.log(`     ! ${p}`);
+
+  verdict(
+    applied && starved && named.length > 0,
+    '§1 goes red BY NAME when a covered surface is deleted from §10\'s boundary table — the\n' +
+    '    exact starve that found this hole in review, when it printed ALL CHECKS PASSED. The\n' +
+    '    section that says where the contract stops is now held by the same round trip as the\n' +
+    '    fields it is about',
+    applied
+      ? `starved=${starved}, ${problems.length} problem(s), ${named.length} naming the boundary`
+      : 'the anchor row did not match, so the document was NOT mutated and this section proved nothing'
+  );
+
+  // THE OTHER DIRECTION, WATCHED TOO — because the guard has two legs and one of
+  // them going red proves nothing about the other. Above, the DOCUMENT loses a
+  // surface. Here the DECLARATION does: a `read-contract.ts` that covers a
+  // response its boundary section never mentions, which is what "somebody adds a
+  // fourth response next quarter" actually looks like.
+  //
+  // The module is cloned with one surface dropped rather than mutating a build,
+  // because `reconcile` is a pure function of (declaration, document) — the same
+  // property §6b relies on, used here on the declaration side instead.
+  const withoutOne = { ...contract, COVERED_SURFACES: { ...contract.COVERED_SURFACES } };
+  delete withoutOne.COVERED_SURFACES.activate_response;
+  const orphaned = reconcile(withoutOne, docText);
+  const namesOrphan = orphaned.filter((p) => p.includes('ACTIVATE_RESPONSE_FIELDS'));
+  console.log(`   dropped \`activate_response\` from COVERED_SURFACES (declaration side)`);
+  for (const p of namesOrphan) console.log(`     ! ${p}`);
+
+  verdict(
+    namesOrphan.length > 0,
+    '§1 also goes red BY NAME on the declaration side — a response this contract covers whose\n' +
+    '    declaration no §10 surface claims. Both legs of the boundary guard are watched failing,\n' +
+    '    because one of them working says nothing about the other',
+    `${orphaned.length} problem(s), ${namesOrphan.length} naming the unclaimed declaration`
   );
 }
 
