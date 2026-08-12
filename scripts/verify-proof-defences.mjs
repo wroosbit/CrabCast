@@ -732,7 +732,14 @@ const PROOF_DEFENCES = [
       'is read from the workflow rather than carried as a second copy of the number.',
     anchor: 'MUTANT',
     note:
-      'Four mutations, each watched going red. The one that earns its place is ' +
+      'Five mutations, each watched going red. "malformed-rows-dropped" was added IN REVIEW and ' +
+      'is the one a reviewer found rather than the author: the reporter keeps an unreadable row ' +
+      'and names it, carried a comment saying why, and nothing exercised it — `epic/KAN-59` ' +
+      'deleted the branch on #82 and got a green run. A dropped row does not render as an error, ' +
+      'it renders as A SCRIPT THAT APPEARS NOT TO HAVE RUN, in the one artifact this change ' +
+      'exists to produce. Driven directly rather than through the loop, because the workflow\'s ' +
+      'bash cannot emit a malformed row and routing fabricated text through the loop would test ' +
+      'the fixture. The one that earns its place on the author\'s side is ' +
       '"timing-capture-removed": it leaves the reporter entirely intact and only stops the clock, ' +
       'which produces a COMPLETE, sorted, plausible table of zeros — the failure that ships by ' +
       'accident, and the one every assertion about shape passes. "reporter-noop" is the attack ' +

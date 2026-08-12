@@ -291,6 +291,103 @@ if (!lifted.error) {
 }
 
 // ---------------------------------------------------------------------------
+console.log('\n=== 1b. A row the reporter cannot parse is NAMED, not dropped ===\n');
+// ---------------------------------------------------------------------------
+//
+// ADDED IN REVIEW, and the review is the point of the section. The reporter
+// carried this branch with a comment explaining why it matters — "a silently
+// skipped script is a script the table implies does not exist" — and nothing
+// exercised it. `epic/KAN-59` deleted the branch on #82, got a green run, and
+// asked for a guard or a disclosure. This is the guard.
+//
+// WHY IT IS WORTH ONE: a dropped row does not render as an error. It renders
+// as A SCRIPT THAT APPEARS NOT TO HAVE RUN, in the one artifact this whole
+// change exists to produce, read by somebody asking "which of 47 moved?" —
+// so the failure mode is a confident answer with the broken script missing
+// from it. That is this ticket's own defect one level down, inside its fix.
+//
+// DRIVEN DIRECTLY RATHER THAN THROUGH THE LOOP, deliberately: the workflow's
+// bash cannot emit a malformed row, so a row like this only ever arrives from
+// a bug. Driving the reporter is what tests the branch; routing fabricated
+// text through the loop would test the fixture.
+
+{
+  const runReporter = (bin, input, label) => {
+    const summaryPath = path.join(scratch, `summary-${label}.md`);
+    fs.writeFileSync(summaryPath, '');
+    const r = spawnSync('node', [bin], {
+      cwd: ROOT,
+      input,
+      encoding: 'utf8',
+      env: { ...process.env, GITHUB_STEP_SUMMARY: summaryPath }
+    });
+    return { ...r, summary: fs.readFileSync(summaryPath, 'utf8') };
+  };
+
+  // Two readable rows and three that are not, one per way a row can be wrong.
+  const MALFORMED = [
+    ['verify-nonnumeric', 'verify-nonnumeric\t1000\tnot-a-number\tPASSED'],
+    ['verify-backwards', 'verify-backwards\t5000\t2000\tPASSED'],
+    ['verify-missing-end', 'verify-missing-end\t1000\t\tPASSED']
+  ];
+  const input =
+    'verify-readable-slow\t1000\t4000\tPASSED\n' +
+    MALFORMED.map(([, line]) => line).join('\n') +
+    '\nverify-readable-fast\t1000\t1100\tPASSED\n';
+
+  const good = runReporter(REPORTER, input, 'malformed-good');
+  check(good.status === 0, 'PRECONDITION the reporter still exits 0 over a mix of readable and unreadable rows', `exit ${good.status}`);
+  check(
+    reportedSeconds(good.stdout, 'verify-readable-slow') === 3.0,
+    'the readable rows are still timed and ranked',
+    `verify-readable-slow reported ${reportedSeconds(good.stdout, 'verify-readable-slow')}s`
+  );
+  for (const [name] of MALFORMED) {
+    check(good.stdout.includes(name), `the unreadable row ${name} is NAMED in the log rendering`);
+    check(good.summary.includes(name), `the unreadable row ${name} is NAMED in the step summary`);
+  }
+  check(
+    /3 row\(s\) could not be read/.test(good.stdout),
+    'the count of unreadable rows is stated rather than left to be noticed',
+    good.stdout.match(/\d+ row\(s\) could not be read/)?.[0] ?? 'no count line'
+  );
+
+  // And the mutation `epic/KAN-59` ran by hand on #82, now owned by a check.
+  const mutant = mutateScript('malformed-rows-dropped', REPORTER, [
+    {
+      find:
+        "      rows.push({ name: name || '(unnamed)', s: NaN, verdict: verdict ?? '?', malformed: true });\n" +
+        '      continue;',
+      replace: '      continue;'
+    }
+  ]);
+  if (mutant) {
+    const starved = runReporter(mutant, input, 'malformed-starved');
+    // The precondition that makes the absence below mean something: a mutant
+    // that crashed would also fail to name them, for the wrong reason.
+    check(
+      starved.status === 0 && starved.stdout.includes('=== verify cost:'),
+      'PRECONDITION the starved reporter still runs and still prints a table',
+      `exit ${starved.status}`
+    );
+    check(
+      reportedSeconds(starved.stdout, 'verify-readable-slow') === 3.0,
+      'PRECONDITION the starved reporter still times the readable rows — the loss is silent, not total'
+    );
+    const named = MALFORMED.filter(([name]) => starved.stdout.includes(name) || starved.summary.includes(name));
+    check(
+      named.length === 0,
+      'MUTANT dropping the branch loses all three unreadable rows without a word — §1b goes red',
+      named.length ? `still named: ${named.map(([n]) => n).join(', ')}` : 'none named anywhere'
+    );
+    check(
+      !/row\(s\) could not be read/.test(starved.stdout),
+      'MUTANT the count line goes too, so nothing in the output says anything is missing'
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 console.log('\n=== 2. A failing script still fails the job, and is still attributed ===\n');
 // ---------------------------------------------------------------------------
 //
