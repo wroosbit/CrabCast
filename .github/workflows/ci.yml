@@ -133,6 +133,23 @@ jobs:
   verify:
     name: verify
     runs-on: ubuntu-latest
+    # A HANG BOUND, NOT A BUDGET, and the distinction is a recorded decision
+    # rather than a quibble (KAN-331; the reasoning is docs/verify-cost.md).
+    # This number exists so a proof that waits forever on a socket ends the job
+    # instead of the runner's six-hour ceiling. It is NOT a cost limit: nothing
+    # in this repository fails because the loop got slower, deliberately.
+    #
+    # A bound the loop grows into stops being purely a hang bound and becomes a
+    # budget whose number nobody chose. THIS COMMENT DOES NOT ASK YOU TO
+    # REMEMBER THAT: `scripts/ci-timing-report.mjs` reads this number and prints
+    # the loop as a percentage of it on every run, so the change is measured on
+    # the page rather than predicted here. A comment that says "someone should
+    # notice when this changes" is a claim outliving its evidence the moment
+    # nothing measures the change (KAN-345 is the worked case).
+    #
+    # The reporter READS this line rather than carrying its own copy, and
+    # verify-timing-attribution.mjs asserts that it does — so editing the number
+    # moves the percentage, and no second number exists to disagree with it.
     timeout-minutes: 20
     steps:
       # Full history, for two scripts: verify-ci-wiring-guards reproduces the
@@ -904,6 +921,7 @@ jobs:
             verify-channel-enabled
             verify-registry-survives-retired-rows
             verify-daemon-foreground
+            verify-timing-attribution
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,
@@ -913,19 +931,44 @@ jobs:
           # contention; the per-script $HOME removes the shared state that
           # would make one script's leftovers another's flake.
           failed=()
+          timings=()
           for s in "${scripts[@]}"; do
             echo "::group::$s"
             home="$RUNNER_TEMP/verify-home-$s"
             mkdir -p "$home"
+            t0=$(date +%s%3N)
             if HOME="$home" node "scripts/$s.mjs"; then
-              echo "--- $s PASSED"
+              verdict=PASSED
             else
-              echo "--- $s FAILED"
+              verdict=FAILED
               failed+=("$s")
             fi
+            t1=$(date +%s%3N)
+            # Both endpoints, subtracted by the reporter rather than here. Not
+            # style: `$(( … ))` is not understood by scripts/ci-workflow.mjs's
+            # shell reader, which fails the WHOLE block to "could not be read
+            # as shell" — and every CI-wiring guard then reports every command
+            # in it as not-live. Closed rather than open, so it goes red with a
+            # confusing message rather than quiet; still a trap. See KAN-354.
+            timings+=("$(printf '%s\t%s\t%s\t%s' "$s" "$t0" "$t1" "$verdict")")
+            echo "--- $s $verdict in $t0..$t1 (epoch ms)"
             echo "::endgroup::"
           done
           echo
+          # ATTRIBUTION (KAN-331). Which of these scripts the job's twelve
+          # minutes went on, written to the run's own summary page rather than
+          # only into this log — the numbers were always in the `::group::`
+          # timestamps, and being in the log is what nobody reading them
+          # looked like for fourteen readings.
+          #
+          # THIS IS NOT A GATE. It compares nothing to a threshold and cannot
+          # turn the job red on cost; the verdict below is still the proofs'.
+          # A deliberate decision, not an omission — docs/verify-cost.md.
+          #
+          # It DOES fail the step if it cannot report at all, which is the one
+          # outcome worth being loud about: a reporter that silently emits
+          # nothing is indistinguishable from a run with nothing to say.
+          printf '%s\n' "${timings[@]}" | node scripts/ci-timing-report.mjs
           echo "ran ${#scripts[@]} script(s); ${#failed[@]} failed"
           if [ ${#failed[@]} -ne 0 ]; then
             printf 'FAILED: %s\n' "${failed[@]}"
