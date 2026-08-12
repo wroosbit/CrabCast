@@ -712,7 +712,16 @@ const PROOF_DEFENCES = [
       'WHAT IS NOT COVERED, and it is the headline claim of the ticket: NO REBOOT IS OBSERVED, ' +
       'and no systemd runs any of this — this script is itself the supervisor. Reboot survival ' +
       'stays PREDICTED. Both the script header and docs/supervision.md say so in those words; ' +
-      'nobody covers it, and a GitHub runner with no user session bus never will.'
+      'nobody covers it, and a GitHub runner with no user session bus never will. ' +
+      'KAN-323 ADDED §8, which guards a SECOND claim rather than the central one above: that the ' +
+      'script leaves nothing running. It is a NEGATIVE CASE with a CANARY and a VACUITY check — ' +
+      'it stages a daemon of the shape red drive 2 leaks (an intermediate spawns it detached and ' +
+      'exits, so it is nobody\'s child and is not in `started`), runs the reaper, and then reads ' +
+      'the process table and every scratch socket. Breaking the reaper turns both assertions red ' +
+      'naming the survivor\'s pid, which is how it was checked. What §8 does NOT establish is ' +
+      'that the mutation\'s own grandchild leaves by that route: the mutation is a source edit ' +
+      'applied by hand and is not in the repository, so the count after a mutated run lives in ' +
+      'KAN-323\'s PR and in no standing check.'
   },
   {
     script: 'verify-activate-requires-agent',
