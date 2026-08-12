@@ -679,6 +679,30 @@ const PROOF_DEFENCES = [
   // guard — a precondition, a negative case, a vacuity check or a canary
   // -------------------------------------------------------------------------
   {
+    script: 'verify-daemon-foreground',
+    defence: 'guard',
+    central:
+      '`crabcast daemon` gives a supervisor a daemon it can own — a FOREGROUND process that ' +
+      'serves on the socket, exits 0 on SIGTERM having released it, refuses non-zero on a config ' +
+      'it cannot load, and loses a socket race cleanly and audibly.',
+    anchor: 'the daemon reporting on that socket IS the foreground child',
+    note:
+      'THE GUARD IS THE PID EQUALITY, and it is what separates this from a proof that would pass ' +
+      'on the pre-fix build. A detached spawn — which is what every client verb already does — ' +
+      'also leaves a working socket behind, so "the socket answers" is satisfied by the behaviour ' +
+      'this ticket exists to say is NOT enough. §3 requires the pid on `daemon-status` to equal ' +
+      'the child this script is holding, which only a foreground process can satisfy. ' +
+      '§1 is the other half: it reproduces the ORIGINAL GAP against the current build (no config ' +
+      'named, and neither a read nor a write verb brings a socket back), so the rest is not ' +
+      'asserting into a vacuum. §7 is a drift guard rather than a behaviour one — it reads the ' +
+      'ExecStart out of docs/supervision.md and requires the verb it names to exist, because a ' +
+      'unit template in prose cannot go red on its own. ' +
+      'WHAT IS NOT COVERED, and it is the headline claim of the ticket: NO REBOOT IS OBSERVED, ' +
+      'and no systemd runs any of this — this script is itself the supervisor. Reboot survival ' +
+      'stays PREDICTED. Both the script header and docs/supervision.md say so in those words; ' +
+      'nobody covers it, and a GitHub runner with no user session bus never will.'
+  },
+  {
     script: 'verify-activate-requires-agent',
     defence: 'guard',
     central:

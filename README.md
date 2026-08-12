@@ -116,7 +116,7 @@ A directory with no prior CrabCast state: configure an agent into it, activate i
 Five things worth knowing before reading it:
 
 * **The first `activate` may be refused, and that is the system working rather than the walkthrough failing.** CrabCast asks whether this machine can carry another agent *before* it starts one, and on a machine already under load the answer is no. The refusal names the binding constraint and shows every term it used; there is a worked example [below](#when-the-machine-is-full-activate-refuses). Two ways past it: wait for the machine to quieten and run the same command again, or pass `--override` to start the agent anyway and have the bypass recorded with the figures it bypassed. Waiting is the better answer on a machine you are also trying to use — **and this transcript is what the unrefused case looks like**: the machine it was captured on had room, so the `activate` below is the bare command, nothing was bypassed, and no derivation was printed because none was refused. The `capacity` block inside the `list` that follows is that machine's real arithmetic at the moment it ran, and those are the figures the gate had just used.
-* **Nothing starts a daemon by hand.** `configure`, `activate`, `deactivate`, `forget` and `send` spawn one when none is running; `list`, `status`, `tail`, `capacity` and `daemon-status` refuse with exit 3 instead of starting a fleet nobody asked for. The first `crabcast list` below is that refusal, on purpose.
+* **No client starts a daemon by hand.** `configure`, `activate`, `deactivate`, `forget` and `send` spawn one when none is running; `list`, `status`, `tail`, `capacity` and `daemon-status` refuse with exit 3 instead of starting a fleet nobody asked for. The first `crabcast list` below is that refusal, on purpose. **This is a promise about clients, and it never covered the machine restarting** — after a reboot there is no client, so nothing spawns anything and the socket stays absent until somebody notices. Giving the daemon a supervisor is the part you do yourself: see [Surviving a reboot](#surviving-a-reboot).
 * **This config declares `"dataDir": ".crabcast"`**, which puts the socket, the log, the durable registry and each agent's sidecar inside the project directory, so the whole demo is removable with one `rm -rf`. Omit `dataDir` and CrabCast uses `~/.local/share/crabcast` instead. Note what is *not* in there: the agent's working directory, which is yours.
 * **`--launcher shell`** is a bash prompt in a pane, and the launcher that keeps this walkthrough dependent on nothing but herdr. It is reachable only by asking for it by name. The other launchers are `claude` and `anti-gravity`, and this walkthrough does not exercise them.
 * **The prompt is finished text, not a template.** `--prompt-file` reads the file *in the CLI* and puts its bytes on the wire; CrabCast writes them into the agent's sidecar verbatim and never inspects them. The file below contains a literal `{{KEY}}` on purpose — watch it arrive at the pane unchanged.
@@ -138,8 +138,9 @@ $ crabcast list
 crabcast: Could not reach the CrabCast daemon at /tmp/ac1-demo/.crabcast/crabcast.sock: connect ENOENT /tmp/ac1-demo/.crabcast/crabcast.sock
 This command does not start a daemon (see `crabcast --help`). Run any of
   configure, activate, deactivate, forget, send
-and one is spawned if none is running. From a repository checkout you can also
-run one in the foreground: node dist/daemon.js [configPath]
+and one is spawned if none is running. To run one in the foreground — which is
+what a supervisor such as systemd should own — run:
+  crabcast daemon [--config <path>]
 If one failed to start earlier, its stderr is in /tmp/ac1-demo/.crabcast/daemon-spawn.err.
 [exit 3]
 
@@ -747,14 +748,15 @@ The CLI is a client, not a second brain: it parses arguments, sends one action, 
 
 ## The daemon
 
-One long-lived daemon per machine, listening on a Unix socket (`<dataDir>/crabcast.sock`, newline-delimited JSON, id-correlated). Nothing needs to start it: the CLI spawns a detached one on first need. From a repository checkout it can also be run in the foreground:
+One long-lived daemon per machine, listening on a Unix socket (`<dataDir>/crabcast.sock`, newline-delimited JSON, id-correlated). Nothing needs to start it: the CLI spawns a detached one on first need. To run it in the foreground instead — which is what a supervisor needs, and what [Surviving a reboot](#surviving-a-reboot) is about:
 
 ```bash
-npm run build
-node dist/daemon.js [configPath]
+crabcast daemon [--config <path>]
 ```
 
-The config path is the first CLI argument, else the `CRABCAST_CONFIG` environment variable, else `crabcast.config.json` in the current directory. The whole of it is an optional `dataDir` — default `~/.local/share/crabcast`, and the socket, the log, the durable registry and each agent's sidecar live under it:
+It does not return; SIGINT or SIGTERM stops it and it removes its socket on the way out. Its exit status is the daemon's own — `0` for a clean shutdown, non-zero for a refusal to boot — rather than the CLI's client exit-code table, because nothing here asked a daemon anything. From a repository checkout with nothing installed, `node dist/daemon.js [configPath]` is the same program.
+
+The config path is `--config`, else the first argument to `node dist/daemon.js`, else the `CRABCAST_CONFIG` environment variable, else `crabcast.config.json` in the current directory. The whole of it is an optional `dataDir` — default `~/.local/share/crabcast`, and the socket, the log, the durable registry and each agent's sidecar live under it:
 
 ```json
 {}
@@ -766,7 +768,17 @@ Validation still refuses rather than repairs, on the two things that remain. A c
 
 **The daemon also refuses to start against a durable registry it cannot fully read.** Records written before agents were addressed by path carry a `type` and a `key` and no path, and their priority, gate flags and prompt lived in the deleted `workspaceTypes` — so there is nowhere to get them from. Converting such a row would mean inventing values nobody decided, and loading the file part-way would mean some agents silently ceasing to exist. So the daemon names the file, the count and two remedies (delete the log, or hand-edit it) and stops.
 
-Exactly one daemon owns the socket: a second daemon that finds a live socket exits 0; a stale socket file left by a crash is unlinked and reclaimed. `node scripts/daemon-status.mjs` round-trips a `daemon_status` request over the socket, and `node scripts/verify-config-and-socket.mjs` is the live proof of all of the above.
+Exactly one daemon owns the socket: a second daemon that finds a live socket says so on stderr and exits 0, changing nothing; a stale socket file left by a crash is unlinked and reclaimed. `node scripts/daemon-status.mjs` round-trips a `daemon_status` request over the socket, and `node scripts/verify-config-and-socket.mjs` is the live proof of all of the above.
+
+### Surviving a reboot
+
+**CrabCast does not supervise itself, and does not start at boot.** It installs no service, enables nothing, and has no opinion about your init system. If you want a daemon that outlives a restart, you give it a supervisor — and `crabcast daemon` is the foreground entrypoint to point one at.
+
+This is the counterpart to *no client starts a daemon by hand*, and the reason it needs saying: that promise is about clients, and after a reboot there are none. Nothing spawns a daemon, no read verb will do it, and — the part that surprises people — **no write verb will either unless it is pointed at a config it can load**, because with nothing named the CLI falls back to the default data dir and deliberately refuses to spawn into it. So the socket is absent, nothing reports it, and it stays that way until a human notices. On the machine this was found on, that was eight days.
+
+**[`docs/supervision.md`](docs/supervision.md) is the whole of it**: the decision and the options it was chosen over, a systemd user unit template, and the two settings in it that are load-bearing rather than taste — `Restart=on-failure` (because the CLI's own auto-spawn means two daemons can race, the loser exits *cleanly*, and `Restart=always` would restart that clean loser forever against a socket it can never win) and a pinned `Environment=PATH` (because the daemon resolves `herdr` off `PATH` at startup, so the wrong one comes up looking healthy and fails every activation).
+
+It also states, in the same words as here, what is **predicted rather than observed**: `scripts/verify-daemon-foreground.mjs` checks every link in CI — the foreground process serves, its pid is the one on the socket, SIGTERM releases it cleanly, a losing second daemon does no harm, a bad config refuses before the socket exists — but **nothing has watched the unit fire at an actual boot**, because the machine this was built on runs a live fleet. Do not read the green check as "reboot handled".
 
 ### Events
 
