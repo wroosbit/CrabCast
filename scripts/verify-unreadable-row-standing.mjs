@@ -57,6 +57,21 @@
 // consumer ACTS on `standing`. It proves the field arrives, on both surfaces,
 // with the value the document says. Whether Butchr branches on it is Butchr's
 // tree and no script in this repository can see it.
+//
+// AND ONE SEAM INSIDE THIS FILE, because the obvious reading of §5 is generous
+// to it. §5 has two halves against two different surfaces:
+//
+//   * `describeUnreadableLog` is the notice the daemon PRINTS at boot
+//     (`src/daemon.ts` writes it to stderr and to `daemon.log`). The standing
+//     and the date being on that line is a fact about a surface somebody reads.
+//   * `scan.samples` is a list of one-liners that, as of this commit, NOTHING IN
+//     THE DAEMON CONSUMES — `describeUnreadableLog` builds its own lines from
+//     `scan.unreadable` and never touches `samples`. So §5b and §6d hold a real
+//     anti-drift property over a value with no reader today. They are worth
+//     keeping (the field is exported, and the single-derivation rule is what
+//     stops the two renderings disagreeing if it ever gains one) but they must
+//     not be read as evidence that an operator sees anything. That the field is
+//     unconsumed at all is KAN-358, filed from this work and linked `Relates`.
 
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
