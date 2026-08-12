@@ -795,6 +795,100 @@ tornWindow: {
 }
 
 // ===========================================================================
+rule('7. THE STAGING FILE IS SWEPT — the residue the atomic write introduces');
+// ===========================================================================
+//
+// KAN-341, and it exists because the review of this change starved
+// `sweepStagingFiles()` to `return []` and every section above stayed green.
+// The rename in section 6 removed one kind of residue and introduced a smaller
+// one: a run killed between the write and the rename leaves the staging file
+// behind. That is a better failure than an empty ci.yml — it is untracked, and
+// it carries the marker as its first line, so it explains itself where an empty
+// file could not — but "better" is not "covered", and the sweep that removes it
+// was the one behaviour in this change with nothing holding it.
+//
+// A sweep that silently stopped working would leave every run green while
+// leftovers accumulated, in a directory where a stray file is exactly what
+// section 3's refusal exists to refuse to build on.
+//
+// IT PLANTS ITS OWN RESIDUE, which is the same limit sections 1–3 carry and is
+// stated here for the same reason: this proves the sweep removes a staging file
+// that reaches it, NOT that a real kill between the write and the rename
+// produces exactly this. Nothing here can land a SIGKILL in a window that is
+// microseconds wide on purpose. Section 6 is what says the window is the only
+// place such a file can come from.
+
+const STAGING_PREFIX = '.ci.yml.staging-';
+const sandboxWorkflowDir = path.dirname(sandboxWorkflow);
+const plantedName = `${STAGING_PREFIX}424243`;
+const plantedPath = path.join(sandboxWorkflowDir, plantedName);
+
+const plantStagingFile = () => {
+  fs.writeFileSync(plantedPath,
+    `# ${MARKER_TAG} — row C (\`continue-on-error: true\` on the job), pid 424243, started 2026-08-05T00:00:00.000Z\n` +
+    '# IF YOU ARE READING THIS IN `git status`, THAT RUN DIED BETWEEN THE WRITE AND THE RENAME.\n');
+};
+
+staging: {
+  // ANTI-DRIFT: the prefix above is retyped rather than imported, so it can go
+  // stale silently and leave this section planting a file the sweep was never
+  // looking for — which would pass while proving nothing.
+  const targetSource = fs.readFileSync(path.join(repoRoot, TARGET_REL), 'utf8');
+  check(targetSource.includes(`'${STAGING_PREFIX}'`),
+    `PRECONDITION: the target still names ${JSON.stringify(STAGING_PREFIX)} as its staging prefix — retyped here, ` +
+    'so a rename in the target would otherwise leave this section sweeping for a file nothing writes',
+    `found in ${TARGET_REL}: ${targetSource.includes(`'${STAGING_PREFIX}'`)}`);
+
+  restoreSandbox();
+  plantStagingFile();
+  check(fs.existsSync(plantedPath), 'PRECONDITION: the staging residue really is on disk before the run', plantedName);
+
+  const r = runVariant(TARGET_REL);
+
+  check(!fs.existsSync(plantedPath),
+    'A RUN SWEEPS AWAY A STAGING FILE A PREVIOUS RUN LEFT — so the residue this change introduces does ' +
+    'not accumulate, and the directory section 3 refuses over stays clean of it',
+    `still present afterwards: ${fs.existsSync(plantedPath)}`);
+  check(r.out.includes('swept') && r.out.includes(plantedName),
+    '…and it SAYS SO, naming the file, rather than deleting something silently',
+    (r.out.split('\n').find((l) => l.includes('swept')) ?? '(nothing said)').trim());
+  check(r.code === 0 && r.out.includes('ALL CHECKS PASSED'),
+    '…and the run was not otherwise disturbed by finding one — sweeping its own leftover is not a ' +
+    'refusal, because unlike a dirty ci.yml a staging file cannot be somebody\'s work',
+    `exit ${r.code}`);
+  check(sandboxPorcelain() === '',
+    '…and git still calls the tree clean, so the sweep did not reach for anything tracked');
+}
+
+// The red drive: starve the sweep and the leftover survives. This is the exact
+// mutation the reviewer applied by hand to show nothing here was holding it.
+noSweep: {
+  const variant = mutateScript(
+    'starve-the-staging-sweep',
+    path.join(repoRoot, TARGET_REL),
+    [{ find: '    swept = fs.readdirSync(workflowDir).filter((n) => n.startsWith(STAGING_PREFIX));',
+      replace: '    swept = []; /* KAN-341: the sweep starved by the mutation */' }]
+  );
+  if (!variant) break noSweep;
+  const rel = path.join('scripts', path.basename(variant));
+
+  restoreSandbox();
+  plantStagingFile();
+  const r = runVariant(rel);
+
+  check(fs.existsSync(plantedPath),
+    'WITH THE SWEEP STARVED the leftover is still there afterwards — so the check above is measuring ' +
+    'the sweep rather than a file that was never going to survive anything',
+    `present afterwards: ${fs.existsSync(plantedPath)}`);
+  check(!r.out.includes('swept'),
+    '…and nothing in the run mentions it, which is what makes an unguarded sweep invisible: the run ' +
+    'is green, the tree looks clean to git, and the leftovers accumulate',
+    `exit ${r.code}`);
+
+  try { fs.unlinkSync(plantedPath); } catch { /* the point of the section is that it is still there */ }
+}
+
+// ===========================================================================
 
 console.log(`\n${'='.repeat(78)}`);
 console.log(`${checks - failures}/${checks} checks passed.`);

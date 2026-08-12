@@ -272,8 +272,10 @@ if (!fs.existsSync(path.join(repoRoot, 'dist', 'cli.js'))) {
 // file, and a truncated file differs; landing there it left an EMPTY ci.yml
 // and the residue's five marker assertions failed against a file with no bytes
 // in it to carry a marker. Run 31590166769 on `main` is that, and it passed on
-// re-run because the window is ~1% of the file's life rather than a bug in the
-// change under it.
+// re-run because landing in the window is a race — reproduced 1 time in 40 by
+// running that SIGKILL rule against this script — rather than a bug in the
+// change under it. The window's size is the timed figure above, not a
+// percentage read off a sample count.
 //
 // rename() is atomic within a filesystem, so a reader of this path sees either
 // the whole previous content or the whole next one, and never a state between.
@@ -286,6 +288,13 @@ if (!fs.existsSync(path.join(repoRoot, 'dist', 'cli.js'))) {
 // self-describing where an empty ci.yml was not. `sweepStagingFiles` below
 // removes any that a previous run left; that is safe in a way `git checkout --
 // ci.yml` is not, because nothing but this script ever creates one.
+//
+// AND THE SWEEP IS GUARDED, in section 7 of
+// `scripts/verify-ci-proof-residue-is-legible.mjs`, which plants a staging file
+// and holds this run to removing it and saying so. It is guarded because it was
+// not: KAN-341's reviewer starved this function to `return []` and the whole
+// residue proof stayed green at 35/35, so the residue this change INTRODUCES
+// was briefly the one residue nothing checked.
 // ---------------------------------------------------------------------------
 
 const STAGING_PREFIX = '.ci.yml.staging-';
@@ -359,8 +368,8 @@ function runGuard(script) {
  * ONE WRITE IS NOT ENOUGH TO GET THAT, which is KAN-341 and is why this goes
  * through `writeWorkflow` rather than `fs.writeFileSync`. One writeFileSync
  * still truncates before it writes, so the file passes through empty — mutated
- * and silent, measurably, ~1% of the time. It is the rename that makes the
- * sentence above true.
+ * and silent, on every single write, for the durations timed at `writeWorkflow`
+ * above. It is the rename that makes the sentence above true.
  *
  * The baseline row goes through here too, with `id` 'baseline'. It is the only
  * row whose yaml equals ORIGINAL, so it is also the only row whose residue would
