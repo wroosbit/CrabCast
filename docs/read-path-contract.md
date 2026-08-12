@@ -151,6 +151,7 @@ would be N chances for the copy that goes stale.
 | 4 | 2026-08-11 | KAN-302 — one row shape added, [UnreadableRecord](#unreadablerecord), and two fields carrying it on each of `list_agents` and `daemon_status`: `unreadableRecords` and `unreadableRecordsTotal`. **Additive on the wire: no documented field changed meaning, was removed, or changed type.** What changed is BEHAVIOUR the document did not previously describe — a registry row this daemon cannot read used to stop it starting, and now it starts, skips the row and publishes it here. A consumer that ignores both fields reads exactly what it read at version 3, and is not wrong; it is unable to tell a registry that is wholly readable from one that is not, which before this version no consumer could do at all | `f8716f6b789e` |
 | 5 | 2026-08-11 | KAN-287 — **a third response is now covered**: [activate_response](#8-activate_response), field by field over eleven branches, with two new row shapes ([PaneOccupant](#paneoccupant), [ProvisionedArtifact](#provisionedartifact)), three new blocks ([PreemptionOffer](#preemptionoffer), [Preempted](#preempted), [CapacityOverride](#capacityoverride)) and five new closed vocabularies ([activateRefused](#activaterefused), [activateRefusedBy](#activaterefusedby), [resumeCause](#resumecause), [artifactKind](#artifactkind), [artifactOrigin](#artifactorigin)). **Additive on the wire: not one byte of any response changed** — this version describes a surface that was already there and was published nowhere. What is new is the document's own [§10](#10-the-boundary--which-responses-this-contract-covers-and-which-it-does-not), which states which responses this contract covers **and which it does not**, so the boundary is readable rather than inferred from what happens to be listed. A consumer that ignores all of it reads exactly what it read at version 4. **§10's two tables are themselves declared and reconciled** — `COVERED_SURFACES` / `UNCOVERED_SURFACES` — so the boundary cannot drift from the contract it describes | `0af7ded4dafc` |
 | 6 | 2026-08-12 | KAN-329 — **the boundary gains a third value.** `send_to_agent` was published in a document of its own ([`docs/send-contract.md`](send-contract.md)), so it moved out of §10's Not-covered table into a new [Covered by a sibling contract](#covered-by-a-sibling-contract--described-and-reconciled-but-not-here) table, declared as `CONTRACTED_ELSEWHERE` and reconciled in both directions with the other two. **Additive on the wire: not one byte of any response changed, and no documented field changed meaning, was removed, or changed type.** Nothing this document covers grew or shrank — what changed is what it says about a surface it does not cover, which stopped being *"described by nothing"* and became *"described over there"*. Those are different answers and version 5 had no way to say the second. A consumer that ignores it reads exactly what it read at version 5 | `75d526b6f7ee` |
+| 7 | 2026-08-12 | KAN-344 — three fields added to [UnreadableRecord](#unreadablerecord), and therefore to `unreadableRecords[]` on both `list_agents` and `daemon_status`: `claimsAt` and `claimsEvent` (`durable`, the row's own bytes quoted) and `standing` (`derived`, this daemon's verdict), with a new closed vocabulary [rowStanding](#rowstanding). **Additive: no documented field changed meaning, was removed, or changed type**, and no behaviour changed — the same rows are skipped, disclosed and carried across compaction as at version 4. What changed is that the disclosure now says whether a row MATTERS as well as why it could not be read. A consumer that ignores all three reads exactly what it read at version 6 and is not wrong; it is unable to tell a nine-day-old tombstone from a row claiming an agent, which is the question a real consumer asked and could not answer from the wire | `4d9c017c196c` |
 
 The digest is `sha256(readContractCanonical())`, first 12 hex characters, over
 `src/read-contract.ts`'s declarations. **What it buys:** changing a documented
@@ -248,6 +249,42 @@ rows are missing and never which. `pages.<category>.nextCursor` is the handle,
 and `null` is the only "you have everything" signal — not `returned < limit`,
 which stops early on a page that landed short, and not `returned === total`,
 because a cursored page is a window into a category rather than a prefix of it.
+
+<a id="an-unreadable-row-never-clears-by-itself"></a>
+### An unreadable row never clears by itself
+
+**`unreadableRecordsTotal` does not fall on its own — and that one fact is what
+makes both halves of the rule true at once. Read them together; neither is safe
+to remember alone:**
+
+1. **A steady value is expected and is not an alarm.** An unreadable row survives
+   compaction by design — carried across verbatim rather than rewritten — nothing
+   ages it out, and the only thing that removes one is a human repairing that
+   line. So a non-zero count is the ordinary state of any registry ever written
+   by another version of this daemon, and it may sit at the same number for
+   months. A `1` that has been `1` since August is not a fault nobody got round
+   to.
+2. **And precisely because it never falls, ANY INCREASE IS AN ALARM.** This
+   number moves upward only when a row this daemon cannot read has *arrived* —
+   there is no churn under it, no window it is sampling, and nothing that can
+   push it up transiently. **So a `1` becoming a `2` is a real event even though
+   the `1` never was**, and it is worth reading every time.
+
+**Both, or the sentence defeats itself.** A reader who keeps only *"not an
+alarm"* has been taught to skip the field a second time, by the paragraph written
+to stop them skipping it the first — which is the very defect this section
+exists to describe, arriving one level up.
+
+**Then read the row, not the number.** An increment whose new row is
+[`standing: "retired"`](#rowstanding) is still boring; one whose new row is
+`claims-an-agent`, with that `identity` absent from every readable category, is
+the case the disclosure exists for.
+
+**A sanctioned way to retire a row** — so the count *could* legitimately reach
+zero — was considered for version 7 and deferred to
+[KAN-356](https://wroosbit.atlassian.net/browse/KAN-356). It is a write against
+the one file the preservation guarantee exists to protect, it needs a human at
+the keyboard, and it answers a different question from *"does this row matter?"*.
 
 <a id="the-refusal-response"></a>
 ### The refusal response
@@ -533,6 +570,83 @@ carried across compaction verbatim.
 | `rawTruncated` | derived | whether `raw` was clipped |
 | `promptRedacted` | derived | whether a `prompt` was removed from `raw` before publishing it. `config.prompt` is the one configured field the ordinary config echo does **not** carry, so publishing it here would widen the surface by the back door. When true, `raw` is re-serialized with a marker naming the withheld length; every other field survives, so the row is still repairable from the disclosure |
 | `claimsPath` | durable | a directory this row names — its `path`, else the retired `workDir` — or null when it names none. **A skipped row's path is not claimed by anything**, so `configure` on that directory will now succeed and create a second record for it; this field is what lets a caller see that coming |
+| `claimsAt` | durable | the timestamp the row gives for **itself** — its `at` — or null when it names none. **When the row was WRITTEN, not when it became unreadable**: a `from-newer` row became unreadable the moment somebody downgraded, which may be minutes ago on a row written last month. Quoted, never parsed or normalised |
+| `claimsEvent` | durable | the row's own `event`, verbatim, or null when it names none. **In the row's own vocabulary** — a word this daemon does not know comes back as the word it is, not as a null. This is the evidence under `standing`, and on a `from-newer` row it is the only thing a consumer has to make its own call with |
+| `standing` | derived | whether this row could be hiding something the list should have carried — [rowStanding](#rowstanding). This daemon's reading of `claimsEvent`; **`unknown` on every `from-newer` row even when the word is one we know** |
+
+**Three of these are version 7's**
+([KAN-344](https://wroosbit.atlassian.net/browse/KAN-344)), and they exist
+because [an unreadable row never clears by itself](#an-unreadable-row-never-clears-by-itself)
+— read that section first, because it is what makes the count the wrong thing to
+watch and these rows the right one.
+
+**Why a verdict AND its evidence, rather than either alone.** `standing` is this
+daemon's reading; `claimsEvent` is the word it read. Shipping only the evidence
+would make our event vocabulary load-bearing for every consumer, who would each
+reimplement the mapping and then drift apart silently. Shipping only the verdict
+would hide its basis — **an interpretation nobody can compare against the
+underlying quote is one nobody can catch being wrong.** Together, a disagreement
+between this daemon and its reader is *detectable rather than latent*, which is
+the same reason `problem` ships with `reason` and `stallInstrument` with
+`stalled`.
+
+**`claimsAt` is a quotation, not a timestamp, and it is typed `string` on
+purpose.** A field typed as a date that sometimes is not one is worse than a
+string, because the type asserts something the value cannot honour — this row
+came off a line nobody could read, and a hand-edited one may hold anything at
+all.
+
+**`standing` is about the ROW, not the agent**, and the obvious reading is the
+wrong one. The registry is append-only and a row is one *event*, so a later
+readable row may supersede this one entirely. `claims-an-agent` says **this line
+asserts an agent**; it is not a claim that anything is running now, and the
+daemon cannot make that claim — the line it would have to read is the line it
+could not read.
+
+**Which is what turns `claims-an-agent` into a branch rather than a number to
+squint at.** The row is published beside a whole fleet read, so a consumer can
+ask whether anything readable already covers the agent this line mentions.
+
+**Join on `claimsPath` first, and fall back to `identity` knowing what it is.**
+An agent **is** a canonical path, so `claimsPath` matches `path` in every
+category directly. `identity` is deliberately *the row's own vocabulary* — it is
+`agentName`, else `<type>/<key>`, else `path` — because its job is letting a
+human find the line in the file. **On a pre-migration row it is very often
+`<type>/<key>`, which matches nothing in a list keyed on paths, and the wire does
+not say which form you are holding.** Reading a failed match of that as *"absent,
+therefore lost"* would manufacture an alarm that never clears.
+
+| `claims-an-agent`, and the join… | what it means | what to do |
+| --- | --- | --- |
+| **matched** — the path (or identity) appears in a readable category | a later readable row superseded this line. The fleet already knows about that agent | nothing. This is the boring case |
+| **ran and found nothing** — `claimsPath` is a path and no category carries it | nothing readable supersedes it, so this row is the only thing that mentions that agent, **and it was not restored** | go and look. This is the case the disclosure exists for |
+| **could not run** — `claimsPath` is `null`, and `identity` is in a vocabulary the categories are not keyed on | **the question was not answered.** This is not evidence either way, and it is the state of the specimen that commissioned this section | read `raw` and decide by hand, or repair the line. Do not record it as either of the rows above |
+
+**The third row is not a hedge, and leaving it out was a real defect in an
+earlier draft of this section.** *"We could not join it"* and *"we joined it and
+found nothing"* are different answers, and collapsing them puts a permanently
+unjoinable row into the *go and look* bucket for ever — an alarm that never
+clears, which is the failure this whole section exists to describe. It is the
+same distinction §3 draws between *not known* and *not true*.
+
+`retired` needs none of this: nothing was going to be restored from it either
+way. All three readings are the consumer's to make from one response — no second
+call is needed, and none of them is a guess.
+
+**Both `claims*` fields are read from the row's parsed object, never from
+`raw`** — which by then may have been re-serialized to withhold a prompt and is
+clipped at 2048 characters. So a row that names its `at` beyond that limit still
+reports it. **And a line that does not parse as JSON never becomes one of these
+rows at all** (see *A torn final line* below), so **`null` has exactly one
+meaning: the row parsed and named none.** It never means *we could not see it*,
+which is what makes it safe to branch on.
+
+**On the daemon parsing what a consumer is told not to.** These two fields *are*
+CrabCast reading the same bytes it publishes as `raw` — the difference is the
+rule, and it is published: the daemon quotes **two named top-level keys,
+verbatim, with no validation**, and says so here. A consumer parsing `raw` is
+guessing at a shape this document has never promised and that `promptRedacted`
+and `rawTruncated` are both allowed to change.
 
 **What this list is not.** It is a fault report, not an inventory, so it is
 bounded at 25 rather than paged — the five paged categories grow with the fleet
@@ -1348,6 +1462,35 @@ activation, which is not an interrupted one.
 | --- | --- |
 | `crabcast` | this activation created it, and `reversal` says how to undo it |
 | `preexisting` | it was already there and was relied on rather than written. **`reversal` then says why there is nothing to undo** — removing somebody else's file is not ours to do |
+
+<a id="rowstanding"></a>
+### `unreadableRecords[].standing`
+
+Whether a row this daemon could not read could be hiding something the fleet
+list should have carried. **This daemon's verdict on the row's own
+`claimsEvent`**, which travels beside it so the verdict can be checked.
+
+<!-- contract-values: rowStanding -->
+
+| value | what it means |
+| --- | --- |
+| `retired` | the row records the agent being **switched off or removed** (`deactivated`, `forgotten`). Nothing was going to be restored from it, so the list is not short of anything that was ever going to run |
+| `claims-an-agent` | the row records the agent being **configured or started** (`configured`, `activated`). It could be hiding a row the list should have carried — **this is the one to go and look at** |
+| `unknown` | we will not say. The row names no event, or names something that is not one of ours — **or it is `from-newer`**, where the vocabulary is not this daemon's to read at all |
+
+**The must-ignore clause bites harder here than anywhere else on this surface.**
+The safe reading of a member you do not recognise is the one `unknown` already
+has — *we will not say* — and **a consumer must never collapse an unfamiliar
+value to `retired`**. Reading *"not a word I know"* as *"harmless"* is precisely
+the wrong-conclusion-from-a-short-list this field exists to prevent, arriving one
+level further up.
+
+**Why `from-newer` abstains even when the word is one we know.** That
+`problem`'s own `reason` says this daemon *"cannot know what a newer row means"*.
+Reading its event vocabulary anyway would contradict that sentence in the same
+response, on the one field a consumer is meant to branch on. The word still
+travels in `claimsEvent`, for a consumer willing to make the assumption this
+daemon is not.
 
 ---
 

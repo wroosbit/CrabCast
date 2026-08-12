@@ -365,7 +365,15 @@ function unreadableBlock(rows: unknown, total: unknown): string | null {
     `${INDENT}the rows are still in the registry and are left untouched; repair the named line, ` +
       `or \`configure\` the directory afresh`,
     ...rows.flatMap((r: any) => [
-      `${INDENT}line ${r.line}: ${r.identity} (${r.problem})` +
+      // `standing` and `claimsAt` are on this line rather than in the detail
+      // below it because they are what decides whether the operator reads any
+      // further (KAN-344): `retired` from last August is a tombstone to leave
+      // alone, and `claims-an-agent` from this morning is the one to go and
+      // look at. Rendered from whatever the response carried rather than
+      // re-derived here — a CLI that recomputed the verdict could disagree with
+      // the daemon that sent it.
+      `${INDENT}line ${r.line}: ${r.identity} (${r.problem}, ${r.standing ?? 'standing unstated'})` +
+        (r.claimsAt ? ` — row written ${r.claimsAt}` : '') +
         (r.claimsPath ? ` — claims ${r.claimsPath}` : ''),
       `${INDENT}${INDENT}${r.reason}`,
       `${INDENT}${INDENT}${r.raw}` +

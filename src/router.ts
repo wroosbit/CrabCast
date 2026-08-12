@@ -469,13 +469,15 @@ const STATE_READ_PROVENANCE = {
     'label', 'refusable', 'chargeable', 'preemptable', 'launcher', 'priority',
     'since', 'at', 'wasPreempted', 'by', 'derivation', 'herdrStatusWhenPreempted',
     'occupiedAgent',
-    // `unreadableRecords[]` (KAN-302). These three are the row's OWN bytes, read
-    // off the log and unchanged by a restart, which is this bucket's definition
-    // applied to a row that is not an agent. The other four fields of that shape
-    // are this daemon's account of the row rather than the row, and are in
-    // `derived` below — see ROW_SHAPES.UnreadableRecord for why the split falls
-    // where it does.
-    'identity', 'raw', 'claimsPath'
+    // `unreadableRecords[]` (KAN-302, extended by KAN-344). These five are the
+    // row's OWN bytes, read off the log and unchanged by a restart, which is
+    // this bucket's definition applied to a row that is not an agent. The other
+    // five fields of that shape are this daemon's account of the row rather
+    // than the row, and are in `derived` below — see ROW_SHAPES.UnreadableRecord
+    // for why the split falls where it does. `claimsAt` and `claimsEvent` are on
+    // this side rather than the other precisely because they are quotes: this
+    // daemon does not parse, range-check or interpret either one.
+    'identity', 'raw', 'claimsPath', 'claimsAt', 'claimsEvent'
   ],
   /**
    * Read live, from the census or the session that answered THIS call. True
@@ -501,9 +503,14 @@ const STATE_READ_PROVENANCE = {
   // `unreadableRecords[]`'s (KAN-302) — a verdict, a newline count and two facts
   // about what this response did to the bytes. `reason` was already here and
   // covers that shape's sentence too, which is the same word doing the same job.
+  // `standing` is KAN-344's, and it is the second verdict on that shape: what
+  // this daemon makes of the row's own `claimsEvent`, which sits in `durable`
+  // two lines up. A newer CrabCast may read the same word differently, and this
+  // daemon abstains outright on a `from-newer` row — both of which are exactly
+  // what `derived` is for and neither of which is true of a quote.
   derived: [
     'paneName', 'state', 'occupies', 'reason',
-    'line', 'problem', 'rawTruncated', 'promptRedacted'
+    'line', 'problem', 'rawTruncated', 'promptRedacted', 'standing'
   ],
   /**
    * REMEMBERED BY THIS PROCESS: neither on the record nor in the census that

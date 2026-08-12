@@ -428,6 +428,43 @@ const PROOF_DEFENCES = [
       'ran, so the section requires the log to have visibly collapsed first.'
   },
   {
+    script: 'verify-unreadable-row-standing',
+    defence: 'mutation',
+    central:
+      'an unreadable registry row publishes whether it MATTERS as well as why it could not be ' +
+      'read — `standing` classified against this daemon\'s own event vocabulary, beside the two ' +
+      'values it was read from (`claimsEvent`, `claimsAt`) quoted off the PARSED row rather than ' +
+      'off the clipped disclosure — on both `list_agents` and `daemon_status`, and unchanged by ' +
+      'a compaction.',
+    anchor: 'THE FIELD IS UNDEFENDED',
+    note:
+      'FOUR STARVES, ONE PER PUBLISHED MECHANISM, and each requires a NAMED assertion to go red ' +
+      'rather than the run merely going red: `standing` frozen to a constant, `claimsAt` and ' +
+      '`claimsEvent` each nulled at the point they reach the caller, and the boot notice pushed ' +
+      'back to re-deriving the event off `parsed`. Each starve re-runs the SAME assertion set §2 ' +
+      'ran, reports which assertions matched, and separately requires that no VACUITY guard ' +
+      'fired — a starve that broke the fixture count rather than the field would otherwise credit ' +
+      'itself with a red it did not earn. §6d needed that discipline twice over: its first draft ' +
+      'compared two empty sample lists (samples stop at three rows and the fixture was eighth), ' +
+      'so the mutant and the real build agreed because neither had reached the row. ' +
+      'FIXTURES ARE DERIVED, NOT PASTED: every row is written by a real `AgentRegistry.record()` ' +
+      'and then perturbed, and the expected classification is parsed out of the `rowStanding` ' +
+      'table in `docs/read-path-contract.md` against an event vocabulary read from the daemon\'s ' +
+      'own refusal text — two sources, neither of them the classifier, so §1 is a reconciliation ' +
+      'rather than the code agreeing with a copy of itself. §1b doctors that document in memory ' +
+      'and requires the same reconciler to fail. ' +
+      'SEAM, and it is the one `prompts/task.md` names: every registry here is one the script ' +
+      'WROTE, so it tests what the daemon does with such a row and not that a row of any of these ' +
+      'shapes ever reaches a registry — covered by the real specimen pasted into the PR, not by a ' +
+      'sibling. PRESERVATION IS NOT THIS FILE\'S CLAIM: that an unreadable row survives a boot and ' +
+      'a compaction at all is `verify-registry-survives-retired-rows`, and §4 here asserts only ' +
+      'that the three new fields answer the same after the rewrite. Two scripts asserting one ' +
+      'property is how the property ends up owned by neither. ' +
+      'UNDEFENDED: nothing here proves a consumer BRANCHES on `standing`. It proves the value ' +
+      'arrives on both surfaces and matches the document; what Butchr does with it is Butchr\'s ' +
+      'tree, and no script in this repository can see it.'
+  },
+  {
     script: 'verify-send-contract',
     defence: 'mutation',
     central:
