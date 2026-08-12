@@ -623,7 +623,33 @@ function lexShell(text) {
     if (c === '$' && text[i + 1] === '(') {
       ensureWord();
       if (text[i + 2] === '(') {                       // $(( … )) is arithmetic, not a command
-        const e = skipParens(text, i + 2);
+        // KAN-354: skip from the OUTER paren, not the inner one. `skipParens`
+        // counts balanced parens from wherever it is pointed, so starting it at
+        // `i + 2` consumed `( t1 - t0 )` and returned with the outer `)` still
+        // unread — which lexed as a stray `)` operator and derailed the
+        // enclosing `for`/`done` or `if`/`fi` pairing. The whole block then
+        // failed to parse, and every command in it reported as not-live with a
+        // message about the block rather than about the construct. Measured at
+        // 5b5a200 by KAN-331 and again at 6cbe5bd9: `ms=$(( t1 - t0 ))` inside
+        // a `for` loop gave ``expected `done` ``.
+        //
+        // Balanced counting from the outer paren is right for both readings of
+        // `$((`: arithmetic, and the `$( (subshell) )` that POSIX requires a
+        // space to write. It is deliberately NOT recorded in `substitutions` —
+        // arithmetic runs no commands, so nothing inside it is a command that
+        // could be mistaken for a live one.
+        //
+        // THE NEAREST LIMIT, measured rather than reasoned — the first draft of
+        // this comment said an unterminated `$((` makes the block fail to
+        // parse, and that is WRONG. `skipParens` runs to end-of-text, so
+        // `ms=$(( t1 - t0` swallows the whole rest of the block into one word:
+        // the block PARSES, as a single assignment, and anything after the
+        // unterminated `$((` reads as `argument` — "an argument to another
+        // command, not the command itself". Still fail-closed, since a caller
+        // needs position 'command' with an empty `disabled`, but closed by
+        // swallowing rather than by the unparsable-block row of boundary 3.
+        // scripts/verify-arithmetic-expansion-is-read.mjs §1b asserts it.
+        const e = skipParens(text, i + 1);
         word.text += text.slice(i, e);
         i = e;
         continue;
@@ -1003,7 +1029,6 @@ function allSimpleCommands(node, out = []) {
  */
 function walk(text, node, ctx, out) {
   const nested = (label) => ({ ...ctx, gating: false, construct: ctx.construct ?? label });
-  const because = (reason) => ({ ...ctx, reasons: [...ctx.reasons, reason] });
 
   switch (node.type) {
     case 'list':
@@ -1025,19 +1050,84 @@ function walk(text, node, ctx, out) {
       });
       return;
 
-    case 'andor':
+    case 'andor': {
+      // KAN-354: a part joined by `&&` to something that CANNOT SUCCEED never
+      // runs at all. `false && node x` reads as a live gating invocation
+      // otherwise — measured on every parser this repo has shipped, including
+      // dff2422 from before KAN-148, so it is an old gap rather than a new one.
+      //
+      // It surfaced here because the arithmetic fix above was masking it: a
+      // block carrying `$(( … ))` failed to parse, so the invocation inside it
+      // read as not-live for the wrong reason. Teaching the lexer arithmetic
+      // without this would have turned that red into a green for exactly the
+      // shape AC-3 names — the widening quietly gaining a live command.
+      //
+      // THE QUESTION IS ABOUT THE CHAIN SO FAR, NOT ABOUT THE PART TO THE LEFT,
+      // and getting that wrong is what the first version of this did. `&&` and
+      // `||` are left-associative with EQUAL precedence, so `a || false && x`
+      // groups as `(a || false) && x`: when `a` succeeds, `false` never runs,
+      // the group succeeds, and `x` RUNS. Asking only whether the immediately
+      // preceding part can succeed reported `x` as dead — a false reason naming
+      // a real operand, which is worse than saying nothing. Measured against
+      // bash rather than argued from precedence:
+      //
+      //   true  || false && echo X   → X RAN
+      //   true  || exit 1 && echo X  → X RAN
+      //   false || false && echo X   → (nothing)
+      //   true  || echo b && false && echo C → (nothing)
+      //
+      // So `canSucceed` tracks the accumulated chain. A part joined by `&&`
+      // cannot run when the chain to its left cannot succeed; a part joined by
+      // `||` runs only when that chain FAILS, and nothing here can prove a
+      // chain always succeeds, so `||` is never blocked. Deliberately
+      // conservative in the direction that keeps a live command live.
+      //
+      // Only `false` and a non-zero `exit` count as unable to succeed — that is
+      // `cannotSucceed`'s existing, deliberately narrow reading, not widened.
+      const blockedBy = new Array(node.parts.length).fill(null);
+      let canSucceed = !cannotSucceed(node.parts[0].node);
+      for (let k = 1; k < node.parts.length; k += 1) {
+        const part = node.parts[k];
+        const partCanSucceed = !cannotSucceed(part.node);
+        if (part.op === '&&') {
+          if (!canSucceed) blockedBy[k] = k - 1;
+          canSucceed = canSucceed && partCanSucceed;
+        } else {
+          canSucceed = canSucceed || partCanSucceed;
+        }
+      }
+
       node.parts.forEach((part, k) => {
         const next = node.parts[k + 1];
         let c = ctx;
+        if (blockedBy[k] !== null) {
+          // Name the whole left-hand chain, because that is what cannot
+          // succeed. Naming only the adjacent operand is how the first version
+          // of this came to say something false about `a || false && x`.
+          const prefix = { start: node.parts[0].node.start, end: node.parts[blockedBy[k]].node.end };
+          c = {
+            ...c,
+            reasons: [
+              ...c.reasons,
+              `the command is joined by \`&&\` to \`${render(text, prefix)}\`, ` +
+                'which cannot succeed, so it never runs'
+            ]
+          };
+        }
         // `|| exit 1` and `|| false` re-raise the failure instead of eating it.
         if (next && next.op === '||' && !cannotSucceed(next.node)) {
-          c = because(
-            `the command is followed by \`|| ${render(text, next.node)}\`, which swallows a non-zero exit`
-          );
+          c = {
+            ...c,
+            reasons: [
+              ...c.reasons,
+              `the command is followed by \`|| ${render(text, next.node)}\`, which swallows a non-zero exit`
+            ]
+          };
         }
         walk(text, part.node, c, out);
       });
       return;
+    }
 
     case 'pipeline': {
       let c = ctx;

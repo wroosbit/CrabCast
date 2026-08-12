@@ -154,12 +154,20 @@ jobs:
     steps:
       # Full history, for two scripts: verify-ci-wiring-guards reproduces the
       # defect it exists for by loading the PRE-FIX scripts/ci-workflow.mjs out
-      # of `origin/main`, and verify-readme-is-current runs itself against the
-      # two README revisions that really had drifted (72db4cd, e7ffb58) — a
-      # shallow clone has neither ref. Both report that section as NOT RUN
-      # rather than as a pass when the ref is missing, so this is the
-      # difference between the demonstration happening and it being announced
-      # as absent (KAN-148, KAN-175).
+      # of the commit before KAN-148 (dff2422), and verify-readme-is-current
+      # runs itself against the two README revisions that really had drifted
+      # (72db4cd, e7ffb58) — a shallow clone has none of them. Both report that
+      # section as NOT RUN rather than as a pass when the commit is missing, so
+      # this is the difference between the demonstration happening and it being
+      # announced as absent (KAN-148, KAN-175).
+      #
+      # ALL THREE ARE PINNED COMMITS, and that is the point rather than an
+      # accident of writing. verify-ci-wiring-guards §2 asked `origin/main` for
+      # its baseline until KAN-354: correct while KAN-148 was in flight, and
+      # from its merge onwards either dormant (byte-equal on a clean main) or
+      # misfiring with eleven FAILs that blamed KAN-148 for overstating its own
+      # defect (on any branch that edited the parser). A baseline that moves is
+      # a baseline that stops being the thing it was chosen for. See KAN-361.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -910,6 +918,7 @@ jobs:
             verify-config-echo-contract
             verify-ci-wiring-guards
             verify-ci-proof-residue-is-legible
+            verify-arithmetic-expansion-is-read
             verify-mutation-harness
             verify-readme-is-current
             verify-proof-defences

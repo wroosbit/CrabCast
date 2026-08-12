@@ -809,6 +809,29 @@ const PROOF_DEFENCES = [
       'precondition on top of the mutation — and the reason that refusal exists is KAN-172.'
   },
   {
+    script: 'verify-arithmetic-expansion-is-read',
+    defence: 'mutation',
+    central:
+      'scripts/ci-workflow.mjs reads `$(( … ))` as arithmetic, and does not gain a live gating ' +
+      'invocation by doing so — a disabled command in a block carrying arithmetic still reads as ' +
+      'disabled.',
+    note:
+      'RED-DRIVEN IN BOTH DIRECTIONS, which is the point of the file rather than a courtesy. §4 ' +
+      'starves the fix (`skipParens(text, i + 1)` back to `i + 2`) and requires the parse-borne ' +
+      'assertions to go red; §5 breaks three DIFFERENT disablers in turn — the lexer\'s comment ' +
+      'span, KAN-354\'s `&&` short-circuit, KAN-141\'s `|| …` swallow — and requires the matching ' +
+      'row to read LIVE. §4 alone would not have held §3: an unreadable block yields no live ' +
+      'commands, so every "not live" row would have stayed green for the wrong reason. That is ' +
+      'why each §3 row also asserts its block PARSES. ' +
+      'SEAM: it rewrites ci.yml in memory and never runs the two CI-wiring guards, so it says ' +
+      'nothing about the committed workflow keeping the audit live — verify-ci-wiring-guards and ' +
+      'verify-proof-registry own that. ' +
+      'AND A NAMED LIMIT: §4 cannot reach the `comment`, `heredoc` and `captured` rows, because ' +
+      '`classify` answers those from lexer-recorded ranges before it consults `parseError`. §4 ' +
+      'asserts those three are UNAFFECTED rather than counting them as covered; §5 holds them. ' +
+      'The moving-baseline defect this ticket found in verify-ci-wiring-guards §2 is KAN-361.'
+  },
+  {
     script: 'verify-readme-is-current',
     defence: 'mutation',
     central:

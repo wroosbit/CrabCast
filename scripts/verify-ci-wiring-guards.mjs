@@ -587,32 +587,77 @@ check(baseline.par.code === 0, 'verify-cli-parity passes on the unmutated ci.yml
 // describing a guard that was always right. The eight shapes have to be shown
 // GOING THROUGH the old parser for the new one's verdict to mean anything.
 //
-// WHAT IT NEEDS: the pre-fix scripts/ci-workflow.mjs, out of git. Three ways
-// that is legitimately unavailable, each reported rather than passed over:
-// a shallow clone with no `origin/main`; a run on `main` after this merged,
-// where `origin/main` IS this code and there is no pre-fix version to load;
-// and a working tree whose ci-workflow.mjs already matches it.
+// WHAT IT NEEDS: the pre-fix scripts/ci-workflow.mjs, out of git — meaning the
+// parser as it stood BEFORE KAN-148, which is a fixed point in history.
+//
+// IT USED TO ASK `origin/main` FOR THAT, AND THAT WAS A MOVING BASELINE
+// (KAN-354, filed as KAN-361). It was right exactly once — while KAN-148 was in
+// flight and `origin/main` really was the pre-fix parser. The moment KAN-148
+// merged at 77ea91f, `origin/main` became the POST-fix parser, and this section
+// had two states and no correct one:
+//
+//   * On a clean tree, `text === current` held, so it printed NOT RUN and
+//     asserted nothing. Measured on main at 6cbe5bd9: dormant, on every build,
+//     inside a passing job — a check-shaped absence rather than a check.
+//
+//   * On ANY branch that edited ci-workflow.mjs — one comment line was enough
+//     to reproduce it — byte-equality broke, the section woke up, loaded the
+//     POST-fix parser as its "pre-fix" baseline, and reported eleven FAILs.
+//
+// The second is the expensive half, and not because it is red. The failure
+// detail reads "this shape was already caught before the change, so the ticket
+// OVERSTATED it" — pointing an investigator at KAN-148's ticket, defect and
+// author, all of which are innocent. A wrong explanation costs more than no
+// explanation.
+//
+// SO THE BASELINE IS PINNED. KAN148_PARENT is the commit before KAN-148's
+// squash merge; the parser there is KAN-141's, byte-identical to 0e9037e's.
+// A pinned historical commit cannot catch up with this file, so the section
+// asserts on every branch AND on main — which is the stronger argument for the
+// pin than fixing the false red is. The same shape as verify-readme-is-current,
+// which pins 72db4cd and e7ffb58 for the same reason and is fetched by the same
+// `fetch-depth: 0` in ci.yml's verify job.
+//
+// Two ways the baseline is legitimately unavailable, each reported rather than
+// passed over: a shallow clone that does not carry the commit, and a working
+// tree whose ci-workflow.mjs somehow already matches it — which now means the
+// parser was REVERTED past KAN-148, not that main caught up.
 // ---------------------------------------------------------------------------
 
 console.log('\n=== 2. The same eight shapes against the PRE-FIX parser ===\n');
 
+/** The commit before KAN-148's merge (77ea91f) — the last tree with the pre-fix parser. */
+const KAN148_PARENT = 'dff24229869f2eb1b3089d2d4674582aaf065a49';
+
 function preFixSource() {
   const current = fs.readFileSync(path.join(repoRoot, 'scripts', 'ci-workflow.mjs'), 'utf8');
-  for (const ref of ['origin/main', 'main']) {
-    let text;
-    try {
-      text = execFileSync('git', ['show', `${ref}:scripts/ci-workflow.mjs`], {
-        cwd: repoRoot,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore']
-      });
-    } catch {
-      continue;
-    }
-    if (text === current) return { ref, text: null, why: `${ref} already carries this parser` };
-    return { ref, text, why: null };
+  const ref = KAN148_PARENT;
+  let text;
+  try {
+    text = execFileSync('git', ['show', `${ref}:scripts/ci-workflow.mjs`], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+  } catch {
+    return {
+      ref: null,
+      text: null,
+      why:
+        `${ref.slice(0, 7)} (the commit before KAN-148) is not in this clone — a shallow ` +
+        'fetch. ci.yml\'s verify job sets fetch-depth: 0 for this section by name'
+    };
   }
-  return { ref: null, text: null, why: 'neither `origin/main` nor `main` is present in this clone' };
+  if (text === current) {
+    return {
+      ref,
+      text: null,
+      why:
+        `this working tree's parser is byte-identical to the one at ${ref.slice(0, 7)}, which ` +
+        'means it was reverted to before KAN-148 rather than that a baseline caught up'
+    };
+  }
+  return { ref, text, why: null };
 }
 
 const preFix = preFixSource();
