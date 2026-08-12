@@ -67,11 +67,13 @@
 //
 //      AND THE MARKER NEEDS AN ATOMIC WRITE TO BE WORTH ANYTHING (KAN-341).
 //      `fs.writeFileSync` truncates before it writes, so the marked content
-//      does not become visible in one step: measured here, ci.yml is observably
-//      EMPTY about 1% of the time this script is running. A run killed there
-//      leaves the unattributed residue of layer 2's whole point, with no bytes
-//      in the file to carry the marker. Every write of this file therefore goes
-//      through `writeWorkflow` — stage, then rename — see its comment below.
+//      does not become visible in one step: measured here with the rename
+//      backed out, one run of this script leaves ci.yml EMPTY in about 100
+//      separate episodes — median 0.07 ms, longest 7.9 ms, ~50 ms in total.
+//      A run killed in one of them leaves the unattributed residue that layer 2
+//      exists to prevent, with no bytes in the file to carry the marker. Every
+//      write of this file therefore goes through `writeWorkflow` — stage, then
+//      rename — see its comment below.
 //
 //   3. A RUN THAT FINDS ci.yml ALREADY DIRTY REFUSES (KAN-172, item 2), and
 //      that is the one that was a live defect rather than a nicety. `ORIGINAL`
@@ -260,8 +262,10 @@ if (!fs.existsSync(path.join(repoRoot, 'dist', 'cli.js'))) {
 // write(). Between those the file exists, is tracked, is EMPTY, and says
 // nothing about why — the exact state the marker exists to make impossible.
 // Measured on this repository at 60a6b8b: a tight observer watching ci.yml
-// while this script ran saw it zero-length 911 times in 87,315 samples, and
-// saw it at 4096, 8192 … 57344 bytes — the write() caught page by page.
+// while this script ran caught it zero-length, and caught it at 4096, 8192 …
+// 57344 bytes — the write() observed page by page. Timed rather than counted,
+// because an empty file is cheaper to read and a sample count therefore
+// over-reports it: ~100 empty episodes per run, median 0.07 ms, longest 7.9 ms.
 //
 // That window is what made `verify-ci-proof-residue-is-legible` flaky. Its
 // SIGKILL is aimed at the first on-disk state that differs from the committed

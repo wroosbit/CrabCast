@@ -73,6 +73,13 @@
 // re-run over the identical tree. Section 6 tests the property directly instead
 // of inheriting it, and it is deterministic where a kill is not.
 //
+// HOW BIG THE WINDOW IS, timed rather than counted, because section 6 counts
+// OBSERVATIONS and an empty file is cheaper to read than a 61KB one — so a
+// sample count over-reports it and is not a measure of duration. Timed with the
+// rename backed out: ~100 empty episodes per run of the target, median 0.07 ms,
+// longest 7.9 ms, ~50 ms in total. Section 6's counts are evidence that the
+// window exists or does not; these are what it is.
+//
 // Needs node, git and a build (`npm run build`) — the target refuses without
 // `dist/cli.js`, because one of the two guards it drives reads the built command
 // table. No daemon, no herdr, no network.
@@ -644,11 +651,13 @@ rule('6. NO STATE IN BETWEEN — every version of ci.yml a reader could catch ex
 // That is not a hypothesis. Run 31590166769 on `main` at 60a6b8b went red with
 // exactly this: five AC1 assertions and one AC2 assertion failed, the residue
 // diff read `@@ -1,933 +0,0 @@`, and the re-run over the identical tree was
-// green. Measured here before the fix: 911 zero-length observations in 87,315
-// samples, and torn reads at 4096, 8192 … 57344 bytes — the write() caught page
-// by page. The same rate at 6f47df7, the commit BEFORE the CI-array line that
-// was suspected of triggering it, so the array line is not the trigger and the
-// eight preceding greens were luck at ~1% a throw rather than evidence.
+// green. Measured here before the fix: zero-length observations plus torn reads
+// at 4096, 8192 … 57344 bytes — the write() caught page by page. Measured again
+// at 6f47df7, the commit BEFORE the CI-array line that was suspected of
+// triggering it, at the same rate — so the array line is not the trigger, and
+// the eight preceding greens were a race won eight times rather than evidence
+// that anything changed. Reproducing the kill 40 times at 60a6b8b left torn
+// residue once; the whole of what made this a flake is that 1 in 40.
 //
 // WHY THIS SECTION IS AN OBSERVER AND NOT ANOTHER KILL. A section that killed
 // and then asserted the residue was whole would be measuring the same race that
@@ -673,13 +682,22 @@ rule('6. NO STATE IN BETWEEN — every version of ci.yml a reader could catch ex
  * whole run, and the bound is stated here because a silent cap reads as full
  * coverage. Watching all ~30 rows costs about 40s per variant and this section
  * runs two; the window under test opens on EVERY write, so the rows after the
- * bound are more samples of a property already sampled thousands of times. What
- * the bound costs is stated in the red drive's own numbers: it catches the torn
- * window inside this many rows with room to spare.
+ * bound are more samples of a property already sampled thousands of times.
+ *
+ * `keepGoingUntilTorn` IS WHAT KEEPS THE BOUND HONEST, and it exists because of
+ * a measurement rather than a worry. The red drive below has to CATCH the torn
+ * window, and how many times it is caught in a fixed number of rows is itself
+ * variable — 241, 68 and 14 on three runs of this machine, against 908 when the
+ * whole run is watched. A red drive that has to win a race is the same defect
+ * this ticket is about, one level up: on a slower runner 14 could be 0, and the
+ * section would go red saying the window was not observed. So the broken
+ * variant watches AT LEAST as many rows as the fixed one did and then keeps
+ * watching until it catches one, to the end of the run if that is what it
+ * takes. The comparison stays like-for-like and the drive stops being a gamble.
  */
-const ROWS_WATCHED = 12;
+const ROWS_WATCHED = 16;
 
-async function observeWorkflowStates(variantRel) {
+async function observeWorkflowStates(variantRel, { keepGoingUntilTorn = false } = {}) {
   restoreSandbox();
   const committed = readSandboxWorkflow();
   const child = spawn(process.execPath, [variantRel], { cwd: sandbox, stdio: 'ignore' });
@@ -700,7 +718,7 @@ async function observeWorkflowStates(variantRel) {
       if (body.includes(MARKER_TAG)) {
         marked += 1;
         distinctMutations.add(body);
-        if (distinctMutations.size >= ROWS_WATCHED) break;
+        if (distinctMutations.size >= ROWS_WATCHED && (!keepGoingUntilTorn || tornTotal > 0)) break;
       } else {
         tornTotal += 1;
         const size = Buffer.byteLength(body);
@@ -753,7 +771,7 @@ tornWindow: {
   if (!variant) break tornWindow;
   const rel = path.join('scripts', path.basename(variant));
 
-  const seen = await observeWorkflowStates(rel);
+  const seen = await observeWorkflowStates(rel, { keepGoingUntilTorn: true });
 
   check(seen.marked > 0,
     'PRECONDITION: the unmutated-write variant also really ran and mutated the file',
@@ -765,8 +783,9 @@ tornWindow: {
     '31590166769 was SIGKILLed in',
     seen.tornTotal > 0
       ? `${seen.tornTotal} torn state(s) in ${seen.samples} samples: ${describeTorn(seen.tornSizes)}`
-      : 'none caught — the window was not observed on this run, so this red drive did not fire and ' +
-        'the check above is unproven on this machine rather than passed');
+      : `none caught in ${seen.samples} samples across ${seen.rows} row(s) — and this variant watched ` +
+        'to the end of the run rather than stopping at the bound, so the window was not merely ' +
+        'missed by a short look. The check above is UNPROVEN on this machine rather than passed');
 
   check(seen.tornSizes.has(0),
     '…and among them the file EMPTY: the whole of what a run killed there leaves behind, which is ' +
