@@ -60,6 +60,19 @@
 // of the claim. Nobody else covers the reboot, and that is written here rather
 // than left for a reader to assume.
 //
+// AND THE SECOND FAILURE THIS WOULD CATCH (KAN-341, section 6): the target's
+// marker is written by `fs.writeFileSync`, which truncates before it writes, so
+// the file passes through EMPTY on every single write — mutated, tracked, and
+// with no bytes in it to carry the marker layer 2 exists for. Sections 1–3 kill
+// the target and read what is left, so they inherit that window rather than
+// testing it: `killWhileMutated` aims at the first state that differs from the
+// committed file, and a truncated file differs. Landing there it leaves an empty
+// ci.yml, and the five AC1 assertions fail against a file with nothing in it.
+// That is what made this script flaky on `main` — run 31590166769 at 60a6b8b,
+// red on six assertions with a residue diff of `@@ -1,933 +0,0 @@`, green on
+// re-run over the identical tree. Section 6 tests the property directly instead
+// of inheriting it, and it is deterministic where a kill is not.
+//
 // Needs node, git and a build (`npm run build`) — the target refuses without
 // `dist/cli.js`, because one of the two guards it drives reads the built command
 // table. No daemon, no herdr, no network.
@@ -346,6 +359,16 @@ let killed;
       'the residue survived the kill — this is the situation a reviewer walks into',
       `git status --porcelain -- ${WORKFLOW_REL}:\n${killed.porcelain}`);
 
+    // KAN-341, and it goes FIRST because it is the one that explains the other
+    // five when they go. A kill that lands between open(O_TRUNC) and write()
+    // leaves a file with no bytes in it, and five assertions about what the
+    // marker says is a very confusing way to be told that. Section 6 is what
+    // holds the property; this is what makes a regression in it legible here.
+    check(killed.residue !== '',
+      'KAN-341: the residue is a whole file rather than a torn write — the five assertions below are ' +
+      'about what the marker SAYS, and an empty ci.yml fails all of them for a reason that is not the marker',
+      `${Buffer.byteLength(killed.residue)} bytes on disk after the kill`);
+
     const markerLine = killed.residue.split('\n').find((l) => l.includes(MARKER_TAG)) ?? '';
     check(markerLine !== '',
       'AC1: the residue NAMES THE SCRIPT that wrote it, in the file itself');
@@ -390,8 +413,8 @@ noMarker: {
   const variant = mutateScript(
     'strip-the-marker',
     path.join(repoRoot, TARGET_REL),
-    [{ find: 'fs.writeFileSync(workflowPath, markerFor(id, what) + yaml);',
-      replace: 'fs.writeFileSync(workflowPath, yaml); /* marker removed by the mutation */' }]
+    [{ find: 'writeWorkflow(markerFor(id, what) + yaml);',
+      replace: 'writeWorkflow(yaml); /* marker removed by the mutation */' }]
   );
   if (!variant) break noMarker;
 
@@ -606,6 +629,150 @@ noRefusal: {
     'own section 4: "git agrees it is clean" goes red where "byte-identical to how this run found ' +
     'it" stayed green. Two assertions doing different work, on the run where they disagree.',
     (r.out.split('\n').find((l) => l.includes('git agrees it is clean')) ?? '(not present)').trim());
+}
+
+// ===========================================================================
+rule('6. NO STATE IN BETWEEN — every version of ci.yml a reader could catch explains itself');
+// ===========================================================================
+//
+// KAN-341. Sections 1–3 all rest on one unstated assumption: that the residue a
+// kill leaves is a WHOLE file. `killWhileMutated` aims its SIGKILL at the first
+// on-disk state that differs from the committed file, and `fs.writeFileSync` is
+// open(O_TRUNC) then write() — so "differs from the committed file" was also
+// true of the file EMPTY, mid-write, with no bytes in it to carry a marker.
+//
+// That is not a hypothesis. Run 31590166769 on `main` at 60a6b8b went red with
+// exactly this: five AC1 assertions and one AC2 assertion failed, the residue
+// diff read `@@ -1,933 +0,0 @@`, and the re-run over the identical tree was
+// green. Measured here before the fix: 911 zero-length observations in 87,315
+// samples, and torn reads at 4096, 8192 … 57344 bytes — the write() caught page
+// by page. The same rate at 6f47df7, the commit BEFORE the CI-array line that
+// was suspected of triggering it, so the array line is not the trigger and the
+// eight preceding greens were luck at ~1% a throw rather than evidence.
+//
+// WHY THIS SECTION IS AN OBSERVER AND NOT ANOTHER KILL. A section that killed
+// and then asserted the residue was whole would be measuring the same race that
+// produced the flake, and would be green on every run where the race was lost —
+// which is most of them. Watching every state the file passes through tests the
+// property directly and deterministically: hundreds of observations per run
+// rather than one bit.
+//
+// AND IT IS ALSO WHY SECTION 2 IS NOT THE PROOF IT LOOKS LIKE. Section 2 asserts
+// the residue of a marker-stripped variant is anonymous — and a TORN residue is
+// anonymous too, for a reason that has nothing to do with the mutation. Every
+// run whose kill landed in the truncation window passed section 2 while
+// measuring nothing. That is not fixed by anything in section 2; it is fixed by
+// the window not existing, which is what this section holds.
+
+/**
+ * Run a variant while sampling ci.yml as fast as the loop allows, and report
+ * every state it was caught in that is neither the committed file nor a complete
+ * marked mutation.
+ *
+ * IT STOPS AFTER `ROWS_WATCHED` DISTINCT MUTATIONS rather than watching the
+ * whole run, and the bound is stated here because a silent cap reads as full
+ * coverage. Watching all ~30 rows costs about 40s per variant and this section
+ * runs two; the window under test opens on EVERY write, so the rows after the
+ * bound are more samples of a property already sampled thousands of times. What
+ * the bound costs is stated in the red drive's own numbers: it catches the torn
+ * window inside this many rows with room to spare.
+ */
+const ROWS_WATCHED = 12;
+
+async function observeWorkflowStates(variantRel) {
+  restoreSandbox();
+  const committed = readSandboxWorkflow();
+  const child = spawn(process.execPath, [variantRel], { cwd: sandbox, stdio: 'ignore' });
+  spawned.add(child);
+  const exited = new Promise((resolve) => child.on('exit', resolve));
+
+  let samples = 0;
+  let marked = 0;
+  let tornTotal = 0;
+  const tornSizes = new Map();
+  const distinctMutations = new Set();
+
+  while (child.exitCode === null && child.signalCode === null) {
+    let body = null;
+    try { body = fs.readFileSync(sandboxWorkflow, 'utf8'); } catch { /* mid-rename is fine */ }
+    samples += 1;
+    if (body !== null && body !== committed) {
+      if (body.includes(MARKER_TAG)) {
+        marked += 1;
+        distinctMutations.add(body);
+        if (distinctMutations.size >= ROWS_WATCHED) break;
+      } else {
+        tornTotal += 1;
+        const size = Buffer.byteLength(body);
+        tornSizes.set(size, (tornSizes.get(size) ?? 0) + 1);
+      }
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  child.kill('SIGKILL');
+  await exited;
+  spawned.delete(child);
+  restoreSandbox();
+  return { samples, marked, rows: distinctMutations.size, tornTotal, tornSizes };
+}
+
+const describeTorn = (sizes) =>
+  [...sizes.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([size, n]) => `${size} bytes x${n}${size === 0 ? ' (EMPTY — truncated, not yet rewritten)' : ''}`)
+    .join(', ');
+
+{
+  const seen = await observeWorkflowStates(TARGET_REL);
+
+  check(seen.marked > 0,
+    'PRECONDITION: the observer really watched ci.yml being mutated — a target that died early ' +
+    'would show no torn states either, and this section would report the property holding over a ' +
+    'run that never exercised it',
+    `${seen.samples} samples, ${seen.marked} of them a marked mutation on disk, across ${seen.rows} distinct row(s)`);
+
+  check(seen.tornTotal === 0,
+    'ci.yml is NEVER observed in a state that is neither the committed file nor a complete marked ' +
+    'mutation — so the residue any ending leaves is one a reader can attribute, which is what ' +
+    'sections 1–3 have been assuming all along',
+    seen.tornTotal === 0
+      ? `0 torn states in ${seen.samples} samples`
+      : `${seen.tornTotal} torn state(s) in ${seen.samples} samples: ${describeTorn(seen.tornSizes)}`);
+}
+
+// The red drive: back the rename out and the window comes straight back.
+tornWindow: {
+  const variant = mutateScript(
+    'back-out-the-atomic-write',
+    path.join(repoRoot, TARGET_REL),
+    [{ find: '  fs.writeFileSync(stagingPath, content);\n  fs.renameSync(stagingPath, workflowPath);',
+      replace: '  fs.writeFileSync(workflowPath, content); /* KAN-341: the rename backed out by the mutation */' }]
+  );
+  if (!variant) break tornWindow;
+  const rel = path.join('scripts', path.basename(variant));
+
+  const seen = await observeWorkflowStates(rel);
+
+  check(seen.marked > 0,
+    'PRECONDITION: the unmutated-write variant also really ran and mutated the file',
+    `${seen.samples} samples, ${seen.marked} of them a marked mutation on disk, across ${seen.rows} distinct row(s)`);
+
+  check(seen.tornTotal > 0,
+    'WITH THE RENAME BACKED OUT the same observer catches ci.yml mutated-and-silent — so the check ' +
+    'above is measuring the atomic write rather than restating a hope, and this is the state run ' +
+    '31590166769 was SIGKILLed in',
+    seen.tornTotal > 0
+      ? `${seen.tornTotal} torn state(s) in ${seen.samples} samples: ${describeTorn(seen.tornSizes)}`
+      : 'none caught — the window was not observed on this run, so this red drive did not fire and ' +
+        'the check above is unproven on this machine rather than passed');
+
+  check(seen.tornSizes.has(0),
+    '…and among them the file EMPTY: the whole of what a run killed there leaves behind, which is ' +
+    'a tracked CI workflow with nothing in it to say who emptied it — layer 2\'s marker defeated by ' +
+    'the write that was supposed to carry it',
+    `zero-length observations: ${seen.tornSizes.get(0) ?? 0}`);
 }
 
 // ===========================================================================

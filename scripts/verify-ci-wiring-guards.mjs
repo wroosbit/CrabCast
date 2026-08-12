@@ -65,6 +65,14 @@
 //      review is read as somebody's work; residue that does not say otherwise
 //      IS a false accusation waiting to be made.
 //
+//      AND THE MARKER NEEDS AN ATOMIC WRITE TO BE WORTH ANYTHING (KAN-341).
+//      `fs.writeFileSync` truncates before it writes, so the marked content
+//      does not become visible in one step: measured here, ci.yml is observably
+//      EMPTY about 1% of the time this script is running. A run killed there
+//      leaves the unattributed residue of layer 2's whole point, with no bytes
+//      in the file to carry the marker. Every write of this file therefore goes
+//      through `writeWorkflow` — stage, then rename — see its comment below.
+//
 //   3. A RUN THAT FINDS ci.yml ALREADY DIRTY REFUSES (KAN-172, item 2), and
 //      that is the one that was a live defect rather than a nicety. `ORIGINAL`
 //      below is whatever is on disk at startup, so a run begun over a previous
@@ -245,12 +253,71 @@ if (!fs.existsSync(path.join(repoRoot, 'dist', 'cli.js'))) {
   process.exit(1);
 }
 
+// ---------------------------------------------------------------------------
+// EVERY WRITE OF ci.yml GOES THROUGH A RENAME (KAN-341).
+//
+// `fs.writeFileSync` is not one operation: it is open(O_TRUNC) followed by
+// write(). Between those the file exists, is tracked, is EMPTY, and says
+// nothing about why — the exact state the marker exists to make impossible.
+// Measured on this repository at 60a6b8b: a tight observer watching ci.yml
+// while this script ran saw it zero-length 911 times in 87,315 samples, and
+// saw it at 4096, 8192 … 57344 bytes — the write() caught page by page.
+//
+// That window is what made `verify-ci-proof-residue-is-legible` flaky. Its
+// SIGKILL is aimed at the first on-disk state that differs from the committed
+// file, and a truncated file differs; landing there it left an EMPTY ci.yml
+// and the residue's five marker assertions failed against a file with no bytes
+// in it to carry a marker. Run 31590166769 on `main` is that, and it passed on
+// re-run because the window is ~1% of the file's life rather than a bug in the
+// change under it.
+//
+// rename() is atomic within a filesystem, so a reader of this path sees either
+// the whole previous content or the whole next one, and never a state between.
+// The header's claim that "the file is never mutated-and-silent on disk at any
+// instant" is true of THIS, and was not true of one writeFileSync.
+//
+// THE STAGING FILE IS THE COST, and it is named rather than hidden: a run
+// killed between the write and the rename leaves it behind. It is untracked, it
+// is this script's alone, and it carries the marker as its first line, so it is
+// self-describing where an empty ci.yml was not. `sweepStagingFiles` below
+// removes any that a previous run left; that is safe in a way `git checkout --
+// ci.yml` is not, because nothing but this script ever creates one.
+// ---------------------------------------------------------------------------
+
+const STAGING_PREFIX = '.ci.yml.staging-';
+const workflowDir = path.dirname(workflowPath);
+const stagingPath = path.join(workflowDir, `${STAGING_PREFIX}${process.pid}`);
+
+function writeWorkflow(content) {
+  fs.writeFileSync(stagingPath, content);
+  fs.renameSync(stagingPath, workflowPath);
+}
+
+function sweepStagingFiles() {
+  let swept = [];
+  try {
+    swept = fs.readdirSync(workflowDir).filter((n) => n.startsWith(STAGING_PREFIX));
+  } catch { return []; }
+  for (const name of swept) {
+    try { fs.unlinkSync(path.join(workflowDir, name)); } catch { /* best effort */ }
+  }
+  return swept;
+}
+
+{
+  const swept = sweepStagingFiles();
+  if (swept.length) {
+    console.log(`(swept ${swept.length} staging file(s) a previous run left behind: ${swept.join(', ')})\n`);
+  }
+}
+
 // The file must go back exactly as it was found even if this run dies.
 let restored = false;
 const restore = () => {
   if (restored) return;
   restored = true;
-  try { fs.writeFileSync(workflowPath, ORIGINAL); } catch { /* nothing better to do while dying */ }
+  try { writeWorkflow(ORIGINAL); } catch { /* nothing better to do while dying */ }
+  try { sweepStagingFiles(); } catch { /* ditto */ }
 };
 process.on('exit', restore);
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
@@ -283,8 +350,13 @@ function runGuard(script) {
  * THE MARKER GOES ON IN THE SAME WRITE as the mutation, deliberately. Written
  * separately there would be a window — however short — in which the file is
  * broken and says nothing about why, and the endings this marker exists for are
- * exactly the ones that arrive without warning. One `writeFileSync` means the
- * file is never mutated-and-silent on disk at any instant.
+ * exactly the ones that arrive without warning.
+ *
+ * ONE WRITE IS NOT ENOUGH TO GET THAT, which is KAN-341 and is why this goes
+ * through `writeWorkflow` rather than `fs.writeFileSync`. One writeFileSync
+ * still truncates before it writes, so the file passes through empty — mutated
+ * and silent, measurably, ~1% of the time. It is the rename that makes the
+ * sentence above true.
  *
  * The baseline row goes through here too, with `id` 'baseline'. It is the only
  * row whose yaml equals ORIGINAL, so it is also the only row whose residue would
@@ -292,7 +364,7 @@ function runGuard(script) {
  * refusal above catches and nothing else would.
  */
 function writeMutated(yaml, id, what) {
-  fs.writeFileSync(workflowPath, markerFor(id, what) + yaml);
+  writeWorkflow(markerFor(id, what) + yaml);
 }
 
 function runBoth(yaml, id, what) {
@@ -300,7 +372,7 @@ function runBoth(yaml, id, what) {
   try {
     return { reg: runGuard(REGISTRY), par: runGuard(PARITY) };
   } finally {
-    fs.writeFileSync(workflowPath, ORIGINAL);
+    writeWorkflow(ORIGINAL);
   }
 }
 

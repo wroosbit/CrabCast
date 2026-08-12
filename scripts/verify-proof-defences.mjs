@@ -382,7 +382,9 @@ const PROOF_DEFENCES = [
     central:
       'the one proof that edits a tracked file survives being SIGKILLed, leaves residue that says ' +
       'what put it there, and refuses to start over another run\'s residue rather than adopting it ' +
-      'as its baseline.'
+      'as its baseline — and (KAN-341) that ci.yml is never observable in a state that is neither ' +
+      'the committed file nor a complete marked mutation, so there is no torn write for the residue ' +
+      'to be caught in and no ending that leaves it unattributable.'
   },
   {
     script: 'verify-config-echo-contract',
