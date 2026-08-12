@@ -90,6 +90,18 @@ taking the socket. That behaviour is load-bearing for the restart policy below.
 A template. Replace the paths — `%h` is your home directory, and the two
 absolute paths must be real on the machine you install this on.
 
+**`ExecStart` needs an absolute path**, and where `crabcast` lives depends on
+how node is installed: `~/.local/bin/crabcast` for some setups, somewhere under
+`~/.nvm/versions/node/<version>/bin/` if you use nvm, `/usr/local/bin` for a
+system node. Find yours and paste that:
+
+```bash
+command -v crabcast
+```
+
+Do not rely on a bare `crabcast` in `ExecStart` — systemd does not search a
+shell `PATH` to resolve it.
+
 ```ini
 [Unit]
 Description=CrabCast daemon — shared agent orchestration
@@ -102,6 +114,8 @@ StartLimitBurst=5
 Type=simple
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.local/bin/crabcast daemon --config %h/.config/crabcast/crabcast.config.json
+# If node is not in one of those PATH entries — nvm is the common case — add its
+# bin directory to PATH above. The `crabcast` shim starts `#!/usr/bin/env node`.
 Restart=on-failure
 RestartSec=2
 SyslogIdentifier=crabcast
@@ -153,14 +167,25 @@ still serving.
 
 ### `Environment=PATH=`, and why it is load-bearing
 
-The daemon resolves `herdr` off `PATH` **at startup**, and every agent it spawns
-is a herdr pane. A unit that inherits an unexpected `PATH` therefore comes up
-**looking perfectly healthy and fails every activation** — the daemon is
-running, the socket answers, and nothing is wrong until you try to start an
-agent. Pin the `PATH` to one that contains both `node` and the `herdr` you
-intend, and check it with `crabcast daemon-status` after install.
+`PATH` has to carry two different things here, and they fail differently.
 
-This is not hygiene. It was found the hard way (KAN-320).
+**`herdr`, and this is the silent one.** The daemon resolves `herdr` off `PATH`
+**at startup**, and every agent it spawns is a herdr pane. A unit that inherits
+an unexpected `PATH` therefore comes up **looking perfectly healthy and fails
+every activation** — the daemon is running, the socket answers, `systemctl
+status` is green, and nothing is wrong until you try to start an agent. This is
+not hygiene; it was found the hard way (KAN-320).
+
+**`node`, which fails loudly and immediately.** The installed `crabcast` is a
+shim beginning `#!/usr/bin/env node`, so the directory holding `node` must be on
+the pinned `PATH` as well. Miss it and the unit dies at once with a
+`203/EXEC`-shaped failure — annoying, but it tells you. The template's `PATH`
+covers a system node; **if you use nvm, node is under
+`~/.nvm/versions/node/<version>/bin` and you must add it.**
+
+Pin `PATH` to one that contains both, and check it with `crabcast daemon-status`
+after install — then actually start an agent, because that is the only thing
+that exercises the `herdr` half.
 
 ## What is predicted and what is observed
 
