@@ -438,15 +438,40 @@ const PROOF_DEFENCES = [
       'a compaction.',
     anchor: 'THE FIELD IS UNDEFENDED',
     note:
-      'FOUR STARVES, ONE PER PUBLISHED MECHANISM, and each requires a NAMED assertion to go red ' +
-      'rather than the run merely going red: `standing` frozen to a constant, `claimsAt` and ' +
-      '`claimsEvent` each nulled at the point they reach the caller, and the boot notice pushed ' +
-      'back to re-deriving the event off `parsed`. Each starve re-runs the SAME assertion set §2 ' +
-      'ran, reports which assertions matched, and separately requires that no VACUITY guard ' +
-      'fired — a starve that broke the fixture count rather than the field would otherwise credit ' +
-      'itself with a red it did not earn. §6d needed that discipline twice over: its first draft ' +
-      'compared two empty sample lists (samples stop at three rows and the fixture was eighth), ' +
-      'so the mutant and the real build agreed because neither had reached the row. ' +
+      'SIX STARVES, ONE PER PUBLISHED MECHANISM, and each requires a NAMED assertion to go red ' +
+      'rather than the run merely going red. Four are over the RECORD and re-run §2\'s assertion ' +
+      'set: `standing` frozen to a constant, `claimsAt` and `claimsEvent` each nulled at the ' +
+      'point they reach the caller, and the empty-string guard dropped from both. Two are over ' +
+      'the NOTICE and re-run §5\'s: the date clause deleted, and `standing` dropped from the ' +
+      'operator\'s line. Each starve reports which assertions matched and separately requires ' +
+      'that no VACUITY guard fired — a starve that broke the fixture count rather than the ' +
+      'mechanism would otherwise credit itself with a red it did not earn. ' +
+      'THE COUNT MOVED WITH KAN-358 AND SO DID WHAT IT COVERS, recorded because a register that ' +
+      'reports a number nobody can reconstruct is the defect this file is about. It was five ' +
+      'starves (this note said four, having omitted the empty-string guard). One of the five ' +
+      'pushed the `scan.samples` one-liner back to re-deriving the event off `parsed` — a real ' +
+      'anti-drift property over a field NOTHING READ, which is what KAN-358 deleted. The ' +
+      'property did not go with it: `describeUnreadableLog` takes a `LogVersionScan` and cannot ' +
+      'name `parsed`, and `classifyLog` — the one scope that can — now renders no text, so the ' +
+      're-derivation is unrepresentable rather than merely unobserved and no assertion stands in ' +
+      'for it. The two notice starves that replace it cover something this file never had: §5 ' +
+      'asserted the date and the standing reached the operator\'s line and nothing established ' +
+      'either assertion could fail. That bit hardest on the negative half — "the notice does not ' +
+      'print 12345" is satisfied by a notice printing no date at all — so `notice-drops-date` is ' +
+      'what stops that pair being a check and its own alibi. ' +
+      'THE SIXTH MECHANISM IS AN ABSENCE, so it is held by a NEGATIVE CASE rather than by a ' +
+      'starve: §5b reads `src/agent-registry.ts` as text and requires `classifyLog` to ' +
+      'interpolate no row value into any string — the property that leaves the notice the only ' +
+      'rendering of a row — then runs the identical predicate over a doctored copy with the ' +
+      'render put back and requires it to catch that. A grep asserting an absence is otherwise ' +
+      'the purest form of an assertion that has only ever been observed passing. NOTE THAT §5b ' +
+      'IS THE ONE SECTION HERE WHOSE VERDICT IS ABOUT THE TREE RATHER THAN THE BUILD: this ' +
+      'file\'s exit code is a blend of the two, and its §0 says so. ' +
+      'THE DISCIPLINE THE OLD §6d BOUGHT IS KEPT WHERE IT WAS EARNED: its first draft compared ' +
+      'two empty sample lists (samples stopped at three rows and the fixture was eighth), so the ' +
+      'mutant and the real build agreed because neither had reached the row. The replacement ' +
+      'carries the same guard in the form that fits it — the notice must have printed one line ' +
+      'per fixture before any grep over its text counts. ' +
       'FIXTURES ARE DERIVED, NOT PASTED: every row is written by a real `AgentRegistry.record()` ' +
       'and then perturbed, and the expected classification is parsed out of the `rowStanding` ' +
       'table in `docs/read-path-contract.md` against an event vocabulary read from the daemon\'s ' +

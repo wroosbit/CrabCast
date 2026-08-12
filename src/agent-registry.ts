@@ -921,14 +921,19 @@ export interface LogVersionScan {
    * with a hole in it, through the recovery procedure it recommended itself.
    */
   unusable: number;
-  /** Every offending row, in file order. The disclosure and the notice share it. */
+  /**
+   * Every offending row, in file order. The disclosure and the notice share it,
+   * and after KAN-358 it is the ONLY row detail this type carries.
+   *
+   * WHAT WAS REMOVED AND WHY IT MATTERS TO THIS FIELD. A `samples` array of up
+   * to three pre-rendered one-liners sat beside this one, built on every read
+   * and read by nothing — see {@link classifyLog}, which is where it was built
+   * and where the correction is recorded. Its absence is what makes
+   * {@link describeUnreadableLog} the single rendering of a row rather than one
+   * of two.
+   */
   unreadable: UnreadableRecord[];
-  /** A few offending rows as one-liners, for the boot notice's text. */
-  samples: string[];
 }
-
-/** How many rows the boot notice names before it says "and N more". */
-const VERSION_SCAN_SAMPLES = 3;
 
 /**
  * Count rows this daemon's format does not cover, WITHOUT loading any of them.
@@ -984,7 +989,7 @@ export function scanLogVersions(file: string): LogVersionScan {
 }
 
 function emptyScan(file: string): LogVersionScan {
-  return { file, rows: 0, preMigration: 0, fromNewer: 0, unusable: 0, unreadable: [], samples: [] };
+  return { file, rows: 0, preMigration: 0, fromNewer: 0, unusable: 0, unreadable: [] };
 }
 
 /**
@@ -1192,25 +1197,41 @@ function classifyLog(text: string, scan: LogVersionScan, entries?: AgentLogEntry
     else if (bad.problem === 'from-newer') scan.fromNewer++;
     else scan.unusable++;
     scan.unreadable.push(bad);
-    if (scan.samples.length < VERSION_SCAN_SAMPLES) {
-      // BUILT FROM THE RECORD, NOT RE-DERIVED FROM `parsed` (KAN-344). This
-      // line used to read `parsed.event` and `parsed.at` for itself, which was
-      // the only place in this file that answered a question about a row twice
-      // — and {@link classifyRow}'s own header makes the argument against
-      // exactly that, one function up: "they are now the same call, so neither
-      // can drift into covering a case the other does not". The boot notice and
-      // the wire now cannot disagree about what a row said, because there is
-      // one expression and two readers of it.
-      //
-      // It is also where the two values were already being extracted and then
-      // written to stderr once, at boot, where no caller could reach them. That
-      // is what makes publishing them a routing decision rather than a new
-      // interpretation of the bytes.
-      scan.samples.push(
-        `line ${bad.line}: ${bad.identity} — ${bad.claimsEvent ?? 'no event'} at ` +
-          `${bad.claimsAt ?? 'no timestamp'} (${bad.problem}, ${bad.standing})`
-      );
-    }
+    // NO ROW IS RENDERED HERE — and note that this says *is* and not *can be*,
+    // because the two are not the same guarantee and only one of them is true
+    // (KAN-358).
+    //
+    // WHAT IS TRUE BY CONSTRUCTION: {@link describeUnreadableLog} cannot
+    // re-derive a row, because it takes a {@link LogVersionScan} and `parsed`
+    // is not nameable inside it. That has always held and no assertion is
+    // needed for it.
+    //
+    // WHAT IS TRUE ONLY BY THIS LOOP STAYING EMPTY OF TEXT: that the file holds
+    // exactly ONE rendering of a row, so there is nothing for that rendering to
+    // drift against. This loop is the only scope where a raw `parsed` row is
+    // reachable, which is what makes it the only place a second derivation
+    // could be written — and nothing in the type system stops a later author
+    // writing one here. `verify-unreadable-row-standing.mjs` §5b is the check
+    // that notices, and it reads this source as text because an absence has no
+    // runtime behaviour to assert on.
+    //
+    // WHAT WAS DELETED, recorded so nobody re-invents it. A `samples` array of
+    // up to `VERSION_SCAN_SAMPLES` (3) one-liners was pushed here on every
+    // registry read, and NOTHING read it — not this notice, not `list_agents`,
+    // not `daemon_status`, not the CLI. Two comments said otherwise and both
+    // were false: the field's own doc said the lines were "for the boot
+    // notice's text", and this branch said the values had been "written to
+    // stderr once, at boot, where no caller could reach them". They were never
+    // written anywhere. The second sentence was offered as the justification
+    // for publishing `claimsEvent`/`claimsAt` on the wire, and it was quoted
+    // and merged before anybody checked who read the field.
+    //
+    // THE CONCLUSION IT WAS SUPPORTING SURVIVES, and that is why this is a
+    // correction rather than a revert: the two values genuinely WERE already
+    // being extracted from `parsed` at this point, which is what makes
+    // publishing them a routing decision rather than a new interpretation of
+    // the bytes. Only the destination was invented — they were extracted and
+    // then discarded.
   }
 }
 

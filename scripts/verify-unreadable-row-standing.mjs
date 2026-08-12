@@ -14,6 +14,13 @@
 // reading a `from-newer` row's event vocabulary as though it were its own,
 // which contradicts that row's own stated reason in the same response.
 //
+// AND SINCE KAN-358, ONE MORE THAT IS NOT ABOUT THE DISCLOSURE'S CONTENT: a
+// build in which a SECOND rendering of a row has been written back into
+// `classifyLog`, where the raw `parsed` line is in scope. That is the shape the
+// deleted `scan.samples` had — a one-liner derived from `parsed` rather than
+// from the record, free to disagree with the notice about what a row said, and
+// read by nobody so that nothing would ever have shown the disagreement.
+//
 // ---------------------------------------------------------------------------
 // WHY THE FIXTURES ARE WRITTEN BY THE DAEMON AND THE EXPECTATIONS COME FROM THE
 // DOCUMENT — neither is a literal in this file, and that is load-bearing twice.
@@ -59,19 +66,33 @@
 // tree and no script in this repository can see it.
 //
 // AND ONE SEAM INSIDE THIS FILE, because the obvious reading of §5 is generous
-// to it. §5 has two halves against two different surfaces:
+// to it. THIS PARAGRAPH IS THE ONE THAT CAUGHT KAN-358 and it is kept rather
+// than deleted with what it disclosed — what changed is which sentence in it is
+// true, so the sentence is replaced and the habit is not.
 //
-//   * `describeUnreadableLog` is the notice the daemon PRINTS at boot
-//     (`src/daemon.ts` writes it to stderr and to `daemon.log`). The standing
-//     and the date being on that line is a fact about a surface somebody reads.
-//   * `scan.samples` is a list of one-liners that, as of this commit, NOTHING IN
-//     THE DAEMON CONSUMES — `describeUnreadableLog` builds its own lines from
-//     `scan.unreadable` and never touches `samples`. So §5b and §6d hold a real
-//     anti-drift property over a value with no reader today. They are worth
-//     keeping (the field is exported, and the single-derivation rule is what
-//     stops the two renderings disagreeing if it ever gains one) but they must
-//     not be read as evidence that an operator sees anything. That the field is
-//     unconsumed at all is KAN-358, filed from this work and linked `Relates`.
+// WHAT IT USED TO SAY. §5 had two halves against two different surfaces: the
+// notice `describeUnreadableLog` returns, which `src/daemon.ts` writes to
+// stderr and to `daemon.log`, and `scan.samples`, a list of one-liners that
+// NOTHING IN THE DAEMON CONSUMED. §5b and §6d held a real anti-drift property
+// over a value with no reader, and this paragraph said so — "they must not be
+// read as evidence that an operator sees anything" — and filed KAN-358.
+//
+// WHAT IS TRUE NOW. KAN-358 deleted the field, and §5 is one surface: the
+// notice, which is read. The anti-drift property did not go with it. It is
+// carried by the type instead — `describeUnreadableLog(scan: LogVersionScan)`
+// cannot name the raw `parsed` row, and `classifyLog`, the one function where
+// `parsed` is in scope, no longer renders any text — so the second derivation
+// is unrepresentable rather than merely unobserved, and no assertion here is
+// standing in for it. §6d starves the notice's own two renders instead, which
+// is coverage this file did not have before.
+//
+// SO THE LIMIT THAT REPLACES THE OLD ONE, in the same spirit: everything §5
+// asserts is about the STRING this function returns. That `src/daemon.ts` calls
+// it, and that the string therefore reaches stderr and `daemon.log`, is read
+// off two call sites and not exercised here; and no script in this repository
+// establishes that an operator ever opens that log. §3 is the surface with a
+// consumer this file can actually reach, and it is the wire rather than the
+// notice.
 
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -105,6 +126,14 @@ console.log('\n=== 0. Preconditions — a verdict read off a stale build is evid
 // second is a COUNTED FAILURE, because a `dist` older than `src` produces a
 // perfectly plausible run against the previous build — the outcome that misleads
 // in both directions, and the one this epic has been caught by twice.
+//
+// AND THIS FILE'S EXIT CODE IS A BLEND, which is worth knowing before anybody
+// reads a verdict off it (KAN-358). Every section except §5b imports from
+// `dist` and is therefore evidence about the BUILD. §5b reads
+// `src/agent-registry.ts` as text and is evidence about the TREE. So on a run
+// where the build is stale the guard above goes red and §5b's verdict is still
+// good, while everything else is about code nobody in this tree wrote. Read the
+// section, not the exit code.
 const daemonJs = path.join(distDir, 'daemon.js');
 if (!fs.existsSync(daemonJs)) {
   console.error('dist/daemon.js not found — run `npm run build` first');
@@ -132,7 +161,11 @@ check(
 );
 
 const registryMod = await import(path.join(distDir, 'agent-registry.js'));
-const { AgentRegistry, describeUnreadableLog, scanLogVersions, UNREADABLE_RAW_LIMIT } = registryMod;
+// `describeUnreadableLog` is deliberately NOT destructured here: §5 reaches it
+// through the module it was handed, so the identical assertion set runs against
+// a starved build in §6d. A convenient top-level binding is how half a section
+// ends up testing the real build while the other half tests the mutant.
+const { AgentRegistry, scanLogVersions, UNREADABLE_RAW_LIMIT } = registryMod;
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kan344-'));
 process.on('exit', () => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -648,70 +681,167 @@ console.log('\n=== 5. The boot notice is rendered FROM the record, not derived a
 // and `event` are NUMBERS: the record quotes only strings, so it says "no event"
 // where a second derivation off `parsed` would print `67890`.
 //
-// TWO SURFACES, ASSERTED SEPARATELY, because they are rendered by different
-// code and only one of them is what §6d starves. `describeUnreadableLog` is the
-// operator's notice; `scan.samples` is the one-liner list. An earlier draft
-// asserted both against the notice and the sample assertion was VACUOUS —
-// `describeUnreadableLog` never prints the event at all, so a check that the
-// event was absent from it could not have failed.
-const NUMERIC_ROW = CASES.find((c) => c.name === 'unusable/non-string-at-and-event').row;
-
-{
-  const c = classify('notice', [CONTROL, ...CASES.map((x) => x.row)]);
-  const notice = describeUnreadableLog(c.scan);
-  const numeric = c.scan.unreadable.find((u) => u.claimsEvent === null && u.claimsAt === null);
-  check(Boolean(numeric), 'the numeric-fields fixture reached the notice', `identity=${numeric?.identity}`);
-  check(
-    !notice.includes('12345'),
-    "the notice does not date a row whose `at` is a number — it renders `claimsAt`, which quoted nothing",
-    'a second derivation off `parsed` would have printed 12345'
-  );
-  const dated = c.scan.unreadable.find((u) => u.claimsAt);
-  check(
-    Boolean(dated) && notice.includes(`the row dates itself ${dated.claimsAt}`),
-    'and it DOES date a row that names a string, so the check above is about the quoting rule rather than an empty notice',
-    dated ? `looked for "${dated.claimsAt}"` : 'no dated row to look for'
-  );
-  const retired = c.scan.unreadable.find((u) => u.standing === 'retired');
-  check(
-    Boolean(retired) && notice.includes(`(${retired.problem}, ${retired.standing})`),
-    "and it carries the standing on the operator's line, where it decides whether to read further",
-    retired ? `looked for "(${retired.problem}, ${retired.standing})"` : 'no retired row to look for'
-  );
-  check(
-    !/\bdelete\b/i.test(notice),
-    "and KAN-302's rule still holds: no remedy this notice offers destroys a record"
-  );
-}
-
-/**
- * The sample line for the numeric row, from whichever build is passed.
- *
- * A REGISTRY OF ITS OWN, holding only the control and that one row: samples stop
- * at `VERSION_SCAN_SAMPLES` (3), and in the full fixture set this row is eighth.
- * An earlier draft used the full set and compared two empty strings — the mutant
- * and the real build agreed because neither had reached the row.
- */
-function numericSample(mod, label) {
-  const dir = path.join(tmp, `samples-${label}`);
+// ONE SURFACE NOW, AND IT IS THE CONSUMED ONE (KAN-358). This section used to
+// have a second half asserting the same property over `scan.samples`, a list of
+// pre-rendered one-liners that nothing in the daemon read. That field is gone,
+// and the property has not been dropped with it — it has moved from an
+// assertion to the type. `describeUnreadableLog` takes a `LogVersionScan`, in
+// which the raw `parsed` row is not nameable, and `classifyLog` — the one place
+// `parsed` IS in scope — now renders no text at all. So the re-derivation the
+// old §6d starved cannot be written any more, which is why §6d below starves
+// something else: the two values this notice DOES render, neither of which had
+// ever been shown capable of going missing.
+//
+// WHY THE EVENT IS NOT ASSERTED HERE, kept from the draft that got it wrong:
+// `describeUnreadableLog` never prints `claimsEvent` at all, so a check that
+// the event is absent from the notice could not fail. `claimsEvent` is held by
+// §2 (the record) and §3 (both wire surfaces), which is where it is consumed.
+//
+// The assertions are a function so §6d can run the identical set against a
+// starved build and require NAMED ones to fail, exactly as §6 does with §2's.
+function assertNotice(mod, label) {
+  const dir = path.join(tmp, `notice-${label}`);
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, 'agents.jsonl');
-  fs.writeFileSync(file, [CONTROL, NUMERIC_ROW].map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const rows = [CONTROL, ...CASES.map((x) => x.row)];
+  fs.writeFileSync(file, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
   const scan = mod.scanLogVersions(file);
-  return { samples: scan.samples.join('\n'), disclosed: scan.unreadable.length };
+  const notice = mod.describeUnreadableLog(scan);
+
+  const results = [];
+  const say = (ok, name, detail) => results.push({ ok, name, detail });
+
+  // --- the vacuity guards, before any assertion about the text --------------
+  // Every negative check below ("the notice does not say X") is satisfied for
+  // free by a notice that reached no row, so what the rows are has to be
+  // established first — and separately, so a starve that broke the fixtures
+  // rather than the render cannot credit itself with the red.
+  const numeric = scan.unreadable.find((u) => u.claimsEvent === null && u.claimsAt === null);
+  const dated = scan.unreadable.find((u) => u.claimsAt);
+  const retired = scan.unreadable.find((u) => u.standing === 'retired');
+  say(
+    scan.unreadable.length === CASES.length,
+    'vacuity: the notice was built over every fixture row',
+    `${scan.unreadable.length} disclosed, ${CASES.length} expected`
+  );
+  say(Boolean(numeric), 'vacuity: the numeric-fields fixture reached the notice', `identity=${numeric?.identity}`);
+  say(Boolean(dated), 'vacuity: a row naming a STRING date reached the notice', `claimsAt=${dated?.claimsAt}`);
+  say(Boolean(retired), 'vacuity: a retired row reached the notice', `identity=${retired?.identity}`);
+  say(
+    notice.split('\n').filter((l) => /^ {2}line \d+:/.test(l)).length === CASES.length,
+    'vacuity: the notice printed one per-row line per fixture, so the greps below are over text that exists',
+    `${notice.split('\n').filter((l) => /^ {2}line \d+:/.test(l)).length} row line(s) of ${CASES.length}`
+  );
+
+  say(
+    !notice.includes('12345'),
+    'notice: it does not date a row whose `at` is a NUMBER — it renders `claimsAt`, which quoted nothing',
+    'a second derivation off `parsed` would have printed 12345'
+  );
+  say(
+    Boolean(dated) && notice.includes(`the row dates itself ${dated.claimsAt}`),
+    'notice: and it DOES date a row that names a string, so the check above is about the quoting rule rather than an empty notice',
+    dated ? `looked for "${dated.claimsAt}"` : 'no dated row to look for'
+  );
+  say(
+    Boolean(retired) && notice.includes(`(${retired.problem}, ${retired.standing})`),
+    "notice: it carries the standing on the operator's line, where it decides whether to read further",
+    retired ? `looked for "(${retired.problem}, ${retired.standing})"` : 'no retired row to look for'
+  );
+  say(
+    !/\bdelete\b/i.test(notice),
+    "notice: and KAN-302's rule still holds — no remedy this notice offers destroys a record"
+  );
+  return results;
 }
 
+for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.detail);
+
+// --- 5b. and there is exactly ONE rendering of a row --------------------------
+//
+// THE ONE STATIC SECTION IN THIS FILE, and both halves of that matter. It reads
+// `src/agent-registry.ts` as TEXT, so its verdict is about the code in this
+// tree rather than about `dist` — a stale or failed build can neither redden
+// nor green it, which is the opposite of every section above and is why this
+// script's exit code must not be read as a single kind of evidence. It is also
+// the only section that CAN hold this property, because the property is an
+// absence and an absence has no runtime behaviour to assert on.
+//
+// WHAT IT DEFENDS, narrowly, because the obvious version of the sentence
+// overclaims and this epic is about sentences that outrun their mechanism:
+//
+//   * `describeUnreadableLog` cannot re-derive a row — it takes a
+//     `LogVersionScan`, in which `parsed` is not nameable. TRUE BY
+//     CONSTRUCTION, true before KAN-358, and not this check's business.
+//   * The file holds exactly ONE rendering of a row, so there is nothing for
+//     that rendering to drift against. TRUE ONLY WHILE `classifyLog` STAYS
+//     EMPTY OF TEXT. That loop is the only scope a raw `parsed` row is
+//     reachable from, nothing in the type system stops a second render being
+//     written there, and until KAN-358 there WAS one — the `scan.samples`
+//     one-liner, which §5b and §6d used to defend precisely because it could
+//     drift. This is the assertion that replaces them.
+//
+// IT MATCHES `bad` AS WELL AS `parsed`, AND THAT STRICTNESS IS DELIBERATE. A
+// second render built from the RECORD cannot disagree with the notice about
+// what a row said — KAN-344 had already fixed the deleted line that far — so on
+// the drift argument alone `${bad.…}` would be harmless. It is matched anyway,
+// because the property this section holds is "exactly one rendering" and not
+// "no re-derivation": a second one is a second reader to keep in step, a second
+// place for a comment to claim an audience it does not have, and the whole of
+// what KAN-358 found. A render that must exist belongs in
+// `describeUnreadableLog`, where it is reachable and where §5 and §6d hold it.
 {
-  const real = numericSample(registryMod, 'real');
+  const registrySrc = fs.readFileSync(path.join(repoRoot, 'src', 'agent-registry.ts'), 'utf8');
+
+  /**
+   * `classifyLog`'s body, sliced to the next top-level declaration. Pure, so
+   * the negative case below can run the identical predicate over a doctored
+   * copy and require it to FAIL — the §1b arrangement, and the only thing that
+   * stops a grep-shaped assertion passing because its anchor drifted.
+   */
+  function renderingsInClassifyLog(text) {
+    const start = text.indexOf('function classifyLog(');
+    if (start === -1) return null;
+    const rest = text.slice(start + 1);
+    const next = /^(?:export )?(?:function|const|interface|type|class) /m.exec(rest);
+    const body = next ? rest.slice(0, next.index) : rest;
+    // `${...}` interpolations of a row's own values — the parsed line, or the
+    // record built from it. A `${i + 1}` line number is not a rendering of a
+    // row and is deliberately not matched.
+    return { body, hits: [...body.matchAll(/\$\{(?:parsed|bad)\b[^}]*\}/g)].map((m) => m[0]) };
+  }
+
+  const found = renderingsInClassifyLog(registrySrc);
   check(
-    real.disclosed === 1,
-    'the sample registry discloses exactly the one row the next assertion is about',
-    `${real.disclosed} disclosed`
+    Boolean(found) && found.body.includes('scan.unreadable.push(bad)'),
+    '5b: the slice really is `classifyLog`\'s body — a drifted anchor would make the check below pass over nothing',
+    found ? `${found.body.length} chars` : 'no `function classifyLog(` in src/agent-registry.ts'
   );
   check(
-    real.samples.includes('no event') && !real.samples.includes('67890'),
-    "the sample line says `no event` for a row whose `event` is a number — one derivation, and it is the record's",
-    real.samples.trim()
+    Boolean(found) && found.hits.length === 0,
+    '5b: `classifyLog` interpolates no row value into any string — the notice is the only rendering, so there is nothing for it to drift against',
+    found ? found.hits.join(' ; ') || 'no interpolation of `parsed` or `bad`' : 'body not found'
+  );
+
+  // THE NEGATIVE CASE. Re-insert the rendering KAN-358 deleted, in the shape a
+  // later author would most plausibly write it, and require the same predicate
+  // to catch it. Without this, §5b is a grep that has only ever been observed
+  // finding nothing — which is the register's own definition of undefended, and
+  // exactly what this reviewer starves.
+  const doctored = registrySrc.replace(
+    '    scan.unreadable.push(bad);\n',
+    '    scan.unreadable.push(bad);\n' +
+      '    scan.notes.push(`line ${bad.line}: ${parsed.event ?? \'no event\'}`);\n'
+  );
+  check(
+    doctored !== registrySrc,
+    '5b: the doctored source differs from the real one, so the negative case tests a re-inserted render rather than a copy'
+  );
+  const after = renderingsInClassifyLog(doctored);
+  check(
+    Boolean(after) && after.hits.length > 0,
+    '5b: and the check goes RED when a second rendering is put back inside the loop — it is not a grep that has only ever found nothing',
+    after ? after.hits.join(' ; ') || 'it stayed green, so §5b would not notice a re-derivation' : 'body not found'
   );
 }
 
@@ -800,34 +930,65 @@ for (const s of STARVES) {
   }
 }
 
-// --- 6d. and the anti-drift render, starved the same way ----------------------
-{
+// --- 6d. and the notice's own renders, starved the same way -------------------
+//
+// TWO STARVES OVER ONE SURFACE, REPLACING ONE OVER A SURFACE NOBODY READ
+// (KAN-358). What stood here mutated the `scan.samples` line back to
+// re-deriving the event off `parsed` and required the two renderings to
+// disagree. That line is gone: `describeUnreadableLog` cannot re-derive,
+// because `parsed` is not in its scope and `classifyLog` renders nothing — the
+// property is now carried by the type rather than by this mutation, which is
+// the trade §5's header states in full.
+//
+// So what is starved instead is what the property was always FOR: that the two
+// values the notice renders reach the operator's line. Neither had ever been
+// starved. §5 asserted both and nothing established either assertion could
+// fail, which is the condition `verify-proof-defences` exists to name — and it
+// bites hardest on the negative one, because "the notice does not print 12345"
+// is satisfied by a notice that prints no date at all. `notice-drops-date` is
+// what stops that pair from being a check and its own alibi.
+const NOTICE_STARVES = [
+  {
+    name: 'notice-drops-date',
+    find: '(row.claimsAt ? ` — the row dates itself ${row.claimsAt}` : \'\')',
+    replace: "''",
+    expect: /notice: and it DOES date a row/
+  },
+  {
+    name: 'notice-drops-standing',
+    find: '`  line ${row.line}: ${row.identity} (${row.problem}, ${row.standing})`',
+    replace: '`  line ${row.line}: ${row.identity} (${row.problem})`',
+    expect: /notice: it carries the standing/
+  }
+];
+
+for (const s of NOTICE_STARVES) {
   starve: {
-    const dir = mutate(
-      'notice-rederives',
-      'agent-registry.js',
-      '`line ${bad.line}: ${bad.identity} — ${bad.claimsEvent ?? \'no event\'} at ` +',
-      '`line ${bad.line}: ${bad.identity} — ${parsed.event ?? \'no event\'} at ` +'
-    );
+    const dir = mutate(s.name, 'agent-registry.js', s.find, s.replace);
     if (!dir) break starve;
     const mod = await import(path.join(dir, 'agent-registry.js'));
-    if (typeof mod.scanLogVersions !== 'function') {
-      check(false, 'notice-rederives: the mutated build loaded and is answering');
-      break starve;
-    }
-    // The sample line is what the mutation touches, so this asserts on the
-    // sample rather than on `describeUnreadableLog`'s own text.
-    const mutant = numericSample(mod, 'mutant');
-    const real = numericSample(registryMod, 'real-again');
+    // THE SAME PRECONDITION §6 CARRIES, and for the same reason: a mutant that
+    // died on an unresolved import produces an absence, and an absence is what
+    // a correctly-starved render produces too.
+    const alive =
+      typeof mod.scanLogVersions === 'function' && typeof mod.describeUnreadableLog === 'function';
+    check(alive, `${s.name}: the mutated build loaded and is answering`);
+    if (!alive) break starve;
+
+    const results = assertNotice(mod, s.name);
+    const failed = results.filter((r) => !r.ok);
+    const named = failed.filter((r) => s.expect.test(r.name));
     check(
-      mutant.disclosed === 1 && real.disclosed === 1,
-      'notice-rederives: both builds reached the row, so the comparison below is between two renderings rather than two absences',
-      `mutant ${mutant.disclosed}, real ${real.disclosed}`
+      named.length > 0,
+      `${s.name}: a NAMED assertion goes red when the render is starved — the render is defended`,
+      named.length
+        ? `${named.length} of ${failed.length} failures matched, e.g. "${named[0].name}" (${named[0].detail})`
+        : `nothing matching ${s.expect} failed; ${failed.length} other failure(s). THE RENDER IS UNDEFENDED.`
     );
     check(
-      mutant.samples.includes('67890') && !real.samples.includes('67890'),
-      'notice-rederives: re-deriving the event off `parsed` prints a value the record withheld — the single derivation is load-bearing',
-      `mutant: ${mutant.samples.trim()} | real: ${real.samples.trim()}`
+      failed.every((r) => !r.name.startsWith('vacuity:')),
+      `${s.name}: and the notice still reached every row, so what went red is the render and not the fixtures`,
+      failed.filter((r) => r.name.startsWith('vacuity:')).map((r) => r.name).join('; ') || 'no vacuity guard fired'
     );
   }
 }
