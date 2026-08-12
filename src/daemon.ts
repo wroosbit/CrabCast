@@ -13,6 +13,7 @@ import { dampCost, sampleFromMeasurement, MIN_MEASURED_CORES } from './agent-cos
 import { AgentCost, MEASURED_AGENT_COST, setMeasuredAgentCost } from './capacity.js';
 import { CpuWindow, finishCpuWindow, setObservedCpu, startCpuWindow } from './machine-cpu.js';
 import { ConfigError, CrabcastConfig, loadConfig, resolveConfigPath } from './config.js';
+import { daemonConfigPathArg } from './daemon-invocation.js';
 import { FleetObservation, FleetStatusMemory, MessageRouter, MissingAgent } from './router.js';
 import { HerdrBridge } from './herdr.js';
 import {
@@ -39,9 +40,14 @@ import { snapshotBuild } from './provenance.js';
 // mistyped the config is looking.
 let config: CrabcastConfig;
 try {
-  // The daemon's own argv: `node dist/daemon.js [configPath]`. The position is
-  // this file's business; the resolution rule after it is config.ts's.
-  config = loadConfig(resolveConfigPath(process.argv[2]));
+  // Two entrypoints reach this line, and they hand the path over differently:
+  // `node dist/daemon.js [configPath]` puts it in argv[2], and `crabcast
+  // daemon` (KAN-322) resolves it through the CLI's own `--config` rule and
+  // declares it before importing this module. Which of the two happened is
+  // daemon-invocation.ts's business; the resolution rule after it is
+  // config.ts's. Reading argv[2] directly here would load the CLI's flags as
+  // a config file on the second path.
+  config = loadConfig(resolveConfigPath(daemonConfigPathArg()));
 } catch (err) {
   if (err instanceof ConfigError) {
     process.stderr.write(`crabcast: refusing to start: ${err.message}\n`);
@@ -398,6 +404,23 @@ server.on('error', (err: any) => {
   probe.once('connect', () => {
     probe.end();
     log('Another daemon is already running; exiting.');
+    // ALSO on stderr, and this is the foreground case specifically (KAN-322).
+    // `log` writes into the data dir's daemon.log — which the INCUMBENT owns,
+    // so this line lands in the winner's log where somebody looking for the
+    // loser's fate will not think to read. Detached spawns get it in
+    // daemon-spawn.err and are otherwise unattended, but `crabcast daemon` is
+    // run by a person or a supervisor watching this stream, and exiting 0
+    // having printed nothing at all is indistinguishable from having started.
+    //
+    // A clean exit is still the right answer rather than an error: the
+    // incumbent is serving, so there is nothing wrong here, and a supervisor
+    // configured `Restart=on-failure` must NOT restart this. Saying so on
+    // stderr is what keeps the silence from being the only evidence.
+    process.stderr.write(
+      `crabcast: a daemon is already running on ${SOCKET_PATH} and is serving; this one is ` +
+        `exiting 0 without taking the socket. Nothing is wrong and nothing was changed — ` +
+        `use \`crabcast daemon-status\` to see the one that is running.\n`
+    );
     process.exit(0);
   });
   probe.once('error', () => {

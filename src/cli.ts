@@ -34,6 +34,7 @@ import {
   loadConfig,
   resolveConfigSource
 } from './config.js';
+import { hostDaemonConfigPath } from './daemon-invocation.js';
 import {
   SPAWN_ERR_FILENAME,
   connectToDaemon,
@@ -127,7 +128,31 @@ export interface ParsedInvocation {
   flags: Record<string, string | number | boolean>;
 }
 
-export interface CommandSpec {
+/**
+ * The part of a subcommand the argument parser needs, and the whole of it.
+ *
+ * Two tables satisfy this: {@link COMMANDS}, whose entries are requests to a
+ * daemon, and {@link SERVER_COMMANDS}, whose one entry *becomes* the daemon.
+ * They are separate tables rather than one table with a mode flag, because
+ * almost nothing a {@link CommandSpec} carries means anything for a server
+ * command — there is no `action`, no reply to correlate, nothing to render,
+ * and "does this start a daemon if none is running" is a question about
+ * clients. Merging them would have cost five fields of filler and left the
+ * parity check (`verify-cli-parity`) reading a socket action that no router
+ * dispatches.
+ *
+ * The parser is shared because argument parsing genuinely is the same job for
+ * both, and a second copy of it is a second set of rules about `--` and
+ * unknown flags that would drift.
+ */
+export interface InvocableSpec {
+  name: string;
+  summary: string;
+  positionals: PositionalSpec[];
+  flags: FlagSpec[];
+}
+
+export interface CommandSpec extends InvocableSpec {
   /** The subcommand as typed. */
   name: string;
   /** The `action` sent over the socket. */
@@ -2266,6 +2291,77 @@ export function commandNamed(name: string): CommandSpec | undefined {
   return COMMANDS.find((c) => c.name === name);
 }
 
+// -------------------------------------------------------- becoming the daemon
+
+/**
+ * A subcommand that does not talk to a daemon because it *is* one.
+ *
+ * `run` is the discriminant as well as the behaviour: a {@link CommandSpec}
+ * has no such member, so `'run' in spec` narrows without anybody having to
+ * keep a `kind` field honest.
+ */
+export interface ServerCommandSpec extends InvocableSpec {
+  /**
+   * Become the daemon in this process. Does not return: the daemon owns the
+   * process from here, and leaves it on SIGINT/SIGTERM or on a boot refusal.
+   */
+  run(configPath: string): Promise<never>;
+}
+
+/**
+ * WHY THIS EXISTS (KAN-322), stated where somebody deciding to delete it will
+ * read it.
+ *
+ * CrabCast spawns a daemon from a client, detached, and only from one of the
+ * five write verbs — and the README calls that a feature, correctly: *nothing
+ * starts a daemon by hand.* The gap that promise never covered is the machine
+ * restarting. After a reboot there is no client, so nothing spawns anything,
+ * and no read verb will do it either (`resolveTarget` refuses to spawn into a
+ * data dir nobody named). The socket simply is not there, and nothing says so
+ * — which on the machine this was found on lasted eight days.
+ *
+ * A supervisor is the answer to that, and a supervisor needs a process it can
+ * own in the foreground. One already existed — `node dist/daemon.js` — but it
+ * is not a command anybody can run: it is a path inside a checkout, or inside
+ * a global `node_modules` nobody is going to find. The systemd unit written
+ * against it (KAN-320) had to hard-code an absolute path into somebody's home
+ * directory, which is exactly why that unit could never ship.
+ *
+ * So this is the whole of the change: the entrypoint that already worked,
+ * given a name that resolves off `PATH` for anyone who installed CrabCast.
+ * `docs/supervision.md` holds the decision and the unit template.
+ *
+ * **It does not soften the promise for clients.** Read verbs still refuse,
+ * write verbs still spawn, and the unnamed-config fallback still never spawns
+ * into the default data dir. What changed is that a supervisor now has a
+ * supported way to ask for a daemon on purpose.
+ */
+export const SERVER_COMMANDS: ServerCommandSpec[] = [
+  {
+    name: 'daemon',
+    summary:
+      'run the daemon in the foreground so a supervisor (systemd, launchd, a container) can ' +
+      'own it — does not return; see docs/supervision.md',
+    positionals: [],
+    flags: [],
+    async run(configPath: string): Promise<never> {
+      // Declared before the import, because importing daemon.js IS starting
+      // the daemon — it reads this path while it is being evaluated.
+      hostDaemonConfigPath(configPath);
+      await import('./daemon.js');
+      // The daemon owns the process now. Returning would let the entrypoint
+      // set an exit code over a daemon that is still serving, so this never
+      // settles; the daemon's own SIGINT/SIGTERM handlers end the process,
+      // and a config it cannot load exits non-zero before we get here.
+      return new Promise<never>(() => {});
+    }
+  }
+];
+
+export function serverCommandNamed(name: string): ServerCommandSpec | undefined {
+  return SERVER_COMMANDS.find((c) => c.name === name);
+}
+
 // ---------------------------------------------------------------- global flags
 
 const GLOBAL_FLAGS: FlagSpec[] = [
@@ -2284,7 +2380,7 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 
 // --------------------------------------------------------------------- help
 
-function usageLine(spec: CommandSpec): string {
+function usageLine(spec: InvocableSpec): string {
   const args = spec.positionals
     .map((p) => (p.rest ? `<${p.name}...>` : p.required ? `<${p.name}>` : `[${p.name}]`))
     .join(' ');
@@ -2325,6 +2421,33 @@ export function renderCommandHelp(spec: CommandSpec): string {
   );
 }
 
+export function renderServerCommandHelp(spec: ServerCommandSpec): string {
+  return lines(
+    usageLine(spec),
+    `\n${INDENT}${spec.summary}`,
+    '\nflags:',
+    ...flagHelp(GLOBAL_FLAGS.filter((f) => f.name === 'config' || f.name === 'help')),
+    '\nThis command does not connect to a daemon — it BECOMES one, in this process, in the',
+    'foreground. It does not return; stop it with SIGINT or SIGTERM, and it removes its',
+    'socket on the way out. A config that will not load is refused before the socket is',
+    'created, with a non-zero exit a supervisor can see.',
+    '\nIts exit status is the DAEMON\'s, not the client exit-code table above: 0 for a clean',
+    'shutdown (including the second-daemon case below), non-zero for a refusal to boot.',
+    'Nothing here answers `success: true/false`, because nothing here asked a daemon',
+    'anything. The one code this command produces itself is 2, for a usage error that',
+    'never reached the daemon at all.',
+    '\nIt is the entrypoint to point a supervisor at, and the reason it exists: nothing else',
+    'in CrabCast brings a daemon back after the machine restarts. The clients spawn one on',
+    'demand, which covers everything except the case where there is no client — see',
+    '`docs/supervision.md` for a systemd unit template, the restart policy, and why that',
+    'policy is `on-failure` rather than `always`.',
+    '\nRunning it by hand is fine and does the obvious thing; a second daemon started against',
+    'a data dir that already has one detects the incumbent and exits 0 without taking the',
+    'socket. `node dist/daemon.js [configPath]` remains the same program, reachable from a',
+    'checkout without an installed binary.'
+  );
+}
+
 /**
  * The whole help, rendered from {@link COMMANDS} — so every command listed
  * exists and works, by construction rather than by anyone remembering to
@@ -2337,6 +2460,13 @@ export function renderHelp(): string {
     '\nusage: crabcast <command> [arguments] [flags]',
     '\ncommands:',
     ...COMMANDS.map((c) => `${INDENT}${c.name.padEnd(width)}  ${c.summary}`),
+    // Its own section, and not a row in the table above, because it is not the
+    // same kind of thing: every command up there sends one request to a daemon
+    // and prints the reply, and this one becomes the daemon. Listing it beside
+    // them would put a command with no socket action in a table whose whole
+    // job is to be the socket API's surface.
+    '\nrunning the daemon itself:',
+    ...SERVER_COMMANDS.map((c) => `${INDENT}${c.name.padEnd(width)}  ${c.summary}`),
     '\nglobal flags:',
     ...flagHelp(GLOBAL_FLAGS),
     '\nexit codes:',
@@ -2350,6 +2480,10 @@ export function renderHelp(): string {
     `${INDENT}refuse instead (exit 3):       ${COMMANDS.filter((c) => !c.spawnsDaemon).map((c) => c.name).join(', ')}`,
     `${INDENT}Starting the daemon runs its boot reconcile, which re-activates every agent the`,
     `${INDENT}durable registry expects — a side effect nobody asked for by typing \`crabcast list\`.`,
+    `${INDENT}Both of those are about a CLIENT starting a daemon on demand. Nothing here brings`,
+    `${INDENT}one back after the machine restarts, because after a reboot there is no client:`,
+    `${INDENT}\`crabcast daemon\` is the foreground entrypoint to give a supervisor. See`,
+    `${INDENT}docs/supervision.md.`,
     '\nconfig:',
     `${INDENT}--config <path>, else $CRABCAST_CONFIG, else ./crabcast.config.json.`,
     `${INDENT}A config that was NAMED and will not load is a refusal (exit 4), never a silent`,
@@ -2375,7 +2509,7 @@ export function renderHelp(): string {
 
 // ------------------------------------------------------------------- parsing
 
-function flagSpecFor(name: string, spec: CommandSpec | null): FlagSpec | undefined {
+function flagSpecFor(name: string, spec: InvocableSpec | null): FlagSpec | undefined {
   return (
     GLOBAL_FLAGS.find((f) => f.name === name) ??
     spec?.flags.find((f) => f.name === name)
@@ -2395,7 +2529,7 @@ function parseBoolean(name: string, raw: string): boolean {
 }
 
 interface ParsedCommandLine {
-  spec: CommandSpec | null;
+  spec: CommandSpec | ServerCommandSpec | null;
   positionals: string[];
   flags: Record<string, string | number | boolean>;
   wantsHelp: boolean;
@@ -2414,7 +2548,7 @@ interface ParsedCommandLine {
  * Returns Infinity for a command with no `rest` positional, so nothing about
  * the other seven changes.
  */
-function restStartsAt(spec: CommandSpec | null): number {
+function restStartsAt(spec: InvocableSpec | null): number {
   if (!spec) return Infinity;
   const index = spec.positionals.findIndex((p) => p.rest);
   return index === -1 ? Infinity : index;
@@ -2423,7 +2557,7 @@ function restStartsAt(spec: CommandSpec | null): number {
 export function parseArgs(argv: string[]): ParsedCommandLine {
   const flags: Record<string, string | number | boolean> = {};
   const positionals: string[] = [];
-  let spec: CommandSpec | null = null;
+  let spec: CommandSpec | ServerCommandSpec | null = null;
   let noMoreFlags = false;
 
   for (let i = 0; i < argv.length; i++) {
@@ -2489,11 +2623,11 @@ export function parseArgs(argv: string[]): ParsedCommandLine {
     }
 
     if (!spec) {
-      const found = commandNamed(token);
+      const found = commandNamed(token) ?? serverCommandNamed(token);
       if (!found) {
         throw new UsageError(
           `Unknown command ${JSON.stringify(token)}. Commands: ` +
-            `${COMMANDS.map((c) => c.name).join(', ')}.`
+            `${[...COMMANDS, ...SERVER_COMMANDS].map((c) => c.name).join(', ')}.`
         );
       }
       spec = found;
@@ -2507,7 +2641,7 @@ export function parseArgs(argv: string[]): ParsedCommandLine {
 }
 
 /** Positional operands checked against the spec, with `rest` joined. */
-function operandsFor(spec: CommandSpec, given: string[]): string[] {
+function operandsFor(spec: InvocableSpec, given: string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < spec.positionals.length; i++) {
     const p = spec.positionals[i];
@@ -2716,17 +2850,24 @@ function describeUnreachable(dataDir: string, spawned: boolean, cause: string): 
   } else {
     // The instruction has to work for the reader who typed the command, and
     // since KAN-100 that reader may have `npm i -g`'d this package and have no
-    // checkout at all — `node dist/daemon.js` lives inside their global
-    // node_modules and is not a path anyone is going to find. So the primary
-    // advice is the one that is true either way (run something that spawns
-    // one), the command list is read off COMMANDS rather than retyped here,
-    // and the foreground path is named as what it is: a checkout-only thing.
+    // checkout at all. This block used to end by naming `node dist/daemon.js`
+    // and calling it "a checkout-only thing", which was honest and left the
+    // installed reader with nothing: that path is inside their global
+    // node_modules and nobody is going to find it. KAN-322 gave that
+    // entrypoint a name, so the foreground route is now sayable to everybody
+    // and is named second — after the spawning verbs, which remain the answer
+    // for somebody who just wants their command to work.
+    //
+    // Both lists are read off the tables rather than retyped, so a verb that
+    // changes its spawn behaviour cannot leave this paragraph lying.
     const spawning = COMMANDS.filter((c) => c.spawnsDaemon).map((c) => c.name).join(', ');
+    const server = SERVER_COMMANDS.map((c) => `crabcast ${c.name}`).join(', ');
     parts.push(
       `This command does not start a daemon (see \`crabcast --help\`). Run any of`,
       `${INDENT}${spawning}`,
-      `and one is spawned if none is running. From a repository checkout you can also`,
-      `run one in the foreground: node dist/daemon.js [configPath]`,
+      `and one is spawned if none is running. To run one in the foreground — which is`,
+      `what a supervisor such as systemd should own — run:`,
+      `${INDENT}${server} [--config <path>]`,
       `If one failed to start earlier, its stderr is in ${errPath}.`
     );
   }
@@ -2795,12 +2936,49 @@ export async function main(argv: string[]): Promise<ExitCode> {
   const { spec, positionals, flags, wantsHelp } = parsed;
 
   if (wantsHelp) {
-    process.stdout.write((spec ? renderCommandHelp(spec) : renderHelp()) + '\n');
+    const help = !spec
+      ? renderHelp()
+      : 'run' in spec
+        ? renderServerCommandHelp(spec)
+        : renderCommandHelp(spec);
+    process.stdout.write(help + '\n');
     return EXIT.OK;
   }
   if (!spec) {
     process.stdout.write(renderHelp() + '\n');
     return EXIT.USAGE;
+  }
+
+  // Becoming the daemon happens before `resolveTarget`, and must: that
+  // function exists to decide which daemon to *address*, and its unnamed-config
+  // branch answers by falling back to the default data dir and forbidding a
+  // spawn. Neither half is the question here. A daemon needs a config it can
+  // load — not a data dir to connect to — and `daemon.ts` refuses to boot
+  // without one, which is the single refusal path this keeps rather than
+  // duplicating.
+  if ('run' in spec) {
+    if (positionals.length > 0) {
+      // Worth a message rather than a silent drop: `node dist/daemon.js
+      // <configPath>` takes the config as a positional, and that is the
+      // invocation this command replaces, so typing it here is the expected
+      // mistake. Ignoring it would start a daemon against a different config
+      // than the one named on the command line.
+      process.stderr.write(
+        `crabcast: \`crabcast ${spec.name}\` takes no arguments, and got ` +
+          `${JSON.stringify(positionals[0])}. The config is named with the global ` +
+          `--config flag: \`crabcast ${spec.name} --config <path>\`. ` +
+          `(\`node dist/daemon.js <configPath>\` is the older form that took it here.)\n`
+      );
+      return EXIT.USAGE;
+    }
+    let configPath: string;
+    try {
+      configPath = resolveConfigSource(flags.config as string | undefined).path;
+    } catch (err: any) {
+      process.stderr.write(`crabcast: refusing to run: ${err?.message ?? String(err)}\n`);
+      return EXIT.CONFIG;
+    }
+    return await spec.run(configPath);
   }
 
   let operands: string[];
