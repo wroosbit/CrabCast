@@ -1006,8 +1006,12 @@ by habit, and one seam is worth stating before the table:
 * **`derived` carries this daemon's account of its own actions** — `started`,
   `reattached`, `recordReconciled`, `provisioned`, `durable`. These are not
   re-readable from anywhere. They are a report about a moment that has passed.
-* **`durable` means what it always means.** The config echo and `channelEnabled`
-  are the only fields here that outlive the process that sent them.
+* **`durable` means what it always means** — on the registry, and answering the
+  same after a restart. It is `path` (the registry's own key), `priority`,
+  `launcher`, the five-field config echo and `channelEnabled`: the only fields
+  here that outlive the process that sent them. Everything else on this response
+  describes either a census read that has already expired or an action that has
+  already finished.
 
 **And one thing no bucket on this surface can tell you: `activate_response`
 carries no `provenance` block.** Both read responses carry the legend that names
@@ -1097,6 +1101,18 @@ condition named above, and nothing else may.
 | `spawn-error` | herdr refused the spawn | `action` `success` `started` `error` `path` | — |
 | `attach-error` | the pane is ours and live, and taking its terminal back failed | `action` `success` `started` `error` `path` `paneName` `paneId` `alreadyRunning` | `recordReconciled` |
 | `confirm-failed` | herdr reported success and left no agent behind | `action` `success` `started` `error` `path` `verified` | — |
+
+**Ten of those eleven rows are checked against a real response. `attach-error`
+is not, and you are told rather than left to assume it.** The proof produces
+every other branch by making a real daemon meet a real condition; that one needs
+`pty.spawn` to throw in the daemon's own process, and a herdr that refuses
+`agent attach` fails in the *child*, where the code that records it is not. So
+its row is reconciled between this document and `src/read-contract.ts` and is
+**held by nothing on the wire** — and no sibling proof covers it either, which
+is the part worth saying plainly: the honest answer to *"who checks this
+branch's shape"* is **nobody**. `verify-read-contract.mjs` §2d prints the same
+sentence in its own output rather than reporting eleven branches when it
+exercised ten.
 
 ### Three things about this surface that will catch you
 

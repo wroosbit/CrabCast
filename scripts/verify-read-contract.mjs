@@ -1639,7 +1639,8 @@ function keyProblems(where, obj, declared) {
     'every `activate_response` branch this harness can produce carries EXACTLY the keys its\n' +
     '    `always` list declares, carries nothing outside `always` + `sometimes`, classifies every\n' +
     '    nested row and block by the contract, and answers only published members of the two new\n' +
-    '    vocabularies — with `started` on every branch and `alreadyRunning` never `false`',
+    '    vocabularies — with `started` on every branch and `alreadyRunning` never `false` on a\n' +
+    '    REFUSAL (it is `false` on `spawned`, where that is the whole content of the field)',
     `${problems.length} problem(s): ${problems.slice(0, 8).join('; ')}`
   );
 
