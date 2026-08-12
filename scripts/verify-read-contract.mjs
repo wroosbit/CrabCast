@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Live proof for KAN-277: the READ PATH is a published contract — `list_agents`
-// and `agent_status`, field by field, with a provenance bucket per field, a
-// version on the wire in exactly one place, and a stability statement that is a
-// NOTICE promise rather than a freeze.
+// Live proof for KAN-277 and KAN-287: the READ PATH is a published contract —
+// `list_agents`, `agent_status` and `activate_response`, field by field, with a
+// provenance bucket per field, a version on the wire in exactly one place, and a
+// stability statement that is a NOTICE promise rather than a freeze.
 //
 // WHAT FAILURE THIS WOULD CATCH: a field appearing on, or disappearing from, a
 // read response with nothing saying so — the shape a consumer builds against
@@ -45,7 +45,9 @@
 //      real socket. A key on the wire that nothing declares is red; a
 //      non-optional declared field missing from the wire is red. All four
 //      `agent_status` branches are produced and their EXACT key sets asserted,
-//      refusals included, and so is a refused `list_agents`. (AC 1, AC 2)
+//      refusals included, and so is a refused `list_agents`. §2d does the same
+//      for `activate_response`'s eleven branches — ten produced, one named as
+//      unproducible rather than skipped. (AC 1, AC 2)
 //
 //   3. the version, in ONE place — document, declaration and wire carry the
 //      same integer; the version table has a row for it whose digest matches
@@ -61,13 +63,19 @@
 //   5. the stability statement, verbatim — the promise and all four of the
 //      things it explicitly does NOT promise. (AC 4)
 //
-//   6. THE RED HALF — three mutations, each watched going red BY NAME:
+//   6. THE RED HALF — five mutations, each watched going red BY NAME:
 //        6a. a field added to a real `list_agents` payload and not documented
 //            (this is AC 5's "add a field to a response without documenting
 //            it, show the failure, restore" — run against a mutated build, so
 //            the failure is produced rather than described)
 //        6b. a field removed from a document table
 //        6c. the declared version bumped without its table row
+//        6d. a field added to a real `activate_response` and not documented —
+//            the same experiment on the surface KAN-287 added, which nothing
+//            checked at all before it
+//        6e. a CONDITIONAL `activate_response` field documented as GUARANTEED.
+//            No field is added or removed, so every check that compares field
+//            sets stays green; only the two-list branch table sees it
 //
 // ---------------------------------------------------------------------------
 // WHAT THIS SCRIPT SUPPLIES ITSELF, AND WHAT THAT LEAVES UNCOVERED
@@ -131,6 +139,20 @@
 //     descriptors from. The block is declared optional and its absence is
 //     legitimate, so §2 reports which of the two happened rather than asserting
 //     over nothing — see the note it prints.
+//   * `activate_response`'s `attach-error` BRANCH. It needs `pty.spawn` to throw
+//     in the parent process, and nothing this harness can do to herdr produces
+//     that — a refused `agent attach` fails in the CHILD, where the catch that
+//     records it is not. §2d names it in its output rather than passing over it,
+//     and its key set is held by §1 against the declaration and by nothing on
+//     the wire. NO SIBLING SCRIPT COVERS IT EITHER: `verify-spawn-failure-
+//     legibility.mjs` drives spawn failures and is excluded from CI, and it
+//     asserts `spawnError`'s wording rather than this response's key set. So the
+//     honest answer to "who covers this branch on the wire" is NOBODY, and that
+//     is written here rather than left to be inferred from a count.
+//   * `activate_response`'s BUCKETS against a live legend. There is no legend:
+//     that response carries no `provenance` block, so §4's join does not exist
+//     for it and its classification is held by §1 alone. The document says the
+//     same thing in §8, in the same words.
 //
 // Everything on the daemon side is real: a real daemon process, real router,
 // bridge, registry and config loader, real NDJSON over a real unix socket, a
@@ -281,6 +303,36 @@ function parseBranches(text) {
   return branches;
 }
 
+/**
+ * `<!-- contract-activate-branches: … -->` — branch name to its TWO key lists
+ * (KAN-287).
+ *
+ * A SECOND PARSER RATHER THAN A FLAG ON THE FIRST, because the tables carry
+ * genuinely different information and merging them would have meant the branch
+ * parser returning a shape whose second half is empty for one caller. On
+ * `agent_status` a branch has an EXACT key set; on `activate_response` nine
+ * fields are spread conditionally, so it has a guaranteed set and a permitted
+ * set. See ACTIVATE_RESPONSE_BRANCHES for why that is a property of the surface
+ * rather than of the documentation.
+ *
+ * An em-dash in the `sometimes` cell means "none" and yields an empty list —
+ * the regex simply finds no backticked names in it, so nothing special is done
+ * for it here. That is deliberate: a cell a human left blank and a cell reading
+ * `—` must not differ, or the document grows a way to say the same thing twice.
+ */
+function parseActivateBranches(text) {
+  const m = /<!--\s*contract-activate-branches:\s*([A-Za-z0-9_]+)\s*-->/.exec(text);
+  if (!m) return null;
+  const branches = {};
+  const keys = (cell) => [...(cell ?? '').matchAll(/`([A-Za-z0-9_]+)`/g)].map((k) => k[1]);
+  for (const cells of tableAfter(text, m.index + m[0].length)) {
+    const name = plain(cells[0] ?? '');
+    if (!name) continue;
+    branches[name] = { always: keys(cells[2]), sometimes: keys(cells[3]) };
+  }
+  return branches;
+}
+
 /** Every `<!-- contract-values: NAME -->` — the first column of the table under it. */
 function parseValueSets(text) {
   const sets = {};
@@ -318,6 +370,8 @@ const {
   LIST_AGENTS_REFUSAL_FIELDS,
   AGENT_STATUS_FIELDS,
   AGENT_STATUS_BRANCHES,
+  ACTIVATE_RESPONSE_FIELDS,
+  ACTIVATE_RESPONSE_BRANCHES,
   DAEMON_STATUS_CONTRACT_FIELDS,
   VALUE_SETS,
   readContractCanonical
@@ -329,6 +383,7 @@ function declarationsOf(mod) {
     ['LIST_AGENTS_FIELDS', mod.LIST_AGENTS_FIELDS],
     ['LIST_AGENTS_REFUSAL_FIELDS', mod.LIST_AGENTS_REFUSAL_FIELDS],
     ['AGENT_STATUS_FIELDS', mod.AGENT_STATUS_FIELDS],
+    ['ACTIVATE_RESPONSE_FIELDS', mod.ACTIVATE_RESPONSE_FIELDS],
     ['DAEMON_STATUS_CONTRACT_FIELDS', mod.DAEMON_STATUS_CONTRACT_FIELDS]
   ]);
   for (const [name, table] of Object.entries(mod.ROW_SHAPES)) {
@@ -341,6 +396,44 @@ function declarationsOf(mod) {
 }
 
 const digestOf = (canonical) => createHash('sha256').update(canonical).digest('hex').slice(0, 12);
+
+/**
+ * The row shapes REACHABLE FROM THE TWO READ RESPONSES, computed rather than
+ * listed (KAN-287).
+ *
+ * §4 joins the contract's row-field buckets against the `provenance` legend a
+ * real response publishes. That legend describes the rows of `list_agents` and
+ * `agent_status` — `activate_response` carries no legend at all — so the join
+ * has to be taken over exactly the shapes those two responses carry, and
+ * `ROW_SHAPES` is now wider than that.
+ *
+ * COMPUTED FROM THE FIELD TABLES, NOT WRITTEN OUT, because a hand-kept list is
+ * the thing that goes stale: a row shape added to `list_agents` tomorrow joins
+ * this set for free, and one that is only ever reached from `activate_response`
+ * stays out of it without anybody deciding to exclude it. Writing the exclusion
+ * by name would have been a second copy of the read path's shape, which is the
+ * drift `src/read-contract.ts` exists to remove.
+ */
+function readPathRowShapes(mod) {
+  const rows = new Set();
+  const blocksSeen = new Set();
+  const visit = (table) => {
+    for (const spec of Object.values(table ?? {})) {
+      if (spec.rows && !rows.has(spec.rows)) {
+        rows.add(spec.rows);
+        visit(mod.ROW_SHAPES[spec.rows]);
+      }
+      if (spec.block && !blocksSeen.has(spec.block)) {
+        blocksSeen.add(spec.block);
+        visit(mod.BLOCK_SHAPES[spec.block]);
+      }
+    }
+  };
+  visit(mod.LIST_AGENTS_FIELDS);
+  visit(mod.AGENT_STATUS_FIELDS);
+  visit(mod.DAEMON_STATUS_CONTRACT_FIELDS);
+  return rows;
+}
 
 /**
  * THE RECONCILIATION, as a pure function of (declaration, document text).
@@ -442,6 +535,79 @@ function reconcile(mod, docText) {
     }
   }
 
+  // The eleven `activate_response` branches (KAN-287). Four things a two-list
+  // branch table can get wrong that a one-list one cannot, and all four are
+  // checked here rather than left to the wire — the wire can only ever show
+  // what one call happened to answer.
+  const docActivate = parseActivateBranches(docText);
+  if (!docActivate) problems.push('document: no contract-activate-branches table');
+  else {
+    const declaredActivate = mod.ACTIVATE_RESPONSE_BRANCHES;
+    for (const b of Object.keys(declaredActivate)) {
+      if (!(b in docActivate)) {
+        problems.push(`activate branch ${b}: declared, absent from the document`);
+      }
+    }
+    for (const b of Object.keys(docActivate)) {
+      if (!(b in declaredActivate)) {
+        problems.push(`activate branch ${b}: documented, not declared`);
+      }
+    }
+    for (const [b, spec] of Object.entries(declaredActivate)) {
+      const documented = docActivate[b];
+      if (!documented) continue;
+      for (const list of ['always', 'sometimes']) {
+        const a = [...spec[list]].sort().join(',');
+        const c = [...documented[list]].sort().join(',');
+        if (a !== c) {
+          problems.push(
+            `activate branch ${b}.${list}: key sets differ (declared ${a || '(none)'} / ` +
+              `documented ${c || '(none)'})`
+          );
+        }
+      }
+      // Every key named must be a field of the response, or the branch table
+      // is describing a field nothing else in the contract knows about.
+      for (const k of [...spec.always, ...spec.sometimes]) {
+        if (!(k in mod.ACTIVATE_RESPONSE_FIELDS)) {
+          problems.push(`activate branch ${b}: key '${k}' is on no activate_response field table`);
+        }
+      }
+      // A key in BOTH lists is a contradiction rather than a redundancy: it
+      // says the field is guaranteed and conditional at once, and the wire
+      // check below would then pass whatever the response did.
+      for (const k of spec.always) {
+        if (spec.sometimes.includes(k)) {
+          problems.push(`activate branch ${b}: '${k}' is in both always and sometimes`);
+        }
+      }
+    }
+    // The same rule the union/branch pair obeys on `agent_status`: a field the
+    // union calls REQUIRED must be guaranteed by every branch, or the word means
+    // nothing on this response.
+    for (const [field, spec] of Object.entries(mod.ACTIVATE_RESPONSE_FIELDS)) {
+      if (spec.optional) continue;
+      for (const [b, branch] of Object.entries(declaredActivate)) {
+        if (!branch.always.includes(field)) {
+          problems.push(
+            `activate_response.${field} is required and branch ${b} does not always carry it`
+          );
+        }
+      }
+    }
+    // And the converse, which is the one that would otherwise rot quietly: a
+    // field NO branch mentions is declared for nothing. It cannot be caught on
+    // the wire — no response carries it, so every key check passes.
+    const named = new Set(
+      Object.values(declaredActivate).flatMap((s) => [...s.always, ...s.sometimes])
+    );
+    for (const field of Object.keys(mod.ACTIVATE_RESPONSE_FIELDS)) {
+      if (!named.has(field)) {
+        problems.push(`activate_response.${field}: declared, and on no branch`);
+      }
+    }
+  }
+
   // The closed vocabularies.
   const docValues = parseValueSets(docText);
   for (const [name, values] of Object.entries(mod.VALUE_SETS)) {
@@ -495,8 +661,21 @@ fs.mkdirSync(shimDir, { recursive: true });
 
 const injectedFile = path.join(shimState, 'injected.json');
 const vanishedFile = path.join(shimState, 'vanished.json');
+/**
+ * KAN-287: a MODES file, so herdr can be made to fail one subcommand at a time
+ * from underneath a running daemon.
+ *
+ * This is what produces the refusal branches of `activate_response` that are
+ * otherwise unreachable: `unverifiable` needs `agent list` to fail, `spawn-error`
+ * needs `agent start` to fail, and `confirm-failed` needs `agent start` to
+ * SUCCEED and leave nothing behind — a shape no error can produce and only a
+ * lying herdr can. Each is set immediately before the one call it is for and
+ * cleared immediately after, so no other section runs against a broken herdr.
+ */
+const modesFile = path.join(shimState, 'modes.json');
 fs.writeFileSync(injectedFile, JSON.stringify([]));
 fs.writeFileSync(vanishedFile, JSON.stringify([]));
+fs.writeFileSync(modesFile, JSON.stringify({}));
 
 const shimImpl = path.join(shimDir, 'herdr-shim.mjs');
 fs.writeFileSync(shimImpl, `
@@ -513,11 +692,33 @@ const load = () => readJson(startedFile, []);
 const save = (list) => fs.writeFileSync(startedFile, JSON.stringify(list, null, 2));
 const injected = () => readJson(path.join(state, 'injected.json'), []);
 const vanished = () => readJson(path.join(state, 'vanished.json'), []);
+const modes = () => readJson(path.join(state, 'modes.json'), {});
 const visible = () => [...load(), ...injected()].filter((s) => !vanished().includes(s.name));
 const out = (obj) => { process.stdout.write(JSON.stringify(obj)); process.exit(0); };
+const die = (code, message) => {
+  process.stderr.write(JSON.stringify({ error: { code, message } }));
+  process.exit(1);
+};
 const [a, b] = args;
 
 if (a === '--version') { process.stdout.write('herdr 0.6.4\\n'); process.exit(0); }
+// KAN-287. Each mode fails ONE subcommand, and they are read per invocation so
+// the harness can turn one on for the duration of a single call.
+if (a === 'agent' && b === 'list' && modes().failList) {
+  die('unavailable', 'herdr server is not answering (KAN-287 failList)');
+}
+if (a === 'agent' && b === 'start' && modes().failStart) {
+  die('start_refused', 'refusing to start: no terminal available (KAN-287 failStart)');
+}
+if (a === 'agent' && b === 'attach' && modes().failAttach) {
+  die('attach_refused', 'refusing to attach (KAN-287 failAttach)');
+}
+// THE LIAR. \`agent start\` reports success and records nothing, so the pane is
+// absent from every later census — which is exactly the shape confirmActivation
+// exists to catch and the only way to reach the \`confirm-failed\` branch.
+if (a === 'agent' && b === 'start' && modes().startInvisible) {
+  out({ result: { agent: { name: args[2], pane_id: '999' } } });
+}
 if (a === 'agent' && b === 'get') {
   const found = visible().find((s) => s.name === args[2]);
   if (found) out({ result: { agent: { name: found.name, pane_id: found.pane_id } } });
@@ -583,6 +784,24 @@ const vanish = (paneName) => {
   const all = JSON.parse(fs.readFileSync(vanishedFile, 'utf8'));
   all.push(paneName);
   fs.writeFileSync(vanishedFile, JSON.stringify(all));
+};
+
+/**
+ * Run one call with herdr broken in one named way, and put it back afterwards
+ * WHATEVER HAPPENS.
+ *
+ * The `finally` is not defensive tidiness: a mode left on leaks into every
+ * later section through a shim file the daemon re-reads on each invocation, and
+ * the failure it would produce — a green section followed by unrelated red ones
+ * — is the kind that gets debugged in the wrong place.
+ */
+const withMode = async (mode, fn) => {
+  fs.writeFileSync(modesFile, JSON.stringify({ [mode]: true }));
+  try {
+    return await fn();
+  } finally {
+    fs.writeFileSync(modesFile, JSON.stringify({}));
+  }
 };
 
 const childEnv = {
@@ -1216,6 +1435,217 @@ function keyProblems(where, obj, declared) {
   );
 }
 
+// ---- 2d. activate_response, every branch that can be produced (KAN-287) ----
+//
+// ELEVEN BRANCHES, TEN OF THEM DRIVEN HERE. Each is produced by making the
+// daemon meet the condition rather than by constructing a response — a refusal
+// this script assembled itself would assert only that this script can type.
+//
+// THE ONE THAT IS NOT PRODUCED IS `attach-error`, AND IT IS REPORTED RATHER
+// THAN SKIPPED. It needs `pty.spawn` to throw in the PARENT process: the branch
+// exists because `attachPty` catches that and records it as a `spawnError`
+// (src/herdr.ts, the KAN-23 second false success). A herdr that refuses `agent
+// attach` does not reach it — node-pty forks successfully and the CHILD exits,
+// so nothing throws where the catch is. Everything this harness can do to herdr
+// is done to the child. What holds that branch is therefore §1 alone: its key
+// set is reconciled between the document and the declaration, and NOTHING here
+// asserts it against the wire. That is weaker than the other ten and it is said
+// out loud, because a reader counting eleven branches in the document would
+// otherwise assume eleven were exercised.
+{
+  const spawned = owned('act-spawned');
+  const refusedNotConfigured = owned('act-never-configured');
+  const spawnFails = owned('act-spawn-fails');
+  const confirmFails = owned('act-confirm-fails');
+
+  // OVER THE RAW SOCKET, for the same reason §2c's `bad-address` is: the MCP
+  // tool resolves `path` against the calling process's cwd before it sends
+  // anything, and it validates the flags — so neither the address refusal nor
+  // the bad-flag refusal can be produced through it. The socket is the daemon's
+  // own surface and the only one that reaches those branches.
+  const activate = async (args) => {
+    const { id, ...body } = await sock.request('activate_agent', args);
+    return body;
+  };
+
+  await call('crabcast_configure_agent', { path: spawned, priority: 5, launcher: LAUNCHER });
+  await call('crabcast_configure_agent', { path: spawnFails, priority: 5, launcher: LAUNCHER });
+  await call('crabcast_configure_agent', { path: confirmFails, priority: 5, launcher: LAUNCHER });
+
+  // THE CAPACITY REFUSAL GETS ITS OWN DAEMON, and this is the one place in this
+  // file that goes THROUGH the gate rather than past it. `CRABCAST_MAX_AGENTS=0`
+  // sets the cap outright and skips the derivation (`src/capacity.ts` documents
+  // zero as legitimate: "run no charged agents"), so the refusal is deterministic
+  // on any machine — which is what the fixture's own PAST_THE_GATE note says is
+  // otherwise unavailable. The agent is left `refusable` and no `override` is
+  // passed, because both are what make the gate answer at all.
+  const gateCfg = makeConfig('capacity-gate');
+  await startDaemon(gateCfg, distDir, 'capacity-gate', { CRABCAST_MAX_AGENTS: '0' });
+  const gateSock = await new SocketClient(gateCfg, 'capacity-gate').ready();
+  const gated = owned('act-capacity');
+  await gateSock.request('configure_agent', {
+    path: gated, priority: 1, launcher: LAUNCHER, refusable: true
+  });
+
+  const produced = {};
+  produced.spawned = await activate({ path: spawned, override: true });
+  produced['already-running'] = await activate({ path: spawned, override: true });
+  produced['bad-address'] = await activate({ path: 'a/relative/path' });
+  produced['bad-flag'] = await activate({ path: spawned, override: 'yes' });
+  produced['not-configured'] = await activate({ path: refusedNotConfigured });
+  produced.occupied = await activate({ path: occupied, override: true });
+  produced.unverifiable = await withMode('failList', () =>
+    activate({ path: spawnFails, override: true })
+  );
+  produced['spawn-error'] = await withMode('failStart', () =>
+    activate({ path: spawnFails, override: true })
+  );
+  produced['confirm-failed'] = await withMode('startInvisible', () =>
+    activate({ path: confirmFails, override: true })
+  );
+  produced.capacity = await (async () => {
+    const { id, ...body } = await gateSock.request('activate_agent', { path: gated });
+    return body;
+  })();
+
+  const problems = [];
+  const missing = [];
+
+  for (const [branch, spec] of Object.entries(ACTIVATE_RESPONSE_BRANCHES)) {
+    const res = produced[branch];
+    if (!res) {
+      missing.push(branch);
+      continue;
+    }
+    show(`activate_response · ${branch}:`, res);
+
+    // `always` IS AN EQUALITY — every one of these keys, and no other key that
+    // is not on the `sometimes` list.
+    const keys = Object.keys(res);
+    const absent = spec.always.filter((k) => !keys.includes(k));
+    const permitted = new Set([...spec.always, ...spec.sometimes]);
+    const unexpected = keys.filter((k) => !permitted.has(k));
+    if (absent.length) {
+      problems.push(`${branch}: declared always and absent from the wire — ${absent.join(' ')}`);
+    }
+    if (unexpected.length) {
+      problems.push(
+        `${branch}: on the wire and on neither list for this branch — ${unexpected.join(' ')}`
+      );
+    }
+    // And the union, which catches a key that is legal on SOME branch appearing
+    // on one the table does not list it for.
+    problems.push(...keyProblems(`activate(${branch})`, res, ACTIVATE_RESPONSE_FIELDS));
+
+    // The nested shapes, each read off the response rather than assumed.
+    for (const [field, shape] of [['occupiedBy', 'PaneOccupant'], ['provisioned', 'ProvisionedArtifact']]) {
+      (res[field] ?? []).forEach((row, i) => {
+        problems.push(...keyProblems(`${branch}.${field}[${i}]`, row, ROW_SHAPES[shape]));
+      });
+    }
+    for (const [field, block] of [
+      ['capacity', 'Capacity'],
+      ['preemption', 'PreemptionOffer'],
+      ['preempted', 'Preempted'],
+      ['capacityOverride', 'CapacityOverride']
+    ]) {
+      if (res[field]) problems.push(...keyProblems(`${branch}.${field}`, res[field], BLOCK_SHAPES[block]));
+    }
+  }
+
+  // THE VALUES OF THE TWO NEW VOCABULARIES, on the wire rather than only in the
+  // document. A published member list that no response is checked against is a
+  // list of guesses.
+  for (const [branch, field, set] of [
+    ['not-configured', 'refused', 'activateRefused'],
+    ['unverifiable', 'refused', 'activateRefused'],
+    ['occupied', 'refused', 'activateRefused'],
+    ['capacity', 'refusedBy', 'activateRefusedBy']
+  ]) {
+    const value = produced[branch]?.[field];
+    if (value !== undefined && !VALUE_SETS[set].includes(value)) {
+      problems.push(`${branch}.${field} is '${value}', which ${set} does not publish`);
+    }
+  }
+
+  // THE TWO CLAIMS THE BRANCH TABLE MAKES THAT A KEY SET CANNOT: `started` on
+  // every branch, and `alreadyRunning` never `false` ON A REFUSAL.
+  //
+  // THE SECOND ONE IS SCOPED, AND THE FIRST DRAFT OF IT WAS NOT — it asserted
+  // "never `false` anywhere" and went red against a correct daemon on the
+  // `spawned` branch, where `false` is not merely allowed but is the whole
+  // content of the field: this call started the agent. The rule being encoded is
+  // the one the compiler holds in `ActivateRefusalFields` (`alreadyRunning?:
+  // true`), and it has always been about refusals. The over-broad version would
+  // have made a correct response look like a defect, which is the failure mode
+  // an over-strong assertion has instead of missing one.
+  const startedEverywhere = Object.entries(produced).filter(([, r]) => !('started' in r));
+  const falseAlreadyRunning = Object.entries(produced).filter(
+    ([, r]) => r.success === false && r.alreadyRunning === false
+  );
+  if (startedEverywhere.length) {
+    problems.push(
+      `started is declared on every branch and is absent from — ` +
+        `${startedEverywhere.map(([b]) => b).join(' ')}`
+    );
+  }
+  if (falseAlreadyRunning.length) {
+    problems.push(
+      `alreadyRunning is never false on a REFUSAL and reads false on — ` +
+        `${falseAlreadyRunning.map(([b]) => b).join(' ')}`
+    );
+  }
+
+  console.log(`\n   branches produced on a real daemon: ${Object.keys(produced).length} of ` +
+    `${Object.keys(ACTIVATE_RESPONSE_BRANCHES).length}`);
+  if (missing.length) {
+    console.log(
+      `   NOT PRODUCED, and held by §1 alone: ${missing.join(', ')} — see this section's header\n` +
+      `     for why, and docs/read-path-contract.md §8 for the same statement to a consumer.`
+    );
+  }
+  console.log(`   \`started\` present on all ${Object.keys(produced).length}: ${startedEverywhere.length === 0}`);
+  console.log(
+    `   \`alreadyRunning\` never false on a refusal: ${falseAlreadyRunning.length === 0} ` +
+    `(false on \`spawned\` is correct and is the field's whole content there: ` +
+    `${produced.spawned?.alreadyRunning === false})`
+  );
+  if (problems.length) {
+    console.log('\n   problems:');
+    for (const p of problems) console.log(`     ! ${p}`);
+  }
+
+  // THE PRECONDITION, SEPARATE FROM THE VERDICT. A branch that silently stopped
+  // being produced would leave the checks above passing over what remained and
+  // reporting a completeness that was not achieved — the vacuous pass this whole
+  // file is shaped against.
+  //
+  // WRITTEN AS "WHICH ONE IS MISSING" RATHER THAN "HOW MANY" (the KAN-263 lesson
+  // about literal anchors, one instrument over). A count of 10 goes red the day
+  // somebody makes `attach-error` producible, which is coverage IMPROVING — and
+  // a check that fails on improvement is a check people learn to edit rather
+  // than read. Naming the exception passes when the hole is closed and fails
+  // when a different one opens.
+  const unexpectedlyMissing = missing.filter((b) => b !== 'attach-error');
+  given(
+    unexpectedlyMissing.length === 0,
+    'every branch except `attach-error` was produced by a real daemon meeting a real condition, ' +
+      'so the assertions above are about responses rather than about fixtures',
+    `${Object.keys(produced).length} produced; unexpectedly absent: ${unexpectedlyMissing.join(', ')}`
+  );
+
+  verdict(
+    problems.length === 0,
+    'every `activate_response` branch this harness can produce carries EXACTLY the keys its\n' +
+    '    `always` list declares, carries nothing outside `always` + `sometimes`, classifies every\n' +
+    '    nested row and block by the contract, and answers only published members of the two new\n' +
+    '    vocabularies — with `started` on every branch and `alreadyRunning` never `false`',
+    `${problems.length} problem(s): ${problems.slice(0, 8).join('; ')}`
+  );
+
+  gateSock.close();
+}
+
 // ============================ 3. THE VERSION, IN EXACTLY ONE PLACE ==========
 
 rule('3. THE VERSION — one integer, one place on the wire, and a digest that notices a change');
@@ -1298,8 +1728,17 @@ rule('4. THE BUCKETS — the document against the legend the daemon actually pub
   // response-level buckets are this contract's own and are checked against the
   // declaration in §1 and against nothing else — which is stated in the
   // document under §3 rather than left to be discovered.
+  //
+  // AND ONLY THE ROWS THE READ RESPONSES CARRY (KAN-287). `activate_response`
+  // publishes no `provenance` block, so its two row shapes have no legend to be
+  // joined against and asserting over them here would fail for the RIGHT reason
+  // in the WRONG place — reporting "the legend does not classify `artifact`"
+  // about a legend that was never asked to. Their buckets are held by §1, and
+  // both the document (§8) and this file's header say that is weaker.
+  const readPathRows = readPathRowShapes(contract);
   const rowFields = new Map();
   for (const [shape, table] of Object.entries(ROW_SHAPES)) {
+    if (!readPathRows.has(shape)) continue;
     for (const [field, spec] of Object.entries(table)) {
       rowFields.set(field, { bucket: spec.bucket, shape });
     }
@@ -1320,6 +1759,11 @@ rule('4. THE BUCKETS — the document against the legend the daemon actually pub
     }
   }
 
+  console.log(`   row shapes the read responses carry: ${[...readPathRows].sort().join(', ')}`);
+  console.log(
+    `   row shapes excluded (activate_response only, no legend to join): ` +
+    `${Object.keys(ROW_SHAPES).filter((s) => !readPathRows.has(s)).sort().join(', ') || '(none)'}`
+  );
   console.log(`   row fields declared by the contract: ${rowFields.size}`);
   console.log(`   fields classified by the live legend: ${byField.size}`);
   console.log(`   remembered, on the wire: ${JSON.stringify(legend?.remembered)}`);
@@ -1478,6 +1922,110 @@ rule('6. THE RED HALF — the checks above, watched failing');
       `declared=${bumped.READ_CONTRACT_VERSION}, expected=${nextVersion}, row=${JSON.stringify(row)}`
     );
   }
+}
+
+// ---- 6d. a field added to a real activate_response and not documented ----
+//
+// AC 2 OF KAN-287, RUN RATHER THAN DESCRIBED, and the same experiment §6a runs
+// one surface over. It is not redundant with §6a: that one mutates
+// `list_agents`, whose top-level field set was already held. This one asks
+// whether the NEW surface is held — and before this ticket the honest answer was
+// no, because nothing checked `activate_response` at all.
+{
+  const mutant = mutatedBuild('undocumented-activate-field', 'router.js',
+    'resumedExistingConversation: session.mayResume === true,',
+    "resumedExistingConversation: session.mayResume === true,\n      /* KAN-287: a field a future slice added and forgot to document */\n      spawnAttempts: 3,");
+
+  if (mutant) {
+    const cfg = makeConfig('undocumented-activate');
+    await startDaemon(cfg, mutant, 'undocumented-activate');
+    const client = new SocketClient(cfg, 'undocumented-activate');
+    await client.ready();
+    const dir = owned('act-mutant');
+    await client.request('configure_agent', { path: dir, priority: 5, launcher: LAUNCHER });
+    const { id, ...res } = await client.request('activate_agent', { path: dir, override: true });
+
+    const problems = keyProblems('activate_response', res, ACTIVATE_RESPONSE_FIELDS);
+    const branchProblem = !ACTIVATE_RESPONSE_BRANCHES.spawned.always.includes('spawnAttempts') &&
+      !ACTIVATE_RESPONSE_BRANCHES.spawned.sometimes.includes('spawnAttempts') &&
+      'spawnAttempts' in res;
+
+    console.log(`   the mutated daemon's activate_response carries spawnAttempts: ${res.spawnAttempts}`);
+    console.log(`   the branch table lists it on neither list: ${branchProblem}`);
+    for (const p of problems) console.log(`     ! ${p}`);
+
+    verdict(
+      res.spawnAttempts === 3 &&
+        branchProblem &&
+        problems.some((p) => p.includes('spawnAttempts') && p.includes('not declared')),
+      '§2d goes red BY NAME on a field added to a real `activate_response` and left undocumented\n' +
+      '    — the field is on the wire (so the mutation really applied), the field table names it,\n' +
+      '    and the branch table lists it on neither `always` nor `sometimes`',
+      `spawnAttempts on the wire=${JSON.stringify(res.spawnAttempts)}, ` +
+      `branchProblem=${branchProblem}, problems=${JSON.stringify(problems.slice(0, 4))}`
+    );
+    client.close();
+  }
+}
+
+// ---- 6e. a conditional field promoted to guaranteed in the document ----
+//
+// THE FAILURE THE TWO-LIST BRANCH TABLE EXISTS TO CATCH, and it has no analogue
+// on the other two surfaces. `always` is a PROMISE and `sometimes` is a
+// PERMISSION, so moving a key from the second list to the first strengthens what
+// the contract claims without changing which fields exist — and a consumer that
+// believed it would branch on a field that is legitimately absent. No key set
+// changes, no field appears or disappears, and every check that compares field
+// SETS stays green. Only the two-list comparison sees it.
+{
+  // `durable` on the spawning branch: conditional, because it rides only a
+  // FAILED registry write. Promoting it to `always` is the exact defect above.
+  //
+  // DONE ON THE ROW'S CELLS RATHER THAN BY A REGEX OVER THE WHOLE LINE. The
+  // first draft of this was one substitution with three capture groups, and it
+  // was unreadable enough that whether it had moved the key or merely deleted it
+  // could not be settled by reading it. Splitting the row is the same edit with
+  // the question answerable.
+  const rowIndex = docText.split('\n').findIndex((l) => l.startsWith('| `spawned` |'));
+  const applied = rowIndex !== -1;
+  let mutatedDoc = docText;
+  if (applied) {
+    const lines = docText.split('\n');
+    const cells = lines[rowIndex].split('|');
+    // cells: ['', ' `spawned` ', ' when ', ' always ', ' sometimes ', '']
+    cells[3] = `${cells[3].trimEnd()} \`durable\` `;
+    cells[4] = cells[4].replace('`durable` ', '');
+    lines[rowIndex] = cells.join('|');
+    mutatedDoc = lines.join('\n');
+  }
+
+  // The mutation is only meaningful if it actually MOVED the key rather than
+  // duplicating or deleting it, so both halves are checked rather than assumed —
+  // an edit that silently matched nothing would hand `reconcile` the untouched
+  // document and this section would report the strongest available result having
+  // tested nothing.
+  const before = parseActivateBranches(docText)?.spawned;
+  const after = parseActivateBranches(mutatedDoc)?.spawned;
+  const moved =
+    Boolean(after) &&
+    after.always.includes('durable') &&
+    !after.sometimes.includes('durable') &&
+    !before.always.includes('durable');
+
+  const problems = reconcile(contract, mutatedDoc);
+  const named = problems.filter((p) => p.includes('spawned') && p.includes('durable'));
+  console.log(`   promoted \`durable\` from sometimes to always on the \`spawned\` branch: ${moved}`);
+  for (const p of named.slice(0, 4)) console.log(`     ! ${p}`);
+
+  verdict(
+    applied && moved && named.length > 0,
+    '§1 goes red BY NAME when a CONDITIONAL field is documented as GUARANTEED — the failure the\n' +
+    '    two-list branch table exists to catch, invisible to every check that compares field sets\n' +
+    '    because no field was added or removed',
+    applied
+      ? `moved=${moved}, ${problems.length} problem(s), ${named.length} naming spawned/durable`
+      : 'the anchor row did not match, so the document was NOT mutated and this section proved nothing'
+  );
 }
 
 // A mutation whose anchor drifted is a section that proved nothing, and the

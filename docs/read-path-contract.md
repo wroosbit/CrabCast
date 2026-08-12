@@ -1,11 +1,19 @@
 # The CrabCast read-path contract
 
-CrabCast answers two questions about agent state: `list_agents` for the fleet
-and `agent_status` for one agent. This document is what a consumer builds
-against. Its executable half is `src/read-contract.ts`, which the router
-imports — the tables below and the declarations in that file are the same
-tables, and `scripts/verify-read-contract.mjs` reconciles them against a **real
-daemon's responses** in both directions, so the two cannot drift apart quietly.
+CrabCast answers two questions about agent state — `list_agents` for the fleet
+and `agent_status` for one agent — and one about an agent's *arrival*:
+`activate_response`, which is the only surface that can tell you about the spawn
+you just made. This document is what a consumer builds against. Its executable
+half is `src/read-contract.ts`, which the router imports — the tables below and
+the declarations in that file are the same tables, and
+`scripts/verify-read-contract.mjs` reconciles them against a **real daemon's
+responses** in both directions, so the two cannot drift apart quietly.
+
+**It covers those three responses and three fields of a fourth, and
+[§10](#10-the-boundary--which-responses-this-contract-covers-and-which-it-does-not)
+names every surface it does not cover.** Read that section before assuming a
+response you are consuming is described here — several are not, and the ones
+that are not have no notice promise.
 
 Before this contract existed the read path was a surface people had read off
 the wire. [`docs/event-contract.md`](event-contract.md) published nine events
@@ -141,6 +149,7 @@ would be N chances for the copy that goes stale.
 | 2 | 2026-08-11 | KAN-263 — five fields added to `capacity`: `startsCharged`, `startsConsidered`, `startsChargeCores`, `startsChargeBasis`, `startsChargeBecause`, and a new closed vocabulary [startsChargeBasis](#startschargebasis). **Additive: no documented field changed meaning, was removed, or changed type.** They carry what the CPU-side reading could not have contained — the term that makes `cpuBusyCores` and `headroomByCpu` reconcile. A consumer that ignores them reads the same numbers it read at version 1 and is not wrong, only unable to explain a refusal | `c17cf3570018` |
 | 3 | 2026-08-11 | KAN-281 — one field added to `agent_status`: [channelEnabled](#channelenabled), on three of its four branches, saying whether the spawn an agent is running from was channel-enabled. **Additive: no documented field changed meaning, was removed, or changed type.** `durable`, sourced from the activation that made the decision rather than recomputed from config at response time, so it survives a restart. The same field is on `activate_response`, which this document does not otherwise cover — the field's own section says so and names what holds that half. Note `null` there means *no spawn to be about*, never *no channel* | `264ecca9f603` |
 | 4 | 2026-08-11 | KAN-302 — one row shape added, [UnreadableRecord](#unreadablerecord), and two fields carrying it on each of `list_agents` and `daemon_status`: `unreadableRecords` and `unreadableRecordsTotal`. **Additive on the wire: no documented field changed meaning, was removed, or changed type.** What changed is BEHAVIOUR the document did not previously describe — a registry row this daemon cannot read used to stop it starting, and now it starts, skips the row and publishes it here. A consumer that ignores both fields reads exactly what it read at version 3, and is not wrong; it is unable to tell a registry that is wholly readable from one that is not, which before this version no consumer could do at all | `f8716f6b789e` |
+| 5 | 2026-08-11 | KAN-287 — **a third response is now covered**: [activate_response](#8-activate_response), field by field over eleven branches, with two new row shapes ([PaneOccupant](#paneoccupant), [ProvisionedArtifact](#provisionedartifact)), three new blocks ([PreemptionOffer](#preemptionoffer), [Preempted](#preempted), [CapacityOverride](#capacityoverride)) and five new closed vocabularies ([activateRefused](#activaterefused), [activateRefusedBy](#activaterefusedby), [resumeCause](#resumecause), [artifactKind](#artifactkind), [artifactOrigin](#artifactorigin)). **Additive on the wire: not one byte of any response changed** — this version describes a surface that was already there and was published nowhere. What is new is the document's own [§10](#10-the-boundary--which-responses-this-contract-covers-and-which-it-does-not), which states which responses this contract covers **and which it does not**, so the boundary is readable rather than inferred from what happens to be listed. A consumer that ignores all of it reads exactly what it read at version 4 | `6ccf716ac362` |
 
 The digest is `sha256(readContractCanonical())`, first 12 hex characters, over
 `src/read-contract.ts`'s declarations. **What it buys:** changing a documented
@@ -535,6 +544,60 @@ record at the end of the log; that is expected, it is dropped, and reporting it
 here would make an ordinary crash look like data loss. Only lines that parse as
 JSON objects and are still unreadable appear.
 
+<a id="paneoccupant"></a>
+### `occupiedBy[]` — PaneOccupant
+
+**On `activate_response` only** ([§8](#8-activate_response)) — the `occupied`
+refusal, and a successful idempotent activation that found a co-occupant. `null`
+never appears here: an empty list is not sent, the field is absent instead.
+
+**All four are `observed`, and this is the clearest case of that bucket on any
+surface.** It is one census read, quoted. Nothing is on a record — these panes
+are very often not ours at all, which is the whole reason the refusal names them
+— and nothing is re-checked after the response is sent.
+
+<!-- contract-table: ROW_SHAPES.PaneOccupant -->
+
+| field | bucket | what it is |
+| --- | --- | --- |
+| `paneId` | observed | herdr's id for the pane, or null when herdr named none |
+| `name` | observed | the pane's name, as herdr reports it. **Not derived from a path** — that is the point of the row: this pane's name is very often not one any path of ours derives |
+| `agentStatus` | observed | what herdr says the pane is doing — [herdrStatus](#herdrstatus) |
+| `workDir` | observed | herdr's own cwd for the pane, or null |
+
+**This is not a claim on the pane.** CrabCast never closes a pane it did not
+start; naming one here is so that a human can decide about it.
+
+<a id="provisionedartifact"></a>
+### `provisioned[]` — ProvisionedArtifact
+
+**On `activate_response`'s spawning branch only.** Every artifact the activation
+wrote or relied on **outside CrabCast's own data directory**: what, where,
+whether it was ours, and how to undo it. **Empty for an agent that opted into
+nothing** — an empty array, not an absent field.
+
+**`derived` throughout, and not `durable`, which is the classification most
+likely to look wrong.** Every row describes a file on somebody's disk, so
+`durable` is the tempting answer — but the bucket does not mean *persists*, it
+means **read from the append-only agent registry**, and none of this is. It is
+this daemon's account, composed during the call, of writes it had just
+performed, and it is not re-read before being sent. `provisioned.json` is the
+durable record of the same facts; this is the response's copy of them.
+
+<!-- contract-table: ROW_SHAPES.ProvisionedArtifact -->
+
+| field | bucket | what it is |
+| --- | --- | --- |
+| `artifact` | derived | which kind — [artifactKind](#artifactkind) |
+| `file` | derived | the absolute path written or relied on |
+| `detail` | derived | what changed inside that file, named the way a human would grep for it |
+| `origin` | derived | `crabcast` or `preexisting` — [artifactOrigin](#artifactorigin) |
+| `reversal` | derived | how to undo it — or, for a pre-existing artifact, why there is nothing to undo |
+
+**Silence is what made writing into somebody's repository unacceptable; the fix
+is not to stop writing, it is to stop being silent.** That is what this list is
+for, and it is why it rides the response rather than only a log.
+
 ---
 
 ## 6. The blocks
@@ -557,7 +620,7 @@ sentence: a caller that ignores every number still cannot ignore that one.**
 | `headroom` | derived | how many more, after every term including the stall veto |
 | `atCapacity` | derived | |
 | `capBoundBy` | derived | which term set the cap — [capBoundBy](#capboundby) |
-| `headroomBoundBy` | derived | which term set headroom — [headroomBoundBy](#headroomboundby). **This is the value that gained a fifth member on 2026-08-11; read the must-ignore clause in §8** |
+| `headroomBoundBy` | derived | which term set headroom — [headroomBoundBy](#headroomboundby). **This is the value that gained a fifth member on 2026-08-11; read the must-ignore clause in §9** |
 | `reason` | derived | the one sentence a UI with a single line to spare renders. On every capacity payload, not only on refusals |
 | `cores` | observed | |
 | `load1` | observed | the 1-minute load average. **Reported, and no longer what gates anything wherever `cpuBusyCores` is non-null** — a machine where the two diverge is a machine worth looking at |
@@ -713,6 +776,64 @@ block is absent** when this daemon could not read its own descriptor usage.
 | `state` | derived | **asked properly rather than assumed stopped** — ours and a stranger can be live in the same directory, which is the case this row exists to make visible |
 | *config echo* | durable | the five fields [above](#configecho) |
 
+<a id="preemptionoffer"></a>
+### `activate_response.preemption` — PreemptionOffer
+
+**An offer, on a refusal. Nothing has been stood down.** It rides the `capacity`
+branch when — and only when — there is something this activation outranks, and
+it names what asking again with `preempt` would cost. Absent when there is
+nothing to preempt.
+
+<!-- contract-table: BLOCK_SHAPES.PreemptionOffer -->
+
+| field | bucket | what it is |
+| --- | --- | --- |
+| `path` | durable | the agent that would be stood down |
+| `paneName` | durable | its pane |
+| `priority` | durable | what it is worth |
+| `herdrStatus` | observed | what it was doing, from the census this refusal read — [herdrStatus](#herdrstatus) |
+| `incomingPriority` | derived | what the refused activation is worth, for the comparison |
+| `offer` | derived | one sentence naming what would be stood down and what authorises it |
+
+**Named so a client can offer a button that says whose work it ends.** A client
+that renders none of this leaves the user at a dead switch, which is the state
+this block exists to prevent.
+
+<a id="preempted"></a>
+### `activate_response.preempted` — Preempted
+
+**An event, on a success. This did happen.** It rides the spawning branch when
+the activation freed its slot by standing something down.
+
+**The difference from [PreemptionOffer](#preemptionoffer) is tense, and it is
+the one confusion on this surface with a real cost.** Mistaking the offer for
+the event reports an interruption that never occurred; mistaking the event for
+the offer hides one that did. **No field name separates them — the branch
+does**, and `success` is what tells you which branch you are holding.
+
+<!-- contract-table: BLOCK_SHAPES.Preempted -->
+
+| field | bucket | what it is |
+| --- | --- | --- |
+| `at` | derived | when the gate **decided**, not when the teardown finished |
+| `victim` | derived | who lost the slot — a [PreemptionOffer](#preemptionoffer) block, the same shape the offer uses |
+| `derivation` | derived | the capacity arithmetic that made the slot necessary |
+
+<a id="capacityoverride"></a>
+### `activate_response.capacityOverride` — CapacityOverride
+
+Present **only** when the activation proceeded because the caller passed
+`override` — that is, when the gate would otherwise have refused. Absent on an
+activation that had room.
+
+<!-- contract-table: BLOCK_SHAPES.CapacityOverride -->
+
+| field | bucket | what it is |
+| --- | --- | --- |
+| `at` | derived | when the override was applied |
+| `derivation` | derived | the arithmetic the gate **would have refused on**, kept so the override is auditable rather than merely permitted |
+| `capacity` | derived | the full [Capacity](#capacity) report as it stood |
+
 ---
 
 ## 7. `agent_status`
@@ -818,25 +939,31 @@ idempotent `activate` on an already-running agent does not overwrite it — that
 call did not spawn anything, so it has no verdict to record. The value changes
 only when the agent is genuinely spawned again.
 
-**It is also on `activate_response`, which this document does not otherwise
-cover.** That surface is outside the contract — §4 and §7 describe `list_agents`
-and `agent_status`, and nothing here enumerates `activate_response`'s fields —
-so read the following as a statement about behaviour rather than as a row this
-document's machinery holds:
+**It is also on `activate_response`, and as of version 5 that surface is
+documented here too** — see [§8](#8-activate_response). It carries
+`channelEnabled` on **both** successful branches, the one that spawns and the
+idempotent one that finds the agent already running, with the same three-value
+meaning as above. Both surfaces answer it from the same durable record, so they
+agree for the same agent; `activate_response` exists for the case a poll cannot
+serve, telling you about *the spawn you just made* where a later `agent_status`
+could be describing a different one.
 
-* `activate_response` carries `channelEnabled` on **both** successful branches,
-  the one that spawns and the idempotent one that finds the agent already
-  running, with the same three-value meaning as above.
-* Both surfaces answer it from the same durable record, so they agree for the
-  same agent. `activate_response` exists for the case a poll cannot serve: it
-  tells you about *the spawn you just made*, where a later `agent_status` could
-  be describing a different one.
-* **What holds it:** `scripts/verify-channel-enabled.mjs` asserts the value on
-  both surfaces and that they agree. **`verify-read-contract.mjs` does not** — it
-  reconciles this document against `list_agents` and `agent_status` only. So a
-  future change to `channelEnabled` on `activate_response` is caught by the
-  first script and by no document check. That asymmetry is named here rather
-  than left to be discovered, in the same spirit as §9's *"where it stops"*.
+**What holds it, now that two things do.** `scripts/verify-channel-enabled.mjs`
+asserts the *value* on both surfaces and that they agree — that is the check
+that would catch this field answering wrongly. `verify-read-contract.mjs` asserts
+that both surfaces *declare and document* it, in both directions. **Neither
+substitutes for the other**, and the split is worth carrying: a field that is
+documented and lying is caught by the first and not the second, and a field that
+is correct and undocumented is caught by the second and not the first.
+
+> **This paragraph used to say the opposite, and the change is the whole of
+> KAN-287.** Until version 5 it read *"that surface is outside the contract …
+> nothing here enumerates `activate_response`'s fields"*, and named the
+> asymmetry rather than closing it. That was honest and it was still the defect:
+> a guarantee holding for two responses and silently not for a third is worse
+> than one holding for none, because a consumer cannot see where it stops. §10
+> is now where the boundary is stated, and it is stated for every response
+> rather than only for the one that happened to be noticed.
 
 **No `statusSince` here, and that is deliberate rather than an omission.** The
 memory is keyed on the sweep's census of our *live* agents, so this response
@@ -846,7 +973,172 @@ legend still announces the `remembered` bucket, the same way it announces
 
 ---
 
-## 8. The closed vocabularies
+## 8. `activate_response`
+
+**The one response that tells you what a call *did* rather than what is *true*.**
+`list_agents` and `agent_status` answer questions you may ask again; this one
+answers a question that has already happened, and asking again gets you a
+different call's answer. That is why it is here: **it is the only surface that
+can tell you about the spawn you just made**, where a later poll could be
+describing a different one.
+
+It is covered as of **version 5** (KAN-287). Before that it was consumed,
+branched on by a real consumer, and described by none of the three artifacts —
+while the two responses beside it were fully published. **The asymmetry was the
+defect rather than the absence**: a consumer who has read this far reasonably
+assumes a documented surface is the norm, and a guarantee that holds for two
+responses and silently not for a third is worse than one that holds for none,
+because the boundary is invisible. [§10](#10-the-boundary--which-responses-this-contract-covers-and-which-it-does-not)
+is where every boundary is now stated at once.
+
+### What the buckets mean on a response that is not a read
+
+The four buckets in [§3](#3-provenance-the-four-buckets-and-what-an-absence-means)
+were defined for *state reads*. They are applied here deliberately rather than
+by habit, and one seam is worth stating before the table:
+
+* **`observed` keeps its exact meaning, and it is the honest home for
+  `verified`.** `verified: true` means the agent was found in herdr's census
+  **before this response was sent** — a read, not a promise. `observed` is
+  precisely the bucket that says *true when it was taken and not one moment
+  longer*, so the strong word is qualified by the classification rather than by
+  a footnote. Nothing re-checks it afterwards, and nothing here claims to.
+* **`derived` carries this daemon's account of its own actions** — `started`,
+  `reattached`, `recordReconciled`, `provisioned`, `durable`. These are not
+  re-readable from anywhere. They are a report about a moment that has passed.
+* **`durable` means what it always means.** The config echo and `channelEnabled`
+  are the only fields here that outlive the process that sent them.
+
+**And one thing no bucket on this surface can tell you: `activate_response`
+carries no `provenance` block.** Both read responses carry the legend that names
+`observedAt` and `censusReachable`; this one does not. So the buckets below are
+held by this document against `src/read-contract.ts` and by nothing on the wire
+— they are **not** cross-checked against a live legend the way §11's check 4
+does it for the row fields, because there is no legend here to check against.
+**That is the one place this surface is held more weakly than the other two.**
+Adding a legend would change the response, which is a decision rather than a
+description, and this version does not make it.
+
+### Field by field
+
+`optional` means **absent on at least one branch**, exactly as on `agent_status`.
+Only three fields ride all eleven: `action`, `success` and **`started`**. The
+last is not an accident of drafting — it is on every refusal deliberately, so
+that a caller can read *"nothing was spawned"* without first knowing which kind
+of refusal it is holding.
+
+<!-- contract-table: ACTIVATE_RESPONSE_FIELDS -->
+
+| field | bucket | what it is |
+| --- | --- | --- |
+| `action` | derived | always `activate_response` |
+| `success` | derived | whether an agent is running at that path **because of or despite this call**. Not whether this call started it — that is `started` |
+| `started` | derived | **on all eleven branches.** Whether *this call* spawned the agent. `false` on every refusal, and on the idempotent success |
+| `error` | derived, optional | the whole refusal, in prose. On the nine refusals |
+| `path` | durable, optional | the agent's identity — its directory, resolved. Absent only on `bad-address`, where nothing was resolved |
+| `paneName` | derived, optional | the pane name this path derives |
+| `alreadyRunning` | observed, optional | `true` — it was already up; `false` — **this call started it**, on `spawned` and nowhere else; **absent** — a refusal that never reached the question. **Never `false` on a refusal**, and the compiler holds that half — see the note below |
+| `paneId` | observed, optional | herdr's id for the pane, from the census that answered this call |
+| `sessionId` | observed, optional | this daemon's handle for the agent's terminal. **On both successful branches**, so a caller can reach the agent it just asked about without a second call |
+| `status` | observed, optional | our session's lifecycle — [sessionStatus](#status--sessionstatus) |
+| `createdAt` | observed, optional | when the session was created |
+| `verified` | observed, optional | **the agent was found in herdr's census before this was sent.** `true` on both successes; `false` on the three refusals that looked and could not confirm; absent on the refusals that never looked. Success is never reported without it |
+| `priority` | durable, optional | from the frozen record. On the spawning branch and the `capacity` refusal |
+| `launcher` | durable, optional | from the frozen record. **On the spawning branch only** |
+| *config echo* | durable, optional | the five fields [above](#configecho), **re-read after the activation's own durable write** rather than taken from the intent this call opened with — which is how `everActivated` can read `true` here and remain a purely durable fact |
+| `channelEnabled` | durable, optional | whether this spawn was channel-enabled — [channelEnabled](#channelenabled--was-this-spawn-channel-enabled). Answered from the record, not from the session, so this surface and `agent_status` agree **by construction** |
+| `resume` | derived, optional | which cause the resume prompt was written for — [resumeCause](#resumecause). Only on a restore |
+| `resumedConversation` | observed, optional | whether a conversation was there to hand back. `true` means the agent is sitting at an empty prompt and needs a nudge; `false` means it came up with the degraded-resume prompt and is already working. Only on a restore |
+| `resumedExistingConversation` | derived, optional | **the resume rule, reported rather than merely obeyed.** `false` says this agent started a *new* session and did not continue whatever conversation the directory holds — at a caller-owned path, the difference between an agent starting work and an agent reading a human's private session |
+| `provisioned` | derived, optional | [ProvisionedArtifact](#provisionedartifact) rows. **Empty rather than absent** for an agent that opted into nothing |
+| `durable` | derived, optional | **present only when the registry write FAILED.** `verified` answers *does this agent exist*; this answers *will a restart know it does* |
+| `durabilityError` | derived, optional | why it failed. With `durable` |
+| `reattached` | derived, optional | present only when **this call** took the terminal back — the agent was running and unreachable, and now is not. Silent on the steady-state no-op |
+| `recordReconciled` | derived, optional | present only when the disk disagreed with the world and this call settled it |
+| `occupiedBy` | observed, optional | [PaneOccupant](#paneoccupant) rows — live panes here that are **not ours** |
+| `note` | derived, optional | prose for a human, beside a co-occupancy that was **reported and not refused** |
+| `refused` | derived, optional | the machine-readable kind — [activateRefused](#activaterefused). **On three of the nine refusals**; read the note below before branching on its absence |
+| `refusedBy` | derived, optional | which subsystem refused — [activateRefusedBy](#activaterefusedby). On the `capacity` refusal only |
+| `missing` | derived, optional | what `configure` would have to supply. On `not-configured` |
+| `reason` | derived, optional | the capacity refusal in one sentence |
+| `derivation` | derived, optional | the capacity arithmetic behind it |
+| `capacity` | derived, optional | the full [Capacity](#capacity) report the refusal was made on |
+| `preemption` | derived, optional | an **offer** — [PreemptionOffer](#preemptionoffer). Nothing has been stood down |
+| `preempted` | derived, optional | an **event** — [Preempted](#preempted). Something has |
+| `capacityOverride` | derived, optional | [CapacityOverride](#capacityoverride) — the activation proceeded only because the caller said so |
+
+### The eleven branches, and exactly what each carries
+
+**Two lists per branch, and the second is not a hedge.** On `agent_status` a
+branch has an *exact* key set: every nullable field is emitted as an explicit
+`null`, so the branch tells you the keys. **On `activate_response` that is not
+true and cannot be made true without changing the surface** — nine fields are
+spread conditionally, so the same branch legitimately answers with different key
+sets on different calls. Collapsing that into one list would force a choice
+between two lies: listing conditionals as always-present, or omitting them so a
+real response carries keys the branch does not declare.
+
+So **`always` is an equality** — exactly these keys, on every call taking that
+branch — and **`sometimes` is a bound**: these may also appear, each under the
+condition named above, and nothing else may.
+
+<!-- contract-activate-branches: ACTIVATE_RESPONSE_BRANCHES -->
+
+| branch | when | always | sometimes |
+| --- | --- | --- | --- |
+| `spawned` | `success: true`, `started: true` — this call started the agent | `action` `success` `path` `paneName` `alreadyRunning` `started` `paneId` `sessionId` `status` `createdAt` `priority` `launcher` `config` `configVersion` `configuredAt` `everActivated` `activatedBy` `channelEnabled` `verified` `resumedExistingConversation` `provisioned` | `durable` `durabilityError` `resume` `resumedConversation` `preempted` `capacityOverride` |
+| `already-running` | `success: true`, `started: false` — it was already up | `action` `success` `path` `paneName` `alreadyRunning` `started` `paneId` `sessionId` `status` `createdAt` `verified` `config` `configVersion` `configuredAt` `everActivated` `activatedBy` `channelEnabled` | `reattached` `recordReconciled` `durable` `durabilityError` `occupiedBy` `note` |
+| `bad-address` | the address was rejected — relative, empty, not a directory | `action` `success` `started` `error` | — |
+| `bad-flag` | `override` or `preempt` was not a boolean | `action` `success` `started` `error` `path` | — |
+| `not-configured` | no `configure` has ever run for this path | `action` `success` `started` `error` `path` `refused` `missing` | — |
+| `unverifiable` | herdr did not answer `agent list`, so occupancy could not be checked | `action` `success` `started` `error` `path` `refused` `verified` | — |
+| `occupied` | live panes here and **none of them ours** | `action` `success` `started` `error` `path` `refused` `verified` `occupiedBy` | — |
+| `capacity` | the capacity gate refused | `action` `success` `started` `error` `path` `refusedBy` `reason` `derivation` `capacity` `priority` | `preemption` |
+| `spawn-error` | herdr refused the spawn | `action` `success` `started` `error` `path` | — |
+| `attach-error` | the pane is ours and live, and taking its terminal back failed | `action` `success` `started` `error` `path` `paneName` `paneId` `alreadyRunning` | `recordReconciled` |
+| `confirm-failed` | herdr reported success and left no agent behind | `action` `success` `started` `error` `path` `verified` | — |
+
+### Three things about this surface that will catch you
+
+**1. The two successful branches are not symmetric, and the one that says less
+is the one you will read most.** `priority`, `launcher`, `provisioned` and
+`resumedExistingConversation` ride the **spawning** branch and not the
+idempotent one. A reconciling caller's ordinary call is `activate` on an agent
+that is already up — so the response a reconciler sees most often is the one
+missing four fields. **This is documented rather than repaired**: repairing it
+changes the wire, which is a decision and not a description. See
+[KAN-328](https://wroosbit.atlassian.net/browse/KAN-328).
+
+**2. Four of the nine refusals carry no machine-readable discriminator.**
+`refused` is on three of them and `refusedBy` on one. `bad-address`, `bad-flag`,
+`spawn-error` and `confirm-failed` are separated from each other **only by the
+prose in `error`** — and `bad-flag` and `spawn-error` have *identical* key sets,
+so no amount of shape inspection tells those two apart. **Do not read the
+absence of `refused` as "not refused"**; read `success: false`. Named here
+because a reader who meets `refused` on some refusals will otherwise assume it
+is on all of them.
+
+**3. `alreadyRunning` is never `false` *on a refusal*, and the absence is
+load-bearing.** On a **success** all three states are ordinary: `true` means it
+was already up, and `false` — on `spawned` and nowhere else — means this call
+started it. On a **refusal** only `true` and *absent* occur. `false` there would
+read as *"we looked, and it is not running"*, which no refusal has established:
+the `occupied` branch in particular knows only that the pane it found is not
+ours. And reporting `true` there is the opposite failure, the swallow that turns
+a safety refusal into a silent success.
+
+**Each half is held by whichever instrument can actually hold it.**
+`src/router.ts` types the refusal field `?: true`, so the compiler refuses the
+dangerous value outright. Its **absence** on the `occupied` branch cannot be
+typed — the same value is legitimate one branch over — so
+`verify-idempotent-lifecycle.mjs` asserts the key is not present at all
+(`!('alreadyRunning' in first)`, deliberately rather than `!== true`, which a
+literal `false` would satisfy), and asserts `true` at the idempotent site that
+earns it.
+
+---
+
+## 9. The closed vocabularies
 
 **A value you do not recognise must be handled as an unknown rather than errored
 on.** This is the same clause §4 of the event contract states for actions and
@@ -976,9 +1268,134 @@ Null when nothing measured.
 | `absent` | a kernel without PSI |
 | `unreadable` | a machine whose PSI would not answer |
 
+<a id="activaterefused"></a>
+### `activate_response.refused`
+
+The machine-readable kind of refusal. **It is on three of the nine refusal
+branches** — see [§8](#three-things-about-this-surface-that-will-catch-you), and
+do not read its absence as *"not refused"*.
+
+<!-- contract-values: activateRefused -->
+
+| value | what it means |
+| --- | --- |
+| `not-configured` | no `configure` has ever run for this path, so there is nothing to activate |
+| `unverifiable` | herdr did not answer, so whether anything is already running there could not be checked. **Silence, not evidence** |
+| `occupied` | live panes are in that directory and none of them is ours |
+
+<a id="activaterefusedby"></a>
+### `activate_response.refusedBy`
+
+Which subsystem refused. **One member today**, published as a set rather than
+described as a constant — *"the only value it takes"* is exactly the kind of
+claim that stops being true without anybody noticing.
+
+<!-- contract-values: activateRefusedBy -->
+
+| value | what it means |
+| --- | --- |
+| `capacity` | the capacity gate. The only branch carrying `reason`, `derivation` and the full [Capacity](#capacity) report |
+
+<a id="resumecause"></a>
+### `activate_response.resume`
+
+Why a restore was a restore. **Only on a restore** — absent on an ordinary
+activation, which is not an interrupted one.
+
+<!-- contract-values: resumeCause -->
+
+| value | what it means |
+| --- | --- |
+| `reboot` | the machine restarted and destroyed the terminal mid-task |
+| `daemon-restart` | this daemon restarted; the pane did not survive with it |
+| `preempted` | the agent was deliberately stood down to free capacity, and is being brought back |
+
+<a id="artifactkind"></a>
+### `provisioned[].artifact`
+
+<!-- contract-values: artifactKind -->
+
+| value | what it means |
+| --- | --- |
+| `mcp-config` | an MCP server configuration written for the agent |
+| `git-exclude` | a line added to a repository's exclude file. **A courtesy rather than a requirement** — the one provisioning step that reports a failure instead of refusing the activation |
+| `folder-trust` | a runtime's folder-trust record |
+| `agy-mcp-config` | the `crabcast` builtin MCP server — the channel, and therefore the agent's identity. See [channelEnabled](#channelenabled--was-this-spawn-channel-enabled) |
+
+<a id="artifactorigin"></a>
+### `provisioned[].origin`
+
+<!-- contract-values: artifactOrigin -->
+
+| value | what it means |
+| --- | --- |
+| `crabcast` | this activation created it, and `reversal` says how to undo it |
+| `preexisting` | it was already there and was relied on rather than written. **`reversal` then says why there is nothing to undo** — removing somebody else's file is not ours to do |
+
 ---
 
-## 9. How this is enforced, and where it stops
+## 10. The boundary — which responses this contract covers, and which it does not
+
+**A contract that does not say where it stops is a claim outrunning its
+mechanism.** Everything above describes three responses. CrabCast answers more
+than three, several of them consumed today, and this section exists so that a
+reader can tell which is which **without inferring it from what happens to be
+listed**. That inference is what went wrong before version 5: `activate_response`
+was consumed and undescribed, and nothing said so.
+
+### Covered — documented here, declared in `src/read-contract.ts`, and reconciled against a real daemon by `verify-read-contract.mjs`
+
+| response | where | held how |
+| --- | --- | --- |
+| `list_agents` | [§4](#4-list_agents), rows in [§5](#5-the-rows), blocks in [§6](#6-the-blocks) | document ↔ declaration ↔ wire, both directions; row buckets also checked against the live `provenance` legend |
+| `agent_status` | [§7](#7-agent_status) | the same, plus an **exact** key set asserted per branch |
+| `activate_response` | [§8](#8-activate_response) | the same, with `always`/`sometimes` per branch — and **no legend cross-check**, because this response carries no `provenance` block |
+| `daemon_status` | [§2](#2-the-version-on-the-wire) — **three fields only** | `contractVersion`, `unreadableRecords`, `unreadableRecordsTotal`. The rest of that response is out of scope on purpose and has its own proofs |
+
+### Not covered — consumed, and described by nothing here
+
+**These are surfaces a caller reads today. Nothing in this document, in
+`src/read-contract.ts`, or in `verify-read-contract.mjs` describes them, and no
+notice promise applies to them.** They are listed rather than left silent
+because the listing is the only thing that makes the covered half readable as a
+boundary rather than as a habit.
+
+| response | what a consumer does with it | what holds it instead |
+| --- | --- | --- |
+| `deactivate_response` | reads `wasRunning` and `state` to tell a stand-down from a no-op | `verify-idempotent-lifecycle.mjs` — behaviour, not shape |
+| `configure_response` | reads the echo back and `configVersion` for compare-and-set | `verify-config-echo-contract.mjs`, `verify-reconfiguration-refuses.mjs` |
+| `forget_response` | reads the refusal when a live pane blocks the forget | `verify-refuses-occupied-directory.mjs` |
+| **`send_to_agent`'s verdict** | **branches on it** — `delivered` / `not-delivered` / `unverifiable`, plus `refused` on the response | `verify-send-confirms-delivery.mjs` and `-live.mjs`. It is a TypeScript union in `src/delivery.ts` with careful prose, and it is **published nowhere**: no document, no `VALUE_SETS`, nothing reconciled |
+| the pty responses | `pty_init`, `pty_input`, `pty_resize` — a terminal client reads all three | `verify-pty-payload-refusal.mjs`, `verify-pty-init-rejects-unknown-session.mjs` |
+| `tail_agent` | reads the tail and which source answered | `verify-tail-asks-every-source.mjs` |
+| the rest of `daemon_status` | `pid`, `build`, `freshness`, the agent counts | `verify-daemon-provenance.mjs`, `verify-daemon-status-over-mcp.mjs` |
+
+**Read that table for what it says and not for more.** Every one of those
+surfaces has a proof, and several have better prose than some of what is
+documented here. What they do **not** have is the document↔code↔wire round trip:
+a field can be added to any of them, and nothing goes red. That is the
+difference this contract is about, and it is the whole of the difference.
+
+**`send_to_agent`'s verdict is the one flagged deliberately.** It is a **closed
+vocabulary a consumer must branch on**, with no published member list — which is
+the exact hazard [§9](#9-the-closed-vocabularies)'s must-ignore clause exists to
+manage on the surfaces that do publish theirs. It is tracked as
+[KAN-329](https://wroosbit.atlassian.net/browse/KAN-329) and is not closed by
+version 5.
+
+### The rule for what belongs here
+
+A response earns a section when **a caller outside this repository branches on
+it**. That is the test KAN-277 applied to the read path and KAN-287 applied to
+`activate_response`, and it is the reason the rest of `daemon_status` is not
+here while three of its fields are. Widening for its own sake is the
+compatibility-surface creep this contract was scoped against; widening because
+somebody is already depending on it is not a widening at all — it is
+publishing what was already true.
+
+---
+
+## 11. How this is enforced, and where it stops
 
 `scripts/verify-read-contract.mjs` is the live proof. It builds a real fleet on
 a real daemon — every category populated, through real lifecycle calls — reads
@@ -991,36 +1408,56 @@ both responses over the real MCP tools and the real socket, and asserts:
 2. **The declaration against a real response, in both directions.** A key on the
    wire that nothing declares is red; a non-optional declared field missing from
    the wire is red. Each `agent_status` branch is produced and its **exact** key
-   set asserted, refusals included.
+   set asserted, refusals included, and each `activate_response` branch is
+   produced and its `always` set asserted as an **equality** with its
+   `sometimes` set as a **bound**.
 3. **The version, in one place.** Document, declaration and wire carry the same
    integer; the version table has a row for it whose digest matches the
    declaration; and `list_agents`, `agent_status` and `capacity` carry **no**
    version field, so "one place" is measured rather than claimed.
 4. **This document's row-field buckets against the live `provenance` legend**, in
-   both directions — the one join neither side owns.
+   both directions — the one join neither side owns. **`list_agents` and
+   `agent_status` only**: `activate_response` carries no legend, and §8 says so.
 5. **The stability statement, verbatim**, including all four of what it does not
    promise — a presence check, which makes deletion loud and claims nothing
    further.
 6. **The red half.** The proof is watched failing: a field is added to a real
    response builder without a document line, a field is removed from a document
-   table, and the declared version is bumped without its table row. Each runs
-   against a mutated build and is required to go red **by name**.
+   table, a field is moved from an `activate_response` branch's `sometimes` list
+   to its `always` list, and the declared version is bumped without its table
+   row. Each runs against a mutated build or a mutated document and is required
+   to go red **by name**.
 
 ### What is bound at BUILD time, and what only by the proof
 
 `src/router.ts` asserts `Exact<keyof ListedAgent, keyof ROW_SHAPES.ListedAgent>`
 and one of those for each **named** shape — every row type, the config echo,
-`FleetPage`, `Provenance`, `ConfigEchoContract`, `PreemptedBy`, `OccupiedAgent`
-— plus the closed vocabularies against their TypeScript unions. Those do not
+`FleetPage`, `Provenance`, `ConfigEchoContract`, `PreemptedBy`, `OccupiedAgent`,
+and `activate_response`'s five composites (`PaneOccupant`,
+`ProvisionedArtifact`, `PreemptionOffer`, `Preempted`, `CapacityOverride`) —
+plus the closed vocabularies against their TypeScript unions. Those do not
 compile when they drift.
+
+**Two of those unions were made unions by KAN-287 in order to be bound.**
+`refused` and `refusedBy` were bare string literals written out at nine `fail`
+sites, which is the shape that grows a tenth member silently; they are
+`ActivateRefusalKind` and `ActivateRefusedBy` now, so a new refusal kind **does
+not compile** until it has a line in the declaration and a row in
+[§9](#9-the-closed-vocabularies). **Prefer the type to the assertion where the
+choice exists** — an assertion can be deleted by a later author and the build
+still passes, while an unrepresentable state cannot be introduced at all. It
+earned its keep immediately: the first draft of the `artifactKind` list guessed
+`agy-mcp` for a constant whose value is `agy-mcp-config`, and the binding
+refused to compile rather than shipping a document that was wrong.
 
 **The response objects themselves have no such type.** They are assembled inline
 and spread into `respond({…})`, and TypeScript has no exact type for an object
-literal — so the top-level field sets of both responses, the four
-`agent_status` branches, `herdrHealth` and `priorities` are held by the proof
-and by nothing else. That is the weaker of the two mechanisms and it is named
-here rather than left to be assumed. It is also the only one available for them,
-and it asserts against a **real** response rather than a constructed one.
+literal — so the top-level field sets of all three responses, the four
+`agent_status` branches, the eleven `activate_response` branches, `herdrHealth`
+and `priorities` are held by the proof and by nothing else. That is the weaker
+of the two mechanisms and it is named here rather than left to be assumed. It is
+also the only one available for them, and it asserts against a **real** response
+rather than a constructed one.
 
 ### What nothing here covers
 
