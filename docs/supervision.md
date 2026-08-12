@@ -124,13 +124,28 @@ SyslogIdentifier=crabcast
 WantedBy=default.target
 ```
 
-Install it:
+Save it as `~/.config/systemd/user/crabcast.service` (create the directory if it
+does not exist), then:
 
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now crabcast.service
 loginctl enable-linger "$USER"     # so it starts at boot, not at first login
 systemctl --user status crabcast
+crabcast daemon-status             # the socket answers, not just "the unit is active"
+```
+
+That last line is the check worth actually running. `active` means systemd
+started a process; it does not mean the daemon bound its socket, and the two
+come apart exactly in the cases this page is about — a config it could not load,
+or a `PATH` without `herdr` on it.
+
+To undo all of it:
+
+```bash
+systemctl --user disable --now crabcast.service
+rm ~/.config/systemd/user/crabcast.service
+systemctl --user daemon-reload
 ```
 
 `enable-linger` is not optional if you want this at boot. Without it a user
