@@ -722,6 +722,34 @@ const PROOF_DEFENCES = [
       'because a mask wide enough to pass against anything is this check\'s own way of ' +
       'overclaiming. §4 additionally runs it against the two revisions that really had drifted.'
   },
+  {
+    script: 'verify-timing-attribution',
+    defence: 'mutation',
+    central:
+      "the `verify` job reports what each of its scripts cost — the figures are MEASUREMENTS off " +
+      'a clock rather than a well-formed table, they reach `$GITHUB_STEP_SUMMARY` as well as the ' +
+      'log, the reporter is a live command the workflow actually runs, and the hang-bound ratio ' +
+      'is read from the workflow rather than carried as a second copy of the number.',
+    anchor: 'MUTANT',
+    note:
+      'Four mutations, each watched going red. The one that earns its place is ' +
+      '"timing-capture-removed": it leaves the reporter entirely intact and only stops the clock, ' +
+      'which produces a COMPLETE, sorted, plausible table of zeros — the failure that ships by ' +
+      'accident, and the one every assertion about shape passes. "reporter-noop" is the attack ' +
+      "KAN-331's brief names outright (\"assume I will make it a no-op and see whether anything " +
+      'notices"). "bound-hardcoded" runs the committed reporter and a constant-carrying mutant ' +
+      'against a tree declaring 40 rather than 20 minutes, so "it reads the workflow" is measured ' +
+      'rather than asserted. §4 mutates the workflow with `|| true` and requires the wiring ' +
+      'reader to call it disabled. ' +
+      'SEAM, AND IT IS THE ONE `prompts/task.md` ASKS FOR: this script SUPPLIES ITS OWN FIXTURES ' +
+      'and their durations, so it proves the loop times and attributes whatever it is handed — ' +
+      'NOT that the committed 47-entry array is the real one (verify-proof-registry owns that, ' +
+      'and is required), and NOT that the 47 real scripts cost what the table says. It also ' +
+      'points the step at a `$GITHUB_STEP_SUMMARY` FILE IT CREATED, so it proves well-formed ' +
+      'markdown is written to the path GitHub sets and not that GitHub renders it. That half is ' +
+      "an observation pasted into the PR — the branch's own summary page — and nothing in CI can " +
+      'own it.'
+  },
 
   // -------------------------------------------------------------------------
   // guard — a precondition, a negative case, a vacuity check or a canary
