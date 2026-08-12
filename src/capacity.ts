@@ -571,17 +571,28 @@ export function flooredCost(cost: AgentCost, costSource: { residentBytes: CostSo
  * budget and admits MORE agents — "conservative" means the larger number here
  * and the larger number there, which is why this constant and
  * {@link MEASURED_AGENT_COST} are both stated rather than derived from one
- * another. 900 MB is above every supervising tree measured on this machine on
- * 2026-08-12 (761, 762, 872, 904 MB across three 60s windows) rather than at
- * the middle of them: an over-reserve costs one agent slot, an under-reserve
+ * another. 950 MB is above every supervising tree measured on this machine on
+ * 2026-08-12 — 761, 762, 872 and 904 MB across three 60s windows — rather than
+ * at the middle of them: an over-reserve costs one agent slot, an under-reserve
  * costs a machine.
+ *
+ * IT WAS 900 MB WHEN THIS PARAGRAPH WAS FIRST WRITTEN, AND THE PARAGRAPH SAID
+ * "above every supervising tree" WITH 904 IN ITS OWN LIST. Recorded rather than
+ * quietly corrected, because it is this epic's signature defect committed
+ * inside the change that is about it: a field that explains itself, making a
+ * claim its own data refutes. Note which way it failed — a reserve seeded
+ * beneath an observed reading under-reserves, which is the direction the rest
+ * of this file exists to prevent. The fix was to raise the constant, not to
+ * soften the sentence: 900 could have been defended as clearing every tree's
+ * MEAN (883, 761, 762), and a claim that has to be narrowed to survive its own
+ * evidence is the wrong half to keep.
  *
  * It is a seed and it is labelled one. This daemon has never had an
  * unchargeable agent of its own to measure, so the trees behind that range were
  * another orchestrator's. When a CrabCast fleet with exempt agents exists, this
  * is the constant to re-measure.
  */
-export const EXEMPT_AGENT_MEMORY_BYTES = 900 * MIB;
+export const EXEMPT_AGENT_MEMORY_BYTES = 950 * MIB;
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
