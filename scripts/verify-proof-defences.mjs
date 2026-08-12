@@ -459,14 +459,23 @@ const PROOF_DEFENCES = [
       'either assertion could fail. That bit hardest on the negative half — "the notice does not ' +
       'print 12345" is satisfied by a notice printing no date at all — so `notice-drops-date` is ' +
       'what stops that pair being a check and its own alibi. ' +
-      'THE SIXTH MECHANISM IS AN ABSENCE, so it is held by a NEGATIVE CASE rather than by a ' +
-      'starve: §5b reads `src/agent-registry.ts` as text and requires `classifyLog` to ' +
-      'interpolate no row value into any string — the property that leaves the notice the only ' +
-      'rendering of a row — then runs the identical predicate over a doctored copy with the ' +
-      'render put back and requires it to catch that. A grep asserting an absence is otherwise ' +
-      'the purest form of an assertion that has only ever been observed passing. NOTE THAT §5b ' +
-      'IS THE ONE SECTION HERE WHOSE VERDICT IS ABOUT THE TREE RATHER THAN THE BUILD: this ' +
-      'file\'s exit code is a blend of the two, and its §0 says so. ' +
+      'THE SIXTH MECHANISM IS AN ABSENCE, so it is held by NEGATIVE CASES rather than by a ' +
+      'starve: §5b PARSES `src/agent-registry.ts` and requires `classifyLog` to put no row ' +
+      'value into a string by any route — interpolation, concatenation, `String`/`JSON.stringify`, ' +
+      'a string method, or a bare argument to `console.*` — which is the property that leaves ' +
+      'the notice the only rendering of a row. It then runs the identical predicate over FOUR ' +
+      'doctored copies, one per shape, and requires each to be caught. THE FOUR ARE THE POINT ' +
+      'AND SO IS THE FIFTH ASSERTION BESIDE THEM: this section began as a regex over `${…}` ' +
+      'with ONE negative case, itself written as a template — the single shape that regex ' +
+      'already matched. The review of #84 walked a `console.error(\'line \' + bad.line)` through ' +
+      'it with the whole run green, which is a second rendering writing a row to stderr, and is ' +
+      'the false comment KAN-358 deleted COMING TRUE in the one form the guard could not see. A ' +
+      'negative case drawn from the predicate it checks proves the predicate works on its own ' +
+      'vocabulary and nothing about coverage. So three of the four shapes are outside the old ' +
+      'regex on purpose, and each case also asserts WHETHER THE OLD REGEX WOULD HAVE SEEN IT — ' +
+      'the widening is demonstrated in the run rather than taken on trust. NOTE THAT §5b IS THE ' +
+      'ONE SECTION HERE WHOSE VERDICT IS ABOUT THE TREE RATHER THAN THE BUILD: this file\'s ' +
+      'exit code is a blend of the two, and its §0 says so. ' +
       'THE DISCIPLINE THE OLD §6d BOUGHT IS KEPT WHERE IT WAS EARNED: its first draft compared ' +
       'two empty sample lists (samples stopped at three rows and the fixture was eighth), so the ' +
       'mutant and the real build agreed because neither had reached the row. The replacement ' +

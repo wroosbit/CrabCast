@@ -100,6 +100,10 @@ import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// THE ONLY PROOF HERE THAT PARSES TYPESCRIPT, and §5b's header says why: the
+// property it holds is "no string-building use of a row", which has no common
+// surface form to grep for. A devDependency `npm ci` already installs.
+import ts from 'typescript';
 import { makeMutator } from './mutation.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -760,12 +764,12 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
 // --- 5b. and there is exactly ONE rendering of a row --------------------------
 //
 // THE ONE STATIC SECTION IN THIS FILE, and both halves of that matter. It reads
-// `src/agent-registry.ts` as TEXT, so its verdict is about the code in this
-// tree rather than about `dist` — a stale or failed build can neither redden
-// nor green it, which is the opposite of every section above and is why this
-// script's exit code must not be read as a single kind of evidence. It is also
-// the only section that CAN hold this property, because the property is an
-// absence and an absence has no runtime behaviour to assert on.
+// `src/agent-registry.ts` rather than `dist`, so its verdict is about the code
+// in this tree — a stale or failed build can neither redden nor green it, which
+// is the opposite of every section above and is why this script's exit code
+// must not be read as a single kind of evidence. It is also the only section
+// that CAN hold this property, because the property is an absence and an
+// absence has no runtime behaviour to assert on.
 //
 // WHAT IT DEFENDS, narrowly, because the obvious version of the sentence
 // overclaims and this epic is about sentences that outrun their mechanism:
@@ -790,59 +794,185 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
 // place for a comment to claim an audience it does not have, and the whole of
 // what KAN-358 found. A render that must exist belongs in
 // `describeUnreadableLog`, where it is reachable and where §5 and §6d hold it.
+//
+// ---------------------------------------------------------------------------
+// WHY THIS PARSES RATHER THAN GREPS, and it is a finding on this PR rather than
+// a preference (review of #84).
+//
+// The first version of this section was a regex — `/\$\{(?:parsed|bad)\b…\}/g`
+// — and its assertion read "interpolates no row value into any string" while
+// its header claimed the property above: exactly one rendering. The reviewer
+// starved the gap between those two sentences and it opened. A
+// `console.error('[AgentRegistry] line ' + bad.line + ': ' + bad.identity)`
+// inserted into the loop is a second rendering, writes a row to stderr, and
+// contains no `${` at all — so the run stayed GREEN. **The guard erected to
+// stop a false comment recurring could not see that comment coming true**: the
+// sentence this whole ticket exists because of claimed those values were
+// "written to stderr once, at boot", and stderr concatenation is the one shape
+// the predicate did not cover.
+//
+// AND THE NEGATIVE CASE DID NOT REACH IT EITHER, which is the more instructive
+// half. It re-inserted the render as a TEMPLATE — the one shape the predicate
+// already matched — so it proved the predicate worked on its own vocabulary and
+// said nothing about coverage. A negative case drawn from the predicate it is
+// checking is the grep-that-has-only-found-nothing problem one level up. So
+// {@link DOCTORED} below carries four shapes, three of which the old regex
+// would have missed, and the section asserts that miss explicitly rather than
+// leaving the reader to take the widening on trust.
+//
+// A TEXT PREDICATE CANNOT EXPRESS "ANY STRING-BUILDING USE" — concatenation,
+// `String()`, `JSON.stringify`, `.join()` and a bare argument to `console.error`
+// have no common surface form. So this parses with the compiler that already
+// builds this repository. `typescript` is a devDependency, `npm ci` installs
+// it, and this is the first proof here to use it; the alternative was a wider
+// regex, which is how the first version got this wrong.
 {
   const registrySrc = fs.readFileSync(path.join(repoRoot, 'src', 'agent-registry.ts'), 'utf8');
 
+  /** The identifiers inside `classifyLog` that hold a row, or part of one. */
+  const ROW_ROOTS = new Set(['parsed', 'bad', 'trimmed']);
+  // `lines` is deliberately NOT one: the loop indexes and measures it
+  // structurally (`lines[i]`, `lines.length - 1`) and flagging that would be a
+  // false positive on every iteration. `trimmed` is `lines[i].trim()`, so the
+  // raw bytes are covered one step later, where a use of them is a use.
+  const STRINGIFIERS = new Set(['String', 'JSON.stringify']);
+  const EMITTERS = new Set([
+    'console.log', 'console.error', 'console.warn', 'console.info', 'console.debug',
+    'process.stderr.write', 'process.stdout.write'
+  ]);
+  const STRING_METHODS = new Set(['toString', 'join', 'concat', 'padStart', 'padEnd', 'repeat']);
+
   /**
-   * `classifyLog`'s body, sliced to the next top-level declaration. Pure, so
-   * the negative case below can run the identical predicate over a doctored
-   * copy and require it to FAIL — the §1b arrangement, and the only thing that
-   * stops a grep-shaped assertion passing because its anchor drifted.
+   * Every string-building use of a row value inside a named function.
+   *
+   * Pure, and it takes the source as an argument, so the negative cases below
+   * run the IDENTICAL predicate over doctored copies — the §1b arrangement, and
+   * the only thing that stops an assertion about an absence passing because its
+   * anchor drifted rather than because the absence holds.
+   *
+   * @returns {{hits: Array<{why: string, code: string}>, body: string}|null}
    */
-  function renderingsInClassifyLog(text) {
-    const start = text.indexOf('function classifyLog(');
-    if (start === -1) return null;
-    const rest = text.slice(start + 1);
-    const next = /^(?:export )?(?:function|const|interface|type|class) /m.exec(rest);
-    const body = next ? rest.slice(0, next.index) : rest;
-    // `${...}` interpolations of a row's own values — the parsed line, or the
-    // record built from it. A `${i + 1}` line number is not a rendering of a
-    // row and is deliberately not matched.
-    return { body, hits: [...body.matchAll(/\$\{(?:parsed|bad)\b[^}]*\}/g)].map((m) => m[0]) };
+  function rowRenderingsIn(text, fnName) {
+    const sf = ts.createSourceFile(`${fnName}.ts`, text, ts.ScriptTarget.ES2022, true);
+    let fn = null;
+    const findFn = (n) => {
+      if (ts.isFunctionDeclaration(n) && n.name?.text === fnName) fn = n;
+      else if (!fn) ts.forEachChild(n, findFn);
+    };
+    ts.forEachChild(sf, findFn);
+    if (!fn?.body) return null;
+
+    /** The root identifier of `a`, `a.b.c`, `(a as T).b`, `a!.b`. */
+    const rootOf = (node) => {
+      let cur = node;
+      while (
+        ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur) ||
+        ts.isNonNullExpression(cur) || ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur)
+      ) cur = cur.expression;
+      return ts.isIdentifier(cur) ? cur.text : null;
+    };
+    const isRow = (node) => ROW_ROOTS.has(rootOf(node) ?? '');
+
+    const hits = [];
+    const flag = (node, why) =>
+      hits.push({ why, code: node.getText().replace(/\s+/g, ' ').slice(0, 60) });
+
+    const walk = (n) => {
+      // 1. `… ${row.x} …`
+      if (ts.isTemplateSpan(n) && isRow(n.expression)) flag(n.expression, 'template interpolation');
+      // 2. `'a' + row.x`, `row.x + 'b'`. Conservative: arithmetic on a row value
+      //    would be flagged too. This loop does none, and a future author who
+      //    needs some can say so rather than have the guard quietly not apply.
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+        if (isRow(n.left)) flag(n.left, 'string concatenation');
+        if (isRow(n.right)) flag(n.right, 'string concatenation');
+      }
+      if (ts.isCallExpression(n)) {
+        const callee = n.expression.getText().replace(/\s+/g, '');
+        // 3. `String(row)`, `JSON.stringify(row)`, `console.error(row)` — the
+        //    last of which needs no string literal anywhere to emit a row.
+        if (STRINGIFIERS.has(callee) || EMITTERS.has(callee)) {
+          for (const a of n.arguments) if (isRow(a)) flag(a, `passed to ${callee}()`);
+        }
+        // 4. `row.x.toString()`, `row.join(', ')`
+        if (
+          ts.isPropertyAccessExpression(n.expression) &&
+          STRING_METHODS.has(n.expression.name.text) &&
+          isRow(n.expression.expression)
+        ) flag(n.expression.expression, `.${n.expression.name.text}() on a row value`);
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(fn.body);
+    return { hits, body: fn.body.getText() };
   }
 
-  const found = renderingsInClassifyLog(registrySrc);
+  /** The regex this section used to be, kept so the widening is demonstrated rather than asserted. */
+  const LEGACY = (body) => [...body.matchAll(/\$\{(?:parsed|bad)\b[^}]*\}/g)].map((m) => m[0]);
+
+  const found = rowRenderingsIn(registrySrc, 'classifyLog');
   check(
     Boolean(found) && found.body.includes('scan.unreadable.push(bad)'),
-    '5b: the slice really is `classifyLog`\'s body — a drifted anchor would make the check below pass over nothing',
-    found ? `${found.body.length} chars` : 'no `function classifyLog(` in src/agent-registry.ts'
+    "5b: the parsed body really is `classifyLog`'s — a renamed function would otherwise make the check below pass over nothing",
+    found ? `${found.body.length} chars` : 'no `function classifyLog` in src/agent-registry.ts'
   );
   check(
     Boolean(found) && found.hits.length === 0,
-    '5b: `classifyLog` interpolates no row value into any string — the notice is the only rendering, so there is nothing for it to drift against',
-    found ? found.hits.join(' ; ') || 'no interpolation of `parsed` or `bad`' : 'body not found'
+    '5b: `classifyLog` puts no row value into a string by ANY route — interpolation, concatenation, a stringifier, a string method or a bare argument to an emitter — so the notice is the only rendering and there is nothing for it to drift against',
+    found ? found.hits.map((h) => `${h.why}: ${h.code}`).join(' ; ') || 'no string-building use of `parsed`, `bad` or `trimmed`' : 'body not found'
   );
 
-  // THE NEGATIVE CASE. Re-insert the rendering KAN-358 deleted, in the shape a
-  // later author would most plausibly write it, and require the same predicate
-  // to catch it. Without this, §5b is a grep that has only ever been observed
-  // finding nothing — which is the register's own definition of undefended, and
-  // exactly what this reviewer starves.
-  const doctored = registrySrc.replace(
-    '    scan.unreadable.push(bad);\n',
-    '    scan.unreadable.push(bad);\n' +
-      '    scan.notes.push(`line ${bad.line}: ${parsed.event ?? \'no event\'}`);\n'
-  );
-  check(
-    doctored !== registrySrc,
-    '5b: the doctored source differs from the real one, so the negative case tests a re-inserted render rather than a copy'
-  );
-  const after = renderingsInClassifyLog(doctored);
-  check(
-    Boolean(after) && after.hits.length > 0,
-    '5b: and the check goes RED when a second rendering is put back inside the loop — it is not a grep that has only ever found nothing',
-    after ? after.hits.join(' ; ') || 'it stayed green, so §5b would not notice a re-derivation' : 'body not found'
-  );
+  // THE NEGATIVE CASES. Four shapes, and THREE OF THEM ARE OUTSIDE THE OLD
+  // PREDICATE'S VOCABULARY on purpose — `concatenation` is verbatim the one the
+  // reviewer of #84 used to walk through the first version of this check.
+  const DOCTORED = [
+    {
+      name: 'template',
+      code: "    scan.notes.push(`line ${bad.line}: ${parsed.event ?? 'no event'}`);\n",
+      legacySees: true
+    },
+    {
+      name: 'concatenation',
+      code: "    console.error('[AgentRegistry] line ' + bad.line + ': ' + bad.identity + ' — ' + parsed.event);\n",
+      legacySees: false
+    },
+    {
+      name: 'stringify-sink',
+      code: '    console.error(JSON.stringify(parsed));\n',
+      legacySees: false
+    },
+    {
+      name: 'bare-emit',
+      code: '    console.error(bad.identity);\n',
+      legacySees: false
+    }
+  ];
+
+  const ANCHOR = '    scan.unreadable.push(bad);\n';
+  for (const d of DOCTORED) {
+    const doctored = registrySrc.replace(ANCHOR, ANCHOR + d.code);
+    check(
+      doctored !== registrySrc,
+      `5b/${d.name}: the doctored source differs from the real one, so this case tests a re-inserted render rather than a copy`
+    );
+    const after = rowRenderingsIn(doctored, 'classifyLog');
+    check(
+      Boolean(after) && after.hits.length > 0,
+      `5b/${d.name}: and the check goes RED when this shape of second rendering is put back inside the loop`,
+      after
+        ? after.hits.map((h) => `${h.why}: ${h.code}`).join(' ; ') ||
+          'it stayed GREEN, so §5b would not notice this rendering'
+        : 'body not found'
+    );
+    // The half that makes the four cases evidence about COVERAGE rather than
+    // four restatements of one predicate: what the regex would have said.
+    const legacyHits = after ? LEGACY(after.body) : [];
+    check(
+      (legacyHits.length > 0) === d.legacySees,
+      `5b/${d.name}: and the regex this section replaced ${d.legacySees ? 'DID' : 'did NOT'} see it — which is why the predicate is a parse and not a wider grep`,
+      legacyHits.length ? legacyHits.join(' ; ') : 'the regex found nothing'
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

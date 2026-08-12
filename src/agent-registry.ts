@@ -1212,8 +1212,13 @@ function classifyLog(text: string, scan: LogVersionScan, entries?: AgentLogEntry
     // reachable, which is what makes it the only place a second derivation
     // could be written — and nothing in the type system stops a later author
     // writing one here. `verify-unreadable-row-standing.mjs` §5b is the check
-    // that notices, and it reads this source as text because an absence has no
-    // runtime behaviour to assert on.
+    // that notices: it PARSES this file and fails on any string-building use of
+    // `parsed`, `bad` or `trimmed` in this function — interpolation,
+    // concatenation, a stringifier, a string method, or a bare argument to
+    // `console.*`. It reads the source rather than the build because an absence
+    // has no runtime behaviour to assert on, and it parses rather than greps
+    // because its first version was a regex over `${…}` only and a
+    // `console.error('line ' + bad.line)` walked straight through it.
     //
     // WHAT WAS DELETED, recorded so nobody re-invents it. A `samples` array of
     // up to `VERSION_SCAN_SAMPLES` (3) one-liners was pushed here on every
