@@ -41,22 +41,33 @@
 // non-zero on a bad config, and does not thrash when it loses a race — and it
 // does NOT cover systemd itself running any of it, nor a real boot.
 //
-// NOTHING HERE OBSERVES A REBOOT, and nothing can: the machine this was
-// developed on runs a live fleet. Reboot survival is PREDICTED from the links
-// below being individually true, not observed. `docs/supervision.md` states
-// the same limit in the same words, and that is deliberate — the honest
-// version of this claim has to survive in the document a user reads, not only
-// in the proof a contributor runs.
+// NOTHING HERE OBSERVES A REBOOT, and nothing in CI ever will: a GitHub
+// runner has no user session bus. That has not changed and is not what moved.
 //
-// WHO COVERS THE REST: nobody yet, and it is named rather than implied.
-// A real `systemctl --user start` under a real unit is a manual step; the
-// transcript of one goes on the PR for KAN-322 rather than into CI, because a
-// GitHub runner has no user session bus.
+// WHAT MOVED (KAN-345): the claim itself was PREDICTED until 2026-08-12, when
+// the machine this was developed on rebooted cleanly and `crabcast.service`
+// came back by itself eleven seconds later — `ActiveState=active`,
+// `MainPID=872`, `NRestarts=0`, socket present. So reboot survival is now
+// OBSERVED ONCE, out of band, on one machine, after a clean shutdown rather
+// than a crash. `docs/supervision.md` carries that observation with its date
+// and its limits, and §7 below guards the SHAPE of that claim.
+//
+// The distinction that matters here: THIS SCRIPT still covers none of it.
+// One observation is evidence, not a guarantee, and it was not taken by
+// anything in this repository — see §7's own comment for what its guard can
+// and cannot detect.
+//
+// WHO COVERS THE REST: nobody, and it is named rather than implied. A real
+// `systemctl --user start` under a real unit is a manual step; the transcript
+// of one goes on the PR for KAN-322, and the reboot observation on the PR for
+// KAN-345, rather than into CI.
 //
 // §7 is the guard against this document and the code drifting apart: it reads
 // the ExecStart out of docs/supervision.md and requires the command it names
-// to be one this CLI actually has. A unit template in prose is exactly the
-// artifact that rots silently.
+// to be one this CLI actually has, and it holds the reboot claim to the shape
+// of its evidence. A unit template in prose is exactly the artifact that rots
+// silently — and KAN-345 is the case where the PROSE was right and the GUARD
+// was the stale artifact.
 //
 // ---------------------------------------------------------------------------
 // §8 STAGES ITS OWN SURVIVOR, AND THAT IS THE EDGE OF WHAT IT COVERS (KAN-323).
@@ -531,9 +542,155 @@ check(
   /Environment=PATH=/.test(doc),
   'it pins PATH — the daemon resolves `herdr` off it and a bad PATH fails every activation while looking healthy'
 );
+// ---------------------------------------------------------------- KAN-345
+// The reboot claim is pinned to the SHAPE OF ITS EVIDENCE, not to a word.
+//
+// What this replaces: `check(/predicted|not observed/i.test(doc), 'and it
+// states that reboot survival is predicted rather than observed')`.
+//
+// That guard existed for a real risk — an honest caveat being quietly
+// upgraded to a guarantee — and it worked by requiring the word "predicted"
+// somewhere in the file. It had TWO independent defects, and the second was
+// only found while fixing the first:
+//
+//   1. It could hold the claim at "predicted" AND NOWHERE ELSE. The page
+//      itself nominated the two commands that would turn the prediction into
+//      an observation; on 2026-08-12 they were run and they answered. From
+//      that moment the guard defended the stale claim, and a contributor
+//      writing the true sentence could be told they had broken the build —
+//      with the cheapest way back to green being to put the false sentence
+//      back. A guard whose only expressible verdict is "predicted" has no way
+//      to hold the page at "observed, on this date, with these limits".
+//
+//   2. It tested the WHOLE FILE for a word, so it was coupled to nothing in
+//      particular. Measured against the corrected page rather than assumed
+//      (the three runs are in KAN-345's PR): the section's own heading
+//      `## What is predicted and what is observed` satisfies it, and so does
+//      any sentence QUOTING the retired wording. Both of those pass while
+//      printing a verdict that is now false. It goes red only for a
+//      correction that happens to drop the vocabulary everywhere.
+//
+// So it was simultaneously too loose to constrain the claim and too tight to
+// let it move. What follows constrains the claim and lets it move: the
+// reboot paragraph must open with a status label from a closed vocabulary,
+// an observation must carry its date and its limits, and no sentence may
+// assert the survival as settled. BOTH states are sayable, which is the
+// point — the honest page is the one that passes most easily, whichever way
+// the world has gone.
+//
+// WHAT THIS CANNOT DETECT, named rather than implied. It enforces the FORM of
+// the claim and never its truth: `**Observed once, on 2099-01-01**` satisfies
+// every check below, because nothing here reboots anything and no check in
+// this repository can — a GitHub runner has no user session bus. It reads
+// only this one section, so an overclaim in prose elsewhere on the page is
+// outside it. And "asserted" is decided per sentence by looking for a
+// negation in the same sentence, so an overclaim spread across two sentences
+// ("Is it handled? Yes.") is not caught.
+
+/**
+ * The body of one `##` section, heading line excluded. Everything below reads
+ * this slice, which is exactly why it is asserted on rather than trusted:
+ * see the two checks immediately after it.
+ */
+function sectionBody(text, heading) {
+  const lines = text.split('\n');
+  const start = lines.findIndex((l) => l.trim() === `## ${heading}`);
+  if (start === -1) return '';
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  return lines.slice(start + 1, end).join('\n').trim();
+}
+
+const REBOOT_HEADING = 'What is predicted and what is observed';
+const rebootSection = sectionBody(doc, REBOOT_HEADING);
+
+// VACUITY, first because every check after it reads that slice. A renamed or
+// deleted heading makes it the empty string, and an empty string satisfies
+// the NEGATIVE check at the bottom of this block without one word of the
+// document being right. Starving the helper has to go red HERE.
 check(
-  /predicted|not observed/i.test(doc),
-  'and it states that reboot survival is predicted rather than observed'
+  rebootSection.length > 500,
+  `the "${REBOOT_HEADING}" section is present and substantial`,
+  `${rebootSection.length} chars`
+);
+
+// The other direction on the same helper, because a slice that had widened to
+// the whole document would also make the checks below pass too easily.
+check(
+  rebootSection.length > 0 && !/^##\s/m.test(rebootSection),
+  'and the slice is that section only — no other heading fell into it'
+);
+
+// The claim this section exists to keep honest. Finding it by what it CLAIMS
+// rather than by how it is labelled is deliberate: the label is the thing
+// under test below, so matching on the label would make that test circular.
+const rebootParas = rebootSection
+  .split(/\n\s*\n/)
+  .map((p) => p.trim())
+  .filter((p) => /after an actual reboot|comes back with a working socket/i.test(p));
+
+check(
+  rebootParas.length > 0,
+  'it still makes the reboot-survival claim explicitly',
+  `${rebootParas.length} paragraph(s)`
+);
+
+const claim = rebootParas[0] ?? '';
+
+// The status label, from a closed vocabulary. This is the replacement for
+// "the word predicted must appear": the claim must say WHICH IT IS, and an
+// observation must date itself. A paragraph that just asserts the survival
+// with no label matches neither and fails.
+const isPredicted = /^\*\*Predicted, not observed[:*]/.test(claim);
+const observedOn = (claim.match(/^\*\*Observed\b[^*]*?\bon (\d{4}-\d{2}-\d{2})\b/) ?? [])[1];
+
+check(
+  isPredicted || Boolean(observedOn),
+  'and the claim opens with a status label saying which it is — predicted, or observed on a date',
+  isPredicted
+    ? 'predicted, not observed'
+    : observedOn
+      ? `observed on ${observedOn}`
+      : `unlabelled: ${claim.slice(0, 60)}…`
+);
+
+// An observation has to carry what makes it one, and its edges. These run
+// only when the page claims one, which is what lets the claim move without
+// the guard having to be rewritten again.
+if (observedOn) {
+  check(
+    /not a guarantee/i.test(rebootSection),
+    'an observation is stated as evidence rather than a guarantee'
+  );
+  check(
+    /\bonce\b|\bone reboot\b|\bone machine\b/i.test(rebootSection),
+    'and says how narrow it is — one observation, one machine'
+  );
+  check(
+    /NRestarts|systemctl --user|daemon-status/.test(rebootSection),
+    'and names the commands it was taken with'
+  );
+}
+
+// The ORIGINAL risk, still guarded — now on the claim rather than on a word.
+// The negation carve-out is load-bearing rather than a convenience: this page
+// has always warned against the word "handled" in those very words, so what
+// is banned is the ASSERTION, not the mention.
+const OVERCLAIM = /\b(guaranteed|handled|supported|bulletproof|foolproof)\b/i;
+const NEGATED = /\b(not|never|no|isn't|doesn't|don't|rather than|until|unless)\b/i;
+const asserted = rebootSection
+  .split(/(?<=[.!?])\s+/)
+  .filter((s) => OVERCLAIM.test(s) && !NEGATED.test(s));
+
+check(
+  asserted.length === 0,
+  'and no sentence asserts reboot survival is handled, guaranteed or supported',
+  asserted.length ? `asserted: ${asserted[0].slice(0, 70)}…` : 'no guarantee asserted'
 );
 
 // ------------------------------------------- 8. this proof leaves nothing up

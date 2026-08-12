@@ -218,13 +218,32 @@ otherwise read as a guarantee.
 * A config that will not load is refused non-zero before the socket exists.
 * The `ExecStart` in this document names a command the CLI actually has.
 
-**Predicted, not observed:** that a machine with this unit installed and
-`linger` enabled comes back with a working socket **after an actual reboot**.
-Every link in that chain has been checked individually and the last one — the
-unit firing at boot — has not been fired, because the machine this was developed
-on runs a live fleet and nobody is rebooting it to find out.
+**Observed once, on 2026-08-12, and not a guarantee:** that a machine with this
+unit installed and `linger` enabled comes back with a working socket **after an
+actual reboot**. Until that date this paragraph read "predicted, not observed",
+and it named the two commands that would turn the prediction into an
+observation. Somebody rebooted for their own reasons, those commands were run,
+and they answered.
 
-Do not let that harden into "handled". If you install this and then reboot for
-your own reasons, `systemctl --user status crabcast` and `crabcast
-daemon-status` afterwards are the two commands that would turn the prediction
-into an observation, and the result is worth adding here.
+The machine went down cleanly at 03:52 PDT and came back up at 03:53:11.
+`crabcast.service` was active again at 03:53:22 — eleven seconds later, with
+nobody logged in and nothing started by hand. `systemctl --user show
+crabcast.service` reported `ActiveState=active`, `MainPID=872` and
+`NRestarts=0`: the unit fired at boot and had not been restarted since, so the
+socket present at `~/.local/share/crabcast/crabcast.sock` was the one that unit
+created. It was seen independently from the other side in the same window — a
+peer's census found the socket reachable in 2259 ms on its first attempt, with
+no errno.
+
+**What that one observation does not establish.** It is one reboot, on one
+machine, on one distribution and init — systemd user units with `linger`
+enabled. It was a clean `shutdown`, so it says nothing about a machine coming
+back from a crash or a power cut, which is the case where a stale socket file
+is left behind for the new daemon to trip over. And nothing in CI observes any
+of it: a GitHub runner has no user session bus, so no check in this repository
+fires a reboot and none can. Do not let one observation harden into "handled" —
+it is evidence, and it stays evidence until somebody records the second one.
+
+If you install this and then reboot for your own reasons, `systemctl --user
+status crabcast` and `crabcast daemon-status` afterwards are still the two
+commands worth running, and the result is still worth adding here.
