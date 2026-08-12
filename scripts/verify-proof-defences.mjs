@@ -745,10 +745,20 @@ const PROOF_DEFENCES = [
       'asserting into a vacuum. §7 is a drift guard rather than a behaviour one — it reads the ' +
       'ExecStart out of docs/supervision.md and requires the verb it names to exist, because a ' +
       'unit template in prose cannot go red on its own. ' +
-      'WHAT IS NOT COVERED, and it is the headline claim of the ticket: NO REBOOT IS OBSERVED, ' +
-      'and no systemd runs any of this — this script is itself the supervisor. Reboot survival ' +
-      'stays PREDICTED. Both the script header and docs/supervision.md say so in those words; ' +
-      'nobody covers it, and a GitHub runner with no user session bus never will. ' +
+      'KAN-345 CHANGED §7\'s CHARACTER on one check: it used to require the WORD "predicted" ' +
+      'somewhere in the file, and now it holds the reboot claim to the SHAPE OF ITS EVIDENCE — ' +
+      'a status label from a closed vocabulary, a date and its limits when the label claims an ' +
+      'observation, and no sentence asserting the survival as settled. That check is a NEGATIVE ' +
+      'CASE with a VACUITY guard: the section slice must be substantial and must be that section ' +
+      'only, because every check after it reads that slice and an empty one satisfies the ' +
+      'overclaim ban with nothing behind it. Six mutations were driven against it and are ' +
+      'recorded in KAN-345\'s PR, including the one that matters most — THE PRISTINE PRE-CHANGE ' +
+      'PAGE STILL PASSES, so the guard did not merely swap one pinned word for another. ' +
+      'WHAT IS NOT COVERED: NO REBOOT IS OBSERVED BY THIS SCRIPT and no systemd runs any of it — ' +
+      'this script is itself the supervisor. Reboot survival was observed ONCE, on 2026-08-12, ' +
+      'OUT OF BAND, and docs/supervision.md carries that with its date and its limits; the guard ' +
+      'enforces the FORM of that claim and never its truth, so a false date satisfies it. ' +
+      'Nobody covers the observation, and a GitHub runner with no user session bus never will. ' +
       'KAN-323 ADDED §8, which guards a SECOND claim rather than the central one above: that the ' +
       'script leaves nothing running. It is a NEGATIVE CASE with a CANARY and a VACUITY check — ' +
       'it stages a daemon of the shape red drive 2 leaks (an intermediate spawns it detached and ' +
