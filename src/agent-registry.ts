@@ -1212,13 +1212,21 @@ function classifyLog(text: string, scan: LogVersionScan, entries?: AgentLogEntry
     // reachable, which is what makes it the only place a second derivation
     // could be written — and nothing in the type system stops a later author
     // writing one here. `verify-unreadable-row-standing.mjs` §5b is the check
-    // that notices: it PARSES this file and fails on any string-building use of
-    // `parsed`, `bad` or `trimmed` in this function — interpolation,
-    // concatenation, a stringifier, a string method, or a bare argument to
-    // `console.*`. It reads the source rather than the build because an absence
-    // has no runtime behaviour to assert on, and it parses rather than greps
-    // because its first version was a regex over `${…}` only and a
-    // `console.error('line ' + bad.line)` walked straight through it.
+    // that notices, and it is an ALLOWLIST rather than a search for renderings:
+    // it parses this file and fails unless every use of `parsed`, `bad` and
+    // `trimmed` below is one of the eight this function is permitted — parse,
+    // type guard, `classifyRow`, the two normalizers, the `problem`
+    // comparisons, and the spread into `entries?.push`. **Binding one to a
+    // local is not permitted**, so the cheap evasion of a rendering check —
+    // alias first, render the alias — is refused at the binding.
+    //
+    // IT IS AN ALLOWLIST BECAUSE THE TWO SEARCHES FAILED, in review of #84 and
+    // in this order: a regex over `${…}` missed
+    // `console.error('line ' + bad.line)`, and the enumeration of string sinks
+    // that replaced it missed `const who = bad.identity`. Both are lists of
+    // examples, and a category is not closed by adding the ones somebody named.
+    // If you need a use this list does not have, add it there — in a diff,
+    // beside the paragraph saying what that costs.
     //
     // WHAT WAS DELETED, recorded so nobody re-invents it. A `samples` array of
     // up to `VERSION_SCAN_SAMPLES` (3) one-liners was pushed here on every

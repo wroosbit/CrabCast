@@ -460,22 +460,36 @@ const PROOF_DEFENCES = [
       'print 12345" is satisfied by a notice printing no date at all — so `notice-drops-date` is ' +
       'what stops that pair being a check and its own alibi. ' +
       'THE SIXTH MECHANISM IS AN ABSENCE, so it is held by NEGATIVE CASES rather than by a ' +
-      'starve: §5b PARSES `src/agent-registry.ts` and requires `classifyLog` to put no row ' +
-      'value into a string by any route — interpolation, concatenation, `String`/`JSON.stringify`, ' +
-      'a string method, or a bare argument to `console.*` — which is the property that leaves ' +
-      'the notice the only rendering of a row. It then runs the identical predicate over FOUR ' +
-      'doctored copies, one per shape, and requires each to be caught. THE FOUR ARE THE POINT ' +
-      'AND SO IS THE FIFTH ASSERTION BESIDE THEM: this section began as a regex over `${…}` ' +
-      'with ONE negative case, itself written as a template — the single shape that regex ' +
-      'already matched. The review of #84 walked a `console.error(\'line \' + bad.line)` through ' +
-      'it with the whole run green, which is a second rendering writing a row to stderr, and is ' +
-      'the false comment KAN-358 deleted COMING TRUE in the one form the guard could not see. A ' +
-      'negative case drawn from the predicate it checks proves the predicate works on its own ' +
-      'vocabulary and nothing about coverage. So three of the four shapes are outside the old ' +
-      'regex on purpose, and each case also asserts WHETHER THE OLD REGEX WOULD HAVE SEEN IT — ' +
-      'the widening is demonstrated in the run rather than taken on trust. NOTE THAT §5b IS THE ' +
-      'ONE SECTION HERE WHOSE VERDICT IS ABOUT THE TREE RATHER THAN THE BUILD: this file\'s ' +
-      'exit code is a blend of the two, and its §0 says so. ' +
+      'starve: §5b PARSES `src/agent-registry.ts` and requires every use of `parsed`, `bad` and ' +
+      '`trimmed` inside `classifyLog` to be on an ALLOWLIST of eight — parse, type guard, ' +
+      'classify, the two field normalizers, the comparisons, and a spread into a sanctioned ' +
+      'push. Anything else fails, including binding a row to a local. That is the property ' +
+      'leaving the boot notice the only rendering of a row. It then runs the identical predicate ' +
+      'over SIX doctored copies and requires each to be caught. ' +
+      'THE ALLOWLIST IS THE THIRD DESIGN AND THE SHAPE OF THE TWO CORRECTIONS IS THE ENTRY: ' +
+      'v1 was a regex over `${…}` with ONE negative case, itself a template — the single shape ' +
+      'that regex already matched, so it proved the predicate on its own vocabulary and nothing ' +
+      'about coverage. The review of #84 walked `console.error(\'line \' + bad.line)` through it, ' +
+      'green: a second rendering writing a row to stderr, which is the false comment KAN-358 ' +
+      'deleted COMING TRUE in the form the guard could not see. v2 enumerated string SINKS — ' +
+      'template, `+`, `String`/`JSON.stringify`, string methods, `console.*`. The same review ' +
+      'then walked `const who = bad.identity; console.error(\'…\' + who)` through THAT, green, ' +
+      'because a sink list is a list of examples and KAN-59 says a category is not closed by ' +
+      'adding the reviewer\'s named ones. v3 inverts the question — not "is this a way a row ' +
+      'becomes a string", which cannot be completed, but "is this one of the things this ' +
+      'function may do with a row", which is eight items long. Aliasing is refused at the ' +
+      'binding rather than chased through it, so no dataflow analysis is involved. ' +
+      'AND THE TWO EARLIER PREDICATES ARE KEPT EXECUTABLE IN THE FILE: every negative case ' +
+      'additionally asserts whether v1 and v2 would have seen it, and two of the six defeat ' +
+      'both. The widening is measured in the run rather than claimed, and both review findings ' +
+      'survive as regression tests rather than as fixed bugs nobody can re-check. ' +
+      'THE RESIDUE IS NAMED AT ITS NEAREST POINT, which is itself a correction: v1 and v2 each ' +
+      'shipped a residue paragraph pointing FURTHER AWAY than the real edge, and a limit stated ' +
+      'too far out is worse than none because the near cases read as covered. It now names the ' +
+      'call one step out (`classifyRow` is trusted with the whole row and this section reads one ' +
+      'function), that editing the allowlist defeats it by design, and that only `classifyLog` ' +
+      'is read. NOTE THAT §5b IS THE ONE SECTION HERE WHOSE VERDICT IS ABOUT THE TREE RATHER ' +
+      'THAN THE BUILD: this file\'s exit code is a blend of the two, and its §0 says so. ' +
       'THE DISCIPLINE THE OLD §6d BOUGHT IS KEPT WHERE IT WAS EARNED: its first draft compared ' +
       'two empty sample lists (samples stopped at three rows and the fixture was eighth), so the ' +
       'mutant and the real build agreed because neither had reached the row. The replacement ' +

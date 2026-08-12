@@ -820,12 +820,70 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
 // would have missed, and the section asserts that miss explicitly rather than
 // leaving the reader to take the widening on trust.
 //
-// A TEXT PREDICATE CANNOT EXPRESS "ANY STRING-BUILDING USE" — concatenation,
-// `String()`, `JSON.stringify`, `.join()` and a bare argument to `console.error`
-// have no common surface form. So this parses with the compiler that already
-// builds this repository. `typescript` is a devDependency, `npm ci` installs
-// it, and this is the first proof here to use it; the alternative was a wider
-// regex, which is how the first version got this wrong.
+// ---------------------------------------------------------------------------
+// AND THE PREDICATE IS AN ALLOWLIST, NOT A LIST OF SINKS — which is the epic's
+// own rule applied to its own review, and the second thing this section got
+// wrong before it got right.
+//
+// KAN-59: "do not close a category by adding the reviewer's named examples.
+// 'Your check misses A, B and C' is answered by closing the category, not by
+// adding three tests." The review named concatenation. The obvious fix — and
+// the one drafted first — was to enumerate the ways a row can become a string:
+// template span, `+`, `String`, `JSON.stringify`, `console.*`, `.join()`. That
+// is wider, and it is still a list of examples. **It has a residue and the
+// residue is nameable**: `emit(bad)`, where `emit` is any helper that
+// stringifies internally, walks through an enumeration of sinks exactly as
+// `console.error('…' + bad.line)` walked through the regex. Writing that
+// residue down honestly would have satisfied the reviewer and left the same
+// defect one step further out.
+//
+// SO THE QUESTION IS INVERTED. Rather than asking "is this one of the ways a
+// row becomes a string?", which can never be complete, it asks "is this one of
+// the handful of things `classifyLog` is allowed to do with a row?", which is
+// small, closed and legible — the function has EIGHT such uses and they are
+// listed below. Any other use of `parsed`, `bad` or `trimmed` is a failure,
+// including one through a helper that does not exist yet. A future author who
+// needs a new one adds it to `ALLOWED_CALLEES` deliberately, in a diff, where
+// it is reviewable — instead of the guard silently not applying.
+//
+// A TEXT PREDICATE CANNOT EXPRESS EITHER FORMULATION, which is why this parses
+// with the compiler that already builds this repository. `typescript` is a
+// devDependency, `npm ci` installs it, and this is the first proof here to use
+// it; the alternative was a wider regex, which is how the first version got
+// this wrong in the first place.
+//
+// ---------------------------------------------------------------------------
+// WHAT IS STILL NOT COVERED — stated at its NEAREST point, which is the lesson
+// both rounds of this review taught rather than a formality.
+//
+// A residue paragraph is worth nothing if it points further away than the real
+// edge. This one has been wrong that way twice. v1's said the property was
+// "exactly one rendering" while the mechanism saw `${…}`; v2's named "a helper
+// that stringifies internally", a whole-program problem, when the actual
+// nearest evasion was `const who = bad.identity` — two lines, no indirection,
+// inside the function the section reads. **Both times the paragraph made the
+// edge sound more exotic than it was, which is worse than saying nothing**,
+// because a reader takes the near cases as covered. So, precisely:
+//
+//   * THE NEAREST UNCOVERED CASE IS ONE CALL OUT. A row handed to an
+//     `ALLOWED_CALLEES` entry is trusted, and this section reads ONE function,
+//     so if `classifyRow`, `toActivatedBy`, `toChannelEnabled` or the `push`
+//     rendered a row, nothing here would see it. `classifyRow` is the live one:
+//     it takes the whole `parsed` row and the raw line. Its own output IS the
+//     record, so it is the sanctioned reader — but "sanctioned" is a fact about
+//     today's body, not a guarantee, and no assertion holds it.
+//   * ADDING TO `ALLOWED_CALLEES` DEFEATS THIS ENTIRELY, by design. The
+//     protection is that doing so is an edit to this file, in a diff, next to
+//     this paragraph — not that it is impossible.
+//   * ONLY `classifyLog` IS READ. That is the whole scope where a raw `parsed`
+//     row is reachable, which is why it is the whole scope that needs reading;
+//     it is not a claim about the rest of the file.
+//
+// What is NOT in this list, because it is now closed: aliasing to a local, and
+// aliasing through an object spread. Both are refused at the binding rather
+// than chased through it, which is why this is an allowlist and not a dataflow
+// analysis — the reviewer asked for the residue named and would have rejected
+// the clever version, and taking a permission away was cheaper than either.
 {
   const registrySrc = fs.readFileSync(path.join(repoRoot, 'src', 'agent-registry.ts'), 'utf8');
 
@@ -835,15 +893,22 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
   // structurally (`lines[i]`, `lines.length - 1`) and flagging that would be a
   // false positive on every iteration. `trimmed` is `lines[i].trim()`, so the
   // raw bytes are covered one step later, where a use of them is a use.
-  const STRINGIFIERS = new Set(['String', 'JSON.stringify']);
-  const EMITTERS = new Set([
-    'console.log', 'console.error', 'console.warn', 'console.info', 'console.debug',
-    'process.stderr.write', 'process.stdout.write'
-  ]);
-  const STRING_METHODS = new Set(['toString', 'join', 'concat', 'padStart', 'padEnd', 'repeat']);
 
   /**
-   * Every string-building use of a row value inside a named function.
+   * The ONLY calls `classifyLog` may hand a row to. Every one is a call that
+   * consumes the row structurally rather than rendering it: the parser that
+   * creates it, the type guard, the classifier, the two field normalizers, and
+   * the push onto the disclosure. `console.*`, `String`, `JSON.stringify` and
+   * every helper nobody has written yet are absent, and absent is the default.
+   */
+  const ALLOWED_CALLEES = new Set([
+    'JSON.parse', 'Array.isArray', 'classifyRow', 'toActivatedBy', 'toChannelEnabled',
+    'scan.unreadable.push', 'entries?.push'
+  ]);
+
+  /**
+   * Every use of a row value inside a named function that is NOT on the
+   * allowlist.
    *
    * Pure, and it takes the source as an argument, so the negative cases below
    * run the IDENTICAL predicate over doctored copies — the §1b arrangement, and
@@ -862,44 +927,87 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
     ts.forEachChild(sf, findFn);
     if (!fn?.body) return null;
 
-    /** The root identifier of `a`, `a.b.c`, `(a as T).b`, `a!.b`. */
-    const rootOf = (node) => {
-      let cur = node;
-      while (
-        ts.isPropertyAccessExpression(cur) || ts.isElementAccessExpression(cur) ||
-        ts.isNonNullExpression(cur) || ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur)
-      ) cur = cur.expression;
-      return ts.isIdentifier(cur) ? cur.text : null;
-    };
-    const isRow = (node) => ROW_ROOTS.has(rootOf(node) ?? '');
+    const K = ts.SyntaxKind;
+    /** `===`, `!==`, `==`, `!=`, `&&`, `||`, `??`, `instanceof`, `in` — reading a row, never rendering it. */
+    const TEST_OPERATORS = new Set([
+      K.EqualsEqualsEqualsToken, K.ExclamationEqualsEqualsToken, K.EqualsEqualsToken,
+      K.ExclamationEqualsToken, K.AmpersandAmpersandToken, K.BarBarToken,
+      K.QuestionQuestionToken, K.InstanceOfKeyword, K.InKeyword
+    ]);
 
     const hits = [];
     const flag = (node, why) =>
       hits.push({ why, code: node.getText().replace(/\s+/g, ' ').slice(0, 60) });
 
+    /** Climb `parsed` up through `.a.b`, `(x as T)`, `x!`, `(x)` to the whole row expression. */
+    const outermost = (id) => {
+      let node = id;
+      while (
+        node.parent &&
+        (ts.isPropertyAccessExpression(node.parent) || ts.isElementAccessExpression(node.parent) ||
+         ts.isNonNullExpression(node.parent) || ts.isParenthesizedExpression(node.parent) ||
+         ts.isAsExpression(node.parent)) &&
+        node.parent.expression === node
+      ) node = node.parent;
+      return node;
+    };
+
     const walk = (n) => {
-      // 1. `… ${row.x} …`
-      if (ts.isTemplateSpan(n) && isRow(n.expression)) flag(n.expression, 'template interpolation');
-      // 2. `'a' + row.x`, `row.x + 'b'`. Conservative: arithmetic on a row value
-      //    would be flagged too. This loop does none, and a future author who
-      //    needs some can say so rather than have the guard quietly not apply.
-      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-        if (isRow(n.left)) flag(n.left, 'string concatenation');
-        if (isRow(n.right)) flag(n.right, 'string concatenation');
-      }
-      if (ts.isCallExpression(n)) {
-        const callee = n.expression.getText().replace(/\s+/g, '');
-        // 3. `String(row)`, `JSON.stringify(row)`, `console.error(row)` — the
-        //    last of which needs no string literal anywhere to emit a row.
-        if (STRINGIFIERS.has(callee) || EMITTERS.has(callee)) {
-          for (const a of n.arguments) if (isRow(a)) flag(a, `passed to ${callee}()`);
+      if (ts.isIdentifier(n) && ROW_ROOTS.has(n.text)) {
+        const p0 = n.parent;
+        // A declaration's NAME, or a property that merely shares the spelling
+        // (`x.parsed`, `{ parsed: … }`), is not a reference to a row.
+        const isDeclName =
+          (ts.isVariableDeclaration(p0) && p0.name === n) ||
+          (ts.isParameter(p0) && p0.name === n) ||
+          (ts.isPropertyAccessExpression(p0) && p0.name === n) ||
+          (ts.isPropertyAssignment(p0) && p0.name === n);
+        if (!isDeclName) {
+          const node = outermost(n);
+          const p = node.parent;
+          const calleeOf = (c) => c.expression.getText().replace(/\s+/g, '');
+          // NOTE WHAT IS ABSENT: `const who = bad.identity` — a row value bound
+          // to a local. Nothing in `classifyLog` needs it (`const bad = …` and
+          // `let parsed` are declaration NAMES, skipped above, and the two rows
+          // it reads go straight into a call or a comparison), so the
+          // permission is not granted, and the cheapest evasion of a sink list
+          // — alias first, render the alias — is refused at the binding instead
+          // of chased through it. That is the review's residue closed by
+          // TAKING A PERMISSION AWAY rather than by adding dataflow analysis,
+          // which is the thing the reviewer said they would reject and which
+          // this deliberately is not.
+          const allowed =
+            // `parsed = JSON.parse(trimmed)`
+            (ts.isBinaryExpression(p) && p.operatorToken.kind === K.EqualsToken && p.left === node) ||
+            // `bad.problem === 'from-newer'`, `!parsed || …`
+            (ts.isBinaryExpression(p) && TEST_OPERATORS.has(p.operatorToken.kind)) ||
+            (ts.isPrefixUnaryExpression(p) && p.operator === K.ExclamationToken) ||
+            ts.isTypeOfExpression(p) ||
+            // `if (bad)`, `bad ? … : …`
+            (ts.isIfStatement(p) && p.expression === node) ||
+            (ts.isConditionalExpression(p) && p.condition === node) ||
+            (ts.isWhileStatement(p) && p.expression === node) ||
+            // `entries?.push({ ...(parsed as AgentLogEntry) })` — a spread, and
+            // ONLY into an object literal that is itself an argument to an
+            // allowed call. `const copy = { ...bad }` is the same evasion as the
+            // alias wearing a spread, so the object it spreads into has to be
+            // going somewhere sanctioned.
+            (ts.isSpreadAssignment(p) &&
+              ts.isObjectLiteralExpression(p.parent) &&
+              ts.isCallExpression(p.parent.parent ?? {}) &&
+              p.parent.parent.arguments.includes(p.parent) &&
+              ALLOWED_CALLEES.has(calleeOf(p.parent.parent))) ||
+            // an argument to one of the calls named above, and only those
+            (ts.isCallExpression(p) && p.arguments.includes(node) && ALLOWED_CALLEES.has(calleeOf(p)));
+          if (!allowed) {
+            const why = ts.isCallExpression(p) && p.arguments.includes(node)
+              ? `passed to ${calleeOf(p)}(), which is not on the allowlist`
+              : ts.isVariableDeclaration(p)
+                ? 'bound to a local — aliasing a row is not on the allowlist'
+                : `${ts.SyntaxKind[p.kind]} — not one of the uses \`classifyLog\` is allowed`;
+            flag(node, why);
+          }
         }
-        // 4. `row.x.toString()`, `row.join(', ')`
-        if (
-          ts.isPropertyAccessExpression(n.expression) &&
-          STRING_METHODS.has(n.expression.name.text) &&
-          isRow(n.expression.expression)
-        ) flag(n.expression.expression, `.${n.expression.name.text}() on a row value`);
       }
       ts.forEachChild(n, walk);
     };
@@ -907,8 +1015,54 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
     return { hits, body: fn.body.getText() };
   }
 
-  /** The regex this section used to be, kept so the widening is demonstrated rather than asserted. */
-  const LEGACY = (body) => [...body.matchAll(/\$\{(?:parsed|bad)\b[^}]*\}/g)].map((m) => m[0]);
+  // THE TWO PREDICATES THIS SECTION USED TO BE, kept executable rather than
+  // described, so that every negative case below reports which designs it
+  // defeats. A claim that a rewrite widened coverage is exactly the kind of
+  // sentence this epic keeps finding unsupported; these two make it measured.
+
+  /** v1: a regex over `${…}`. Review of #84 walked a concatenation through it. */
+  const V1_REGEX = (body) => [...body.matchAll(/\$\{(?:parsed|bad)\b[^}]*\}/g)].map((m) => m[0]);
+
+  /** v2: an enumeration of string sinks. The alias case walked through THIS one. */
+  const V2_SINKS = (body) => {
+    const sf = ts.createSourceFile('v2.ts', `function f(){${body}}`, ts.ScriptTarget.ES2022, true);
+    const STRINGIFIERS = new Set(['String', 'JSON.stringify']);
+    const EMITTERS = new Set([
+      'console.log', 'console.error', 'console.warn', 'console.info', 'console.debug',
+      'process.stderr.write', 'process.stdout.write'
+    ]);
+    const STRING_METHODS = new Set(['toString', 'join', 'concat', 'padStart', 'padEnd', 'repeat']);
+    const rootOf = (n) => {
+      let c = n;
+      while (
+        ts.isPropertyAccessExpression(c) || ts.isElementAccessExpression(c) ||
+        ts.isNonNullExpression(c) || ts.isParenthesizedExpression(c) || ts.isAsExpression(c)
+      ) c = c.expression;
+      return ts.isIdentifier(c) ? c.text : null;
+    };
+    const isRow = (n) => ROW_ROOTS.has(rootOf(n) ?? '');
+    const out = [];
+    const walk = (n) => {
+      if (ts.isTemplateSpan(n) && isRow(n.expression)) out.push(n.expression.getText());
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+        if (isRow(n.left)) out.push(n.left.getText());
+        if (isRow(n.right)) out.push(n.right.getText());
+      }
+      if (ts.isCallExpression(n)) {
+        const callee = n.expression.getText().replace(/\s+/g, '');
+        if (STRINGIFIERS.has(callee) || EMITTERS.has(callee)) {
+          for (const a of n.arguments) if (isRow(a)) out.push(a.getText());
+        }
+        if (
+          ts.isPropertyAccessExpression(n.expression) &&
+          STRING_METHODS.has(n.expression.name.text) && isRow(n.expression.expression)
+        ) out.push(n.expression.expression.getText());
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(sf);
+    return out;
+  };
 
   const found = rowRenderingsIn(registrySrc, 'classifyLog');
   check(
@@ -918,33 +1072,55 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
   );
   check(
     Boolean(found) && found.hits.length === 0,
-    '5b: `classifyLog` puts no row value into a string by ANY route — interpolation, concatenation, a stringifier, a string method or a bare argument to an emitter — so the notice is the only rendering and there is nothing for it to drift against',
-    found ? found.hits.map((h) => `${h.why}: ${h.code}`).join(' ; ') || 'no string-building use of `parsed`, `bad` or `trimmed`' : 'body not found'
+    '5b: every use of `parsed`, `bad` and `trimmed` in `classifyLog` is on the allowlist — parse, guard, classify, normalize, spread into a sanctioned push. Anything else, INCLUDING BINDING ONE TO A LOCAL, is a failure, so the notice stays the only rendering',
+    found ? found.hits.map((h) => `${h.why}: ${h.code}`).join(' ; ') || `${found.body.length} chars, no off-allowlist use` : 'body not found'
   );
 
-  // THE NEGATIVE CASES. Four shapes, and THREE OF THEM ARE OUTSIDE THE OLD
-  // PREDICATE'S VOCABULARY on purpose — `concatenation` is verbatim the one the
-  // reviewer of #84 used to walk through the first version of this check.
+  // THE NEGATIVE CASES, and the point of the last two columns is that each one
+  // names WHICH DESIGN IT DEFEATS. `concatenation` is verbatim the mutation the
+  // reviewer of #84 used to walk through v1; `alias` is verbatim the one they
+  // used to walk through v2, at the head where v2 had just been declared a fix.
   const DOCTORED = [
     {
       name: 'template',
       code: "    scan.notes.push(`line ${bad.line}: ${parsed.event ?? 'no event'}`);\n",
-      legacySees: true
+      v1Sees: true, v2Sees: true
     },
     {
       name: 'concatenation',
       code: "    console.error('[AgentRegistry] line ' + bad.line + ': ' + bad.identity + ' — ' + parsed.event);\n",
-      legacySees: false
+      v1Sees: false, v2Sees: true
     },
     {
       name: 'stringify-sink',
       code: '    console.error(JSON.stringify(parsed));\n',
-      legacySees: false
+      v1Sees: false, v2Sees: true
     },
     {
       name: 'bare-emit',
       code: '    console.error(bad.identity);\n',
-      legacySees: false
+      v1Sees: false, v2Sees: true
+    },
+    {
+      // THE REVIEWER'S SECOND MUTATION, verbatim. Two lines, no helper, no
+      // indirection — by the time a sink sees them the values are `who` and
+      // `when`, and nothing rooted at a row reaches a `+` or an emitter.
+      name: 'alias',
+      code:
+        '    const who = bad.identity;\n' +
+        '    const when = parsed.at;\n' +
+        "    console.error('[AgentRegistry] ' + who + ' at ' + when);\n",
+      v1Sees: false, v2Sees: false
+    },
+    {
+      // The same evasion wearing a spread, which is the one shape the allowlist
+      // has to permit for `entries?.push`. Permitted only INTO a sanctioned
+      // call, so this is refused where the real one is not.
+      name: 'spread-alias',
+      code:
+        '    const copy = { ...bad };\n' +
+        "    console.error('[AgentRegistry] ' + copy.identity);\n",
+      v1Sees: false, v2Sees: false
     }
   ];
 
@@ -964,13 +1140,15 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
           'it stayed GREEN, so §5b would not notice this rendering'
         : 'body not found'
     );
-    // The half that makes the four cases evidence about COVERAGE rather than
-    // four restatements of one predicate: what the regex would have said.
-    const legacyHits = after ? LEGACY(after.body) : [];
+    // What makes these six cases evidence about COVERAGE rather than six
+    // restatements of one predicate: what the two earlier designs would have
+    // said about each. Two of the six defeat BOTH of them.
+    const v1 = after ? V1_REGEX(after.body) : [];
+    const v2 = after ? V2_SINKS(after.body) : [];
     check(
-      (legacyHits.length > 0) === d.legacySees,
-      `5b/${d.name}: and the regex this section replaced ${d.legacySees ? 'DID' : 'did NOT'} see it — which is why the predicate is a parse and not a wider grep`,
-      legacyHits.length ? legacyHits.join(' ; ') : 'the regex found nothing'
+      (v1.length > 0) === d.v1Sees && (v2.length > 0) === d.v2Sees,
+      `5b/${d.name}: and the two designs this replaced — the \`\${…}\` regex, then the sink enumeration — ${d.v1Sees ? 'saw' : 'did NOT see'} / ${d.v2Sees ? 'saw' : 'did NOT see'} it`,
+      `v1 ${v1.length} hit(s), v2 ${v2.length} hit(s)`
     );
   }
 }
