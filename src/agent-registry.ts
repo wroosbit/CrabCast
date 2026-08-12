@@ -675,6 +675,76 @@ export const UNREADABLE_RAW_LIMIT = 2048;
 export type UnreadableProblem = 'pre-migration' | 'from-newer' | 'unusable';
 
 /**
+ * What an unreadable row says about ITSELF — whether the list it is missing
+ * from could be short of something that was meant to be there (KAN-344).
+ *
+ * WHY A SECOND CLASSIFICATION, when {@link UnreadableProblem} is right there.
+ * They answer different questions and only one of them is the consumer's.
+ * `problem` grades WHY WE COULD NOT READ THE ROW, which is the operator's
+ * question and decides the repair. This grades WHETHER IT MATTERS, which is the
+ * reconciling caller's, and nothing on the wire answered it: `pre-migration`
+ * says an old daemon wrote the line and says nothing whatever about whether the
+ * line was a running agent or a tombstone for one switched off in August.
+ *
+ * That gap is what this exists to close, and the defect it closes is not
+ * cosmetic. `unreadableRecordsTotal` is a STANDING count — an unreadable row
+ * survives compaction by design (KAN-302), nothing ages it out, and only a
+ * human repairing that line removes it. So a consumer that meets a permanently
+ * non-zero count learns its constant value and stops reading it, and the second
+ * row — the one that does mean a lost agent — arrives as a `2` where the `1`
+ * was background noise. A count cannot distinguish those. A per-row standing
+ * can, because the new row is a DIFFERENT KIND of row rather than a larger
+ * number.
+ *
+ *   retired           this row records the agent being switched off or removed.
+ *                     Nothing was going to be restored from it, so the fleet
+ *                     list is not short of anything that was ever going to run.
+ *   claims-an-agent   this row records the agent being configured or started.
+ *                     It could be hiding a row the fleet list should have
+ *                     carried, and it is the one worth looking at.
+ *   unknown           we will not say. The row names no event, names something
+ *                     that is not one of ours — or is `from-newer`, where the
+ *                     vocabulary is not this daemon's to read at all.
+ *
+ * IT DESCRIBES THE ROW AND NOT THE AGENT, and the obvious reading is the wrong
+ * one. The registry is append-only and a row is ONE event, so a later readable
+ * row may supersede this one entirely: `claims-an-agent` says this LINE asserts
+ * an agent, never that anything is running now. The daemon cannot say the
+ * second — the line it would have to read is the line it could not read.
+ */
+export type RowStanding = 'retired' | 'claims-an-agent' | 'unknown';
+
+/**
+ * What each event this daemon knows says about a row's standing.
+ *
+ * `satisfies Record<AgentEvent, …>` RATHER THAN A `switch` OR A PAIR OF LISTS,
+ * and that is the point of the shape: a fifth {@link AgentEvent} is a COMPILE
+ * ERROR here until somebody decides which side of the line it falls on. A
+ * membership test against two arrays would give a newly added event `unknown`
+ * by default and silently — which on this field means "we will not say" about a
+ * word we had in fact just added, and nothing would have gone red.
+ *
+ * A `Map` ON THE OUTSIDE, AND THAT HALF IS A CORRECTNESS FIX RATHER THAN A
+ * PREFERENCE. The word looked up here comes off a line somebody hand-edited, so
+ * it can be any string at all — and a plain object inherits `Object.prototype`,
+ * where `EVENT_STANDING['toString']` answers a FUNCTION. It is truthy, so it
+ * would have been returned as this field's value, and `JSON.stringify` drops a
+ * function silently: the response would have carried NO `standing` KEY, on
+ * exactly the `unusable` rows most likely to hold a strange word. A `Map` has no
+ * prototype chain to fall through, so an unrecognised word answers `undefined`
+ * and the lookup falls to `unknown` as written. `verify-unreadable-row-standing`
+ * §2 covers it with a `toString` row.
+ */
+const EVENT_STANDING: ReadonlyMap<string, RowStanding> = new Map(
+  Object.entries({
+    configured: 'claims-an-agent',
+    activated: 'claims-an-agent',
+    deactivated: 'retired',
+    forgotten: 'retired'
+  } satisfies Record<AgentEvent, RowStanding>)
+);
+
+/**
  * One row this daemon could not read, in the shape a CALLER receives it —
  * `list_agents.unreadableRecords[]` and `daemon_status.unreadableRecords[]`.
  *
@@ -745,6 +815,80 @@ export interface UnreadableRecord {
    * string.
    */
   claimsPath: string | null;
+  /**
+   * The timestamp this row gives for ITSELF — its `at` — or `null` when it
+   * names none or names something that is not a string (KAN-344).
+   *
+   * WHAT IT DATES, said precisely because the useful-sounding reading is the
+   * wrong one: **WHEN THE ROW WAS WRITTEN, NOT WHEN IT BECAME UNREADABLE.** A
+   * `from-newer` row became unreadable the moment somebody downgraded this
+   * daemon, which may be minutes ago on a row written last month; a
+   * `pre-migration` row became unreadable when the format moved past it. So
+   * this answers *"how old is this record"* and never *"how long has this been
+   * broken"*.
+   *
+   * WHY THE ROW'S OWN CLAIM RATHER THAN A FIRST-SEEN OBSERVATION OF OURS, which
+   * is the shape this was nearly built as. A first-seen timestamp is memory:
+   * either module state a restart discards — which would re-date every row on
+   * every reboot, exactly when an operator is most likely to be looking — or a
+   * second durable file beside the registry, whose whole content is our opinion
+   * about a file we already have. And it would date OUR NOTICING, which is not
+   * the question anybody asked. The row carries the answer already; this quotes
+   * it, and `claims` is the prefix that says whose claim it is.
+   *
+   * NOT PARSED, NOT NORMALISED, NOT VALIDATED. Whatever string the row holds,
+   * handed back as it stands. A hand-edited row may carry nonsense here, and
+   * turning that into `null` — or into a Date — would be this daemon deciding
+   * what a row it cannot read meant.
+   *
+   * `null` HAS EXACTLY ONE MEANING, AND THAT IS A PROPERTY OF WHERE IT IS READ
+   * FROM. It is taken off `parsed` — the object — and never off {@link raw},
+   * which by this point may have been re-serialized to withhold a prompt and is
+   * then clipped at {@link UNREADABLE_RAW_LIMIT}. A row that names its `at`
+   * past byte 2048 would answer `null` if this were read off the disclosure,
+   * and a consumer could not tell that null from *"the row named none"* — a
+   * null meaning two things, which is this ticket's own defect one field over.
+   * The precedent is {@link identity} and {@link claimsPath}, which read
+   * `parsed` for the same reason.
+   *
+   * The other half of the same guarantee is upstream: a line that does not
+   * `JSON.parse` never reaches this type at all — {@link classifyLog} catches
+   * the failure, deliberately does not disclose it, and moves on. **Every row
+   * that becomes an `UnreadableRecord` parsed.** So `null` here can only mean
+   * *this row parsed and named no timestamp, or named a non-string*, and never
+   * *we could not see it*. That is what makes it safe to branch on.
+   */
+  claimsAt: string | null;
+  /**
+   * The row's own `event`, verbatim, or `null` when it names none or names a
+   * non-string (KAN-344).
+   *
+   * THE EVIDENCE UNDER {@link standing}, and it is published rather than folded
+   * into it for one reason that is not symmetry: on a `from-newer` row
+   * `standing` deliberately abstains, and this is then the ONLY thing that lets
+   * a consumer make its own call. A reader that trusts a newer daemon's
+   * vocabulary to be a superset of this one's is entitled to read
+   * `claimsEvent: "deactivated"` and act on it. This daemon is not entitled to
+   * do that FOR them, which is the whole of the difference between the two
+   * fields.
+   *
+   * Quoted in the row's own vocabulary, like {@link identity}: a word this
+   * daemon does not know comes back as the word it is, not as a null.
+   */
+  claimsEvent: string | null;
+  /**
+   * Whether this row could be hiding something the fleet list should have
+   * carried — see {@link RowStanding}, which carries the argument (KAN-344).
+   *
+   * THIS DAEMON'S VERDICT ON {@link claimsEvent}, which is what puts it in
+   * `derived` while the two `claims*` fields beside it are `durable`. The pair
+   * is the same shape as {@link problem} and {@link reason} one field up: a
+   * closed vocabulary to branch on, and the row's own bytes to check it
+   * against. When they disagree — `claimsEvent: "deactivated"` beside
+   * `standing: "unknown"` on a `from-newer` row — the disagreement is legible
+   * rather than resolved, and that is the intended outcome.
+   */
+  standing: RowStanding;
 }
 
 /** What {@link scanLogVersions} found, in the shape the boot notice prints. */
@@ -949,7 +1093,39 @@ function classifyRow(parsed: any, line: number, source: string): UnreadableRecor
         ? parsed.workDir
         : null;
 
-  return { line, problem, identity, reason, raw, rawTruncated, promptRedacted, claimsPath };
+  // Quoted, both of them: whatever the row holds, or null when it holds no
+  // string at all. Neither is parsed, ranged or normalised — see the field
+  // documentation, and note that `''` is null here for the same reason
+  // `claimsPath` treats an empty `workDir` as naming nothing.
+  const claimsAt =
+    typeof parsed.at === 'string' && parsed.at.length ? parsed.at : null;
+  const claimsEvent =
+    typeof parsed.event === 'string' && parsed.event.length ? parsed.event : null;
+
+  // `from-newer` ABSTAINS EVEN WHEN THE WORD IS ONE WE KNOW, and this line is
+  // the whole of that decision. `problem`'s own reason text on that branch says
+  // this daemon "cannot know what a newer row means"; reading its event
+  // vocabulary anyway would contradict that sentence in the same response, over
+  // the one field a consumer is meant to branch on. The word still travels, in
+  // `claimsEvent`, for a consumer willing to make the assumption we are not.
+  const standing: RowStanding =
+    problem === 'from-newer'
+      ? 'unknown'
+      : (claimsEvent !== null ? EVENT_STANDING.get(claimsEvent) : undefined) ?? 'unknown';
+
+  return {
+    line,
+    problem,
+    identity,
+    reason,
+    raw,
+    rawTruncated,
+    promptRedacted,
+    claimsPath,
+    claimsAt,
+    claimsEvent,
+    standing
+  };
 }
 
 /**
@@ -1005,9 +1181,22 @@ function classifyLog(text: string, scan: LogVersionScan, entries?: AgentLogEntry
     else scan.unusable++;
     scan.unreadable.push(bad);
     if (scan.samples.length < VERSION_SCAN_SAMPLES) {
+      // BUILT FROM THE RECORD, NOT RE-DERIVED FROM `parsed` (KAN-344). This
+      // line used to read `parsed.event` and `parsed.at` for itself, which was
+      // the only place in this file that answered a question about a row twice
+      // — and {@link classifyRow}'s own header makes the argument against
+      // exactly that, one function up: "they are now the same call, so neither
+      // can drift into covering a case the other does not". The boot notice and
+      // the wire now cannot disagree about what a row said, because there is
+      // one expression and two readers of it.
+      //
+      // It is also where the two values were already being extracted and then
+      // written to stderr once, at boot, where no caller could reach them. That
+      // is what makes publishing them a routing decision rather than a new
+      // interpretation of the bytes.
       scan.samples.push(
-        `line ${bad.line}: ${bad.identity} — ${parsed.event ?? 'no event'} at ` +
-          `${parsed.at ?? 'no timestamp'} (${bad.problem})`
+        `line ${bad.line}: ${bad.identity} — ${bad.claimsEvent ?? 'no event'} at ` +
+          `${bad.claimsAt ?? 'no timestamp'} (${bad.problem}, ${bad.standing})`
       );
     }
   }
@@ -1058,7 +1247,18 @@ export function describeUnreadableLog(scan: LogVersionScan): string {
   ];
 
   for (const row of shown) {
-    parts.push(`  line ${row.line}: ${row.identity} (${row.problem})`, `      ${row.reason}`);
+    // The STANDING is on the operator's line as well as on the wire (KAN-344),
+    // and it is second only to the line number in what it decides: `retired`
+    // from last August is a tombstone to leave alone, `claims-an-agent` is a
+    // row that may be the only thing mentioning an agent nothing restored. Read
+    // off the record rather than recomputed here — this text and the response
+    // are two renderings of one classification, and a second derivation is how
+    // they would come to disagree about the same line.
+    parts.push(
+      `  line ${row.line}: ${row.identity} (${row.problem}, ${row.standing})` +
+        (row.claimsAt ? ` — the row dates itself ${row.claimsAt}` : ''),
+      `      ${row.reason}`
+    );
   }
   if (bad > shown.length) {
     parts.push(

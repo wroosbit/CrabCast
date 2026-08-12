@@ -922,6 +922,7 @@ jobs:
             verify-registry-survives-retired-rows
             verify-daemon-foreground
             verify-timing-attribution
+            verify-unreadable-row-standing
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

@@ -59,6 +59,7 @@
  *     coverage that does not exist.
  */
 
+import type { RowStanding } from './agent-registry.js';
 import type { CapBound, CostSource, HeadroomBound } from './capacity.js';
 import { CAPACITY_FIELDS, type Exact } from './events.js';
 import type { HerdrAgentStatus } from './herdr.js';
@@ -113,7 +114,7 @@ import type { ResumeCause } from './resume.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 6;
+export const READ_CONTRACT_VERSION = 7;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -327,7 +328,17 @@ export const ROW_SHAPES = {
     raw: { bucket: 'durable' },
     rawTruncated: { bucket: 'derived' },
     promptRedacted: { bucket: 'derived' },
-    claimsPath: { bucket: 'durable' }
+    claimsPath: { bucket: 'durable' },
+    // KAN-344. The two `claims*` fields are `durable` for the same reason
+    // `claimsPath` is — they are the row's own bytes, quoted, and a restart
+    // answers them unchanged — and `standing` is `derived` for the same reason
+    // `problem` is: it is this daemon's verdict on those bytes, and a newer
+    // CrabCast reading the same line may reach a different one. The split runs
+    // exactly along "what the row said" versus "what we make of it", which is
+    // the line this shape was already drawn on.
+    claimsAt: { bucket: 'durable' },
+    claimsEvent: { bucket: 'durable' },
+    standing: { bucket: 'derived' }
   } satisfies FieldTable,
 
   /** A live pane that is not ours — `list_agents.foreignPanes[]`. */
@@ -1244,7 +1255,19 @@ export const VALUE_SETS = {
    * already there. `preexisting` is what makes the reversal column honest: there
    * is nothing to undo.
    */
-  artifactOrigin: ['crabcast', 'preexisting']
+  artifactOrigin: ['crabcast', 'preexisting'],
+  /**
+   * `unreadableRecords[].standing` (KAN-344) — whether a row this daemon could
+   * not read could be hiding something the fleet list should have carried.
+   *
+   * THE MUST-IGNORE CLAUSE ABOVE BITES HARDER HERE THAN ANYWHERE ELSE ON THIS
+   * SURFACE, so it is worth restating in this entry. The safe reading of an
+   * unrecognised member is the one `unknown` already has — *"we will not say"* —
+   * and a consumer must NOT collapse an unfamiliar value to `retired`. Reading
+   * "not a word I know" as "harmless" is precisely the wrong-conclusion-from-a-
+   * short-list this field exists to prevent, arriving one level up.
+   */
+  rowStanding: ['retired', 'claims-an-agent', 'unknown']
 } as const;
 
 // `state` and `sessionStatus` are bound in `src/router.ts` instead, beside the
@@ -1285,6 +1308,17 @@ const _artifactOriginValuesAreExact: Exact<
   ArtifactOrigin
 > = true;
 
+// KAN-344, bound here for the same reason as the three above and with one extra
+// consequence worth naming: `standing` is a verdict this daemon reaches from a
+// vocabulary it also owns (`AgentEvent`). Two closed sets that move together are
+// exactly where a fourth standing gets added to the classifier and not to the
+// document, so the union is held to the published list at BUILD time rather than
+// by a check that runs after it.
+const _rowStandingValuesAreExact: Exact<
+  (typeof VALUE_SETS.rowStanding)[number],
+  RowStanding
+> = true;
+
 void _herdrStatusValuesAreExact;
 void _capBoundValuesAreExact;
 void _headroomBoundValuesAreExact;
@@ -1293,6 +1327,7 @@ void _stallSourceValuesAreExact;
 void _resumeCauseValuesAreExact;
 void _artifactKindValuesAreExact;
 void _artifactOriginValuesAreExact;
+void _rowStandingValuesAreExact;
 
 // ------------------------------------------------------------------ the digest
 
