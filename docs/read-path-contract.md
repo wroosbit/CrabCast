@@ -604,19 +604,34 @@ daemon cannot make that claim — the line it would have to read is the line it
 could not read.
 
 **Which is what turns `claims-an-agent` into a branch rather than a number to
-squint at — `identity` is published beside it, and that is what resolves the
-case.** Take the row's
-`identity` (or `claimsPath`) and look for it in the readable categories of the
-same response:
+squint at.** The row is published beside a whole fleet read, so a consumer can
+ask whether anything readable already covers the agent this line mentions.
 
-| `claims-an-agent` and… | what it means | what to do |
+**Join on `claimsPath` first, and fall back to `identity` knowing what it is.**
+An agent **is** a canonical path, so `claimsPath` matches `path` in every
+category directly. `identity` is deliberately *the row's own vocabulary* — it is
+`agentName`, else `<type>/<key>`, else `path` — because its job is letting a
+human find the line in the file. **On a pre-migration row it is very often
+`<type>/<key>`, which matches nothing in a list keyed on paths, and the wire does
+not say which form you are holding.** Reading a failed match of that as *"absent,
+therefore lost"* would manufacture an alarm that never clears.
+
+| `claims-an-agent`, and the join… | what it means | what to do |
 | --- | --- | --- |
-| the identity **appears** in a readable category | a later readable row superseded this line. The fleet already knows about that agent | nothing — this is the boring case |
-| the identity is **absent** from every category | nothing readable supersedes it, so this row is the only thing that mentions that agent — **and it was not restored** | go and look. This is the case the disclosure exists for |
+| **matched** — the path (or identity) appears in a readable category | a later readable row superseded this line. The fleet already knows about that agent | nothing. This is the boring case |
+| **ran and found nothing** — `claimsPath` is a path and no category carries it | nothing readable supersedes it, so this row is the only thing that mentions that agent, **and it was not restored** | go and look. This is the case the disclosure exists for |
+| **could not run** — `claimsPath` is `null`, and `identity` is in a vocabulary the categories are not keyed on | **the question was not answered.** This is not evidence either way, and it is the state of the specimen that commissioned this section | read `raw` and decide by hand, or repair the line. Do not record it as either of the rows above |
 
-`retired` needs none of that: nothing was going to be restored from it either
-way. Both readings are the consumer's to make from one response — no second call
-is needed, and neither is a guess.
+**The third row is not a hedge, and leaving it out was a real defect in an
+earlier draft of this section.** *"We could not join it"* and *"we joined it and
+found nothing"* are different answers, and collapsing them puts a permanently
+unjoinable row into the *go and look* bucket for ever — an alarm that never
+clears, which is the failure this whole section exists to describe. It is the
+same distinction §3 draws between *not known* and *not true*.
+
+`retired` needs none of this: nothing was going to be restored from it either
+way. All three readings are the consumer's to make from one response — no second
+call is needed, and none of them is a guess.
 
 **Both `claims*` fields are read from the row's parsed object, never from
 `raw`** — which by then may have been re-serialized to withhold a prompt and is

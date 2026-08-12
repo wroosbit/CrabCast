@@ -354,6 +354,21 @@ CASES.push({
   claimsEvent: null,
   claimsAt: null
 });
+// THE THIRD INPUT THAT MEANS "NAMES NOTHING", and it had no fixture until the
+// review starved the guard and this file did not notice. `''` IS A STRING, so
+// the `typeof` half passes and only `&& parsed.at.length` sends it to null —
+// which makes that clause a decision rather than an idiom, and an undefended
+// decision is one a later author deletes with every check still green. It is
+// not hypothetical either: the live specimen carries `"workDir": ""`, which is
+// why `claimsPath` grew the same treatment first.
+CASES.push({
+  name: 'unusable/empty-string-at-and-event',
+  row: { ...asUnusable(writtenRow('activated', { dir: 'empty' })), at: '', event: '' },
+  problem: 'unusable',
+  standing: 'unknown',
+  claimsEvent: null,
+  claimsAt: null
+});
 
 // THE TRUNCATION CASE, and it is the one that distinguishes reading the parsed
 // row from reading the disclosure. `at` is the LAST key of a row padded past
@@ -727,12 +742,35 @@ const STARVES = [
     find: '\n        claimsEvent,\n',
     replace: '\n        claimsEvent: null,\n',
     expect: /claimsEvent quotes/
+  },
+  {
+    // THE EMPTY-STRING GUARD, starved on its own. `typeof x === 'string'` alone
+    // lets `''` through, so this mutant quotes an empty string back as though
+    // the row had named a time. Two edits rather than one, because the two
+    // fields are separate expressions and a mutation that hit only one would
+    // leave the other's guard untested while the section reported it defended.
+    name: 'empty-string-guard-dropped',
+    edits: [
+      {
+        file: 'agent-registry.js',
+        find: "typeof parsed.at === 'string' && parsed.at.length ? parsed.at : null",
+        replace: "typeof parsed.at === 'string' ? parsed.at : null"
+      },
+      {
+        file: 'agent-registry.js',
+        find: "typeof parsed.event === 'string' && parsed.event.length ? parsed.event : null",
+        replace: "typeof parsed.event === 'string' ? parsed.event : null"
+      }
+    ],
+    expect: /empty-string-at-and-event: claims(At|Event) quotes/
   }
 ];
 
 for (const s of STARVES) {
   starve: {
-    const dir = mutate(s.name, 'agent-registry.js', s.find, s.replace);
+    const dir = s.edits
+      ? mutate(s.name, s.edits)
+      : mutate(s.name, 'agent-registry.js', s.find, s.replace);
     if (!dir) break starve;
     const mod = await import(path.join(dir, 'agent-registry.js'));
     // PRECONDITION: the mutant really loaded and really answers. Without this a

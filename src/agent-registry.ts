@@ -816,8 +816,15 @@ export interface UnreadableRecord {
    */
   claimsPath: string | null;
   /**
-   * The timestamp this row gives for ITSELF — its `at` — or `null` when it
-   * names none or names something that is not a string (KAN-344).
+   * The timestamp this row gives for ITSELF — its `at` — or `null` (KAN-344).
+   *
+   * THREE INPUTS ANSWER `null`, ENUMERATED HERE BECAUSE A LIST THAT STOPS AT TWO
+   * IS HOW THE THIRD BECOMES A SECOND MEANING: the key is **absent**, the key
+   * holds **something that is not a string**, or the key holds **the empty
+   * string**. All three are the row naming no time, and they are one answer on
+   * purpose. `''` is not an oversight in that list — {@link claimsPath} treats an
+   * empty `workDir` as naming nothing for the same reason, and the specimen that
+   * commissioned this work carries exactly that.
    *
    * WHAT IT DATES, said precisely because the useful-sounding reading is the
    * wrong one: **WHEN THE ROW WAS WRITTEN, NOT WHEN IT BECAME UNREADABLE.** A
@@ -860,8 +867,10 @@ export interface UnreadableRecord {
    */
   claimsAt: string | null;
   /**
-   * The row's own `event`, verbatim, or `null` when it names none or names a
-   * non-string (KAN-344).
+   * The row's own `event`, verbatim, or `null` (KAN-344).
+   *
+   * THE SAME THREE INPUTS ANSWER `null` HERE — absent, not a string, or the
+   * empty string — see {@link claimsAt}, which carries the argument.
    *
    * THE EVIDENCE UNDER {@link standing}, and it is published rather than folded
    * into it for one reason that is not symmetry: on a `from-newer` row
@@ -1093,10 +1102,13 @@ function classifyRow(parsed: any, line: number, source: string): UnreadableRecor
         ? parsed.workDir
         : null;
 
-  // Quoted, both of them: whatever the row holds, or null when it holds no
-  // string at all. Neither is parsed, ranged or normalised — see the field
-  // documentation, and note that `''` is null here for the same reason
-  // `claimsPath` treats an empty `workDir` as naming nothing.
+  // Quoted, both of them: whatever the row holds, or null on any of the three
+  // inputs that mean it holds nothing — absent, not a string, or `''`. Neither
+  // is parsed, ranged or normalised; see the field documentation, which
+  // enumerates those three rather than the two that are obvious. `''` is null
+  // for the same reason `claimsPath` treats an empty `workDir` as naming
+  // nothing, and `verify-unreadable-row-standing` §6 starves the `.length` half
+  // specifically — it is a decision, so it is held rather than assumed.
   const claimsAt =
     typeof parsed.at === 'string' && parsed.at.length ? parsed.at : null;
   const claimsEvent =
