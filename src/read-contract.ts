@@ -113,7 +113,7 @@ import type { ResumeCause } from './resume.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 5;
+export const READ_CONTRACT_VERSION = 6;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -1138,12 +1138,44 @@ export const UNCOVERED_SURFACES = [
   'deactivate_response',
   'configure_response',
   'forget_response',
-  'send_to_agent',
   'pty_init',
   'pty_input',
   'pty_resize',
   'tail_agent'
 ] as const;
+
+/**
+ * SURFACES A SIBLING CONTRACT COVERS — the third value of a boundary that used
+ * to have two (KAN-329).
+ *
+ * WHY A THIRD LIST AND NOT A REWRITTEN NOTE IN THE SECOND. `send_to_agent` left
+ * `UNCOVERED_SURFACES` when `docs/send-contract.md` was published, and it had
+ * exactly two places it could go. Leaving it under *"Not covered — consumed,
+ * and described by nothing here"* with a note saying it is described elsewhere
+ * makes the heading false. Moving it to `COVERED_SURFACES` makes THIS document
+ * claim a surface it does not describe and its proof does not reconcile — and
+ * that list is checked against declarations in this file, so the claim would
+ * have to be backed by declarations that do not exist here.
+ *
+ * Both options collapse a distinction a consumer needs: **"covered by nothing"
+ * and "covered somewhere else" are different answers to the only question §10
+ * exists to answer.** A reader who cannot tell them apart either goes looking
+ * for a document that is not there, or stops looking for one that is. So the
+ * boundary is three-valued, and each entry names the document and the proof
+ * that hold it — which is the same shape `COVERED_SURFACES` uses, one artifact
+ * over.
+ *
+ * `verify-read-contract.mjs` §1 holds this to §10's third table in both
+ * directions, asserts the three lists are pairwise disjoint, and requires each
+ * named document and proof to EXIST as a file — a sibling contract named here
+ * and deleted tomorrow is red rather than a dangling promise.
+ */
+export const CONTRACTED_ELSEWHERE = {
+  send_to_agent: {
+    document: 'docs/send-contract.md',
+    proof: 'scripts/verify-send-contract.mjs'
+  }
+} as const;
 
 // ------------------------------------------------------------- the value sets
 
@@ -1305,6 +1337,17 @@ export function readContractCanonical(): string {
       .map((s) => `${s}:${[...COVERED_SURFACES[s as keyof typeof COVERED_SURFACES]].sort().join('|')}`)
       .join(';')}}`,
     `uncovered{${[...UNCOVERED_SURFACES].sort().join('|')}}`,
+    // The third value of the boundary is in the digest for the same reason the
+    // first two are: a surface moving between "covered by nothing" and "covered
+    // by a sibling" is a change to what §10 promises, and it must not be
+    // possible to make it with no version row and nothing to notice.
+    `elsewhere{${Object.keys(CONTRACTED_ELSEWHERE)
+      .sort()
+      .map((s) => {
+        const e = CONTRACTED_ELSEWHERE[s as keyof typeof CONTRACTED_ELSEWHERE];
+        return `${s}:${e.document}+${e.proof}`;
+      })
+      .join(';')}}`,
     `list_agents{${table(LIST_AGENTS_FIELDS)}}`,
     `list_agents_refusal{${table(LIST_AGENTS_REFUSAL_FIELDS)}}`,
     `agent_status{${table(AGENT_STATUS_FIELDS)}}`,

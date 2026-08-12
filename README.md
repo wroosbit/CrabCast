@@ -792,11 +792,19 @@ Read the delivery section before you build on them. Events are **at-most-once** 
 
 The socket's two state reads — `list_agents` for the fleet and `agent_status` for one agent — plus **`activate_response`**, the one response that tells you about the spawn you just made rather than about what is true now, are published field by field in **[`docs/read-path-contract.md`](docs/read-path-contract.md)**, with the **provenance bucket** of every field: whether it came off the durable registry, was observed from herdr just now, was computed, or is this process's own memory. That is what tells you whether an absence means *not known* or *not true*.
 
-**And the contract says where it stops.** §10 lists the responses it does *not* cover — `deactivate_response`, `configure_response`, `forget_response`, `send_to_agent`'s verdict and the pty responses are all consumed by somebody and described by none of it. Read that before assuming a response you depend on is covered; a boundary you have to infer from what happens to be listed is the defect that section exists to remove.
+**And the contract says where it stops.** §10 lists the responses it does *not* cover — `deactivate_response`, `configure_response`, `forget_response` and the pty responses are all consumed by somebody and described by none of it. It also names the one covered by a **sibling contract** rather than by nothing, because those are different answers: `send_to_agent` is published in [`docs/send-contract.md`](docs/send-contract.md), below. Read that section before assuming a response you depend on is covered; a boundary you have to infer from what happens to be listed is the defect it exists to remove.
 
 Read it beside the event contract, not instead of it: events are the latency optimisation and `list_agents` is the authoritative read, so the delivery guarantees stay over there while the shape lives here.
 
 Three things worth knowing before you build on it. **The stability statement is a notice promise, not a freeze**: below 1.0 no field is guaranteed not to change, and what is promised is that a change to a documented field arrives with a consumer notice naming it — *you will not find out by breaking*. **The version is on the wire in exactly one place**, `daemon_status.contractVersion`; read it once and re-read it when `bootId` moves. And **the document is checked against the code**: `node scripts/verify-read-contract.mjs` reconciles it, `src/read-contract.ts` and a real daemon's responses in both directions, so a field added to a response and not to the document goes red in CI. It drives ten of `activate_response`'s eleven branches on a real daemon to do it — and **names the eleventh as unproduced** rather than letting a count of branches in the document imply a count of branches exercised.
+
+### The send path
+
+`send_to_agent` types at another agent's terminal and answers with a **verdict**, and **[`docs/send-contract.md`](docs/send-contract.md) is the contract**: what each verdict means, what a caller should *do* with it, the evidence block the verdict was read from, and the exact key set of each of the five branches.
+
+**Read §2 before you write the switch, because three is not four.** A send that happened can conclude three things — `delivered`, `not-delivered`, `unverifiable`, each a statement about a pane that was looked at. The *response* carries a fourth, `refused`, for a request that never became a send and therefore read no pane. A consumer switching exhaustively on the three meets the fourth as a default case. And `not-delivered` and `unverifiable` license **opposite** actions: the first is evidence of absence and you may resend; the second is the absence of evidence, and resending types a duplicate at an agent that may already be working on the first copy.
+
+`node scripts/verify-send-contract.mjs` is the live proof — document, declaration and a real daemon's responses, with the vocabularies bound to their TypeScript unions at compile time, so an undocumented verdict does not build.
 
 ### Which build is running
 
