@@ -840,8 +840,12 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
 // SO THE QUESTION IS INVERTED. Rather than asking "is this one of the ways a
 // row becomes a string?", which can never be complete, it asks "is this one of
 // the handful of things `classifyLog` is allowed to do with a row?", which is
-// small, closed and legible — the function has EIGHT such uses and they are
-// listed below. Any other use of `parsed`, `bad` or `trimmed` is a failure,
+// small, closed and legible: SEVEN calls, in `ALLOWED_CALLEES` below, and a
+// short list of read-only positions beside it — a comparison, a `typeof`, a
+// negation, a condition, an assignment target, and a spread into one of those
+// seven calls. Both lists are literals a reader can count, and the run reports
+// how many row references it checked them against rather than leaving that to
+// a number in a comment. Any other use of `parsed`, `bad` or `trimmed` is a failure,
 // including one through a helper that does not exist yet. A future author who
 // needs a new one adds it to `ALLOWED_CALLEES` deliberately, in a diff, where
 // it is reviewable — instead of the guard silently not applying.
@@ -936,6 +940,11 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
     ]);
 
     const hits = [];
+    // COUNTED, because "no use is off the allowlist" is trivially true of a
+    // body the walker never reached — a renamed identifier, a refactor that
+    // moved the loop, or a parse that found the wrong function. The number goes
+    // in the verdict rather than in a comment, so it cannot drift.
+    let refs = 0;
     const flag = (node, why) =>
       hits.push({ why, code: node.getText().replace(/\s+/g, ' ').slice(0, 60) });
 
@@ -963,6 +972,7 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
           (ts.isPropertyAccessExpression(p0) && p0.name === n) ||
           (ts.isPropertyAssignment(p0) && p0.name === n);
         if (!isDeclName) {
+          refs += 1;
           const node = outermost(n);
           const p = node.parent;
           const calleeOf = (c) => c.expression.getText().replace(/\s+/g, '');
@@ -1012,7 +1022,7 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
       ts.forEachChild(n, walk);
     };
     walk(fn.body);
-    return { hits, body: fn.body.getText() };
+    return { hits, refs, body: fn.body.getText() };
   }
 
   // THE TWO PREDICATES THIS SECTION USED TO BE, kept executable rather than
@@ -1071,9 +1081,14 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
     found ? `${found.body.length} chars` : 'no `function classifyLog` in src/agent-registry.ts'
   );
   check(
+    Boolean(found) && found.refs > 0,
+    '5b: vacuity — the walker actually reached row references inside `classifyLog`, so the allowlist below is checked against something',
+    found ? `${found.refs} reference(s) to \`parsed\`/\`bad\`/\`trimmed\`` : 'body not found'
+  );
+  check(
     Boolean(found) && found.hits.length === 0,
     '5b: every use of `parsed`, `bad` and `trimmed` in `classifyLog` is on the allowlist — parse, guard, classify, normalize, spread into a sanctioned push. Anything else, INCLUDING BINDING ONE TO A LOCAL, is a failure, so the notice stays the only rendering',
-    found ? found.hits.map((h) => `${h.why}: ${h.code}`).join(' ; ') || `${found.body.length} chars, no off-allowlist use` : 'body not found'
+    found ? found.hits.map((h) => `${h.why}: ${h.code}`).join(' ; ') || `${found.refs} row reference(s) examined, none off-allowlist` : 'body not found'
   );
 
   // THE NEGATIVE CASES, and the point of the last two columns is that each one

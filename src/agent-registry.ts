@@ -1214,11 +1214,15 @@ function classifyLog(text: string, scan: LogVersionScan, entries?: AgentLogEntry
     // writing one here. `verify-unreadable-row-standing.mjs` §5b is the check
     // that notices, and it is an ALLOWLIST rather than a search for renderings:
     // it parses this file and fails unless every use of `parsed`, `bad` and
-    // `trimmed` below is one of the eight this function is permitted — parse,
-    // type guard, `classifyRow`, the two normalizers, the `problem`
-    // comparisons, and the spread into `entries?.push`. **Binding one to a
-    // local is not permitted**, so the cheap evasion of a rendering check —
-    // alias first, render the alias — is refused at the binding.
+    // `trimmed` below is one this function is permitted: an argument to one of
+    // seven named calls — `JSON.parse`, `Array.isArray`, `classifyRow`, the two
+    // field normalizers, `scan.unreadable.push` and `entries?.push` — or a
+    // read-only position beside them (a comparison, a `typeof`, a negation, a
+    // condition, an assignment target, a spread into one of those seven).
+    // **Binding one to a local is not permitted**, so the cheap evasion of a
+    // rendering check — alias first, render the alias — is refused at the
+    // binding. The proof reports how many references it checked, so no count
+    // lives in a comment here to go stale.
     //
     // IT IS AN ALLOWLIST BECAUSE THE TWO SEARCHES FAILED, in review of #84 and
     // in this order: a regex over `${…}` missed

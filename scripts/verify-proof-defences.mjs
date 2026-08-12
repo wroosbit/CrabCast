@@ -461,9 +461,13 @@ const PROOF_DEFENCES = [
       'what stops that pair being a check and its own alibi. ' +
       'THE SIXTH MECHANISM IS AN ABSENCE, so it is held by NEGATIVE CASES rather than by a ' +
       'starve: §5b PARSES `src/agent-registry.ts` and requires every use of `parsed`, `bad` and ' +
-      '`trimmed` inside `classifyLog` to be on an ALLOWLIST of eight — parse, type guard, ' +
-      'classify, the two field normalizers, the comparisons, and a spread into a sanctioned ' +
-      'push. Anything else fails, including binding a row to a local. That is the property ' +
+      '`trimmed` inside `classifyLog` to be on an ALLOWLIST: an argument to one of SEVEN named ' +
+      'calls (`JSON.parse`, `Array.isArray`, `classifyRow`, the two field normalizers, and the ' +
+      'two pushes), or a read-only position beside them — comparison, `typeof`, negation, ' +
+      'condition, assignment target, or a spread into one of those seven. Anything else fails, ' +
+      'including binding a row to a local. A VACUITY GUARD REPORTS HOW MANY ROW REFERENCES THE ' +
+      'WALKER REACHED (15 at this writing) rather than a count sitting in prose, because "no ' +
+      'use is off the allowlist" is trivially true of a body nothing walked. That is the property ' +
       'leaving the boot notice the only rendering of a row. It then runs the identical predicate ' +
       'over SIX doctored copies and requires each to be caught. ' +
       'THE ALLOWLIST IS THE THIRD DESIGN AND THE SHAPE OF THE TWO CORRECTIONS IS THE ENTRY: ' +
@@ -477,7 +481,7 @@ const PROOF_DEFENCES = [
       'because a sink list is a list of examples and KAN-59 says a category is not closed by ' +
       'adding the reviewer\'s named ones. v3 inverts the question — not "is this a way a row ' +
       'becomes a string", which cannot be completed, but "is this one of the things this ' +
-      'function may do with a row", which is eight items long. Aliasing is refused at the ' +
+      'function may do with a row", which is two short literals in the file. Aliasing is refused at the ' +
       'binding rather than chased through it, so no dataflow analysis is involved. ' +
       'AND THE TWO EARLIER PREDICATES ARE KEPT EXECUTABLE IN THE FILE: every negative case ' +
       'additionally asserts whether v1 and v2 would have seen it, and two of the six defeat ' +
