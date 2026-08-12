@@ -783,6 +783,36 @@ const PROOF_DEFENCES = [
       'same field to come back false. The verified flag is therefore observed moving.'
   },
   {
+    script: 'verify-uncharged-agent-cost',
+    defence: 'guard',
+    central:
+      'a per-agent cost measured from process trees this daemon cannot attribute to its own agents ' +
+      'can only ever make the gate MORE conservative — and the memory an uncharged agent holds is ' +
+      'netted out of exactly one of the two memory terms, never both and never neither.',
+    anchor: 'VACUITY: the floor is what bound',
+    note:
+      'BOTH SIDES OF A ONE-SIDED RULE. §1 pins the floor where it bites (a measurement a quarter ' +
+      'of the seed leaves the cap where the seed put it) AND where it must not (a measurement ' +
+      'twice the seed is still believed in full, and an operator override is never raised). A ' +
+      'floor asserted only on the cheap side would be satisfied by a clamp that pinned the divisor ' +
+      'unconditionally and deleted the measurement.\n\n' +
+      'THE VACUITY GUARD IS LOAD-BEARING RATHER THAN DECORATIVE: "cap unchanged from the seed" is ' +
+      'equally true of a build that never consulted the measurement at all, so §1 requires ' +
+      '`costBeforeFloor` to be the measurement supplied and `flooredDimensions` to name both ' +
+      'dimensions — i.e. that the figure reached the arithmetic and was raised there.\n\n' +
+      'THE OVER-CORRECTION IS THE THIRD SECTION AND THE EASIEST DEFECT TO SHIP: the reserve is ' +
+      'subtracted from `capByMemory` (numerator `totalBytes`, nets out nothing) and must NOT be ' +
+      'subtracted from `headroomByMemory` (numerator MemAvailable, from which the kernel has ' +
+      'already taken it). Red-driven both ways before merge — removing the floor moved ' +
+      '`capByMemory` 16 → 66, and applying the reserve to the live term moved `headroomByMemory` ' +
+      '7 → 5.\n\n' +
+      'SEAM, AND IT IS THE TICKET\'S OWN OPEN HALF: this file proves the divisor is BOUNDED, never ' +
+      'that it is ATTRIBUTED. Nothing joins a process tree to an agent record — the only handle is ' +
+      '`cwd`, which herdr.ts records as never deciding ownership because a process can `cd` and ' +
+      'disown itself — so no script here can assert the sample is this daemon\'s fleet. The ' +
+      'header says so; KAN-275 carries the remainder.'
+  },
+  {
     script: 'verify-agent-capacity',
     defence: 'guard',
     central:
