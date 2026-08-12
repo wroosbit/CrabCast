@@ -732,6 +732,16 @@ jobs:
       # And one whose subject is the OTHER user-facing document — the read path,
       # published for the first time by KAN-277:
       #
+      #   verify-send-contract               `docs/send-contract.md`,
+      #                                      `src/send-contract.ts` and a REAL
+      #                                      daemon's `send_to_agent_response`,
+      #                                      on the same three-artifact plan.
+      #                                      Its subject is the verdict
+      #                                      vocabulary Butchr branches on more
+      #                                      than anything else we emit, which
+      #                                      was typed, proven and published
+      #                                      NOWHERE until KAN-329.
+      #
       #   verify-read-contract               `docs/read-path-contract.md`,
       #                                      `src/read-contract.ts` and a REAL
       #                                      daemon's responses, reconciled
@@ -889,6 +899,7 @@ jobs:
             verify-daemon-started-at
             verify-daemon-status-over-mcp
             verify-read-contract
+            verify-send-contract
             verify-channel-enabled
             verify-registry-survives-retired-rows
             verify-daemon-foreground

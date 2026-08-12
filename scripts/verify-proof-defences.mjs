@@ -426,6 +426,40 @@ const PROOF_DEFENCES = [
       'ran, so the section requires the log to have visibly collapsed first.'
   },
   {
+    script: 'verify-send-contract',
+    defence: 'mutation',
+    central:
+      '`send_to_agent`\'s verdict is a published contract: `docs/send-contract.md`, ' +
+      '`src/send-contract.ts` and a REAL daemon\'s `send_to_agent_response` carry the same ' +
+      'vocabularies, the same fields with the same provenance buckets, and the same EXACT key set ' +
+      'per branch, in both directions — on a closed vocabulary a consumer must switch on, which ' +
+      'was typed and proven and published nowhere until KAN-329.',
+    note:
+      'SIX MUTATIONS AND A COMPILE-TIME REFUSAL, and the split between them is the point rather ' +
+      'than a detail. §7a-§7e hand the SAME reconcilers §1 ran doctored inputs — a member added ' +
+      'to the declaration with no document row, a member DELETED from a document table (the other ' +
+      'direction, which the ticket asked about explicitly), a field row deleted, and a branch key ' +
+      'set altered to claim the refusal carries `path` when it does not. That last one is the ' +
+      'defect no field-set comparison can see, because nothing is added or removed anywhere. §7f ' +
+      'is the leg no document mutation could establish: the wire reconciler re-run over the ' +
+      'ALREADY-CAPTURED real responses with one branch\'s key set doctored. §6 is different in ' +
+      'kind — the `Exact<>` bindings make an undocumented member UNREPRESENTABLE rather than ' +
+      'detectable, and a binding nobody has watched refuse anything has not been shown to bind, ' +
+      'so a copy of `src/` gets a fifth verdict added to the union alone and `tsc` is required to ' +
+      'refuse it AND to name `src/send-contract.ts`. Its precondition earned its place on the ' +
+      'first run: the copied tree built as CommonJS for want of a `package.json`, and both ' +
+      'mutation checks would have passed on four unrelated `import.meta` errors. VACUITY: §2 ' +
+      'asserts four distinct verdicts were produced before asserting anything about their shape, ' +
+      'and §5\'s scan for bare verdict literals is guarded by requiring the handler to actually ' +
+      'call both typed constructors, so it cannot pass over a renamed or empty function. HOLE ' +
+      'NAMED RATHER THAN COVERED: one of the five branches — `unconfirmable` — needs the bridge ' +
+      'to reject, and the bridge is written never to throw, so §3 MANUFACTURES it by mutating the ' +
+      'build and says so at the assertion. It is evidence about the router\'s handling of a ' +
+      'rejection, not evidence that one happens. SEAM: every pane here is a shim this file wrote, ' +
+      'so nothing on this page is evidence about a real Claude Code composer — ' +
+      'verify-send-confirms-delivery-live.mjs is what covers that, and it is in the live half.'
+  },
+  {
     script: 'verify-read-contract',
     defence: 'mutation',
     central:

@@ -647,7 +647,11 @@ function reconcile(mod, docText) {
   ];
   for (const [anchor, declared] of [
     ['covered', Object.keys(mod.COVERED_SURFACES)],
-    ['uncovered', [...mod.UNCOVERED_SURFACES]]
+    ['uncovered', [...mod.UNCOVERED_SURFACES]],
+    // KAN-329's third value. A surface published in a SIBLING contract is
+    // neither covered here nor described by nothing, and both of the two
+    // existing rows would have been a false statement about it.
+    ['elsewhere', Object.keys(mod.CONTRACTED_ELSEWHERE ?? {})]
   ]) {
     const documented = parseBoundary(docText, anchor);
     if (!documented) {
@@ -662,6 +666,47 @@ function reconcile(mod, docText) {
     for (const s of documented) {
       if (!declared.includes(s)) {
         problems.push(`boundary ${anchor}: §10's table lists '${s}', which is not declared`);
+      }
+    }
+  }
+
+  // THE THREE LISTS ARE PAIRWISE DISJOINT (KAN-329). Without this, a surface
+  // could sit in two of them and each table would independently reconcile —
+  // "covered here" and "covered elsewhere" are contradictory answers, and the
+  // membership checks above compare each list to its own table and would see
+  // nothing wrong.
+  {
+    const lists = {
+      covered: Object.keys(mod.COVERED_SURFACES),
+      uncovered: [...mod.UNCOVERED_SURFACES],
+      elsewhere: Object.keys(mod.CONTRACTED_ELSEWHERE ?? {})
+    };
+    const names = Object.keys(lists);
+    for (let i = 0; i < names.length; i++) {
+      for (let j = i + 1; j < names.length; j++) {
+        for (const s of lists[names[i]]) {
+          if (lists[names[j]].includes(s)) {
+            problems.push(
+              `boundary: '${s}' is in both ${names[i]} and ${names[j]} — a surface has exactly one`
+            );
+          }
+        }
+      }
+    }
+  }
+
+  // A SIBLING CONTRACT'S DOCUMENT AND PROOF MUST EXIST. A row that sends a
+  // reader to another document is worth what the promise being checked is
+  // worth: without this, deleting `docs/send-contract.md` leaves §10 pointing
+  // at nothing and every membership check above still green.
+  for (const [surface, where] of Object.entries(mod.CONTRACTED_ELSEWHERE ?? {})) {
+    for (const [kind, rel] of [['document', where.document], ['proof', where.proof]]) {
+      if (!rel) {
+        problems.push(`boundary elsewhere: ${surface} names no ${kind}`);
+        continue;
+      }
+      if (!fs.existsSync(path.join(repoRoot, rel))) {
+        problems.push(`boundary elsewhere: ${surface}'s ${kind} '${rel}' is not a file that exists`);
       }
     }
   }

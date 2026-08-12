@@ -6,6 +6,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { CrabcastConfig } from './config.js';
+import { refusedSend, unconfirmableSend } from './delivery.js';
 import { MAX_LINE_CHARS } from './ipc.js';
 import {
   CAPACITY_FIELDS,
@@ -5050,16 +5051,16 @@ export class MessageRouter {
      * the outcome from a missing field — and the ABSENCE of an `evidence`
      * block is deliberately not the signal, since inference-from-absence is the
      * thing being refused. `refused` is the field to read.
+     *
+     * BOTH WORDS ARE TYPED RATHER THAN TYPED OUT (KAN-329). `refusedSend`
+     * builds this beside the unions it draws on, so `verdict` and `refused` are
+     * members of a published vocabulary at compile time instead of two string
+     * literals at a `respond({…})` call — which is where `activateRefused` grew
+     * to nine unchecked literals before KAN-287. Not a byte of the response
+     * changed.
      */
     const fail = (error: string) =>
-      respond({
-        action: 'send_to_agent_response',
-        success: false,
-        delivered: false,
-        verdict: 'refused',
-        refused: 'invalid-request',
-        error
-      });
+      respond({ action: 'send_to_agent_response', ...refusedSend('invalid-request', error) });
 
     const address = this.addressOfRequest(data.path, true);
     if ('error' in address) {
@@ -5077,14 +5078,19 @@ export class MessageRouter {
       // A rejection here is a bug in the bridge rather than a fact about the
       // agent, and the honest reading of "our own confirmation threw" is that
       // nothing was established either way.
+      //
+      // THIS BRANCH ANSWERS `unverifiable` WITH NO `evidence` BLOCK, unlike
+      // every other `unverifiable` on this surface — the code that assembles
+      // evidence is the code that just threw. `docs/send-contract.md` publishes
+      // that asymmetry rather than this response acquiring a synthesised
+      // evidence block nobody read a pane for.
       (err) =>
         respond({
           action: 'send_to_agent_response',
           path: address.path,
-          success: false,
-          delivered: false,
-          verdict: 'unverifiable',
-          error: `The send could not be completed or confirmed: ${err?.message ?? String(err)}`
+          ...unconfirmableSend(
+            `The send could not be completed or confirmed: ${err?.message ?? String(err)}`
+          )
         })
     );
   }

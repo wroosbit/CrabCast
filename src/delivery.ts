@@ -1,3 +1,4 @@
+import type { Exact } from './events.js';
 import type { TailSource } from './herdr.js';
 
 /**
@@ -233,8 +234,29 @@ export type SendVerdict = 'delivered' | 'not-delivered' | 'unverifiable';
  * read and it is not in it". Giving them their own word keeps each of the three
  * above meaning exactly what it says, and it uses the vocabulary `activate`
  * already has for a call rejected before anything happened.
+ *
+ * UNTIL KAN-329 THIS TYPE WAS USED BY NOTHING. It was declared here, argued for
+ * here, and named in no signature anywhere — `Respond` is `(msg: any) => void`,
+ * so both wire literals were unchecked strings and this alias documented a
+ * vocabulary it did not bind. {@link SendResponse} is what binds it now: the
+ * union of the three response shapes the router can emit, whose `verdict`s are
+ * asserted below to be EXACTLY these four. `docs/send-contract.md` publishes
+ * them.
  */
 export type SendResponseVerdict = SendVerdict | 'refused';
+
+/**
+ * Why a request never became a send. **One member**, published as a set rather
+ * than described as a constant, for the reason `activate_response.refusedBy`
+ * gives for its own single member: *"the only value it takes"* is exactly the
+ * kind of claim that stops being true without anybody noticing.
+ *
+ * It covers both refusals because they are the same fact about the caller —
+ * a path that resolves to no configured agent, and a message that is missing,
+ * not a string, or only whitespace. Neither reached a pane, and a consumer's
+ * repair for both is the same: fix the request and call again.
+ */
+export type SendRefusal = 'invalid-request';
 
 /** How much of the tail is carried back to the caller as the verdict's evidence. */
 export const EVIDENCE_TAIL_CHARS = 4000;
@@ -301,4 +323,99 @@ export interface SendOutcome {
   retried: boolean;
   evidence: SendEvidence;
   error?: string;
+}
+
+// -------------------------------------------------------- what the wire says
+
+/*
+ * KAN-329. Everything above this line describes what a SEND did. What follows
+ * describes what the ROUTER ANSWERS, and the two are not the same set of
+ * shapes: `handleSendToAgent` has three respond sites and only one of them
+ * carries a {@link SendOutcome}. The other two were object literals with bare
+ * string verdicts in them, which is precisely the shape `activateRefused` was
+ * in before KAN-287 gave it a union — a vocabulary that grows a member at a
+ * `respond({…})` call site, where nothing is looking.
+ *
+ * PREFER THE TYPE TO THE ASSERTION. These declarations do not change a byte of
+ * any response; they make the two off-outcome branches nameable, so that the
+ * four-member vocabulary is checked by the compiler rather than only by a
+ * document. `docs/send-contract.md` is the document, and
+ * `scripts/verify-send-contract.mjs` reconciles it against these.
+ */
+
+/**
+ * The request never became a send, so NO PANE WAS READ.
+ *
+ * WHAT IT DOES NOT CARRY IS THE POINT, and it is stated as a type rather than
+ * left to be noticed: no `evidence`, because nothing was observed; no
+ * `interrupts`, `submits` or `retried`, because no keystroke was issued; and no
+ * `path`, because on this branch the address is what could not be resolved.
+ * A consumer reading `evidence` off every response meets `undefined` here.
+ */
+export interface SendRefusedResponse {
+  success: false;
+  delivered: false;
+  verdict: 'refused';
+  /** The field to read. Never inferred from the absence of `evidence`. */
+  refused: SendRefusal;
+  error: string;
+}
+
+/**
+ * The bridge itself rejected — our own confirmation threw, which is a bug on
+ * this side rather than a fact about the agent.
+ *
+ * IT ANSWERS `unverifiable` WITH NO EVIDENCE BLOCK, and that is the one
+ * asymmetry a consumer is most likely to be caught by: the verdict does not
+ * tell you whether `evidence` is there. Every `unverifiable` from
+ * {@link SendOutcome} carries a full one; this one carries none, because the
+ * code that would have assembled it is the code that threw. Documented rather
+ * than repaired — synthesising an evidence block here would mean reporting a
+ * reading nobody took.
+ */
+export interface SendUnconfirmableResponse {
+  success: false;
+  delivered: false;
+  verdict: 'unverifiable';
+  error: string;
+}
+
+/**
+ * Every shape `send_to_agent_response` can carry, minus the two envelope fields
+ * the router adds (`action` always, `path` on all but the refusal).
+ */
+export type SendResponse = SendOutcome | SendRefusedResponse | SendUnconfirmableResponse;
+
+/**
+ * THE ROUND TRIP, CLOSED AT COMPILE TIME: the verdicts the wire can actually
+ * carry are exactly {@link SendResponseVerdict}, no more and no fewer.
+ *
+ * This is the binding that was missing. A fifth word answered by a new branch
+ * fails to compile until it is in the union; a word removed from the union
+ * while a branch still answers it fails to compile too. Both directions, and
+ * neither is a check that runs later — the state is not introducible.
+ *
+ * What it does NOT reach: a respond site that builds its object inline instead
+ * of through one of these types is invisible to it, because `Respond` is
+ * `(msg: any) => void`. `verify-send-contract.mjs` §4 scans the handler for
+ * exactly that and is the reason this comment can stop here rather than
+ * overclaiming.
+ */
+const _wireVerdictsAreExactlyTheVocabulary: Exact<
+  SendResponse['verdict'],
+  SendResponseVerdict
+> = true;
+void _wireVerdictsAreExactlyTheVocabulary;
+
+/**
+ * The refusal, built where its vocabulary is declared rather than at the
+ * `respond({…})` call.
+ */
+export function refusedSend(refused: SendRefusal, error: string): SendRefusedResponse {
+  return { success: false, delivered: false, verdict: 'refused', refused, error };
+}
+
+/** The bridge-rejection branch. See {@link SendUnconfirmableResponse}. */
+export function unconfirmableSend(error: string): SendUnconfirmableResponse {
+  return { success: false, delivered: false, verdict: 'unverifiable', error };
 }
