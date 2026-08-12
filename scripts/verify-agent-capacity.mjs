@@ -510,20 +510,64 @@ const MEASURED = {
   agentTrees: 4
 };
 
+// A measurement MORE expensive than the seed on both dimensions. The floor
+// below is one-sided, and this is the side it must not touch.
+const DEAR = {
+  residentBytes: 1400 * MIB,
+  cores: 1.5,
+  sampledAt: Date.parse('2026-08-02T19:00:00Z'),
+  windowSeconds: 60,
+  agentTrees: 4
+};
+
 const seeded = computeCapacity(FACTS, 0);
 const measuredCap = computeCapacity(FACTS, 0, { measured: MEASURED });
+const dearCap = computeCapacity(FACTS, 0, { measured: DEAR });
 
 console.log('with nothing measured — the seed, and the report says so:\n');
 console.log(describeCapacity(seeded));
 console.log("\nwith the daemon's damped measurement in place of the seed:\n");
 console.log(describeCapacity(measuredCap));
+console.log('\nwith a measurement DEARER than the seed:\n');
+console.log(describeCapacity(dearCap));
+
+// KAN-275 REVERSED WHAT THIS SECTION USED TO ASSERT, and the old assertion is
+// quoted here rather than deleted so the change is legible: it read
+// `flag(measuredCap.cap > seeded.cap)` — a measured tree cheaper than the seed
+// bought a LARGER cap on the same hardware. That is the defect. The sampler
+// enumerates every agent-runtime tree on the machine and nothing joins a tree
+// to an agent record, so "cheap" can mean "mostly somebody else's idle
+// supervisors", and the discount then arrives as a permission to start more of
+// OUR agents. Measured on the machine this was written on: 0.135 core/agent
+// averaged over four trees, none of them this daemon's, deriving capByCpu 18 on
+// a four-core box.
+//
+// So the divisor is floored at the seed, one-sidedly, and this section now
+// pins BOTH sides of that — a floor asserted only where it bites would pass
+// just as well if it clamped everything.
 console.log(
-  `\n  → cap ${seeded.cap} → ${measuredCap.cap} on the same hardware, because the measured tree ` +
-  `(${MEASURED.cores} core)\n    is cheaper than the seed's calibrated 0.75. Every figure above carries its\n` +
-  '    provenance — (seed) or (measured) — plus the window, tree count and\n' +
-  '    timestamp, so the moving divisor stays checkable by hand.'
+  `\n  → cheap measurement (${MEASURED.cores} core, ${MEASURED.residentBytes / MIB} MB): ` +
+  `cap ${seeded.cap} → ${measuredCap.cap} — UNCHANGED, floored at the seed.\n` +
+  `    dear measurement (${DEAR.cores} core, ${DEAR.residentBytes / MIB} MB): ` +
+  `cap ${seeded.cap} → ${dearCap.cap} — LOWER, the measurement still binds upward.\n` +
+  '    Every figure above carries its provenance — (seed) or (measured), and\n' +
+  '    "raised to the seed floor" where the floor is what divided — plus the\n' +
+  '    window, tree count and timestamp, so the divisor stays checkable by hand.'
 );
-flag(measuredCap.cap > seeded.cap);
+flag(
+  // The floor holds the cheap measurement at exactly the seed's answer...
+  measuredCap.cap === seeded.cap &&
+  measuredCap.cost.cores === seeded.cost.cores &&
+  measuredCap.cost.residentBytes === seeded.cost.residentBytes &&
+  // ...and says so, rather than reporting the measurement as what divided.
+  measuredCap.flooredDimensions.length === 2 &&
+  measuredCap.costBeforeFloor.cores === MEASURED.cores &&
+  // ...while a dearer measurement is still believed, in full, in the direction
+  // that charges more. Without this, a clamp-everything bug would pass.
+  dearCap.cap < seeded.cap &&
+  dearCap.flooredDimensions.length === 0 &&
+  dearCap.cost.cores === DEAR.cores
+);
 
 // -------------------------------------------------------- 11. damping --
 rule('11. DAMPING — quick to believe expensive, slow to believe cheap');

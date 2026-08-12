@@ -59,14 +59,31 @@ export { STALL_REFUSE_PERCENT };
  *
  * The rule that replaced it (KAN-41, in the extraction source), now expressed
  * per agent rather than per workspace type: only *chargeable* agents are
- * accounted for at all. `cap` is cores and memory minus the human reserve and
- * herdr's overhead, and nothing else. An agent a caller configured with
- * `chargeable: false` is neither counted in `running` nor reserved for — that
- * flag is asked for because the agent supervises rather than does the work,
- * typically low-resource and idle, not competing for the machine the way a
- * worker compiling a repo does. Such agents are still reported in
- * `Capacity.exemptAgents`, so a reader of a capacity report can see they
- * exist; they are simply never charged.
+ * counted. An agent a caller configured with `chargeable: false` is not counted
+ * in `running` — that flag is asked for because the agent supervises rather
+ * than does the work, typically low-resource and idle, not competing for the
+ * machine the way a worker compiling a repo does. Such agents are reported in
+ * `Capacity.exemptAgents`, so a reader of a capacity report can see they exist.
+ *
+ * KAN-275 CORRECTED THE SECOND HALF OF THAT, which used to read "neither
+ * counted in `running` nor reserved for". Not counted is right. Not reserved
+ * for was right about the LIVE terms and wrong about the STATIC one, and the
+ * difference is which numerator each divides:
+ *
+ *   - `headroomByMemory` divides `availableBytes` (MemAvailable). The kernel
+ *     has already subtracted every uncharged agent's resident memory from it,
+ *     so that term feels them without being told, and a reserve there would
+ *     charge for them twice.
+ *   - `capByMemory` divides `totalBytes`, which nets out nothing. With no
+ *     reserve, the static ceiling described a machine with no supervisors on
+ *     it — roughly 0.9 GB of real memory per uncharged agent absent from the
+ *     arithmetic entirely.
+ *
+ * So `cap` is now cores and memory minus the human reserve, herdr's overhead,
+ * AND `exemptAgents × EXEMPT_AGENT_MEMORY_BYTES`. The rule that survives is
+ * narrower and truer than the one it replaces: no term may net a population out
+ * of its numerator and also count it in its denominator, and no term may leave
+ * a population out of both.
  *
  * `chargeable` used to be one third of a `gateExempt` boolean declared on a
  * workspace type. Splitting it out is what lets a caller have an agent that
@@ -285,9 +302,32 @@ export interface AgentCost {
  * says `seed`, because a figure nobody measured on this fleet must be labelled
  * as such — that mislabelling is the exact failure story KAN-44 (likewise in
  * the extraction source) exists to correct.
+ *
+ * KAN-275 RAISED `residentBytes` FROM 650 MB TO 800 MB, and the reason is that
+ * a DIVISOR's seed must OVER-charge. 650 was the bottom of the 654/658/679
+ * range above; every tree-wide figure measured since is above it. Measured on
+ * this machine on 2026-08-12, three 60s windows: a worker tree held 719, 731
+ * and 733 MB, and supervising trees 761-904 MB. A seed at the bottom of a
+ * range that has since moved up is a seed that admits more agents than the
+ * machine carries, and it is live exactly when nothing has been measured yet —
+ * which is when a fleet is being staffed.
+ *
+ * WHAT 800 IS AND IS NOT. It is above every chargeable-agent reading taken here
+ * (733 max, so ~9% of headroom over the worst observed) and below the largest
+ * tree observed at all (904). It is NOT a measurement of a CrabCast agent:
+ * this daemon managed no agents when it was taken, so the trees measured were
+ * another orchestrator's. That is stated rather than smoothed over, because the
+ * whole of KAN-275 is that a figure measured off one population and reported as
+ * another's is how this gate went wrong in the first place.
+ *
+ * The provenance of the 650 it replaces: measured in the extraction source on
+ * 2026-07-31, tree-wide, across three live agents. The header above records the
+ * machine as a 4-core laptop, which matches this machine's core count — but
+ * nothing in this file or in docs/ported-lineage.md certifies it was the same
+ * box, so it is not claimed.
  */
 export const MEASURED_AGENT_COST: AgentCost = {
-  residentBytes: 650 * MIB,
+  residentBytes: 800 * MIB,
   cores: 0.75
 };
 
@@ -456,6 +496,103 @@ export function startingAgentCores(cost: AgentCost, costSource: CostSource): num
   if (costSource === 'override') return cost.cores;
   return Math.max(cost.cores, MEASURED_AGENT_COST.cores);
 }
+
+/**
+ * The divisor floor (KAN-275): a MEASURED per-agent cost is raised to the seed,
+ * an OVERRIDE is honoured outright.
+ *
+ * THIS IS NOT A NEW PHILOSOPHY, and that is the argument for it. It is
+ * {@link startingAgentCores} — `max(measurement, seed)`, override exempt —
+ * applied to the divisor itself rather than to what one starting agent is
+ * charged. The two now say the same thing in the same direction, which is what
+ * the alternative could not offer: a second rule for the same question is how
+ * two figures on one report drift into disagreeing.
+ *
+ * WHY A FLOOR AT ALL, since a measurement is supposed to beat a seed. Because
+ * this daemon cannot tell whose process trees it is measuring. `agent-cost.ts`
+ * enumerates every agent-runtime tree on the machine and groups by process
+ * ancestry; nothing joins a tree to an agent record, so a machine running
+ * another orchestrator's fleet — or this one's own supervising agents, which
+ * are deliberately never charged — contributes samples to a figure that is then
+ * divided into a budget for CHARGED agents. Measured here on 2026-08-12: 0.135
+ * core/agent averaged over four trees, none of which this daemon managed, which
+ * derived `capByCpu 18` on a four-core box. Cheap foreign trees drag the
+ * divisor down, and a smaller divisor is a LARGER cap — the discount arrives as
+ * a permission rather than a saving.
+ *
+ * So the floor bounds the damage from a divisor whose population is not known
+ * to be ours, WITHOUT pretending to attribute it. Attribution is the better fix
+ * and it is not available yet: the only handle on a running tree is its `cwd`,
+ * and `herdr.ts` records — from a measured failure — that ownership is never
+ * decided on `cwd`, because a process can `cd` and disown itself.
+ *
+ * WHAT IT COSTS, named because it is a real loss and not a rounding one: a
+ * fleet of genuinely cheap agents can no longer earn a cap above the seed's.
+ * The measurement can still make this gate MORE conservative and can no longer
+ * make it less. Given that the incident this whole file exists to prevent was a
+ * machine admitting more than it could carry, that is the direction to fail in
+ * — but a reader should know the trade was made, so the derivation says when
+ * the floor is what bound.
+ */
+export function flooredCost(cost: AgentCost, costSource: { residentBytes: CostSource; cores: CostSource }): AgentCost {
+  return {
+    residentBytes:
+      costSource.residentBytes === 'override'
+        ? cost.residentBytes
+        : Math.max(cost.residentBytes, MEASURED_AGENT_COST.residentBytes),
+    cores:
+      costSource.cores === 'override'
+        ? cost.cores
+        : Math.max(cost.cores, MEASURED_AGENT_COST.cores)
+  };
+}
+
+/**
+ * What this daemon holds back for the agents it does not charge (KAN-275).
+ *
+ * THE DEFECT THIS CLOSES IS A NUMERATOR/DENOMINATOR MISMATCH, and it is worth
+ * stating as one because the two memory terms have it in opposite directions:
+ *
+ *   - `headroomByMemory` divides `availableBytes` — MemAvailable, from which
+ *     the kernel has ALREADY subtracted every unchargeable agent's resident
+ *     memory. Its numerator nets them out. Nothing more is owed there, and
+ *     subtracting a reserve as well would charge for them twice.
+ *   - `capByMemory` divides `totalBytes`, a static figure that nets out
+ *     nothing. The unchargeable agents are absent from its numerator and so the
+ *     static ceiling describes a machine with no supervisors on it.
+ *
+ * So the reserve belongs to the STATIC cap and only there. It is `exempt ×
+ * this figure`, and `exempt` is the count `readCapacity` already carries from
+ * the registry — no new plumbing, and in particular no join from a process to
+ * an agent, which is the thing this daemon cannot currently do.
+ *
+ * SEEDED HIGH, DELIBERATELY, and the direction is the opposite of a divisor's.
+ * A reserve is SUBTRACTED from a budget, so under-reserving leaves a larger
+ * budget and admits MORE agents — "conservative" means the larger number here
+ * and the larger number there, which is why this constant and
+ * {@link MEASURED_AGENT_COST} are both stated rather than derived from one
+ * another. 950 MB is above every supervising tree measured on this machine on
+ * 2026-08-12 — 761, 762, 872 and 904 MB across three 60s windows — rather than
+ * at the middle of them: an over-reserve costs one agent slot, an under-reserve
+ * costs a machine.
+ *
+ * IT WAS 900 MB WHEN THIS PARAGRAPH WAS FIRST WRITTEN, AND THE PARAGRAPH SAID
+ * "above every supervising tree" WITH 904 IN ITS OWN LIST. Recorded rather than
+ * quietly corrected, because it is this epic's signature defect committed
+ * inside the change that is about it: a field that explains itself, making a
+ * claim its own data refutes. Note which way it failed — a reserve seeded
+ * beneath an observed reading under-reserves, which is the direction the rest
+ * of this file exists to prevent. The fix was to raise the constant, not to
+ * soften the sentence: 900 could have been defended as clearing every tree's
+ * MEAN (883, 761, 762), and a claim that has to be narrowed to survive its own
+ * evidence is the wrong half to keep.
+ *
+ * It is a seed and it is labelled one. This daemon has never had an
+ * unchargeable agent of its own to measure, so the trees behind that range were
+ * another orchestrator's. When a CrabCast fleet with exempt agents exists, this
+ * is the constant to re-measure.
+ */
+export const EXEMPT_AGENT_MEMORY_BYTES = 950 * MIB;
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -658,7 +795,23 @@ export type HeadroomBound = 'cap' | 'cpu' | 'load' | 'memory' | 'stall';
 
 export interface Capacity {
   machine: MachineFacts;
+  /**
+   * The per-agent divisor actually used, AFTER the KAN-275 floor. Never below
+   * {@link MEASURED_AGENT_COST} on a dimension the operator did not override.
+   */
   cost: AgentCost;
+  /**
+   * What the override/measured/seed precedence chose BEFORE the floor was
+   * applied. Equal to `cost` in the ordinary case; lower on any dimension the
+   * floor raised. Reported so the arithmetic stays reproducible by hand when a
+   * measurement was overruled — see {@link flooredDimensions}.
+   */
+  costBeforeFloor: AgentCost;
+  /**
+   * Which dimensions the floor raised, so a report can say the measurement was
+   * not what divided. Empty in the ordinary case.
+   */
+  flooredDimensions: Array<keyof AgentCost>;
   /** Where each dimension of `cost` came from: override, measured, or seed. */
   costSource: { residentBytes: CostSource; cores: CostSource };
   /**
@@ -667,6 +820,18 @@ export interface Capacity {
    */
   measured: MeasuredAgentCost | null;
   reservedForHuman: { cores: number; bytes: number };
+  /**
+   * Memory held back on the STATIC cap for agents this daemon does not charge
+   * (KAN-275): `exemptAgents × EXEMPT_AGENT_MEMORY_BYTES`, zero when there are
+   * none.
+   *
+   * It is subtracted from `capByMemory`'s budget and deliberately NOT from
+   * `headroomByMemory`'s, because that term divides `availableBytes` and the
+   * kernel has already taken this memory out of it. Two terms, two bases, one
+   * reserve — see EXEMPT_AGENT_MEMORY_BYTES for why applying it to both would
+   * be a double charge.
+   */
+  exemptReserveBytes: number;
 
   /** Concurrent *charged* agents this hardware supports, load aside. */
   cap: number;
@@ -816,8 +981,19 @@ export function computeCapacity(
   };
   const resident = pick('residentBytes');
   const coreCost = pick('cores');
-  const cost: AgentCost = { residentBytes: resident.value, cores: coreCost.value };
   const costSource = { residentBytes: resident.source, cores: coreCost.source };
+  // What the precedence rule alone chose, kept so the report can say what the
+  // floor below changed and by how much. A correction whose effect is invisible
+  // is one a reader assumes is not happening — the same argument `startsLine`
+  // and `stallLine` are printed-when-inert for.
+  const costBeforeFloor: AgentCost = { residentBytes: resident.value, cores: coreCost.value };
+  // KAN-275: a measured divisor is raised to the seed; an override is honoured
+  // outright. See flooredCost for why the population behind the measurement is
+  // not known to be this daemon's, and what that costs.
+  const cost = flooredCost(costBeforeFloor, costSource);
+  const flooredDimensions: Array<keyof AgentCost> = [];
+  if (cost.residentBytes > costBeforeFloor.residentBytes) flooredDimensions.push('residentBytes');
+  if (cost.cores > costBeforeFloor.cores) flooredDimensions.push('cores');
   const configuredCap = options.configuredCap ?? null;
 
   const reservedCores = humanReserveCores(machine.cores);
@@ -829,8 +1005,16 @@ export function computeCapacity(
   // — see the header: only charged agents are charged.
   const cpuBudget = machine.cores - reservedCores - HERDR_OVERHEAD_CORES;
   const capByCpu = Math.floor(Math.max(0, cpuBudget) / cost.cores);
+  // KAN-275: the STATIC ceiling nets out the agents it does not charge, because
+  // its numerator is `totalBytes` and nets out nothing by itself. This is the
+  // one term the reserve belongs to — `headroomByMemory` below divides
+  // `availableBytes`, from which the kernel has already taken these agents, and
+  // subtracting there as well would charge for them twice. See
+  // EXEMPT_AGENT_MEMORY_BYTES.
+  const exemptRunning = options.exemptRunning ?? 0;
+  const exemptReserveBytes = exemptRunning * EXEMPT_AGENT_MEMORY_BYTES;
   const capByMemory = Math.floor(
-    Math.max(0, machine.totalBytes - reservedBytes) / cost.residentBytes
+    Math.max(0, machine.totalBytes - reservedBytes - exemptReserveBytes) / cost.residentBytes
   );
 
   let cap: number;
@@ -950,16 +1134,19 @@ export function computeCapacity(
   return {
     machine,
     cost,
+    costBeforeFloor,
+    flooredDimensions,
     costSource,
     measured,
     reservedForHuman: { cores: reservedCores, bytes: reservedBytes },
+    exemptReserveBytes,
     cap,
     capByCpu,
     capByMemory,
     capBoundBy,
     configuredCap,
     running,
-    exemptAgents: options.exemptRunning ?? 0,
+    exemptAgents: exemptRunning,
     headroom,
     headroomByCap,
     headroomByCpu,
@@ -1207,10 +1394,32 @@ export function describeCapacity(c: Capacity): string {
   // Every cost figure carries its provenance, because the divisor can now be
   // a measurement: a reader must be able to tell a number this fleet produced
   // from the 2026-07-31 seed and from a number the operator typed in.
+  // A dimension the floor raised still has `costSource` 'measured' — the
+  // measurement is what the precedence rule picked — but the number dividing is
+  // the seed's. Saying only "measured" there would be the KAN-44 mislabelling
+  // exactly: a figure nobody measured on this fleet, presented as one that was.
+  const flooredNote = (dim: keyof AgentCost) =>
+    c.flooredDimensions.includes(dim) ? `${c.costSource[dim]}, raised to the seed floor` : c.costSource[dim];
   lines.push(
-    `agent cost: ${Math.round(c.cost.residentBytes / MIB)} MB resident (${c.costSource.residentBytes}), ` +
-    `${c.cost.cores} core while active (${c.costSource.cores})`
+    `agent cost: ${Math.round(c.cost.residentBytes / MIB)} MB resident (${flooredNote('residentBytes')}), ` +
+    `${c.cost.cores} core while active (${flooredNote('cores')})`
   );
+  if (c.flooredDimensions.length) {
+    lines.push(
+      `  floored (KAN-275): ` +
+      c.flooredDimensions
+        .map((dim) =>
+          dim === 'cores'
+            ? `${c.costBeforeFloor.cores} core would have divided, seed floor ${MEASURED_AGENT_COST.cores}`
+            : `${Math.round(c.costBeforeFloor.residentBytes / MIB)} MB would have divided, ` +
+              `seed floor ${Math.round(MEASURED_AGENT_COST.residentBytes / MIB)} MB`
+        )
+        .join('; ') +
+      ` — a measured divisor is raised to the seed because nothing joins a measured ` +
+      `process tree to an agent record, so the sample is not known to be this daemon's. ` +
+      `The measurement can still charge MORE than the seed; it can no longer charge less`
+    );
+  }
   if (c.measured) {
     const beaten: string[] = [];
     if (c.costSource.residentBytes === 'override') {
@@ -1219,16 +1428,24 @@ export function describeCapacity(c: Capacity): string {
     if (c.costSource.cores === 'override') {
       beaten.push(`CRABCAST_AGENT_CORES overrides its ${c.measured.cores} core`);
     }
+    // KAN-275: the tree count is NOT a count of this daemon's agents, and used
+    // to sit one line above `running: N charged agent(s)` as though it were.
+    // On the machine this was written on those read `4 tree(s)` and `running:
+    // 0` simultaneously, and the contradiction went unread for a day. The
+    // sampler measures every agent-runtime tree on the machine, whoever started
+    // it, because there is nothing to join a tree to an agent by.
     lines.push(
       `  measured (damped): ${Math.round(c.measured.residentBytes / MIB)} MB, ` +
-      `${c.measured.cores} core per agent tree — ${c.measured.agentTrees} tree(s) ` +
+      `${c.measured.cores} core per agent tree — ${c.measured.agentTrees} agent-runtime ` +
+      `tree(s) found ON THIS MACHINE, not necessarily this daemon's and not compared ` +
+      `against its ${c.running} charged / ${c.exemptAgents} exempt agent(s); ` +
       `over a ${Math.round(c.measured.windowSeconds)}s window ` +
       `ending ${new Date(c.measured.sampledAt).toISOString()}` +
       (beaten.length ? `; ignored: ${beaten.join(', ')}` : '')
     );
   } else if (c.costSource.residentBytes === 'seed' || c.costSource.cores === 'seed') {
     lines.push(
-      '  no live measurement; seed figures are the 2026-07-31 constants, ' +
+      '  no live measurement; seed figures are constants re-derived on 2026-08-12, ' +
       'not a measurement of this fleet'
     );
   }
@@ -1248,8 +1465,15 @@ export function describeCapacity(c: Capacity): string {
       `cap: ${c.cap} charged agents — ` +
       `CPU allows ${c.capByCpu} ((${m.cores} cores − ${c.reservedForHuman.cores} reserved ` +
       `− ${HERDR_OVERHEAD_CORES} for herdr) ÷ ${c.cost.cores} core/agent), ` +
-      `memory allows ${c.capByMemory} ((${gib(m.totalBytes)} − ${gib(c.reservedForHuman.bytes)}) ` +
-      `÷ ${Math.round(c.cost.residentBytes / MIB)} MB/agent)` +
+      `memory allows ${c.capByMemory} ((${gib(m.totalBytes)} − ${gib(c.reservedForHuman.bytes)}` +
+      // Printed only when it is non-zero: an unconditional "− 0.0 GiB for 0
+      // exempt agent(s)" is noise on the ordinary report, and unlike the stall
+      // and starts terms this one cannot silently stop doing its job — it is
+      // arithmetic on a count the same report prints two lines down.
+      (c.exemptReserveBytes > 0
+        ? ` − ${gib(c.exemptReserveBytes)} for ${c.exemptAgents} uncharged agent(s)`
+        : '') +
+      `) ÷ ${Math.round(c.cost.residentBytes / MIB)} MB/agent)` +
       (c.capBoundBy === 'floor'
         ? '; both said 0, floored to 1 because a machine that can run nothing is not a useful answer'
         : `; bound by ${c.capBoundBy}`)
@@ -1259,7 +1483,10 @@ export function describeCapacity(c: Capacity): string {
   lines.push(
     `running: ${c.running} charged agent(s)` +
     (c.exemptAgents > 0
-      ? `, plus ${c.exemptAgents} uncharged agent(s) (not counted against the cap)`
+      ? `, plus ${c.exemptAgents} uncharged agent(s) — not counted against the cap, but ` +
+        `${gib(c.exemptReserveBytes)} is now held off the static memory ceiling for them ` +
+        `(KAN-275); the live memory term needs no such reserve because MemAvailable has ` +
+        `already had their memory taken out of it`
       : '')
   );
   // Every term prints its own arithmetic, including the one that did not bind
