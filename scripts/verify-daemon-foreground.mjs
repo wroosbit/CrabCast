@@ -16,6 +16,22 @@
 // command quietly becoming a detached spawn — §3 pins the daemon's own pid to
 // the child this script started, which a detached spawn cannot satisfy.
 //
+// AND (KAN-323) §8 catches a failure of this script's own housekeeping: a
+// daemon left running under this run's scratch root when the script exits.
+// That is not hypothetical and it is not about the pristine build. Driving §3
+// red requires a mutation that makes `crabcast daemon` spawn detached — red
+// drive 2 on PR #74 — and under it the daemon is a GRANDCHILD: the child this
+// script holds exits 0, `started` has nothing left to kill, and the daemon
+// serving on the scratch socket outlives the run. Measured on 2026-08-11:
+// `pid 538617` still listening on
+// `/tmp/crabcast-fg-hsd8WC/one/.crabcast/crabcast.sock` twenty-eight minutes
+// after the run finished; reproduced at `197dd46` on 2026-08-12 as `pid
+// 1533487` on `/tmp/crabcast-fg-abDNiK/one/.crabcast/crabcast.sock`. Harmless
+// in itself — its own scratch dataDir, its own socket — and the cost is a
+// later reader's false lead, because a stray process answering on a path
+// ending `crabcast.sock` is exactly what a socket check trips over. They also
+// accumulate, one per mutation run, unbounded.
+//
 // ---------------------------------------------------------------------------
 // WHAT THIS SCRIPT SUPPLIES ITSELF, AND WHAT THAT LEAVES UNCOVERED (KAN-170).
 //
@@ -42,12 +58,41 @@
 // to be one this CLI actually has. A unit template in prose is exactly the
 // artifact that rots silently.
 //
+// ---------------------------------------------------------------------------
+// §8 STAGES ITS OWN SURVIVOR, AND THAT IS THE EDGE OF WHAT IT COVERS (KAN-323).
+//
+// On the pristine build every daemon here is a direct child, so the reaper
+// §8 guards would have nothing to catch and "no survivors" would be true of a
+// run that never risked one — the vacuous pass this suite exists to distrust.
+// So §8 stages a survivor of the shape the mutation produces: an intermediate
+// process that spawns `dist/daemon.js` detached and exits, leaving a daemon
+// that is nobody's child and is not in `started`. It then runs the same reaper
+// the teardown runs, and ASSERTS nothing answers on any scratch socket and no
+// process under this run's scratch root is left on the process table.
+//
+// WHAT THAT LEAVES UNCOVERED, named rather than implied: §8 supplies its own
+// survivor, so it proves the reaper catches one — not that red drive 2's
+// grandchild takes the same route. Nothing in this file can cover that, because
+// the mutation is a source edit applied by hand and is not in the repository.
+// WHO COVERS IT: the PR that applies the mutation, by pasting the process-table
+// count taken after the run. Before this change that count was 1; the PR for
+// KAN-323 records it at 0 over five consecutive mutated runs. There is no
+// standing check, and there will not be one while the mutation lives in prose.
+//
+// A DIFFERENT FAILURE, DELIBERATELY NOT FIXED HERE: an INTERRUPTED run.
+// `process.on('exit')` does not fire for SIGINT, so Ctrl-C during a run still
+// leaves whatever was up. That is the subject of
+// `verify-proof-cleans-up-when-interrupted.mjs`, whose target is
+// `verify-send-confirms-delivery.mjs` and not this script — so the gap is real
+// and is named here rather than half-closed with a handler nobody has watched
+// go red.
+//
 // No herdr and no network: nothing below activates an agent. Every child runs
 // under a scratch $HOME, so the DEFAULT data dir this script reasons about in
 // §1 is a scratch one and never the machine's real ~/.local/share/crabcast —
 // which on a developer box may well have a live daemon in it.
 
-import { spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -83,12 +128,104 @@ const defaultDataDir = path.join(fakeHome, '.local', 'share', 'crabcast');
 const defaultSocket = path.join(defaultDataDir, 'crabcast.sock');
 
 const started = [];
+
+// ------------------------------------------------------------------ reaping
+//
+// KAN-323. Killing the children in `started` is not the same job as leaving
+// nothing running, and the difference is a whole process: a daemon this script
+// caused to exist but never fathered is invisible to every handle here. So the
+// instrument is the PROCESS TABLE, filtered by this run's scratch root — which
+// `mkdtempSync` makes unique, so nothing below can match a process this run did
+// not cause. The idiom, and the reason for the canary under it, are
+// `verify-proof-cleans-up-when-interrupted.mjs`'s.
+
+/** Sleep without an await, so the same reaper serves `process.on('exit')`. */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Pids of this repo's node entrypoints whose command line names this run's
+ * scratch root.
+ *
+ * TWO CONDITIONS, and the second is not belt-and-braces. Anchoring on the full
+ * scratch path is what keeps a scratch socket from being confused with the
+ * machine's real one — but a path substring matches ANY process that merely
+ * mentions it, a shell included, and this list is a kill list. Measured while
+ * writing this section: a `bash -c` line that named the scratch root was
+ * counted as a survivor by a hand-run version of exactly this match. So a row
+ * also has to BE one of the two programs this script starts, read off `argv[1]`
+ * where a shell cannot put it.
+ */
+function processesUnderScratch() {
+  let out;
+  try {
+    out = execFileSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' });
+  } catch {
+    return [];
+  }
+  return out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.includes(scratch))
+    .filter((line) => /dist\/(daemon|cli)\.js$/.test(line.split(/\s+/)[2] ?? ''))
+    .map((line) => Number(line.split(/\s+/)[0]))
+    .filter((pid) => Number.isFinite(pid) && pid !== process.pid);
+}
+
+/** That `ps` is answering at all, so a zero from it is a measurement. */
+function psWorks() {
+  try {
+    return execFileSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' }).split('\n').length > 5;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * SIGTERM everything under the scratch root, then SIGKILL what is left.
+ *
+ * SIGTERM first because §4 is the assertion that it is a clean stop — a reaper
+ * that reaches for SIGKILL immediately would leave the socket file behind and
+ * make this script's own debris look different from the debris it is judging.
+ * Returns whatever is STILL running, so the caller asserts on a measurement
+ * rather than on the fact that the calls were made.
+ */
+function reapScratchProcesses(waitMs = 5_000) {
+  let pids = processesUnderScratch();
+  if (pids.length === 0) return [];
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {}
+  }
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    pids = processesUnderScratch();
+    if (pids.length === 0) return [];
+    sleepSync(100);
+  }
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {}
+  }
+  sleepSync(500);
+  return processesUnderScratch();
+}
+
 process.on('exit', () => {
   for (const child of started) {
     try {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     } catch {}
   }
+  // The backstop, not the mechanism: §8 reaps and then asserts, so by the time
+  // this runs there is normally nothing left. It is what covers a run that
+  // threw before reaching §8.
+  try {
+    reapScratchProcesses(2_000);
+  } catch {}
 });
 
 function cli(args, opts = {}) {
@@ -125,13 +262,44 @@ function startForeground(configPath, label) {
   return child;
 }
 
+/** Every dataDir this run has pointed a daemon at, for §8 to sweep. */
+const managed = [];
+
 function makeConfig(name) {
   const dir = path.join(scratch, name);
   const dataDir = path.join(dir, '.crabcast');
   fs.mkdirSync(dir, { recursive: true });
   const configPath = path.join(dir, 'crabcast.config.json');
   fs.writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
-  return { dir, dataDir, configPath, socket: path.join(dataDir, 'crabcast.sock') };
+  const cfg = { name, dir, dataDir, configPath, socket: path.join(dataDir, 'crabcast.sock') };
+  managed.push(cfg);
+  return cfg;
+}
+
+/**
+ * How many times a daemon was positively observed answering on a scratch
+ * socket. §8's anti-vacuity precondition: a sweep that finds no survivors
+ * proves nothing about a run where nothing was ever up to survive.
+ */
+let listenersObserved = 0;
+
+/**
+ * Who is serving on `cfg`'s socket, asked over that socket.
+ *
+ * `daemon-status` is the right question and the safe one: `spawnsDaemon` is
+ * false for it, so asking cannot create the thing it is asking about. The
+ * `data dir:` cross-check is the path anchoring again — a pid this script is
+ * willing to signal has to have said, on the socket inside this run's own
+ * scratch root, that it is serving that dataDir.
+ */
+function daemonOnSocket(cfg) {
+  const r = cli(['daemon-status', '--config', cfg.configPath], { timeout: 30_000 });
+  const out = r.stdout ?? '';
+  const pid = Number((out.match(/pid:\s+(\d+)/) ?? [])[1]);
+  const dataDir = ((out.match(/data dir:\s+(.+)/) ?? [])[1] ?? '').trim();
+  const mine = r.status === 0 && Number.isFinite(pid) && dataDir === cfg.dataDir;
+  if (mine) listenersObserved += 1;
+  return { exit: r.status, pid, dataDir, mine };
 }
 
 // ---------------------------------------------------------------- 1. the gap
@@ -233,13 +401,13 @@ check(
   `exitCode ${fg.exitCode}`
 );
 
-const status = cli(['daemon-status', '--config', one.configPath]);
-check(status.status === 0, '`daemon-status` answers over that socket', `exit ${status.status}`);
+const status = daemonOnSocket(one);
+check(status.exit === 0, '`daemon-status` answers over that socket', `exit ${status.exit}`);
 
 // THE distinguishing assertion. A detached spawn would also produce a working
 // socket; what makes this a foreground process a supervisor can own is that
 // the daemon's pid IS the child this script is holding.
-const reportedPid = Number(((status.stdout ?? '').match(/pid:\s+(\d+)/) ?? [])[1]);
+const reportedPid = status.pid;
 check(
   reportedPid === fg.pid,
   'the daemon reporting on that socket IS the foreground child',
@@ -288,10 +456,10 @@ check(
   incumbent.exitCode === null,
   'the incumbent is untouched by the attempt'
 );
-const afterRace = cli(['daemon-status', '--config', one.configPath]);
-const afterPid = Number(((afterRace.stdout ?? '').match(/pid:\s+(\d+)/) ?? [])[1]);
+const afterRace = daemonOnSocket(one);
+const afterPid = afterRace.pid;
 check(
-  afterRace.status === 0 && afterPid === incumbent.pid,
+  afterRace.exit === 0 && afterPid === incumbent.pid,
   'and it is still the one serving',
   `pid ${afterPid} vs incumbent ${incumbent.pid}`
 );
@@ -368,8 +536,78 @@ check(
   'and it states that reboot survival is predicted rather than observed'
 );
 
+// ------------------------------------------- 8. this proof leaves nothing up
+
+rule('8. NOTHING IS STILL RUNNING UNDER THIS RUN’S SCRATCH ROOT');
+
+// The instrument first. An absence read off a `ps` that did not answer is the
+// same false negative this suite keeps finding, so the zero below has to be a
+// measurement before it is allowed to be a verdict.
+check(psWorks(), 'CANARY: the process table is readable, so a zero from it means zero');
+
+// And the vacuity precondition, in the shape KAN-330 used: a sweep for
+// survivors over a run that never had a daemon up would pass with nothing
+// behind it. §3 and §5 asked `daemon-status` on a scratch socket and got a pid;
+// this is that count.
+check(
+  listenersObserved > 0,
+  'PRECONDITION: a daemon really was serving on a scratch socket earlier in this run',
+  `${listenersObserved} observation(s)`
+);
+
+// A survivor of the shape red drive 2 produces: an intermediate that spawns the
+// daemon detached and exits, so the daemon is nobody's child. `dist/daemon.js`
+// detached with `unref()` is what `spawnDaemon` (src/ipc.ts) does on every
+// client verb, which is what that mutation makes `crabcast daemon` do too.
+const three = makeConfig('three');
+const spawnerPath = path.join(scratch, 'detach-and-exit.mjs');
+fs.writeFileSync(
+  spawnerPath,
+  `import { spawn } from 'node:child_process';\n` +
+    `const child = spawn(process.execPath, [process.argv[2], process.argv[3]], ` +
+    `{ detached: true, stdio: 'ignore' });\n` +
+    `child.unref();\n`
+);
+const spawner = spawnSync(
+  process.execPath,
+  [spawnerPath, path.join(repoRoot, 'dist', 'daemon.js'), three.configPath],
+  { encoding: 'utf8', env: ENV, cwd: scratch, timeout: 30_000 }
+);
+check(spawner.status === 0, 'the intermediate that detaches the daemon exits', `exit ${spawner.status}`);
+check(await waitFor(() => fs.existsSync(three.socket)), 'and an orphaned daemon is serving', three.socket);
+
+const orphan = daemonOnSocket(three);
+const trackedPids = started.map((c) => c.pid);
+check(
+  orphan.mine && !trackedPids.includes(orphan.pid),
+  'PRECONDITION: it is a survivor `started` cannot reach — the case the child handles miss',
+  `pid ${orphan.pid}; started holds ${JSON.stringify(trackedPids)}`
+);
+
+// The reaper, and then the measurement. This is the assertion the ticket asked
+// for: not "the cleanup ran" and not "the code says nothing should be left",
+// but the process table and the sockets, read after the sweep.
+const survivors = reapScratchProcesses();
+check(
+  survivors.length === 0,
+  'REAPED: nothing under this run’s scratch root is left on the process table',
+  `survivors ${JSON.stringify(survivors)}`
+);
+
+const answering = managed.filter((cfg) => daemonOnSocket(cfg).mine);
+check(
+  answering.length === 0,
+  'and nothing answers on any socket this run created',
+  answering.map((cfg) => cfg.socket).join(', ')
+);
+
 // -------------------------------------------------------------------- verdict
 
+// Order matters: reaping happens above, while the sockets still exist to be
+// asked. Removing the scratch root first would unlink them and leave a live
+// daemon holding a socket nothing on disk can find — measured on 2026-08-12,
+// where `rmSync` succeeded and `pid 1533487` went on listening on the deleted
+// path.
 try {
   fs.rmSync(scratch, { recursive: true, force: true });
 } catch {}
