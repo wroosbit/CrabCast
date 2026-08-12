@@ -14,6 +14,13 @@
 // reading a `from-newer` row's event vocabulary as though it were its own,
 // which contradicts that row's own stated reason in the same response.
 //
+// AND SINCE KAN-358, ONE MORE THAT IS NOT ABOUT THE DISCLOSURE'S CONTENT: a
+// build in which a SECOND rendering of a row has been written back into
+// `classifyLog`, where the raw `parsed` line is in scope. That is the shape the
+// deleted `scan.samples` had — a one-liner derived from `parsed` rather than
+// from the record, free to disagree with the notice about what a row said, and
+// read by nobody so that nothing would ever have shown the disagreement.
+//
 // ---------------------------------------------------------------------------
 // WHY THE FIXTURES ARE WRITTEN BY THE DAEMON AND THE EXPECTATIONS COME FROM THE
 // DOCUMENT — neither is a literal in this file, and that is load-bearing twice.
@@ -59,19 +66,33 @@
 // tree and no script in this repository can see it.
 //
 // AND ONE SEAM INSIDE THIS FILE, because the obvious reading of §5 is generous
-// to it. §5 has two halves against two different surfaces:
+// to it. THIS PARAGRAPH IS THE ONE THAT CAUGHT KAN-358 and it is kept rather
+// than deleted with what it disclosed — what changed is which sentence in it is
+// true, so the sentence is replaced and the habit is not.
 //
-//   * `describeUnreadableLog` is the notice the daemon PRINTS at boot
-//     (`src/daemon.ts` writes it to stderr and to `daemon.log`). The standing
-//     and the date being on that line is a fact about a surface somebody reads.
-//   * `scan.samples` is a list of one-liners that, as of this commit, NOTHING IN
-//     THE DAEMON CONSUMES — `describeUnreadableLog` builds its own lines from
-//     `scan.unreadable` and never touches `samples`. So §5b and §6d hold a real
-//     anti-drift property over a value with no reader today. They are worth
-//     keeping (the field is exported, and the single-derivation rule is what
-//     stops the two renderings disagreeing if it ever gains one) but they must
-//     not be read as evidence that an operator sees anything. That the field is
-//     unconsumed at all is KAN-358, filed from this work and linked `Relates`.
+// WHAT IT USED TO SAY. §5 had two halves against two different surfaces: the
+// notice `describeUnreadableLog` returns, which `src/daemon.ts` writes to
+// stderr and to `daemon.log`, and `scan.samples`, a list of one-liners that
+// NOTHING IN THE DAEMON CONSUMED. §5b and §6d held a real anti-drift property
+// over a value with no reader, and this paragraph said so — "they must not be
+// read as evidence that an operator sees anything" — and filed KAN-358.
+//
+// WHAT IS TRUE NOW. KAN-358 deleted the field, and §5 is one surface: the
+// notice, which is read. The anti-drift property did not go with it. It is
+// carried by the type instead — `describeUnreadableLog(scan: LogVersionScan)`
+// cannot name the raw `parsed` row, and `classifyLog`, the one function where
+// `parsed` is in scope, no longer renders any text — so the second derivation
+// is unrepresentable rather than merely unobserved, and no assertion here is
+// standing in for it. §6d starves the notice's own two renders instead, which
+// is coverage this file did not have before.
+//
+// SO THE LIMIT THAT REPLACES THE OLD ONE, in the same spirit: everything §5
+// asserts is about the STRING this function returns. That `src/daemon.ts` calls
+// it, and that the string therefore reaches stderr and `daemon.log`, is read
+// off two call sites and not exercised here; and no script in this repository
+// establishes that an operator ever opens that log. §3 is the surface with a
+// consumer this file can actually reach, and it is the wire rather than the
+// notice.
 
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -79,6 +100,10 @@ import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// THE ONLY PROOF HERE THAT PARSES TYPESCRIPT, and §5b's header says why: the
+// property it holds is "no string-building use of a row", which has no common
+// surface form to grep for. A devDependency `npm ci` already installs.
+import ts from 'typescript';
 import { makeMutator } from './mutation.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -105,6 +130,14 @@ console.log('\n=== 0. Preconditions — a verdict read off a stale build is evid
 // second is a COUNTED FAILURE, because a `dist` older than `src` produces a
 // perfectly plausible run against the previous build — the outcome that misleads
 // in both directions, and the one this epic has been caught by twice.
+//
+// AND THIS FILE'S EXIT CODE IS A BLEND, which is worth knowing before anybody
+// reads a verdict off it (KAN-358). Every section except §5b imports from
+// `dist` and is therefore evidence about the BUILD. §5b reads
+// `src/agent-registry.ts` as text and is evidence about the TREE. So on a run
+// where the build is stale the guard above goes red and §5b's verdict is still
+// good, while everything else is about code nobody in this tree wrote. Read the
+// section, not the exit code.
 const daemonJs = path.join(distDir, 'daemon.js');
 if (!fs.existsSync(daemonJs)) {
   console.error('dist/daemon.js not found — run `npm run build` first');
@@ -132,7 +165,11 @@ check(
 );
 
 const registryMod = await import(path.join(distDir, 'agent-registry.js'));
-const { AgentRegistry, describeUnreadableLog, scanLogVersions, UNREADABLE_RAW_LIMIT } = registryMod;
+// `describeUnreadableLog` is deliberately NOT destructured here: §5 reaches it
+// through the module it was handed, so the identical assertion set runs against
+// a starved build in §6d. A convenient top-level binding is how half a section
+// ends up testing the real build while the other half tests the mutant.
+const { AgentRegistry, scanLogVersions, UNREADABLE_RAW_LIMIT } = registryMod;
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kan344-'));
 process.on('exit', () => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -648,71 +685,535 @@ console.log('\n=== 5. The boot notice is rendered FROM the record, not derived a
 // and `event` are NUMBERS: the record quotes only strings, so it says "no event"
 // where a second derivation off `parsed` would print `67890`.
 //
-// TWO SURFACES, ASSERTED SEPARATELY, because they are rendered by different
-// code and only one of them is what §6d starves. `describeUnreadableLog` is the
-// operator's notice; `scan.samples` is the one-liner list. An earlier draft
-// asserted both against the notice and the sample assertion was VACUOUS —
-// `describeUnreadableLog` never prints the event at all, so a check that the
-// event was absent from it could not have failed.
-const NUMERIC_ROW = CASES.find((c) => c.name === 'unusable/non-string-at-and-event').row;
-
-{
-  const c = classify('notice', [CONTROL, ...CASES.map((x) => x.row)]);
-  const notice = describeUnreadableLog(c.scan);
-  const numeric = c.scan.unreadable.find((u) => u.claimsEvent === null && u.claimsAt === null);
-  check(Boolean(numeric), 'the numeric-fields fixture reached the notice', `identity=${numeric?.identity}`);
-  check(
-    !notice.includes('12345'),
-    "the notice does not date a row whose `at` is a number — it renders `claimsAt`, which quoted nothing",
-    'a second derivation off `parsed` would have printed 12345'
-  );
-  const dated = c.scan.unreadable.find((u) => u.claimsAt);
-  check(
-    Boolean(dated) && notice.includes(`the row dates itself ${dated.claimsAt}`),
-    'and it DOES date a row that names a string, so the check above is about the quoting rule rather than an empty notice',
-    dated ? `looked for "${dated.claimsAt}"` : 'no dated row to look for'
-  );
-  const retired = c.scan.unreadable.find((u) => u.standing === 'retired');
-  check(
-    Boolean(retired) && notice.includes(`(${retired.problem}, ${retired.standing})`),
-    "and it carries the standing on the operator's line, where it decides whether to read further",
-    retired ? `looked for "(${retired.problem}, ${retired.standing})"` : 'no retired row to look for'
-  );
-  check(
-    !/\bdelete\b/i.test(notice),
-    "and KAN-302's rule still holds: no remedy this notice offers destroys a record"
-  );
-}
-
-/**
- * The sample line for the numeric row, from whichever build is passed.
- *
- * A REGISTRY OF ITS OWN, holding only the control and that one row: samples stop
- * at `VERSION_SCAN_SAMPLES` (3), and in the full fixture set this row is eighth.
- * An earlier draft used the full set and compared two empty strings — the mutant
- * and the real build agreed because neither had reached the row.
- */
-function numericSample(mod, label) {
-  const dir = path.join(tmp, `samples-${label}`);
+// ONE SURFACE NOW, AND IT IS THE CONSUMED ONE (KAN-358). This section used to
+// have a second half asserting the same property over `scan.samples`, a list of
+// pre-rendered one-liners that nothing in the daemon read. That field is gone,
+// and the property has not been dropped with it — it has moved from an
+// assertion to the type. `describeUnreadableLog` takes a `LogVersionScan`, in
+// which the raw `parsed` row is not nameable, and `classifyLog` — the one place
+// `parsed` IS in scope — now renders no text at all. So the re-derivation the
+// old §6d starved cannot be written any more, which is why §6d below starves
+// something else: the two values this notice DOES render, neither of which had
+// ever been shown capable of going missing.
+//
+// WHY THE EVENT IS NOT ASSERTED HERE, kept from the draft that got it wrong:
+// `describeUnreadableLog` never prints `claimsEvent` at all, so a check that
+// the event is absent from the notice could not fail. `claimsEvent` is held by
+// §2 (the record) and §3 (both wire surfaces), which is where it is consumed.
+//
+// The assertions are a function so §6d can run the identical set against a
+// starved build and require NAMED ones to fail, exactly as §6 does with §2's.
+function assertNotice(mod, label) {
+  const dir = path.join(tmp, `notice-${label}`);
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, 'agents.jsonl');
-  fs.writeFileSync(file, [CONTROL, NUMERIC_ROW].map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const rows = [CONTROL, ...CASES.map((x) => x.row)];
+  fs.writeFileSync(file, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
   const scan = mod.scanLogVersions(file);
-  return { samples: scan.samples.join('\n'), disclosed: scan.unreadable.length };
+  const notice = mod.describeUnreadableLog(scan);
+
+  const results = [];
+  const say = (ok, name, detail) => results.push({ ok, name, detail });
+
+  // --- the vacuity guards, before any assertion about the text --------------
+  // Every negative check below ("the notice does not say X") is satisfied for
+  // free by a notice that reached no row, so what the rows are has to be
+  // established first — and separately, so a starve that broke the fixtures
+  // rather than the render cannot credit itself with the red.
+  const numeric = scan.unreadable.find((u) => u.claimsEvent === null && u.claimsAt === null);
+  const dated = scan.unreadable.find((u) => u.claimsAt);
+  const retired = scan.unreadable.find((u) => u.standing === 'retired');
+  say(
+    scan.unreadable.length === CASES.length,
+    'vacuity: the notice was built over every fixture row',
+    `${scan.unreadable.length} disclosed, ${CASES.length} expected`
+  );
+  say(Boolean(numeric), 'vacuity: the numeric-fields fixture reached the notice', `identity=${numeric?.identity}`);
+  say(Boolean(dated), 'vacuity: a row naming a STRING date reached the notice', `claimsAt=${dated?.claimsAt}`);
+  say(Boolean(retired), 'vacuity: a retired row reached the notice', `identity=${retired?.identity}`);
+  say(
+    notice.split('\n').filter((l) => /^ {2}line \d+:/.test(l)).length === CASES.length,
+    'vacuity: the notice printed one per-row line per fixture, so the greps below are over text that exists',
+    `${notice.split('\n').filter((l) => /^ {2}line \d+:/.test(l)).length} row line(s) of ${CASES.length}`
+  );
+
+  say(
+    !notice.includes('12345'),
+    'notice: it does not date a row whose `at` is a NUMBER — it renders `claimsAt`, which quoted nothing',
+    'a second derivation off `parsed` would have printed 12345'
+  );
+  say(
+    Boolean(dated) && notice.includes(`the row dates itself ${dated.claimsAt}`),
+    'notice: and it DOES date a row that names a string, so the check above is about the quoting rule rather than an empty notice',
+    dated ? `looked for "${dated.claimsAt}"` : 'no dated row to look for'
+  );
+  say(
+    Boolean(retired) && notice.includes(`(${retired.problem}, ${retired.standing})`),
+    "notice: it carries the standing on the operator's line, where it decides whether to read further",
+    retired ? `looked for "(${retired.problem}, ${retired.standing})"` : 'no retired row to look for'
+  );
+  say(
+    !/\bdelete\b/i.test(notice),
+    "notice: and KAN-302's rule still holds — no remedy this notice offers destroys a record"
+  );
+  return results;
 }
 
+for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.detail);
+
+// --- 5b. and there is exactly ONE rendering of a row --------------------------
+//
+// THE ONE STATIC SECTION IN THIS FILE, and both halves of that matter. It reads
+// `src/agent-registry.ts` rather than `dist`, so its verdict is about the code
+// in this tree — a stale or failed build can neither redden nor green it, which
+// is the opposite of every section above and is why this script's exit code
+// must not be read as a single kind of evidence. It is also the only section
+// that CAN hold this property, because the property is an absence and an
+// absence has no runtime behaviour to assert on.
+//
+// WHAT IT DEFENDS, narrowly, because the obvious version of the sentence
+// overclaims and this epic is about sentences that outrun their mechanism:
+//
+//   * `describeUnreadableLog` cannot re-derive a row — it takes a
+//     `LogVersionScan`, in which `parsed` is not nameable. TRUE BY
+//     CONSTRUCTION, true before KAN-358, and not this check's business.
+//   * The file holds exactly ONE rendering of a row, so there is nothing for
+//     that rendering to drift against. TRUE ONLY WHILE `classifyLog` STAYS
+//     EMPTY OF TEXT. That loop is the only scope a raw `parsed` row is
+//     reachable from, nothing in the type system stops a second render being
+//     written there, and until KAN-358 there WAS one — the `scan.samples`
+//     one-liner, which §5b and §6d used to defend precisely because it could
+//     drift. This is the assertion that replaces them.
+//
+// IT MATCHES `bad` AS WELL AS `parsed`, AND THAT STRICTNESS IS DELIBERATE. A
+// second render built from the RECORD cannot disagree with the notice about
+// what a row said — KAN-344 had already fixed the deleted line that far — so on
+// the drift argument alone `${bad.…}` would be harmless. It is matched anyway,
+// because the property this section holds is "exactly one rendering" and not
+// "no re-derivation": a second one is a second reader to keep in step, a second
+// place for a comment to claim an audience it does not have, and the whole of
+// what KAN-358 found. A render that must exist belongs in
+// `describeUnreadableLog`, where it is reachable and where §5 and §6d hold it.
+//
+// ---------------------------------------------------------------------------
+// WHY THIS PARSES RATHER THAN GREPS, and it is a finding on this PR rather than
+// a preference (review of #84).
+//
+// The first version of this section was a regex — `/\$\{(?:parsed|bad)\b…\}/g`
+// — and its assertion read "interpolates no row value into any string" while
+// its header claimed the property above: exactly one rendering. The reviewer
+// starved the gap between those two sentences and it opened. A
+// `console.error('[AgentRegistry] line ' + bad.line + ': ' + bad.identity)`
+// inserted into the loop is a second rendering, writes a row to stderr, and
+// contains no `${` at all — so the run stayed GREEN. **The guard erected to
+// stop a false comment recurring could not see that comment coming true**: the
+// sentence this whole ticket exists because of claimed those values were
+// "written to stderr once, at boot", and stderr concatenation is the one shape
+// the predicate did not cover.
+//
+// AND THE NEGATIVE CASE DID NOT REACH IT EITHER, which is the more instructive
+// half. It re-inserted the render as a TEMPLATE — the one shape the predicate
+// already matched — so it proved the predicate worked on its own vocabulary and
+// said nothing about coverage. A negative case drawn from the predicate it is
+// checking is the grep-that-has-only-found-nothing problem one level up. So
+// {@link DOCTORED} below carries four shapes, three of which the old regex
+// would have missed, and the section asserts that miss explicitly rather than
+// leaving the reader to take the widening on trust.
+//
+// ---------------------------------------------------------------------------
+// AND THE PREDICATE IS AN ALLOWLIST, NOT A LIST OF SINKS — which is the epic's
+// own rule applied to its own review, and the second thing this section got
+// wrong before it got right.
+//
+// KAN-59: "do not close a category by adding the reviewer's named examples.
+// 'Your check misses A, B and C' is answered by closing the category, not by
+// adding three tests." The review named concatenation. The obvious fix — and
+// the one drafted first — was to enumerate the ways a row can become a string:
+// template span, `+`, `String`, `JSON.stringify`, `console.*`, `.join()`. That
+// is wider, and it is still a list of examples. **It has a residue and the
+// residue is nameable**: `emit(bad)`, where `emit` is any helper that
+// stringifies internally, walks through an enumeration of sinks exactly as
+// `console.error('…' + bad.line)` walked through the regex. Writing that
+// residue down honestly would have satisfied the reviewer and left the same
+// defect one step further out.
+//
+// SO THE QUESTION IS INVERTED. Rather than asking "is this one of the ways a
+// row becomes a string?", which can never be complete, it asks "is this one of
+// the handful of things `classifyLog` is allowed to do with a row?", which is
+// small, closed and legible: SEVEN calls, in `ALLOWED_CALLEES` below, and a
+// short list of read-only positions beside it — a comparison, a `typeof`, a
+// negation, a condition, an assignment target, and a spread into one of those
+// seven calls. Both lists are literals a reader can count, and the run reports
+// how many row references it checked them against rather than leaving that to
+// a number in a comment. Any other use of `parsed`, `bad` or `trimmed` is a failure,
+// including one through a helper that does not exist yet. A future author who
+// needs a new one adds it to `ALLOWED_CALLEES` deliberately, in a diff, where
+// it is reviewable — instead of the guard silently not applying.
+//
+// A TEXT PREDICATE CANNOT EXPRESS EITHER FORMULATION, which is why this parses
+// with the compiler that already builds this repository. `typescript` is a
+// devDependency, `npm ci` installs it, and this is the first proof here to use
+// it; the alternative was a wider regex, which is how the first version got
+// this wrong in the first place.
+//
+// ---------------------------------------------------------------------------
+// WHAT IS STILL NOT COVERED — stated at its NEAREST point, which is the lesson
+// both rounds of this review taught rather than a formality.
+//
+// A residue paragraph is worth nothing if it points further away than the real
+// edge. This one has been wrong that way twice. v1's said the property was
+// "exactly one rendering" while the mechanism saw `${…}`; v2's named "a helper
+// that stringifies internally", a whole-program problem, when the actual
+// nearest evasion was `const who = bad.identity` — two lines, no indirection,
+// inside the function the section reads. **Both times the paragraph made the
+// edge sound more exotic than it was, which is worse than saying nothing**,
+// because a reader takes the near cases as covered. So, precisely:
+//
+//   * THIS PARAGRAPH WAS WRONG A THIRD TIME AND THE THIRD IS THE SHARPEST. It
+//     named "one call out" as the nearest edge while `console.error('row: ' +
+//     lines[i])` — no call, no indirection, an INDEX — rendered a whole raw row
+//     and passed, because the reassurance about `lines` was sitting next to
+//     `ROW_ROOTS` rather than here. `lines` is now a root with its two
+//     structural uses named. Read the pattern rather than the three instances:
+//     every time this paragraph has been wrong it pointed FURTHER OUT than the
+//     truth, and twice the real edge was in a comment that read as coverage.
+//   * THE NEAREST UNCOVERED CASE IS ONE CALL OUT. A row handed to an
+//     `ALLOWED_CALLEES` entry is trusted, and this section reads ONE function,
+//     so if `classifyRow`, `toActivatedBy`, `toChannelEnabled` or the `push`
+//     rendered a row, nothing here would see it. `classifyRow` is the live one:
+//     it takes the whole `parsed` row and the raw line. Its own output IS the
+//     record, so it is the sanctioned reader — but "sanctioned" is a fact about
+//     today's body, not a guarantee, and no assertion holds it.
+//   * ADDING TO `ALLOWED_CALLEES` DEFEATS THIS ENTIRELY, by design. The
+//     protection is that doing so is an edit to this file, in a diff, next to
+//     this paragraph — not that it is impossible.
+//   * ONLY `classifyLog` IS READ. That is the whole scope where a raw `parsed`
+//     row is reachable, which is why it is the whole scope that needs reading;
+//     it is not a claim about the rest of the file.
+//
+// What is NOT in this list, because it is now closed: aliasing to a local, and
+// aliasing through an object spread. Both are refused at the binding rather
+// than chased through it, which is why this is an allowlist and not a dataflow
+// analysis — the reviewer asked for the residue named and would have rejected
+// the clever version, and taking a permission away was cheaper than either.
 {
-  const real = numericSample(registryMod, 'real');
+  const registrySrc = fs.readFileSync(path.join(repoRoot, 'src', 'agent-registry.ts'), 'utf8');
+
+  /** The identifiers inside `classifyLog` that hold a row, or part of one. */
+  const ROW_ROOTS = new Set(['parsed', 'bad', 'trimmed', 'lines']);
+  // `lines` IS one, and the reasoning that kept it out was the same mistake
+  // this section keeps making one level down (review of #84, third finding).
+  // The old comment said `lines` was excluded because the loop indexes and
+  // measures it structurally — TRUE — and then that "`trimmed` is
+  // `lines[i].trim()`, so the raw bytes are covered one step later". THAT HALF
+  // WAS A CLAIM ABOUT THE FUTURE. `trimmed` covers the bytes only for a render
+  // that reaches them THROUGH `trimmed`; `console.error('row: ' + lines[i])`
+  // never becomes a use of `trimmed` and was never seen. It renders a whole raw
+  // row to stderr, and it passed. The sentence was true of today's body, which
+  // is the one thing this section exists not to rely on.
+  //
+  // The false-positive problem it was avoiding is real and the inversion solves
+  // it the same way it solved aliasing: name the TWO structural uses rather
+  // than the unbounded set of bad ones. See LINES_SHAPES.
+
+  /**
+   * The ONLY calls `classifyLog` may hand a row to. Every one is a call that
+   * consumes the row structurally rather than rendering it: the parser that
+   * creates it, the type guard, the classifier, the two field normalizers, and
+   * the push onto the disclosure. `console.*`, `String`, `JSON.stringify` and
+   * every helper nobody has written yet are absent, and absent is the default.
+   */
+  const ALLOWED_CALLEES = new Set([
+    'JSON.parse', 'Array.isArray', 'classifyRow', 'toActivatedBy', 'toChannelEnabled',
+    'scan.unreadable.push', 'entries?.push'
+  ]);
+
+  /**
+   * Every use of a row value inside a named function that is NOT on the
+   * allowlist.
+   *
+   * Pure, and it takes the source as an argument, so the negative cases below
+   * run the IDENTICAL predicate over doctored copies — the §1b arrangement, and
+   * the only thing that stops an assertion about an absence passing because its
+   * anchor drifted rather than because the absence holds.
+   *
+   * @returns {{hits: Array<{why: string, code: string}>, body: string}|null}
+   */
+  function rowRenderingsIn(text, fnName) {
+    const sf = ts.createSourceFile(`${fnName}.ts`, text, ts.ScriptTarget.ES2022, true);
+    let fn = null;
+    const findFn = (n) => {
+      if (ts.isFunctionDeclaration(n) && n.name?.text === fnName) fn = n;
+      else if (!fn) ts.forEachChild(n, findFn);
+    };
+    ts.forEachChild(sf, findFn);
+    if (!fn?.body) return null;
+
+    const K = ts.SyntaxKind;
+    /** `===`, `!==`, `==`, `!=`, `&&`, `||`, `??`, `instanceof`, `in` — reading a row, never rendering it. */
+    const TEST_OPERATORS = new Set([
+      K.EqualsEqualsEqualsToken, K.ExclamationEqualsEqualsToken, K.EqualsEqualsToken,
+      K.ExclamationEqualsToken, K.AmpersandAmpersandToken, K.BarBarToken,
+      K.QuestionQuestionToken, K.InstanceOfKeyword, K.InKeyword
+    ]);
+
+    const hits = [];
+    // COUNTED, because "no use is off the allowlist" is trivially true of a
+    // body the walker never reached — a renamed identifier, a refactor that
+    // moved the loop, or a parse that found the wrong function. The number goes
+    // in the verdict rather than in a comment, so it cannot drift.
+    let refs = 0;
+    const flag = (node, why) =>
+      hits.push({ why, code: node.getText().replace(/\s+/g, ' ').slice(0, 60) });
+
+    /** Climb `parsed` up through `.a.b`, `(x as T)`, `x!`, `(x)` to the whole row expression. */
+    const outermost = (id) => {
+      let node = id;
+      while (
+        node.parent &&
+        (ts.isPropertyAccessExpression(node.parent) || ts.isElementAccessExpression(node.parent) ||
+         ts.isNonNullExpression(node.parent) || ts.isParenthesizedExpression(node.parent) ||
+         ts.isAsExpression(node.parent)) &&
+        node.parent.expression === node
+      ) node = node.parent;
+      return node;
+    };
+
+    const walk = (n) => {
+      if (ts.isIdentifier(n) && ROW_ROOTS.has(n.text)) {
+        const p0 = n.parent;
+        // A declaration's NAME, or a property that merely shares the spelling
+        // (`x.parsed`, `{ parsed: … }`), is not a reference to a row.
+        const isDeclName =
+          (ts.isVariableDeclaration(p0) && p0.name === n) ||
+          (ts.isParameter(p0) && p0.name === n) ||
+          (ts.isPropertyAccessExpression(p0) && p0.name === n) ||
+          (ts.isPropertyAssignment(p0) && p0.name === n);
+        if (!isDeclName) {
+          refs += 1;
+          const node = outermost(n);
+          const p = node.parent;
+          const calleeOf = (c) => c.expression.getText().replace(/\s+/g, '');
+          if (n.text === 'lines') {
+            // LINES_SHAPES — the only two things the loop does with the array.
+            // `lines.length` is a COUNT and carries no row bytes at all;
+            // `lines[i].trim()` is the single sanctioned way a row's bytes
+            // leave it, and what they become is `trimmed`, which the allowlist
+            // above then governs. A bare `lines[i]` anywhere else is a raw row
+            // in the open and fails.
+            const okLines =
+              (ts.isPropertyAccessExpression(node) && node.name.text === 'length') ||
+              (ts.isPropertyAccessExpression(node) && node.name.text === 'trim' &&
+                ts.isElementAccessExpression(node.expression) &&
+                ts.isCallExpression(node.parent) && node.parent.expression === node);
+            if (!okLines) {
+              flag(node, '`lines` may only be `lines.length` or `lines[i].trim()` — a raw row in the open');
+            }
+            ts.forEachChild(n, walk);
+            return;
+          }
+          // NOTE WHAT IS ABSENT: `const who = bad.identity` — a row value bound
+          // to a local. Nothing in `classifyLog` needs it (`const bad = …` and
+          // `let parsed` are declaration NAMES, skipped above, and the two rows
+          // it reads go straight into a call or a comparison), so the
+          // permission is not granted, and the cheapest evasion of a sink list
+          // — alias first, render the alias — is refused at the binding instead
+          // of chased through it. That is the review's residue closed by
+          // TAKING A PERMISSION AWAY rather than by adding dataflow analysis,
+          // which is the thing the reviewer said they would reject and which
+          // this deliberately is not.
+          const allowed =
+            // `parsed = JSON.parse(trimmed)`
+            (ts.isBinaryExpression(p) && p.operatorToken.kind === K.EqualsToken && p.left === node) ||
+            // `bad.problem === 'from-newer'`, `!parsed || …`
+            (ts.isBinaryExpression(p) && TEST_OPERATORS.has(p.operatorToken.kind)) ||
+            (ts.isPrefixUnaryExpression(p) && p.operator === K.ExclamationToken) ||
+            ts.isTypeOfExpression(p) ||
+            // `if (bad)`, `bad ? … : …`
+            (ts.isIfStatement(p) && p.expression === node) ||
+            (ts.isConditionalExpression(p) && p.condition === node) ||
+            (ts.isWhileStatement(p) && p.expression === node) ||
+            // `entries?.push({ ...(parsed as AgentLogEntry) })` — a spread, and
+            // ONLY into an object literal that is itself an argument to an
+            // allowed call. `const copy = { ...bad }` is the same evasion as the
+            // alias wearing a spread, so the object it spreads into has to be
+            // going somewhere sanctioned.
+            (ts.isSpreadAssignment(p) &&
+              ts.isObjectLiteralExpression(p.parent) &&
+              ts.isCallExpression(p.parent.parent ?? {}) &&
+              p.parent.parent.arguments.includes(p.parent) &&
+              ALLOWED_CALLEES.has(calleeOf(p.parent.parent))) ||
+            // an argument to one of the calls named above, and only those
+            (ts.isCallExpression(p) && p.arguments.includes(node) && ALLOWED_CALLEES.has(calleeOf(p)));
+          if (!allowed) {
+            const why = ts.isCallExpression(p) && p.arguments.includes(node)
+              ? `passed to ${calleeOf(p)}(), which is not on the allowlist`
+              : ts.isVariableDeclaration(p)
+                ? 'bound to a local — aliasing a row is not on the allowlist'
+                : `${ts.SyntaxKind[p.kind]} — not one of the uses \`classifyLog\` is allowed`;
+            flag(node, why);
+          }
+        }
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(fn.body);
+    return { hits, refs, body: fn.body.getText() };
+  }
+
+  // THE TWO PREDICATES THIS SECTION USED TO BE, kept executable rather than
+  // described, so that every negative case below reports which designs it
+  // defeats. A claim that a rewrite widened coverage is exactly the kind of
+  // sentence this epic keeps finding unsupported; these two make it measured.
+
+  /** v1: a regex over `${…}`. Review of #84 walked a concatenation through it. */
+  const V1_REGEX = (body) => [...body.matchAll(/\$\{(?:parsed|bad)\b[^}]*\}/g)].map((m) => m[0]);
+
+  /** v2: an enumeration of string sinks. The alias case walked through THIS one. */
+  const V2_SINKS = (body) => {
+    const sf = ts.createSourceFile('v2.ts', `function f(){${body}}`, ts.ScriptTarget.ES2022, true);
+    const STRINGIFIERS = new Set(['String', 'JSON.stringify']);
+    const EMITTERS = new Set([
+      'console.log', 'console.error', 'console.warn', 'console.info', 'console.debug',
+      'process.stderr.write', 'process.stdout.write'
+    ]);
+    const STRING_METHODS = new Set(['toString', 'join', 'concat', 'padStart', 'padEnd', 'repeat']);
+    const rootOf = (n) => {
+      let c = n;
+      while (
+        ts.isPropertyAccessExpression(c) || ts.isElementAccessExpression(c) ||
+        ts.isNonNullExpression(c) || ts.isParenthesizedExpression(c) || ts.isAsExpression(c)
+      ) c = c.expression;
+      return ts.isIdentifier(c) ? c.text : null;
+    };
+    // v2 never rooted `lines` — that is the whole of the third finding, so the
+    // replay must not silently acquire it.
+    const V2_ROOTS = new Set(['parsed', 'bad', 'trimmed']);
+    const isRow = (n) => V2_ROOTS.has(rootOf(n) ?? '');
+    const out = [];
+    const walk = (n) => {
+      if (ts.isTemplateSpan(n) && isRow(n.expression)) out.push(n.expression.getText());
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+        if (isRow(n.left)) out.push(n.left.getText());
+        if (isRow(n.right)) out.push(n.right.getText());
+      }
+      if (ts.isCallExpression(n)) {
+        const callee = n.expression.getText().replace(/\s+/g, '');
+        if (STRINGIFIERS.has(callee) || EMITTERS.has(callee)) {
+          for (const a of n.arguments) if (isRow(a)) out.push(a.getText());
+        }
+        if (
+          ts.isPropertyAccessExpression(n.expression) &&
+          STRING_METHODS.has(n.expression.name.text) && isRow(n.expression.expression)
+        ) out.push(n.expression.expression.getText());
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(sf);
+    return out;
+  };
+
+  const found = rowRenderingsIn(registrySrc, 'classifyLog');
   check(
-    real.disclosed === 1,
-    'the sample registry discloses exactly the one row the next assertion is about',
-    `${real.disclosed} disclosed`
+    Boolean(found) && found.body.includes('scan.unreadable.push(bad)'),
+    "5b: the parsed body really is `classifyLog`'s — a renamed function would otherwise make the check below pass over nothing",
+    found ? `${found.body.length} chars` : 'no `function classifyLog` in src/agent-registry.ts'
   );
   check(
-    real.samples.includes('no event') && !real.samples.includes('67890'),
-    "the sample line says `no event` for a row whose `event` is a number — one derivation, and it is the record's",
-    real.samples.trim()
+    Boolean(found) && found.refs > 0,
+    '5b: vacuity — the walker actually reached row references inside `classifyLog`, so the allowlist below is checked against something',
+    found ? `${found.refs} reference(s) to \`parsed\`/\`bad\`/\`trimmed\`/\`lines\`` : 'body not found'
   );
+  check(
+    Boolean(found) && found.hits.length === 0,
+    '5b: every use of `parsed`, `bad`, `trimmed` and `lines` in `classifyLog` is on the allowlist — parse, guard, classify, normalize, spread into a sanctioned push, and `lines` only as `lines.length` or `lines[i].trim()`. Anything else, INCLUDING BINDING A ROW TO A LOCAL OR READING A RAW LINE OUT OF THE ARRAY, is a failure, so the notice stays the only rendering',
+    found ? found.hits.map((h) => `${h.why}: ${h.code}`).join(' ; ') || `${found.refs} row reference(s) examined, none off-allowlist` : 'body not found'
+  );
+
+  // THE NEGATIVE CASES, and the point of the last two columns is that each one
+  // names WHICH DESIGN IT DEFEATS. `concatenation` is verbatim the mutation the
+  // reviewer of #84 used to walk through v1; `alias` is verbatim the one they
+  // used to walk through v2, at the head where v2 had just been declared a fix.
+  const DOCTORED = [
+    {
+      name: 'template',
+      code: "    scan.notes.push(`line ${bad.line}: ${parsed.event ?? 'no event'}`);\n",
+      v1Sees: true, v2Sees: true
+    },
+    {
+      name: 'concatenation',
+      code: "    console.error('[AgentRegistry] line ' + bad.line + ': ' + bad.identity + ' — ' + parsed.event);\n",
+      v1Sees: false, v2Sees: true
+    },
+    {
+      name: 'stringify-sink',
+      code: '    console.error(JSON.stringify(parsed));\n',
+      v1Sees: false, v2Sees: true
+    },
+    {
+      name: 'bare-emit',
+      code: '    console.error(bad.identity);\n',
+      v1Sees: false, v2Sees: true
+    },
+    {
+      // THE REVIEWER'S SECOND MUTATION, verbatim. Two lines, no helper, no
+      // indirection — by the time a sink sees them the values are `who` and
+      // `when`, and nothing rooted at a row reaches a `+` or an emitter.
+      name: 'alias',
+      code:
+        '    const who = bad.identity;\n' +
+        '    const when = parsed.at;\n' +
+        "    console.error('[AgentRegistry] ' + who + ' at ' + when);\n",
+      v1Sees: false, v2Sees: false
+    },
+    {
+      // THE REVIEWER'S THIRD MUTATION, verbatim. No call, no indirection, no
+      // alias — an INDEX. It reaches the row's raw bytes without ever touching
+      // `parsed`, `bad` or `trimmed`, which is why `lines` had to become a root
+      // with its two structural uses named rather than stay excluded.
+      name: 'raw-line',
+      code: "    console.error('[AgentRegistry] offending row: ' + lines[i]);\n",
+      v1Sees: false, v2Sees: false
+    },
+    {
+      // The same evasion wearing a spread, which is the one shape the allowlist
+      // has to permit for `entries?.push`. Permitted only INTO a sanctioned
+      // call, so this is refused where the real one is not.
+      name: 'spread-alias',
+      code:
+        '    const copy = { ...bad };\n' +
+        "    console.error('[AgentRegistry] ' + copy.identity);\n",
+      v1Sees: false, v2Sees: false
+    }
+  ];
+
+  const ANCHOR = '    scan.unreadable.push(bad);\n';
+  for (const d of DOCTORED) {
+    const doctored = registrySrc.replace(ANCHOR, ANCHOR + d.code);
+    check(
+      doctored !== registrySrc,
+      `5b/${d.name}: the doctored source differs from the real one, so this case tests a re-inserted render rather than a copy`
+    );
+    const after = rowRenderingsIn(doctored, 'classifyLog');
+    check(
+      Boolean(after) && after.hits.length > 0,
+      `5b/${d.name}: and the check goes RED when this shape of second rendering is put back inside the loop`,
+      after
+        ? after.hits.map((h) => `${h.why}: ${h.code}`).join(' ; ') ||
+          'it stayed GREEN, so §5b would not notice this rendering'
+        : 'body not found'
+    );
+    // What makes these six cases evidence about COVERAGE rather than six
+    // restatements of one predicate: what the two earlier designs would have
+    // said about each. Two of the six defeat BOTH of them.
+    const v1 = after ? V1_REGEX(after.body) : [];
+    const v2 = after ? V2_SINKS(after.body) : [];
+    check(
+      (v1.length > 0) === d.v1Sees && (v2.length > 0) === d.v2Sees,
+      `5b/${d.name}: and the two designs this replaced — the \`\${…}\` regex, then the sink enumeration — ${d.v1Sees ? 'saw' : 'did NOT see'} / ${d.v2Sees ? 'saw' : 'did NOT see'} it`,
+      `v1 ${v1.length} hit(s), v2 ${v2.length} hit(s)`
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -800,34 +1301,65 @@ for (const s of STARVES) {
   }
 }
 
-// --- 6d. and the anti-drift render, starved the same way ----------------------
-{
+// --- 6d. and the notice's own renders, starved the same way -------------------
+//
+// TWO STARVES OVER ONE SURFACE, REPLACING ONE OVER A SURFACE NOBODY READ
+// (KAN-358). What stood here mutated the `scan.samples` line back to
+// re-deriving the event off `parsed` and required the two renderings to
+// disagree. That line is gone: `describeUnreadableLog` cannot re-derive,
+// because `parsed` is not in its scope and `classifyLog` renders nothing — the
+// property is now carried by the type rather than by this mutation, which is
+// the trade §5's header states in full.
+//
+// So what is starved instead is what the property was always FOR: that the two
+// values the notice renders reach the operator's line. Neither had ever been
+// starved. §5 asserted both and nothing established either assertion could
+// fail, which is the condition `verify-proof-defences` exists to name — and it
+// bites hardest on the negative one, because "the notice does not print 12345"
+// is satisfied by a notice that prints no date at all. `notice-drops-date` is
+// what stops that pair from being a check and its own alibi.
+const NOTICE_STARVES = [
+  {
+    name: 'notice-drops-date',
+    find: '(row.claimsAt ? ` — the row dates itself ${row.claimsAt}` : \'\')',
+    replace: "''",
+    expect: /notice: and it DOES date a row/
+  },
+  {
+    name: 'notice-drops-standing',
+    find: '`  line ${row.line}: ${row.identity} (${row.problem}, ${row.standing})`',
+    replace: '`  line ${row.line}: ${row.identity} (${row.problem})`',
+    expect: /notice: it carries the standing/
+  }
+];
+
+for (const s of NOTICE_STARVES) {
   starve: {
-    const dir = mutate(
-      'notice-rederives',
-      'agent-registry.js',
-      '`line ${bad.line}: ${bad.identity} — ${bad.claimsEvent ?? \'no event\'} at ` +',
-      '`line ${bad.line}: ${bad.identity} — ${parsed.event ?? \'no event\'} at ` +'
-    );
+    const dir = mutate(s.name, 'agent-registry.js', s.find, s.replace);
     if (!dir) break starve;
     const mod = await import(path.join(dir, 'agent-registry.js'));
-    if (typeof mod.scanLogVersions !== 'function') {
-      check(false, 'notice-rederives: the mutated build loaded and is answering');
-      break starve;
-    }
-    // The sample line is what the mutation touches, so this asserts on the
-    // sample rather than on `describeUnreadableLog`'s own text.
-    const mutant = numericSample(mod, 'mutant');
-    const real = numericSample(registryMod, 'real-again');
+    // THE SAME PRECONDITION §6 CARRIES, and for the same reason: a mutant that
+    // died on an unresolved import produces an absence, and an absence is what
+    // a correctly-starved render produces too.
+    const alive =
+      typeof mod.scanLogVersions === 'function' && typeof mod.describeUnreadableLog === 'function';
+    check(alive, `${s.name}: the mutated build loaded and is answering`);
+    if (!alive) break starve;
+
+    const results = assertNotice(mod, s.name);
+    const failed = results.filter((r) => !r.ok);
+    const named = failed.filter((r) => s.expect.test(r.name));
     check(
-      mutant.disclosed === 1 && real.disclosed === 1,
-      'notice-rederives: both builds reached the row, so the comparison below is between two renderings rather than two absences',
-      `mutant ${mutant.disclosed}, real ${real.disclosed}`
+      named.length > 0,
+      `${s.name}: a NAMED assertion goes red when the render is starved — the render is defended`,
+      named.length
+        ? `${named.length} of ${failed.length} failures matched, e.g. "${named[0].name}" (${named[0].detail})`
+        : `nothing matching ${s.expect} failed; ${failed.length} other failure(s). THE RENDER IS UNDEFENDED.`
     );
     check(
-      mutant.samples.includes('67890') && !real.samples.includes('67890'),
-      'notice-rederives: re-deriving the event off `parsed` prints a value the record withheld — the single derivation is load-bearing',
-      `mutant: ${mutant.samples.trim()} | real: ${real.samples.trim()}`
+      failed.every((r) => !r.name.startsWith('vacuity:')),
+      `${s.name}: and the notice still reached every row, so what went red is the render and not the fixtures`,
+      failed.filter((r) => r.name.startsWith('vacuity:')).map((r) => r.name).join('; ') || 'no vacuity guard fired'
     );
   }
 }
