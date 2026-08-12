@@ -461,15 +461,17 @@ const PROOF_DEFENCES = [
       'what stops that pair being a check and its own alibi. ' +
       'THE SIXTH MECHANISM IS AN ABSENCE, so it is held by NEGATIVE CASES rather than by a ' +
       'starve: §5b PARSES `src/agent-registry.ts` and requires every use of `parsed`, `bad` and ' +
-      '`trimmed` inside `classifyLog` to be on an ALLOWLIST: an argument to one of SEVEN named ' +
-      'calls (`JSON.parse`, `Array.isArray`, `classifyRow`, the two field normalizers, and the ' +
-      'two pushes), or a read-only position beside them — comparison, `typeof`, negation, ' +
-      'condition, assignment target, or a spread into one of those seven. Anything else fails, ' +
-      'including binding a row to a local. A VACUITY GUARD REPORTS HOW MANY ROW REFERENCES THE ' +
-      'WALKER REACHED (15 at this writing) rather than a count sitting in prose, because "no ' +
-      'use is off the allowlist" is trivially true of a body nothing walked. That is the property ' +
+      '`trimmed` and `lines` inside `classifyLog` to be on an ALLOWLIST: an argument to one of ' +
+      'SEVEN named calls (`JSON.parse`, `Array.isArray`, `classifyRow`, the two field ' +
+      'normalizers, and the two pushes), or a read-only position beside them — comparison, ' +
+      '`typeof`, negation, condition, assignment target, or a spread into one of those seven — ' +
+      'and, for the line array, ONLY `lines.length` or `lines[i].trim()`. Anything else fails, ' +
+      'including binding a row to a local and reading a raw line out of the array. A VACUITY ' +
+      'GUARD REPORTS HOW MANY ROW REFERENCES THE WALKER REACHED rather than a count sitting in ' +
+      'prose, because "no use is off the allowlist" is trivially true of a body nothing walked. ' +
+      'That is the property ' +
       'leaving the boot notice the only rendering of a row. It then runs the identical predicate ' +
-      'over SIX doctored copies and requires each to be caught. ' +
+      'over SEVEN doctored copies and requires each to be caught. ' +
       'THE ALLOWLIST IS THE THIRD DESIGN AND THE SHAPE OF THE TWO CORRECTIONS IS THE ENTRY: ' +
       'v1 was a regex over `${…}` with ONE negative case, itself a template — the single shape ' +
       'that regex already matched, so it proved the predicate on its own vocabulary and nothing ' +
@@ -479,12 +481,18 @@ const PROOF_DEFENCES = [
       'template, `+`, `String`/`JSON.stringify`, string methods, `console.*`. The same review ' +
       'then walked `const who = bad.identity; console.error(\'…\' + who)` through THAT, green, ' +
       'because a sink list is a list of examples and KAN-59 says a category is not closed by ' +
-      'adding the reviewer\'s named ones. v3 inverts the question — not "is this a way a row ' +
+      'adding the reviewer\'s named ones. AND THEN THROUGH v3\'s FIRST FORM: ' +
+      '`console.error(\'row: \' + lines[i])` renders a whole raw row with no call, no alias and ' +
+      'no indirection, and passed because `lines` had been left unrooted on the strength of a ' +
+      'comment claiming `trimmed` covered the bytes — which was true of that day\'s body and is ' +
+      'exactly what the section exists not to rely on. `lines` is now a root whose TWO ' +
+      'structural uses are named, which is the same subtraction applied a third time. ' +
+      'v3 inverts the question — not "is this a way a row ' +
       'becomes a string", which cannot be completed, but "is this one of the things this ' +
       'function may do with a row", which is two short literals in the file. Aliasing is refused at the ' +
       'binding rather than chased through it, so no dataflow analysis is involved. ' +
       'AND THE TWO EARLIER PREDICATES ARE KEPT EXECUTABLE IN THE FILE: every negative case ' +
-      'additionally asserts whether v1 and v2 would have seen it, and two of the six defeat ' +
+      'additionally asserts whether v1 and v2 would have seen it, and three of the seven defeat ' +
       'both. The widening is measured in the run rather than claimed, and both review findings ' +
       'survive as regression tests rather than as fixed bugs nobody can re-check. ' +
       'THE RESIDUE IS NAMED AT ITS NEAREST POINT, which is itself a correction: v1 and v2 each ' +
@@ -492,7 +500,8 @@ const PROOF_DEFENCES = [
       'too far out is worse than none because the near cases read as covered. It now names the ' +
       'call one step out (`classifyRow` is trusted with the whole row and this section reads one ' +
       'function), that editing the allowlist defeats it by design, and that only `classifyLog` ' +
-      'is read. NOTE THAT §5b IS THE ONE SECTION HERE WHOSE VERDICT IS ABOUT THE TREE RATHER ' +
+      'is read — and it records that it has now been wrong THREE times in the same direction, ' +
+      'always pointing further out than the real edge. NOTE THAT §5b IS THE ONE SECTION HERE WHOSE VERDICT IS ABOUT THE TREE RATHER ' +
       'THAN THE BUILD: this file\'s exit code is a blend of the two, and its §0 says so. ' +
       'THE DISCIPLINE THE OLD §6d BOUGHT IS KEPT WHERE IT WAS EARNED: its first draft compared ' +
       'two empty sample lists (samples stopped at three rows and the fixture was eighth), so the ' +

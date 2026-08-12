@@ -1224,13 +1224,17 @@ function classifyLog(text: string, scan: LogVersionScan, entries?: AgentLogEntry
     // binding. The proof reports how many references it checked, so no count
     // lives in a comment here to go stale.
     //
-    // IT IS AN ALLOWLIST BECAUSE THE TWO SEARCHES FAILED, in review of #84 and
-    // in this order: a regex over `${…}` missed
-    // `console.error('line ' + bad.line)`, and the enumeration of string sinks
-    // that replaced it missed `const who = bad.identity`. Both are lists of
-    // examples, and a category is not closed by adding the ones somebody named.
-    // If you need a use this list does not have, add it there — in a diff,
-    // beside the paragraph saying what that costs.
+    // IT IS AN ALLOWLIST BECAUSE THE SEARCHES FAILED, in review of #84 and in
+    // this order: a regex over `${…}` missed
+    // `console.error('line ' + bad.line)`; the enumeration of string sinks that
+    // replaced it missed `const who = bad.identity`; and the first allowlist
+    // missed `console.error('row: ' + lines[i])`, because `lines` had been left
+    // unrooted on the strength of a comment claiming `trimmed` covered the raw
+    // bytes — true of that day's body, which is the thing the check exists not
+    // to rely on. Each was a list of examples, and a category is not closed by
+    // adding the ones somebody named. If you need a use this list does not
+    // have, add it there — in a diff, beside the paragraph saying what that
+    // costs.
     //
     // WHAT WAS DELETED, recorded so nobody re-invents it. A `samples` array of
     // up to `VERSION_SCAN_SAMPLES` (3) one-liners was pushed here on every

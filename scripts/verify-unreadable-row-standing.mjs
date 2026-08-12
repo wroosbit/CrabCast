@@ -869,6 +869,14 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
 // edge sound more exotic than it was, which is worse than saying nothing**,
 // because a reader takes the near cases as covered. So, precisely:
 //
+//   * THIS PARAGRAPH WAS WRONG A THIRD TIME AND THE THIRD IS THE SHARPEST. It
+//     named "one call out" as the nearest edge while `console.error('row: ' +
+//     lines[i])` — no call, no indirection, an INDEX — rendered a whole raw row
+//     and passed, because the reassurance about `lines` was sitting next to
+//     `ROW_ROOTS` rather than here. `lines` is now a root with its two
+//     structural uses named. Read the pattern rather than the three instances:
+//     every time this paragraph has been wrong it pointed FURTHER OUT than the
+//     truth, and twice the real edge was in a comment that read as coverage.
 //   * THE NEAREST UNCOVERED CASE IS ONE CALL OUT. A row handed to an
 //     `ALLOWED_CALLEES` entry is trusted, and this section reads ONE function,
 //     so if `classifyRow`, `toActivatedBy`, `toChannelEnabled` or the `push`
@@ -892,11 +900,21 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
   const registrySrc = fs.readFileSync(path.join(repoRoot, 'src', 'agent-registry.ts'), 'utf8');
 
   /** The identifiers inside `classifyLog` that hold a row, or part of one. */
-  const ROW_ROOTS = new Set(['parsed', 'bad', 'trimmed']);
-  // `lines` is deliberately NOT one: the loop indexes and measures it
-  // structurally (`lines[i]`, `lines.length - 1`) and flagging that would be a
-  // false positive on every iteration. `trimmed` is `lines[i].trim()`, so the
-  // raw bytes are covered one step later, where a use of them is a use.
+  const ROW_ROOTS = new Set(['parsed', 'bad', 'trimmed', 'lines']);
+  // `lines` IS one, and the reasoning that kept it out was the same mistake
+  // this section keeps making one level down (review of #84, third finding).
+  // The old comment said `lines` was excluded because the loop indexes and
+  // measures it structurally — TRUE — and then that "`trimmed` is
+  // `lines[i].trim()`, so the raw bytes are covered one step later". THAT HALF
+  // WAS A CLAIM ABOUT THE FUTURE. `trimmed` covers the bytes only for a render
+  // that reaches them THROUGH `trimmed`; `console.error('row: ' + lines[i])`
+  // never becomes a use of `trimmed` and was never seen. It renders a whole raw
+  // row to stderr, and it passed. The sentence was true of today's body, which
+  // is the one thing this section exists not to rely on.
+  //
+  // The false-positive problem it was avoiding is real and the inversion solves
+  // it the same way it solved aliasing: name the TWO structural uses rather
+  // than the unbounded set of bad ones. See LINES_SHAPES.
 
   /**
    * The ONLY calls `classifyLog` may hand a row to. Every one is a call that
@@ -976,6 +994,24 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
           const node = outermost(n);
           const p = node.parent;
           const calleeOf = (c) => c.expression.getText().replace(/\s+/g, '');
+          if (n.text === 'lines') {
+            // LINES_SHAPES — the only two things the loop does with the array.
+            // `lines.length` is a COUNT and carries no row bytes at all;
+            // `lines[i].trim()` is the single sanctioned way a row's bytes
+            // leave it, and what they become is `trimmed`, which the allowlist
+            // above then governs. A bare `lines[i]` anywhere else is a raw row
+            // in the open and fails.
+            const okLines =
+              (ts.isPropertyAccessExpression(node) && node.name.text === 'length') ||
+              (ts.isPropertyAccessExpression(node) && node.name.text === 'trim' &&
+                ts.isElementAccessExpression(node.expression) &&
+                ts.isCallExpression(node.parent) && node.parent.expression === node);
+            if (!okLines) {
+              flag(node, '`lines` may only be `lines.length` or `lines[i].trim()` — a raw row in the open');
+            }
+            ts.forEachChild(n, walk);
+            return;
+          }
           // NOTE WHAT IS ABSENT: `const who = bad.identity` — a row value bound
           // to a local. Nothing in `classifyLog` needs it (`const bad = …` and
           // `let parsed` are declaration NAMES, skipped above, and the two rows
@@ -1050,7 +1086,10 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
       ) c = c.expression;
       return ts.isIdentifier(c) ? c.text : null;
     };
-    const isRow = (n) => ROW_ROOTS.has(rootOf(n) ?? '');
+    // v2 never rooted `lines` — that is the whole of the third finding, so the
+    // replay must not silently acquire it.
+    const V2_ROOTS = new Set(['parsed', 'bad', 'trimmed']);
+    const isRow = (n) => V2_ROOTS.has(rootOf(n) ?? '');
     const out = [];
     const walk = (n) => {
       if (ts.isTemplateSpan(n) && isRow(n.expression)) out.push(n.expression.getText());
@@ -1083,11 +1122,11 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
   check(
     Boolean(found) && found.refs > 0,
     '5b: vacuity — the walker actually reached row references inside `classifyLog`, so the allowlist below is checked against something',
-    found ? `${found.refs} reference(s) to \`parsed\`/\`bad\`/\`trimmed\`` : 'body not found'
+    found ? `${found.refs} reference(s) to \`parsed\`/\`bad\`/\`trimmed\`/\`lines\`` : 'body not found'
   );
   check(
     Boolean(found) && found.hits.length === 0,
-    '5b: every use of `parsed`, `bad` and `trimmed` in `classifyLog` is on the allowlist — parse, guard, classify, normalize, spread into a sanctioned push. Anything else, INCLUDING BINDING ONE TO A LOCAL, is a failure, so the notice stays the only rendering',
+    '5b: every use of `parsed`, `bad`, `trimmed` and `lines` in `classifyLog` is on the allowlist — parse, guard, classify, normalize, spread into a sanctioned push, and `lines` only as `lines.length` or `lines[i].trim()`. Anything else, INCLUDING BINDING A ROW TO A LOCAL OR READING A RAW LINE OUT OF THE ARRAY, is a failure, so the notice stays the only rendering',
     found ? found.hits.map((h) => `${h.why}: ${h.code}`).join(' ; ') || `${found.refs} row reference(s) examined, none off-allowlist` : 'body not found'
   );
 
@@ -1125,6 +1164,15 @@ for (const r of assertNotice(registryMod, 'baseline')) check(r.ok, r.name, r.det
         '    const who = bad.identity;\n' +
         '    const when = parsed.at;\n' +
         "    console.error('[AgentRegistry] ' + who + ' at ' + when);\n",
+      v1Sees: false, v2Sees: false
+    },
+    {
+      // THE REVIEWER'S THIRD MUTATION, verbatim. No call, no indirection, no
+      // alias — an INDEX. It reaches the row's raw bytes without ever touching
+      // `parsed`, `bad` or `trimmed`, which is why `lines` had to become a root
+      // with its two structural uses named rather than stay excluded.
+      name: 'raw-line',
+      code: "    console.error('[AgentRegistry] offending row: ' + lines[i]);\n",
       v1Sees: false, v2Sees: false
     },
     {
