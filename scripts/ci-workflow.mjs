@@ -623,7 +623,27 @@ function lexShell(text) {
     if (c === '$' && text[i + 1] === '(') {
       ensureWord();
       if (text[i + 2] === '(') {                       // $(( … )) is arithmetic, not a command
-        const e = skipParens(text, i + 2);
+        // KAN-354: skip from the OUTER paren, not the inner one. `skipParens`
+        // counts balanced parens from wherever it is pointed, so starting it at
+        // `i + 2` consumed `( t1 - t0 )` and returned with the outer `)` still
+        // unread — which lexed as a stray `)` operator and derailed the
+        // enclosing `for`/`done` or `if`/`fi` pairing. The whole block then
+        // failed to parse, and every command in it reported as not-live with a
+        // message about the block rather than about the construct. Measured at
+        // 5b5a200 by KAN-331 and again at 6cbe5bd9: `ms=$(( t1 - t0 ))` inside
+        // a `for` loop gave ``expected `done` ``.
+        //
+        // Balanced counting from the outer paren is right for both readings of
+        // `$((`: arithmetic, and the `$( (subshell) )` that POSIX requires a
+        // space to write. It is deliberately NOT recorded in `substitutions` —
+        // arithmetic runs no commands, so nothing inside it is a command that
+        // could be mistaken for a live one.
+        //
+        // THE NEAREST LIMIT: an UNTERMINATED `$((` still runs to end-of-text,
+        // exactly as an unterminated `$(` does, and the block then fails to
+        // parse. That is the same fail-closed ending as before and is what
+        // boundary 3's "an unparsable block" row already covers.
+        const e = skipParens(text, i + 1);
         word.text += text.slice(i, e);
         i = e;
         continue;
@@ -1003,7 +1023,6 @@ function allSimpleCommands(node, out = []) {
  */
 function walk(text, node, ctx, out) {
   const nested = (label) => ({ ...ctx, gating: false, construct: ctx.construct ?? label });
-  const because = (reason) => ({ ...ctx, reasons: [...ctx.reasons, reason] });
 
   switch (node.type) {
     case 'list':
@@ -1025,19 +1044,62 @@ function walk(text, node, ctx, out) {
       });
       return;
 
-    case 'andor':
+    case 'andor': {
+      // KAN-354: a part joined by `&&` to something that CANNOT SUCCEED never
+      // runs at all. `false && node x` reads as a live gating invocation
+      // otherwise — measured on every parser this repo has shipped, including
+      // dff2422 from before KAN-148, so it is an old gap rather than a new one.
+      //
+      // It surfaced here because the arithmetic fix above was masking it: a
+      // block carrying `$(( … ))` failed to parse, so the invocation inside it
+      // read as not-live for the wrong reason. Teaching the lexer arithmetic
+      // without this would have turned that red into a green for exactly the
+      // shape AC-3 names — the widening quietly gaining a live command.
+      //
+      // THE CHAIN STOPS AT THE FIRST `||`, because that is where bash resumes:
+      // in `false && a || b`, `a` never runs and `b` does. Only `false` and a
+      // non-zero `exit` count as unable to succeed — that is `cannotSucceed`'s
+      // existing, deliberately narrow reading, and it is not widened here.
+      const blockedBy = new Array(node.parts.length).fill(null);
+      let blocker = null;
+      node.parts.forEach((part, k) => {
+        if (k > 0) {
+          if (part.op === '&&') {
+            if (blocker) blockedBy[k] = blocker;
+          } else {
+            blocker = null;                       // `||` runs whatever the left side did
+          }
+        }
+        if (!blockedBy[k] && cannotSucceed(part.node)) blocker = part;
+      });
+
       node.parts.forEach((part, k) => {
         const next = node.parts[k + 1];
         let c = ctx;
+        if (blockedBy[k]) {
+          c = {
+            ...c,
+            reasons: [
+              ...c.reasons,
+              `the command is joined by \`&&\` to \`${render(text, blockedBy[k].node)}\`, ` +
+                'which cannot succeed, so it never runs'
+            ]
+          };
+        }
         // `|| exit 1` and `|| false` re-raise the failure instead of eating it.
         if (next && next.op === '||' && !cannotSucceed(next.node)) {
-          c = because(
-            `the command is followed by \`|| ${render(text, next.node)}\`, which swallows a non-zero exit`
-          );
+          c = {
+            ...c,
+            reasons: [
+              ...c.reasons,
+              `the command is followed by \`|| ${render(text, next.node)}\`, which swallows a non-zero exit`
+            ]
+          };
         }
         walk(text, part.node, c, out);
       });
       return;
+    }
 
     case 'pipeline': {
       let c = ctx;
