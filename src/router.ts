@@ -25,7 +25,7 @@ import {
   VALUE_SETS
 } from './read-contract.js';
 import { AgentConfig, DaemonResponse, McpServerSpec } from './types.js';
-import { removeProvisionedArtifacts } from './provisioning.js';
+import { type ArtifactDisclosure, removeProvisionedArtifacts } from './provisioning.js';
 import {
   HerdrBridge,
   HerdrCensus,
@@ -116,9 +116,30 @@ type Respond = (msg: any) => void;
  *
  * See {@link MessageRouter.handleActivate}'s `fail` for the rest of it.
  */
+/**
+ * THE MACHINE-READABLE KIND OF AN ACTIVATE REFUSAL, as a union rather than as a
+ * string literal typed out at the site (KAN-287).
+ *
+ * These were bare literals at the `fail` calls, which is the shape that grows a
+ * fourth member silently — and this one is published: `VALUE_SETS.activateRefused`
+ * carries it, so a consumer branches on it. Written as a type, a new kind is a
+ * COMPILE ERROR until it has a line in the contract and a row in the document.
+ * An assertion could only have noticed afterwards, and only if somebody ran it.
+ *
+ * THREE OF THE NINE REFUSALS CARRY THIS AND SIX DO NOT, which the document
+ * states rather than smoothing over. Making it nine is a change to the wire and
+ * therefore a decision, not a description — see KAN-328.
+ */
+export type ActivateRefusalKind = 'not-configured' | 'unverifiable' | 'occupied';
+
+/** Which subsystem refused. One member today, and published as a set for the same reason. */
+export type ActivateRefusedBy = 'capacity';
+
 type ActivateRefusalFields = Record<string, unknown> & {
   alreadyRunning?: true;
   started?: false;
+  refused?: ActivateRefusalKind;
+  refusedBy?: ActivateRefusedBy;
 };
 
 /**
@@ -1446,6 +1467,48 @@ const _occupiedAgentMatchesTheContract: Exact<
   keyof typeof BLOCK_SHAPES.OccupiedAgent
 > = true;
 
+// KAN-287. `activate_response`'s composites. The response's OWN top-level field
+// set has no type — it is an object literal spread into `respond({…})`, exactly
+// as both read responses are, and §10 of the document says so — but every named
+// shape it carries can be bound, and is. These five are the difference between
+// "the proof would notice" and "it does not compile".
+const _paneOccupantMatchesTheContract: Exact<
+  keyof PaneOccupant,
+  keyof typeof ROW_SHAPES.PaneOccupant
+> = true;
+const _provisionedArtifactMatchesTheContract: Exact<
+  keyof ArtifactDisclosure,
+  keyof typeof ROW_SHAPES.ProvisionedArtifact
+> = true;
+const _preemptionOfferMatchesTheContract: Exact<
+  keyof PreemptionOfferDto,
+  keyof typeof BLOCK_SHAPES.PreemptionOffer
+> = true;
+const _preemptedMatchesTheContract: Exact<
+  keyof NonNullable<CapacityGateResult['preempted']>,
+  keyof typeof BLOCK_SHAPES.Preempted
+> = true;
+// `capacityOverride` is the one composite assembled at the RESPONSE rather than
+// returned whole by the gate — `{ ...gate.overrode, capacity: capacityDto(…) }`
+// — so the binding names that spread rather than a single interface. Written
+// this way it still fails to compile if `overrode` grows a field.
+const _capacityOverrideMatchesTheContract: Exact<
+  keyof NonNullable<CapacityGateResult['overrode']> | 'capacity',
+  keyof typeof BLOCK_SHAPES.CapacityOverride
+> = true;
+
+// The two vocabularies this ticket turned from literals into unions, bound here
+// beside them for the reason the block below states: this file must not be
+// imported by `read-contract.ts`, so a union declared here is bound here.
+const _activateRefusedValuesMatchTheContract: Exact<
+  ActivateRefusalKind,
+  (typeof VALUE_SETS.activateRefused)[number]
+> = true;
+const _activateRefusedByValuesMatchTheContract: Exact<
+  ActivateRefusedBy,
+  (typeof VALUE_SETS.activateRefusedBy)[number]
+> = true;
+
 // The two closed vocabularies whose unions are declared in this file and in
 // `herdr.ts`. The other six are bound in `read-contract.ts`, beside the list.
 const _stateValuesMatchTheContract: Exact<AgentState, (typeof VALUE_SETS.state)[number]> = true;
@@ -1467,6 +1530,13 @@ void _configEchoContractMatchesTheContract;
 void _provenanceMatchesTheContract;
 void _preemptedByMatchesTheContract;
 void _occupiedAgentMatchesTheContract;
+void _paneOccupantMatchesTheContract;
+void _provisionedArtifactMatchesTheContract;
+void _preemptionOfferMatchesTheContract;
+void _preemptedMatchesTheContract;
+void _capacityOverrideMatchesTheContract;
+void _activateRefusedValuesMatchTheContract;
+void _activateRefusedByValuesMatchTheContract;
 void _stateValuesMatchTheContract;
 void _sessionStatusValuesMatchTheContract;
 

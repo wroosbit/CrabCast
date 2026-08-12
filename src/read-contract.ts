@@ -19,6 +19,24 @@
  * shape in THEIR repository, which means it was not our contract at all.
  *
  * ---------------------------------------------------------------------------
+ * WHY THERE IS A THIRD SURFACE HERE (KAN-287)
+ *
+ * `activate_response` was consumed, branched on, and covered by none of the
+ * three artifacts. The asymmetry was the defect rather than the absence: a
+ * consumer that has read this contract, and seen the notice promise, reasonably
+ * assumes a documented-and-enforced surface is the norm — and a guarantee that
+ * holds for two responses and silently not for a third is worse than one that
+ * holds for none, because the boundary is invisible. So the surface is
+ * enumerated here, and §10 of the document now states where the contract STOPS
+ * rather than leaving a reader to infer it from what happens to be listed.
+ *
+ * IT IS NOT A READ, AND THAT CHANGES WHAT THE BUCKETS MEAN — see
+ * {@link ACTIVATE_RESPONSE_FIELDS}. `list_agents` and `agent_status` answer
+ * "what is true now"; this one answers "what did this call just do". The four
+ * buckets were defined for the first question, and applying them to the second
+ * is done deliberately and with the seam named, not silently.
+ *
+ * ---------------------------------------------------------------------------
  * WHAT THIS FILE IS NOT
  *
  * It is NOT a projection, a filter or a validator, and nothing on the read path
@@ -45,6 +63,8 @@ import type { CapBound, CostSource, HeadroomBound } from './capacity.js';
 import { CAPACITY_FIELDS, type Exact } from './events.js';
 import type { HerdrAgentStatus } from './herdr.js';
 import type { StallSource } from './machine-pressure.js';
+import type { ArtifactKind, ArtifactOrigin } from './provisioning.js';
+import type { ResumeCause } from './resume.js';
 
 // ---------------------------------------------------------------- the version
 
@@ -93,7 +113,7 @@ import type { StallSource } from './machine-pressure.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 4;
+export const READ_CONTRACT_VERSION = 5;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -327,6 +347,46 @@ export const ROW_SHAPES = {
     paneName: { bucket: 'derived' },
     priority: { bucket: 'durable' },
     herdrStatus: { bucket: 'observed' }
+  } satisfies FieldTable,
+
+  /**
+   * A live pane in a directory, as an `activate` refusal names it (KAN-287) —
+   * `activate_response.occupiedBy[]`, on the `occupied` refusal and beside a
+   * successful idempotent activation that found a co-occupant.
+   *
+   * ALL FOUR ARE `observed`, AND THE ROW IS THE CLEAREST CASE ON THIS SURFACE:
+   * it is one census read, quoted. Nothing here is on a record — these panes are
+   * very often not ours at all, which is the whole reason the refusal names them
+   * — and nothing is re-checked after the response is sent. A caller that acts on
+   * a pane listed here is acting on where it was at `activate` time.
+   */
+  PaneOccupant: {
+    paneId: { bucket: 'observed' },
+    name: { bucket: 'observed' },
+    agentStatus: { bucket: 'observed' },
+    workDir: { bucket: 'observed' }
+  } satisfies FieldTable,
+
+  /**
+   * One artifact this activation wrote or relied on outside CrabCast's own data
+   * directory — `activate_response.provisioned[]`.
+   *
+   * `derived` THROUGHOUT, AND NOT `durable`, WHICH IS THE ONE THAT LOOKS WRONG
+   * UNTIL THE BUCKET IS READ AS WRITTEN. Every row describes a file on somebody's
+   * disk, so `durable` is the tempting answer — but the bucket does not mean
+   * "persists"; it means READ FROM THE APPEND-ONLY AGENT REGISTRY. None of this
+   * is: it is this daemon's account, composed during the call, of writes it just
+   * performed. It is also not re-read before being sent, so a row here says what
+   * provisioning DID rather than what the file contains now. `provisioned.json`
+   * is the durable record of the same facts, and `verify-agy-reads-what-we-write`
+   * is what holds it — this is the response's copy, not that file.
+   */
+  ProvisionedArtifact: {
+    artifact: { bucket: 'derived' },
+    file: { bucket: 'derived' },
+    detail: { bucket: 'derived' },
+    origin: { bucket: 'derived' },
+    reversal: { bucket: 'derived' }
   } satisfies FieldTable
 } as const;
 
@@ -468,6 +528,55 @@ export const BLOCK_SHAPES = {
     configuredAt: { bucket: 'durable' },
     everActivated: { bucket: 'durable' },
     activatedBy: { bucket: 'durable' }
+  } satisfies FieldTable,
+
+  /**
+   * `activate_response.preemption` — what a capacity refusal WOULD stand down
+   * if the caller asked again with `preempt` (KAN-287). An offer, not an event:
+   * nothing has been stood down when this block is on the wire.
+   *
+   * `incomingPriority` and `offer` are this daemon's arithmetic and its sentence;
+   * the other four describe the agent that would lose its slot, and `path`,
+   * `paneName` and `priority` are its record while `herdrStatus` is what herdr
+   * said about it during the census this refusal read.
+   */
+  PreemptionOffer: {
+    path: { bucket: 'durable' },
+    paneName: { bucket: 'durable' },
+    priority: { bucket: 'durable' },
+    herdrStatus: { bucket: 'observed' },
+    incomingPriority: { bucket: 'derived' },
+    offer: { bucket: 'derived' }
+  } satisfies FieldTable,
+
+  /**
+   * `activate_response.preempted` — what this activation ACTUALLY stood down.
+   * The same offer shape one field in, plus when it happened and the arithmetic
+   * that made it necessary.
+   *
+   * THE DIFFERENCE FROM {@link PreemptionOffer} IS TENSE AND IT IS THE WHOLE
+   * POINT: `preemption` rides a REFUSAL and describes a thing that has not
+   * happened; `preempted` rides a SUCCESS and describes a thing that has. A
+   * caller that confuses them either interrupts work it did not mean to or
+   * reports an interruption that never occurred, and no field name alone
+   * separates them — the branch does.
+   */
+  Preempted: {
+    at: { bucket: 'derived' },
+    victim: { bucket: 'derived', block: 'PreemptionOffer' },
+    derivation: { bucket: 'derived' }
+  } satisfies FieldTable,
+
+  /**
+   * `activate_response.capacityOverride` — present only when the activation
+   * proceeded ONLY because the caller passed `override`, with the derivation the
+   * gate would have refused on. All three are this daemon's account of a decision
+   * it made during this call.
+   */
+  CapacityOverride: {
+    at: { bucket: 'derived' },
+    derivation: { bucket: 'derived' },
+    capacity: { bucket: 'derived', block: 'Capacity' }
   } satisfies FieldTable,
 
   /** The config echo, for the one place it is nested under its own key. */
@@ -655,6 +764,304 @@ export const AGENT_STATUS_BRANCHES = {
   'bad-address': ['action', 'success', 'error', 'configEchoContract']
 } as const;
 
+// ----------------------------------------------------- activate_response ----
+
+/**
+ * `activate_response`, field by field, over the union of its ELEVEN branches
+ * (KAN-287).
+ *
+ * ---------------------------------------------------------------------------
+ * THIS SURFACE ANSWERS A DIFFERENT QUESTION FROM THE OTHER TWO, AND THE BUCKETS
+ * HAVE TO BE READ ACCORDINGLY.
+ *
+ * `list_agents` and `agent_status` answer *what is true now*. This response
+ * answers *what this call just did* — and the four buckets were defined for the
+ * first question. Rather than invent a fifth bucket for one surface, the four
+ * are applied with the seam stated:
+ *
+ *   * `observed` keeps its exact meaning and is the honest home for the
+ *     event-shaped fields that were read from something: `verified`,
+ *     `alreadyRunning`, `paneId`, `occupiedBy`. The bucket already says "true as
+ *     of the read and not one moment longer", which is PRECISELY the caveat
+ *     `verified: true` needs — it means the agent was in herdr's census before
+ *     this response was sent, and nothing re-checks it afterwards. The strong
+ *     word is qualified by the bucket rather than by a footnote.
+ *   * `derived` carries this daemon's account of its own actions — `started`,
+ *     `reattached`, `recordReconciled`, `provisioned`, `durable`. These are not
+ *     re-readable from anywhere: they are a report, and their truth is a claim
+ *     about a moment that has passed.
+ *   * `durable` means what it always means: on the registry, and answering the
+ *     same after a restart. The config echo and `channelEnabled` are the only
+ *     fields here that survive the process that sent them.
+ *
+ * WHAT NO BUCKET ON THIS SURFACE CAN TELL YOU, said here because the omission is
+ * structural rather than an oversight: **`activate_response` carries no
+ * `provenance` block.** Both read responses carry the legend that names
+ * `observedAt` and `censusReachable`; this one does not, and adding it would
+ * change the surface this contract exists to describe. So the buckets below are
+ * the contract's own classification, held by the document and by
+ * `verify-read-contract.mjs` §1, and NOT cross-checked against a live legend the
+ * way §4 checks the row fields — because there is no legend here to check
+ * against. That is the one place this surface is held more weakly than the other
+ * two, and it is named rather than left to be discovered.
+ *
+ * ---------------------------------------------------------------------------
+ * `optional` HERE MEANS "ABSENT ON AT LEAST ONE BRANCH", exactly as it does on
+ * `agent_status`. Only `action`, `success` and `started` ride all eleven.
+ * `started` doing so is not an accident of drafting — KAN-138 item 6 put it on
+ * every refusal deliberately, because a caller must be able to read "nothing was
+ * spawned" without first knowing which kind of refusal it is holding.
+ */
+export const ACTIVATE_RESPONSE_FIELDS = {
+  action: { bucket: 'derived' },
+  success: { bucket: 'derived' },
+  /**
+   * ON ALL ELEVEN BRANCHES, refusals included. The one field this surface
+   * guarantees beyond `action`/`success`.
+   */
+  started: { bucket: 'derived' },
+  /** Only on the nine refusals. */
+  error: { bucket: 'derived', optional: true },
+  /**
+   * The agent's identity — its directory, resolved. `durable` for the same
+   * reason `agent_status.path` is: it is the registry's own key, not a value
+   * computed for this response. Absent only on `bad-address`, where the address
+   * was refused before anything was resolved.
+   */
+  path: { bucket: 'durable', optional: true },
+  paneName: { bucket: 'derived', optional: true },
+  /**
+   * `observed` — from the census this call read. Three states, and the third is
+   * the one that carries information:
+   *
+   *   `true`    the agent was already up. Both the idempotent success and the
+   *             one refusal that reached the question (`attach-error`).
+   *   `false`   THIS CALL STARTED IT — the `spawned` branch, and only that one.
+   *   absent    a refusal that never reached the question.
+   *
+   * NEVER `false` ON A REFUSAL, and that half is held by the compiler:
+   * `ActivateRefusalFields` in `src/router.ts` types it `?: true`, so a refusal
+   * claiming "we looked and it is not running" does not build. No refusal here
+   * has established that — the `occupied` branch in particular knows only that
+   * the pane it found is not ours.
+   */
+  alreadyRunning: { bucket: 'observed', optional: true },
+  paneId: { bucket: 'observed', optional: true },
+  sessionId: { bucket: 'observed', optional: true },
+  status: { bucket: 'observed', optional: true },
+  createdAt: { bucket: 'observed', optional: true },
+  /**
+   * `observed`, and this is the field the bucket most earns its keep on. `true`
+   * means the agent was found in herdr's census BEFORE this response was sent —
+   * a read, not a promise — and `observed` is the bucket that says a read is
+   * true when it was taken and not one moment longer. Nothing re-checks it.
+   */
+  verified: { bucket: 'observed', optional: true },
+  /** From the frozen record. On the spawning branch and the capacity refusal. */
+  priority: { bucket: 'durable', optional: true },
+  /** From the frozen record. On the spawning branch only. */
+  launcher: { bucket: 'durable', optional: true },
+  config: { bucket: 'durable', optional: true },
+  configVersion: { bucket: 'durable', optional: true },
+  configuredAt: { bucket: 'durable', optional: true },
+  everActivated: { bucket: 'durable', optional: true },
+  activatedBy: { bucket: 'durable', optional: true },
+  /**
+   * KAN-281. `durable`, and answered from the record rather than from the
+   * session that produced it, which is what makes this surface and
+   * `agent_status` agree BY CONSTRUCTION rather than by both being handed the
+   * same variable.
+   */
+  channelEnabled: { bucket: 'durable', optional: true },
+  /** Only on a restore: which cause the resume prompt was written for. */
+  resume: { bucket: 'derived', optional: true },
+  /** Only on a restore: whether a conversation was there to hand back. */
+  resumedConversation: { bucket: 'observed', optional: true },
+  /**
+   * THE RESUME RULE, REPORTED RATHER THAN MERELY OBEYED. `false` says this agent
+   * started a NEW session and did not continue whatever conversation the
+   * directory holds — which at a caller-owned path is the difference between an
+   * agent starting work and an agent reading a human's private session.
+   */
+  resumedExistingConversation: { bucket: 'derived', optional: true },
+  /** Empty for an agent that opted into nothing — never absent on its branch. */
+  provisioned: { bucket: 'derived', optional: true, rows: 'ProvisionedArtifact' },
+  /**
+   * Present ONLY when the registry write failed. `verified` answers "does this
+   * agent exist"; this answers "will a restart know it does".
+   */
+  durable: { bucket: 'derived', optional: true },
+  durabilityError: { bucket: 'derived', optional: true },
+  /** Present only when THIS call took the terminal back. */
+  reattached: { bucket: 'derived', optional: true },
+  /** Present only when the disk disagreed with the world and this call settled it. */
+  recordReconciled: { bucket: 'derived', optional: true },
+  /** Live panes in the directory that are not ours. */
+  occupiedBy: { bucket: 'observed', optional: true, rows: 'PaneOccupant' },
+  /** Prose for a human, beside a co-occupancy that was reported and not refused. */
+  note: { bucket: 'derived', optional: true },
+  /** See {@link VALUE_SETS.activateRefused}. On three of the nine refusals. */
+  refused: { bucket: 'derived', optional: true },
+  /** See {@link VALUE_SETS.activateRefusedBy}. On the capacity refusal only. */
+  refusedBy: { bucket: 'derived', optional: true },
+  /** What `configure` would have to supply. On the `not-configured` refusal. */
+  missing: { bucket: 'derived', optional: true },
+  /** The capacity refusal, split into the pieces a UI can lay out. */
+  reason: { bucket: 'derived', optional: true },
+  derivation: { bucket: 'derived', optional: true },
+  capacity: { bucket: 'derived', optional: true, block: 'Capacity' },
+  /** An OFFER, on a refusal: what preempting WOULD stand down. Nothing has happened. */
+  preemption: { bucket: 'derived', optional: true, block: 'PreemptionOffer' },
+  /** An EVENT, on a success: what this activation DID stand down. */
+  preempted: { bucket: 'derived', optional: true, block: 'Preempted' },
+  /** Present only when the activation proceeded because the caller said so. */
+  capacityOverride: { bucket: 'derived', optional: true, block: 'CapacityOverride' }
+} as const satisfies FieldTable;
+
+/**
+ * A branch of `activate_response`: the keys it ALWAYS carries, and the keys it
+ * carries only under a condition the document states.
+ *
+ * WHY THIS IS SHAPED DIFFERENTLY FROM {@link AGENT_STATUS_BRANCHES}, which is a
+ * flat key list per branch. On `agent_status` a branch has an EXACT key set —
+ * every nullable field is emitted as an explicit `null`, so knowing the branch
+ * tells you the keys. On `activate_response` that is not true and cannot be made
+ * true without changing the surface: nine fields are conditionally spread
+ * (`...(durable.ok ? {} : {…})`), so the same branch legitimately answers with
+ * different key sets on different calls.
+ *
+ * Collapsing that into one list would have forced a choice between two lies —
+ * listing the conditionals as always-present, or omitting them so a real
+ * response carries keys the branch does not declare. Two lists says what is
+ * actually true, and it is what lets the proof assert `always` as an EQUALITY
+ * and `sometimes` as a BOUND rather than asserting nothing about either.
+ */
+export interface ActivateBranchSpec {
+  /** Every call on this branch carries exactly these. */
+  readonly always: readonly string[];
+  /** These may also appear, each under the condition the document names. */
+  readonly sometimes: readonly string[];
+}
+
+/**
+ * EXACTLY WHAT EACH BRANCH CARRIES — two successes and nine refusals, read off
+ * `MessageRouter.handleActivate` rather than sampled from responses.
+ *
+ * THE TWO SUCCESSFUL BRANCHES ARE NOT SYMMETRIC, and that is the fact a consumer
+ * is most likely to be caught by. `priority`, `launcher`, `provisioned` and
+ * `resumedExistingConversation` ride the SPAWNING branch and not the idempotent
+ * one — so the reconciling caller's most common read is the one that says less.
+ * This is documented rather than repaired: repairing it changes the wire, which
+ * is a decision and not a description.
+ *
+ * FOUR OF THE NINE REFUSALS CARRY NO MACHINE-READABLE DISCRIMINATOR.
+ * `bad-address`, `bad-flag`, `spawn-error` and `confirm-failed` are separated
+ * from each other only by the prose in `error` — and `bad-flag` and
+ * `spawn-error` have IDENTICAL key sets, so no amount of shape inspection tells
+ * them apart. `refused` and `refusedBy` exist and cover three and one of the
+ * nine respectively. Named here because a reader who sees `refused` on some
+ * refusals will otherwise assume it is on all of them.
+ */
+export const ACTIVATE_RESPONSE_BRANCHES = {
+  /** `success: true` — this call started the agent. */
+  spawned: {
+    always: [
+      'action', 'success', 'path', 'paneName', 'alreadyRunning', 'started', 'paneId',
+      'sessionId', 'status', 'createdAt', 'priority', 'launcher', 'config', 'configVersion',
+      'configuredAt', 'everActivated', 'activatedBy', 'channelEnabled', 'verified',
+      'resumedExistingConversation', 'provisioned'
+    ],
+    sometimes: [
+      'durable', 'durabilityError', 'resume', 'resumedConversation', 'preempted',
+      'capacityOverride'
+    ]
+  },
+  /**
+   * `success: true` — the agent was already running and this call did not start
+   * it. The ordinary state of a caller reconciling towards desired state, and
+   * therefore the read this surface serves most often.
+   */
+  'already-running': {
+    always: [
+      'action', 'success', 'path', 'paneName', 'alreadyRunning', 'started', 'paneId',
+      'sessionId', 'status', 'createdAt', 'verified', 'config', 'configVersion',
+      'configuredAt', 'everActivated', 'activatedBy', 'channelEnabled'
+    ],
+    sometimes: [
+      'reattached', 'recordReconciled', 'durable', 'durabilityError', 'occupiedBy', 'note'
+    ]
+  },
+  /** The address itself was rejected — relative, empty, not a directory. */
+  'bad-address': {
+    always: ['action', 'success', 'started', 'error'],
+    sometimes: []
+  },
+  /** `override` or `preempt` was not a boolean. Checked before anything is looked up. */
+  'bad-flag': {
+    always: ['action', 'success', 'started', 'error', 'path'],
+    sometimes: []
+  },
+  /** No `configure` has ever run for this path. */
+  'not-configured': {
+    always: ['action', 'success', 'started', 'error', 'path', 'refused', 'missing'],
+    sometimes: []
+  },
+  /**
+   * herdr did not answer `agent list`, so whether anything is already running
+   * there could not be checked. An empty census from an unreachable herdr is
+   * silence, not evidence — `verified: false` says the look did not happen.
+   */
+  unverifiable: {
+    always: ['action', 'success', 'started', 'error', 'path', 'refused', 'verified'],
+    sometimes: []
+  },
+  /**
+   * Live panes in the directory and none of them ours. NOTE THE ABSENCE OF
+   * `alreadyRunning`: this branch established nothing about whether OUR agent is
+   * running, and reporting either value would be a claim it did not earn.
+   */
+  occupied: {
+    always: [
+      'action', 'success', 'started', 'error', 'path', 'refused', 'verified', 'occupiedBy'
+    ],
+    sometimes: []
+  },
+  /** The capacity gate refused. The only branch carrying the arithmetic. */
+  capacity: {
+    always: [
+      'action', 'success', 'started', 'error', 'path', 'refusedBy', 'reason', 'derivation',
+      'capacity', 'priority'
+    ],
+    sometimes: ['preemption']
+  },
+  /** herdr refused the spawn. Nothing was started and the start charge is unwound. */
+  'spawn-error': {
+    always: ['action', 'success', 'started', 'error', 'path'],
+    sometimes: []
+  },
+  /**
+   * The pane is ours and live, and taking its terminal back failed. THE ONE
+   * REFUSAL ENTITLED TO `alreadyRunning: true` — the question was reached and
+   * answered, which is why the type permits `true` here and forbids `false`
+   * everywhere.
+   */
+  'attach-error': {
+    always: [
+      'action', 'success', 'started', 'error', 'path', 'paneName', 'paneId', 'alreadyRunning'
+    ],
+    sometimes: ['recordReconciled']
+  },
+  /**
+   * herdr reported the spawn succeeded and left no agent behind. `verified:
+   * false` is the whole content of this branch: the difference between this
+   * response and a false success.
+   */
+  'confirm-failed': {
+    always: ['action', 'success', 'started', 'error', 'path', 'verified'],
+    sometimes: []
+  }
+} as const satisfies Readonly<Record<string, ActivateBranchSpec>>;
+
 // ------------------------------------------------------- daemon_status's half
 
 /**
@@ -682,6 +1089,61 @@ export const DAEMON_STATUS_CONTRACT_FIELDS = {
   unreadableRecords: { bucket: 'durable', rows: 'UnreadableRecord' },
   unreadableRecordsTotal: { bucket: 'derived' }
 } as const satisfies FieldTable;
+
+// --------------------------------------------------------- the boundary ----
+
+/**
+ * WHICH RESPONSES THIS CONTRACT COVERS — the machine-readable half of §10 of
+ * `docs/read-path-contract.md` (KAN-287, hardened on review).
+ *
+ * WHY THIS EXISTS AS DATA. §10 opens by saying *"a contract that does not say
+ * where it stops is a claim outrunning its mechanism"*, and in its first draft
+ * it was exactly that: four rows of prose that no check read. Deleting the
+ * `agent_status` row left `verify-read-contract.mjs` entirely green — so the
+ * section whose whole purpose is to stop a reader inferring the boundary could
+ * silently disagree with it. That is this ticket's own thesis applied to its own
+ * deliverable, and it was found by starving the table rather than by reading it.
+ *
+ * Each entry names the declarations that back the surface, and
+ * `verify-read-contract.mjs` §1 asserts three things: the document's Covered
+ * table lists exactly these keys, every declaration named here exists, and every
+ * response-level declaration is claimed by exactly one surface. So a response
+ * added to this file and not to §10 is red, and a row deleted from §10 is red.
+ */
+export const COVERED_SURFACES = {
+  list_agents: ['LIST_AGENTS_FIELDS', 'LIST_AGENTS_REFUSAL_FIELDS'],
+  agent_status: ['AGENT_STATUS_FIELDS'],
+  activate_response: ['ACTIVATE_RESPONSE_FIELDS'],
+  daemon_status: ['DAEMON_STATUS_CONTRACT_FIELDS']
+} as const;
+
+/**
+ * The surfaces §10 DISCLOSES as uncovered, listed so the disclosure itself
+ * cannot drift.
+ *
+ * READ WHAT THIS ASSERTS, BECAUSE IT IS NARROWER THAN IT LOOKS AND THE
+ * DIFFERENCE IS THE WHOLE POINT OF THE SECTION. The proof holds this list and
+ * the document's Not-covered table to each other — membership consistency, in
+ * both directions. It does **NOT** assert that the list is COMPLETE: nothing
+ * here enumerates every response CrabCast can emit, and a tenth uncovered
+ * surface could exist tomorrow with nothing going red.
+ *
+ * So this guard stops the disclosure rotting; it does not turn the disclosure
+ * into a proof of exhaustiveness. Claiming otherwise would be the same defect
+ * one level further up — an artifact whose sentence covers more than its
+ * mechanism — which is the thing §10 exists to prevent, and it is said in the
+ * document in these words rather than only here.
+ */
+export const UNCOVERED_SURFACES = [
+  'deactivate_response',
+  'configure_response',
+  'forget_response',
+  'send_to_agent',
+  'pty_init',
+  'pty_input',
+  'pty_resize',
+  'tail_agent'
+] as const;
 
 // ------------------------------------------------------------- the value sets
 
@@ -727,7 +1189,30 @@ export const VALUE_SETS = {
    * reads `load1-period` on a machine where nothing measured CPU even when the
    * count or memory term is what refused.
    */
-  startsChargeBasis: ['cpu-window', 'load1-period']
+  startsChargeBasis: ['cpu-window', 'load1-period'],
+  /**
+   * `activate_response.refused` (KAN-287) — the machine-readable kind, on the
+   * three refusals that carry one. **It is on three of the nine**, and the
+   * document says which; a consumer must not read its absence as "not refused".
+   */
+  activateRefused: ['not-configured', 'unverifiable', 'occupied'],
+  /**
+   * `activate_response.refusedBy` — which SUBSYSTEM refused. One member today,
+   * and the set is published rather than the field being described as a
+   * constant, because "the only value it takes" is the sort of claim that stops
+   * being true without anybody noticing.
+   */
+  activateRefusedBy: ['capacity'],
+  /** `activate_response.resume` — why a restore was a restore. Only on a restore. */
+  resumeCause: ['reboot', 'daemon-restart', 'preempted'],
+  /** `provisioned[].artifact` — what kind of thing was written. */
+  artifactKind: ['mcp-config', 'git-exclude', 'folder-trust', 'agy-mcp-config'],
+  /**
+   * `provisioned[].origin` — whether CrabCast created the artifact or found it
+   * already there. `preexisting` is what makes the reversal column honest: there
+   * is nothing to undo.
+   */
+  artifactOrigin: ['crabcast', 'preexisting']
 } as const;
 
 // `state` and `sessionStatus` are bound in `src/router.ts` instead, beside the
@@ -747,11 +1232,35 @@ const _headroomBoundValuesAreExact: Exact<
 const _costSourceValuesAreExact: Exact<(typeof VALUE_SETS.costSource)[number], CostSource> = true;
 const _stallSourceValuesAreExact: Exact<(typeof VALUE_SETS.stallSource)[number], StallSource> = true;
 
+// KAN-287. Three of the five new vocabularies have a TypeScript union behind
+// them already, so they are bound here rather than left to the proof: PREFER THE
+// TYPE TO THE ASSERTION WHERE THE CHOICE EXISTS. A fourth resume cause, or a
+// fifth artifact kind, is a COMPILE ERROR until it has a line above and a row in
+// the document — which is a stronger guarantee than any check that runs later,
+// because the undocumented value cannot be introduced at all.
+//
+// `activateRefused` and `activateRefusedBy` get the same treatment, and their
+// unions were introduced in `src/router.ts` by this ticket precisely so they
+// could: they were bare string literals at nine `fail` sites, which is exactly
+// the shape that grows a tenth member silently.
+const _resumeCauseValuesAreExact: Exact<(typeof VALUE_SETS.resumeCause)[number], ResumeCause> = true;
+const _artifactKindValuesAreExact: Exact<
+  (typeof VALUE_SETS.artifactKind)[number],
+  ArtifactKind
+> = true;
+const _artifactOriginValuesAreExact: Exact<
+  (typeof VALUE_SETS.artifactOrigin)[number],
+  ArtifactOrigin
+> = true;
+
 void _herdrStatusValuesAreExact;
 void _capBoundValuesAreExact;
 void _headroomBoundValuesAreExact;
 void _costSourceValuesAreExact;
 void _stallSourceValuesAreExact;
+void _resumeCauseValuesAreExact;
+void _artifactKindValuesAreExact;
+void _artifactOriginValuesAreExact;
 
 // ------------------------------------------------------------------ the digest
 
@@ -787,9 +1296,19 @@ export function readContractCanonical(): string {
       .join(';');
 
   return [
+    // THE BOUNDARY IS PART OF THE DIGEST, and it has to be: if coverage could
+    // change without moving the digest, §10 could gain or lose a surface with no
+    // version row and nothing to notice — which is the defect the digest exists
+    // to make loud, on the one section that is about where the contract stops.
+    `covered{${Object.keys(COVERED_SURFACES)
+      .sort()
+      .map((s) => `${s}:${[...COVERED_SURFACES[s as keyof typeof COVERED_SURFACES]].sort().join('|')}`)
+      .join(';')}}`,
+    `uncovered{${[...UNCOVERED_SURFACES].sort().join('|')}}`,
     `list_agents{${table(LIST_AGENTS_FIELDS)}}`,
     `list_agents_refusal{${table(LIST_AGENTS_REFUSAL_FIELDS)}}`,
     `agent_status{${table(AGENT_STATUS_FIELDS)}}`,
+    `activate{${table(ACTIVATE_RESPONSE_FIELDS)}}`,
     `daemon_status{${table(DAEMON_STATUS_CONTRACT_FIELDS)}}`,
     `branches{${Object.keys(AGENT_STATUS_BRANCHES)
       .sort()
@@ -799,6 +1318,21 @@ export function readContractCanonical(): string {
             .sort()
             .join('|')}`
       )
+      .join(';')}}`,
+    // BOTH LISTS, and `sometimes` is not decoration in the digest: moving a field
+    // from `sometimes` to `always` changes what the contract PROMISES without
+    // changing which fields exist, and a digest that hashed only `always` would
+    // let the reverse — a guaranteed field quietly downgraded to a conditional
+    // one — land without a version row.
+    `activate_branches{${Object.keys(ACTIVATE_RESPONSE_BRANCHES)
+      .sort()
+      .map((b) => {
+        const spec =
+          ACTIVATE_RESPONSE_BRANCHES[b as keyof typeof ACTIVATE_RESPONSE_BRANCHES];
+        return `${b}:${[...spec.always].sort().join('|')}?${[...spec.sometimes]
+          .sort()
+          .join('|')}`;
+      })
       .join(';')}}`,
     `rows{${named(ROW_SHAPES)}}`,
     `blocks{${named(BLOCK_SHAPES)}}`,

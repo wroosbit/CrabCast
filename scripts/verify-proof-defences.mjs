@@ -430,9 +430,9 @@ const PROOF_DEFENCES = [
     defence: 'mutation',
     central:
       'the read path is a published contract: `docs/read-path-contract.md`, `src/read-contract.ts` ' +
-      'and a REAL daemon\'s `list_agents` and `agent_status` responses carry the same fields with ' +
-      'the same provenance buckets, in both directions, and the version is on the wire in exactly ' +
-      'one place.',
+      'and a REAL daemon\'s `list_agents`, `agent_status` and `activate_response` responses carry ' +
+      'the same fields with the same provenance buckets, in both directions; the version is on the ' +
+      'wire in exactly one place; and the document states which responses it does NOT cover.',
     note:
       'THREE ARTIFACTS, AND THE MUTATIONS ARE WHY IT NEEDS TO BE THREE. §6a adds a field to a REAL ' +
       '`list_agents` payload in a compiled build and requires the check to name it — which is the ' +
@@ -440,12 +440,24 @@ const PROOF_DEFENCES = [
       'document table and requires the same; it needs no daemon because the reconciliation is a ' +
       'pure function of (declaration, document text), which is the whole reason it was written as ' +
       'one — a checker that can only be pointed at the real file cannot be shown to fail. §6c ' +
-      'bumps the declared version without its table row. SEAM: this asserts the document AGREES ' +
+      'bumps the declared version without its table row. KAN-287 added the third surface and two ' +
+      'more mutations: §6d is §6a one response over, and §6e promotes a CONDITIONAL ' +
+      '`activate_response` field to GUARANTEED in the document — a defect no field-set comparison ' +
+      'can see, because no field is added or removed, and the reason that branch table carries two ' +
+      'lists rather than one. §6f is the review\'s own finding kept as a guard: the document section ' +
+      'that states WHERE THE CONTRACT STOPS was prose, and deleting a covered surface from it left ' +
+      'this proof entirely green — the boundary is declared on both sides now, and both legs are ' +
+      'watched failing (the document losing a surface, and a declaration no surface claims). SEAM: this asserts the document AGREES ' +
       'with the daemon\'s own provenance legend; whether a bucket is the RIGHT bucket — durable ' +
       'fields really surviving a restart, observed ones really moving with the census — is ' +
       'verify-state-read-echoes-config §7, which makes each bucket demonstrate its claimed ' +
       'property. Two honest mechanisms, and if the legend and the document were wrong the SAME ' +
-      'way, §4 here would be green and that one would be what noticed.'
+      'way, §4 here would be green and that one would be what noticed. TWO HOLES NAMED RATHER ' +
+      'THAN COVERED, both KAN-287\'s: `activate_response` carries no `provenance` block, so its ' +
+      'buckets have NO legend to be joined against and are held by §1 alone; and its `attach-error` ' +
+      'branch is the one of eleven this harness cannot produce — it needs `pty.spawn` to throw in ' +
+      'the parent, and a herdr that refuses `agent attach` fails in the child. §2d prints both ' +
+      'rather than passing over them, and no sibling script covers the second.'
   },
   {
     script: 'verify-event-contract',
