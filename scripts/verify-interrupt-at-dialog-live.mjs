@@ -231,13 +231,14 @@ async function main() {
   // honest limit of the pin. This reads CALL SITES AND THEIR ORDER out of the
   // source text. It says nothing about whether any of them is REACHABLE.
   //
-  // KAN-383 is the worked case. It makes the submit conditional — the pane is
-  // read between `send-text` and `Enter`, and the Enter is skipped by an early
-  // `return` when our own text never appeared — which is a change to whether
-  // the third keystroke happens at all. Run against that branch's `src/herdr.ts`
-  // (`origin/butchr/KAN-383`), this section extracts `C-c → TEXT → Enter →
-  // Enter` and PASSES, exactly as it does here, because the four call sites are
-  // textually untouched and only a guard above them moved.
+  // KAN-383 is the worked case, and it has since MERGED. It makes the submit
+  // conditional — the pane is read between `send-text` and `Enter`, and the
+  // Enter is skipped by an early `return` when our own text never appeared —
+  // which is a change to whether the third keystroke happens at all. This
+  // section extracts `C-c → TEXT → Enter → Enter` and PASSES against it, because
+  // the four call sites are textually untouched and only a guard above them
+  // moved. Measured twice: against that branch before it merged, and against the
+  // merged tree afterwards.
   //
   // An earlier revision of this comment asserted the opposite — that §0 would
   // go red when KAN-383 landed. That was wrong, and it was wrong in the

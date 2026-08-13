@@ -464,8 +464,21 @@ let unverifiableAfter;
 
   check(r.verdict === 'unverifiable',
     '4b: a send that WAS typed and then could not be observed is UNVERIFIABLE', JSON.stringify(r));
-  check(r.interrupts === 1 && r.submits === 1,
-    'and it really was sent — one interrupt, one submit, so the agent may well have it',
+  // CHANGED BY KAN-383, and it is a deliberate reversal rather than a test
+  // bent to fit new code. This check used to read `submits === 1` — "it really
+  // was sent, so the agent may well have it". That was the old contract: type,
+  // then press Enter regardless of whether anything could be seen. An Enter
+  // pressed at a pane nobody can observe is not a neutral act — if that pane is
+  // at a Claude Code dialog it CONFIRMS WHATEVER IS HIGHLIGHTED, which was
+  // measured to grant folder trust, to exit an agent, and to run a command and
+  // grant a standing permission. So the submit is now withheld here, and the
+  // reason this file's own words had to change is that "the agent may well have
+  // it" is no longer true of this branch: the message is typed and NOT
+  // submitted. `verify-submit-withheld-at-dialog.mjs` owns the new behaviour
+  // and red-drives it three ways.
+  check(r.interrupts === 1 && r.submits === 0,
+    'it was typed, and the submit was WITHHELD — an Enter at a pane nobody can observe may ' +
+    'confirm a dialog rather than submit a message (KAN-383)',
     JSON.stringify({ interrupts: r.interrupts, submits: r.submits }));
   check(r.delivered === false && r.success === false,
     'it does not claim delivery — `delivered` and `success` are both false');
@@ -475,11 +488,12 @@ let unverifiableAfter;
   check(r.evidence.readable === false && r.evidence.landedAfter === null,
     'the evidence says the pane could not be read, rather than reporting a count of zero',
     JSON.stringify(r.evidence));
-  check(typeof r.error === 'string' && /NOT A FAILED SEND/i.test(r.error),
-    'and the error tells the caller what NOT to conclude', r.error);
-  check(r.submits === 1,
+  check(typeof r.error === 'string' && /WITHHELD/i.test(r.error) && /composer/i.test(r.error),
+    'and the error tells the caller what NOT to conclude, and where the text may now be',
+    r.error);
+  check(r.submits === 0,
     'it did NOT retry into the dark — typing again at an agent nobody can observe is how a ' +
-    'bounded retry becomes a loop of interrupts');
+    'bounded retry becomes a loop of interrupts, and it did not submit into the dark either');
 }
 
 console.log('\n   EVERY VERDICT, SIDE BY SIDE:');

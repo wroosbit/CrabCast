@@ -171,7 +171,7 @@ different shape of response.
 | `verdict` | derived | the four-member vocabulary of [§2](#2-the-vocabulary--three-verdicts-four-values). **On every branch, both outcomes** |
 | `refused` | derived, optional | why the request never became a send. Refusal branch only |
 | `interrupts` | derived, optional | Ctrl+C keystrokes this send issued. **Never more than 1, by construction** — a second is how Claude Code quits. Absent where nothing was typed |
-| `submits` | derived, optional | Enter keystrokes this send issued: `2` means the confirm-and-retry fired |
+| `submits` | derived, optional | Enter keystrokes this send issued: `2` means the confirm-and-retry fired, and **`0` means the submit was WITHHELD** — see [§6.1](#61-when-the-submit-is-withheld-submits-0) |
 | `retried` | derived, optional | whether the Enter-only retry ran |
 | `evidence` | observed, optional | the pane state the verdict was read from — [SendEvidence](#4-the-evidence-block). **Absent on two branches** |
 | `error` | derived, optional | **absent if and only if the verdict is `delivered`** |
@@ -291,7 +291,7 @@ actions.**
 | verdict | the safe action | why |
 | --- | --- | --- |
 | `delivered` | nothing — but read [§7](#7-what-delivered-does-not-mean) before depending on it | the strongest claim available from a pane, and it is weaker than "the work is under way" |
-| `not-delivered` | **resend, or route around** | the pane was read and it is not there. Acting on it is what the evidence supports |
+| `not-delivered` | **resend, or route around** | the pane was read and it is not there. Acting on it is what the evidence supports. **Read `submits` before you resend** — `0` means nothing was pressed at the pane ([§6.1](#61-when-the-submit-is-withheld-submits-0)) |
 | `unverifiable` | **wait and look again; do not resend blindly** | the message may well have arrived. Resending types a duplicate at an agent that may already be working on the first copy — and every send begins with a Ctrl+C |
 | `refused` | **fix the request** | nothing was typed at anybody. Read `refused`, not the absence of `evidence` |
 
@@ -300,6 +300,84 @@ with its own single Ctrl+C. The daemon does not retry what it cannot see: an
 unreadable pane answers `unverifiable` and stops, because typing again at an
 agent nobody can observe is how a bounded retry becomes a loop of interrupts at
 somebody's working agent.
+
+<a id="61-when-the-submit-is-withheld-submits-0"></a>
+### 6.1 When the submit is withheld — `submits: 0`
+
+**A send presses Enter only when it can see the text it typed.** Where the typed
+text does not appear on the pane, no Enter is issued, and **`submits: 0` is the
+field that says so.** No field was added for this: a count that can be zero
+already said it.
+
+**Why an unpressed Enter is the safe one, and a pressed one is not neutral.**
+Enter confirms whatever the pane currently has selected. If our text is not on
+the pane, Enter cannot submit our message — so the only thing it can still do is
+answer somebody else's prompt. Measured against a real Claude Code (KAN-383):
+
+| the pane | what `send-text` did | what Enter would have done |
+| --- | --- | --- |
+| startup trust dialog, highlight left at option 1 | echoed **nowhere**; frame byte-identical | confirmed *"Yes, I trust this folder"* — folder trust granted |
+| the same dialog, highlight moved to option 2 first | echoed **nowhere** | confirmed *"No, exit"* — **`claude` exited with status 1** |
+| tool-permission dialog, highlight moved to option 2 | echoed **nowhere** | **ran the command** and granted the standing permission |
+
+Option 2 was neither the default position nor the conservative answer in either
+run. Its only property was being highlighted, which is what makes the mechanism
+*"Enter confirms whatever is highlighted"* rather than *"resolves to option 1"*.
+
+**What the daemon does NOT do, stated because the obvious design is the wrong
+one: it does not detect dialogs.** Nothing reads their wording, their footer or
+their shape. Two dialog kinds measured on the same afternoon render their
+footers differently — *"Enter to confirm · Esc to cancel"* against *"Esc to
+cancel · Tab to amend"* — so a detector tuned to either misses the other, and
+both belong to a TUI that CrabCast does not own and cannot version-pin. The
+condition read is about **our own message**: is the thing we just typed on the
+pane? That is an observation rather than a guess, and it stays true however
+Claude Code chooses to redraw itself.
+
+**The consequences for a caller, which are the point of documenting it:**
+
+* **`submits: 0` with `verdict: not-delivered`** — the pane was read, the text
+  never appeared, nothing was pressed. **The pane was left exactly as it was
+  found**, so **resending is safe** and does the same harmless thing. This is
+  the state a send addressed to an agent sitting at a dialog now reaches.
+* **`submits: 0` with `verdict: unverifiable`** — the pane could not be read
+  after typing, so the submit was withheld rather than pressed blind. *"We could
+  not tell"* does not resolve to *"press it anyway"*.
+* **`interrupts` is unchanged and is still `1`.** The Ctrl+C is **measured inert
+  at a dialog** — not dismissed, not cancelled, highlight unmoved, with a `Down`
+  keystroke immediately afterwards proving the pane was listening. It is
+  untouched here because it is not what damages a pane at a dialog, and its own
+  justification is real: at a shell with a half-typed line one Ctrl+C clears it
+  and the command does not run.
+
+**Why this is not `refused`, since that is the value a reader expects here.**
+`refused` means *the request never became a send* — [§2](#2-the-vocabulary--three-verdicts-four-values)
+defines it as *"no pane was read and no keystroke was issued"*, and its branch
+carries neither `interrupts` nor `submits`. By the time a submit is withheld a
+pane **has** been read and a Ctrl+C **has** been issued, so `refused` would be
+true in outcome and false in its basis — the one thing the four-member
+vocabulary exists to prevent. **No vocabulary member was added and no field was
+added**; the contract digest is unchanged, and an exhaustive consumer switch
+gains no new case.
+
+**The limit of the check, because a caller should not have to infer it.** *"Is
+our message on the pane"* is only as sharp as the fingerprint asking it, and the
+fingerprint has no minimum length — a one-character message asks a
+one-character question. The count is taken over the **composer region** rather
+than the whole pane precisely so that unrelated redraws cannot answer it, and
+that closes the case found in review (an ordinary streaming line inflating the
+count for `y` until the submit went out at a live dialog). **It does not close
+the class:** a redraw inside the composer region could still inflate a short
+needle, and the residual failure is a submit that should have been withheld.
+**No minimum length is imposed** — `y`, `ok` and `go` must stay sendable — so
+this is a named gap rather than a fixed one.
+
+**And the cost, stated rather than hidden.** A withheld submit can leave a
+message typed-and-unsubmitted in a composer — which is precisely the KAN-114
+failure the delivery confirmation was built to catch. That is the deliberate
+trade: an unsubmitted message is visible, recoverable, and **reported**
+(`submits: 0`, plus `error`), while an answered consent dialog is none of the
+three.
 
 ---
 
@@ -367,20 +445,26 @@ pairwise in both directions.
   changing.
 * **`SendVerdict` used internally.** `src/nudge.ts` carries one on its own
   record; that is not on this wire and nothing here describes it.
-* **Timing.** How long a confirmation waits, how often it polls, and the retry's
-  existence are behaviour rather than shape. `verify-send-confirms-delivery.mjs`
-  holds them.
+* **Timing.** How long a confirmation waits, how often it polls, the retry's
+  existence, and **whether a given send presses Enter at all** are behaviour
+  rather than shape. `verify-send-confirms-delivery.mjs` and
+  `verify-submit-withheld-at-dialog.mjs` hold them. The *observable trace* of
+  the last one is not behaviour and is contracted: it is `submits`, whose `0`
+  is documented in [§6.1](#61-when-the-submit-is-withheld-submits-0).
 * **Whether `COMPOSER_MARKERS` matches a real Claude Code pane.** That is the
   load-bearing assumption under every verdict on this page, and no shape
   contract can reach it. `verify-send-confirms-delivery-live.mjs` is what runs
-  the same code against a real pane nobody wrote.
+  the same code against a real pane nobody wrote. **And it matches more than it
+  was meant to:** a dialog's highlight caret is `❯`, so `splitAtComposer` finds
+  a "composer" at `❯ 1. Yes` and reports the selected option as the input line.
+  That is measured (KAN-383) and it is why the submit precondition in
+  [§6.1](#61-when-the-submit-is-withheld-submits-0) does not rely on the marker.
 * **The keystrokes a send issues, and what they do to a pane that is not at an
   ordinary prompt.** Those are behaviour rather than shape, so they are not on
   this contract's wire and carry no digest — but they are what a caller most
   often needs, so they are written down in
   [§10](#10-the-keystrokes-a-send-issues-and-why-the-interrupt-is-unconditional)
-  rather than left in `src/herdr.ts`. **Note in particular that no verdict on
-  this page can report that a send answered a dialog** (KAN-383).
+  rather than left in `src/herdr.ts`.
 
 **This section is prose, and the read-path contract's §10 is data.** That is a
 real difference and it is stated rather than smoothed over: the list above can
@@ -452,7 +536,12 @@ A `send_to_agent` that reaches a pane issues exactly three things, in order:
 | --- | --- | --- |
 | 1 | one `Ctrl+C` | clears a partially typed line, so the message cannot be concatenated onto stray input |
 | 2 | the message text | the payload |
-| 3 | `Enter` | submits it |
+| 3 | `Enter` | submits it — **only when the pane shows the text step 2 typed.** See [§6.1](#61-when-the-submit-is-withheld-submits-0) |
+
+**Step 3 is conditional and steps 1 and 2 are not**, which is the whole of the
+difference between this section and [§6.1](#61-when-the-submit-is-withheld-submits-0).
+Read them together: that one says when the submit is withheld, this one says why
+the interrupt in front of it is not.
 
 A confirmation follows, and **the retry presses `Enter` only** — it never types
 again and never interrupts again. **Exactly one `Ctrl+C` exists for the whole
@@ -513,10 +602,10 @@ the probe before acting on it.
 * **Remove it.** Rejected. It reintroduces the silent concatenation §1 of the
   probe demonstrates it prevents.
 
-### What a caller with a dialog open should do instead
+### What a caller with a dialog open should do instead — and what the daemon now does for them
 
-**Not send.** And this is a real answer rather than a deflection, because the
-hazard at a dialog is **not** the interrupt:
+**The honest answer when this decision was taken was "not send", because the
+hazard at a dialog was never the interrupt:**
 
 > **The `Enter` at step 3 confirms whatever option is highlighted.** Measured
 > twice, with the discriminator: with the highlight left at its default the
@@ -525,16 +614,25 @@ hazard at a dialog is **not** the interrupt:
 > default position nor the conservative answer, and whose only property was
 > being highlighted. The message text itself is swallowed and echoed nowhere.
 
-So a send to a pane at a dialog **loses its message and answers a question
-nobody was asked**, and no verdict on this page can say so — the response will
-truthfully report `not-delivered`, having no vocabulary for *"and I supplied an
-answer on your behalf"*.
+**That was KAN-383, and it has since landed**, which changes this answer rather
+than leaving it as advice. The submit is now **earned**: the pane is read between
+step 2 and step 3, and the `Enter` goes out only when this message's own text is
+visible. A dialog destroys the text, so the text is not visible, so **no `Enter`
+is issued and the dialog is not answered.** `submits: 0` is what the response
+carries, and [§6.1](#61-when-the-submit-is-withheld-submits-0) is where that
+branch is specified.
 
-**That is tracked as KAN-383**, filed separately and deliberately: it is a
-property of the submit, not of the interrupt, and it deserves its own severity
-assessment rather than inheriting this one's. **Until it is resolved, a caller
-that may be sending to an agent at a dialog should establish that it is not —
-`tail_agent` reads the pane — and treat a send as unsafe if it cannot.**
+**So the caller-facing answer is now: send, and read `submits`.** A send to a
+pane at a dialog costs that pane nothing — one inert `Ctrl+C` and some text the
+dialog discards — and reports that it did not land. The advice this section used
+to give (establish the pane is not at a dialog first, with `tail_agent`) is no
+longer required, and is kept nowhere but this sentence so that a reader arriving
+from an older copy can see it was superseded rather than forgotten.
+
+**What did not change is the reason this section exists.** The interrupt is
+still unconditional, and the measurement above is still why: it is inert at the
+dialog, so it was never the thing that needed conditioning. **KAN-383 conditioned
+the keystroke that was.**
 
 ### Where this is enforced
 
@@ -550,7 +648,10 @@ one that breaks §2's own control.
 **What §0 does not reach, said here because the table above invites the wrong
 reading.** It pins the **call sites and their order**, not whether each one is
 **reachable**. A guard placed above the `Enter` — which is exactly what KAN-383
-adds — leaves all four calls textually intact, so §0 stays green while the third
-keystroke becomes conditional. Verified against that branch rather than assumed.
+landed — leaves all four calls textually intact, so §0 stays green while the
+third keystroke becomes conditional. **Measured against KAN-383's branch before
+it merged, and again on the merged tree: green both times.** That is the pin's
+limit, not a defect in it.
+
 **So the table above describes what a send issues when nothing withholds it, and
 `submits` on the response is what tells a caller how many actually went out.**

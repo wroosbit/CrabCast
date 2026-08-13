@@ -753,6 +753,21 @@ const PROOF_DEFENCES = [
       'is covered only by verify-send-confirms-delivery-live. Both headers say so.'
   },
   {
+    script: 'verify-submit-withheld-at-dialog',
+    defence: 'mutation',
+    central:
+      'A send presses Enter only when it can SEE the text it typed, so a pane that swallowed the ' +
+      'message never receives a keystroke that would confirm whatever it has highlighted.',
+    note:
+      'Three mutations, because one is not enough to reach three sections: removing the ' +
+      'visibility comparison leaves the unreadable-pane section green, and moving the baseline ' +
+      'back before the interrupt is the only thing that reaches the recovery section. Its four ' +
+      'pane frames are verbatim captures from a real Claude Code rather than shim drawings, but ' +
+      'the transport is still a shim: that a real herdr DESTROYS send-text at a real dialog is ' +
+      'covered by the live measurement on KAN-383 and by no script. There is deliberately no ' +
+      'live sibling — reproducing it means answering a consent dialog on a real agent.'
+  },
+  {
     script: 'verify-tail-asks-every-source',
     defence: 'guard',
     central:
