@@ -112,6 +112,16 @@ so the next sweep does not have to re-derive that.
 `kan369-red-drive.mjs` is the same kind of thing — the mutations behind §4d,
 run one at a time, for a pull request rather than for a gate. Neither is a
 standing guard and neither should be counted as one.
+`kan117-red-drive.mjs` is a third, and it has a baseline that moves in a way
+the others do not: it drives **Butchr's** `verify-crabcast-runtime-live.mjs`,
+a file in **another repository**, against isolated daemons built from mutated
+copies of our own `dist`. Two of its inputs drift without any commit here —
+Butchr's checkout, and the contract version their adapter pins — so its output
+is only ever evidence about the pair of commits it names in its own header
+output. It is not in the CI array, it needs a real herdr, and
+`verify-crabcast-runtime-live.mjs:15` says `CI-RUNNABLE: no`. **It is not
+evidence for KAN-117's AC1**, which asks for a herdr-free runner; it says so
+in its own header and the distinction is the whole reason that ticket exists.
 
 **If you are here to repin `verify-ci-wiring-guards` §2, read this first
 (KAN-363).** `verify-ci-proof-residue-is-legible` §4c pins the same commit
