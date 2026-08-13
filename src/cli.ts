@@ -425,7 +425,7 @@ const CAPACITY_FIELDS = [
   'headroomBoundBy', 'reason', 'cores', 'load1', 'cpuBusyCores',
   'cpuWindowSeconds', 'cpuObservedAt', 'totalMb', 'availableMb',
   'agentMemoryMb', 'agentCores', 'agentMemorySource', 'agentCoresSource',
-  'measuredAt', 'measuredWindowSeconds', 'measuredAgentTrees', 'capByCpu',
+  'measuredAt', 'measuredWindowSeconds', 'measuredAgentTrees', 'measuredTreesSeen', 'capByCpu',
   'capByMemory', 'headroomByCap', 'headroomByCpu', 'headroomByLoad',
   'headroomByMemory', 'stallPercent', 'stallSource', 'stallInstrument',
   'stalled', 'stallRefusePercent', 'headroomBeforeStall', 'summary',
@@ -532,7 +532,8 @@ function capacityBlock(capacity: any): string | null {
       `${capacity.agentCores} core (${capacity.agentCoresSource})` +
       (capacity.measuredAt
         ? `, measured over ${capacity.measuredWindowSeconds}s across ` +
-          `${capacity.measuredAgentTrees} tree(s) ending ${capacity.measuredAt}`
+          `${capacity.measuredAgentTrees} of ${capacity.measuredTreesSeen} tree(s) ` +
+          `attributed to this daemon ending ${capacity.measuredAt}`
         : ''),
     // KAN-263: the CPU-side term's missing subtrahend. PRINTED WHEN INERT, for
     // the reason the stall line is: `list_agents` ships no derivation, so on

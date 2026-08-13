@@ -95,6 +95,27 @@ function check(ok, label, detail = '') {
  */
 const EXCLUSIONS = [
   {
+    script: 'verify-agent-cost-attribution-live',
+    reason:
+      'Needs a running herdr server and a real terminal pane. It spawns a scratch `shell` agent ' +
+      'through HerdrBridge, starts a process inside that pane, and asserts that the cost ' +
+      'sampler joins the resulting process tree back to that agent — none of which a GitHub ' +
+      'runner can do, since the join reads a variable herdr puts in a pane environment and ' +
+      'resolves it through `herdr pane get`. WHY IT IS WORTH THE HAND-RUN, and this is the ' +
+      'load-bearing half: its CI-side sibling `verify-agent-cost-attribution` SUPPLIES ITS OWN ' +
+      'ATTRIBUTOR. It proves what the sampler does with an ownership answer and cannot prove ' +
+      'that an answer arrives, so a herdr that stopped setting the handle — or a `pane get` ' +
+      'that stopped resolving it — would leave every tree unattributed, the divisor permanently ' +
+      'at the seed, and the CI half green from top to bottom. That is the KAN-145 shape (two ' +
+      'honest scripts, the hole between them), and this entry is where the hole is named. Run ' +
+      'it before merging any change to the join: `PANE_HANDLE_VAR` in src/agent-cost.ts, ' +
+      '`paneNameForHandle` in src/herdr.ts, or `chargedPaneNames` in src/daemon.ts. It carries ' +
+      'its own red drive — the pane-handle variable renamed, where the live agent must fall out ' +
+      'of the sample — so a green run is evidence the gate can still go red.',
+    evidence:
+      'scripts/verify-agent-cost-attribution-live.mjs:23 spawns a real pane via HerdrBridge; §2 resolves HERDR_PANE_ID through `herdr pane get`'
+  },
+  {
     script: 'verify-agy-reads-what-we-write',
     reason:
       'Needs a real `agy` binary, which no GitHub runner has and which cannot be installed on one ' +

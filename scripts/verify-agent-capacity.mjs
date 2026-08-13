@@ -507,7 +507,7 @@ const MEASURED = {
   cores: 0.3,
   sampledAt: Date.parse('2026-08-02T19:00:00Z'),
   windowSeconds: 60,
-  agentTrees: 4
+  agentTrees: 4, treesSeen: 4
 };
 
 // A measurement MORE expensive than the seed on both dimensions. The floor
@@ -517,7 +517,7 @@ const DEAR = {
   cores: 1.5,
   sampledAt: Date.parse('2026-08-02T19:00:00Z'),
   windowSeconds: 60,
-  agentTrees: 4
+  agentTrees: 4, treesSeen: 4
 };
 
 const seeded = computeCapacity(FACTS, 0);
@@ -572,7 +572,7 @@ flag(
 // -------------------------------------------------------- 11. damping --
 rule('11. DAMPING — quick to believe expensive, slow to believe cheap');
 
-const meta = { sampledAt: MEASURED.sampledAt, windowSeconds: 60, agentTrees: 4 };
+const meta = { sampledAt: MEASURED.sampledAt, windowSeconds: 60, agentTrees: 4, treesSeen: 4 };
 const capFor = (est) => computeCapacity(FACTS, 0, { measured: { ...est, ...meta } }).cap;
 const row = (i, est) =>
   console.log(
@@ -964,7 +964,7 @@ const idleSample = sampleFromMeasurement(idleWindow, FACTS.totalBytes);
 console.log(`an idle fleet's window (0.0001 core/tree) samples as: ${JSON.stringify(idleSample)}\n`);
 
 const flooredCap = computeCapacity(FACTS, 0, {
-  measured: { ...idleSample, sampledAt: Date.parse('2026-08-03T17:00:00Z'), windowSeconds: 60, agentTrees: 4 }
+  measured: { ...idleSample, sampledAt: Date.parse('2026-08-03T17:00:00Z'), windowSeconds: 60, agentTrees: 4, treesSeen: 4 }
 });
 console.log(describeCapacity(flooredCap));
 console.log(

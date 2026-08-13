@@ -1610,6 +1610,42 @@ export class HerdrBridge {
   }
 
   /**
+   * The NAME of the pane a herdr pane handle refers to, or null if herdr will
+   * not resolve it (KAN-338).
+   *
+   * WHAT THIS IS FOR. A pane handle is what a running process carries — herdr
+   * puts one in every pane's environment, and `agent-cost.ts` reads it off a
+   * process tree's root. A pane NAME is what this daemon decides ownership on.
+   * This is the one step between them, and it is a lookup rather than a
+   * judgement: it answers "which pane is that", never "is it ours".
+   *
+   * IT IS NOT PART OF THE CENSUS, AND IT CANNOT BE. `herdr agent list` and
+   * `herdr pane list` report no handle in this form, so there is no single
+   * read that maps every handle to a name — checked at herdr 0.6.4 on
+   * 2026-08-13 across `pane list`, `pane get` and `agent get`. The cost is one
+   * `herdr pane get` per agent TREE per sampling window (seven on this machine,
+   * once a minute), and the remedy is on herdr's side of a boundary this
+   * daemon does not edit: see the note on `PANE_HANDLE_VAR` in agent-cost.ts.
+   *
+   * Null on every failure — an unknown handle, a herdr that will not answer, a
+   * reply in a shape we do not recognise — because a caller can only degrade,
+   * and a caller that cannot tell those apart must not guess a name. The
+   * distinction that DOES matter to the sampler, "herdr answered nothing at
+   * all", is taken from {@link listHerdrAgentsChecked} rather than from here,
+   * so an unreachable herdr is one fact read once rather than N nulls that
+   * could each mean either thing.
+   */
+  public paneNameForHandle(handle: string): string | null {
+    let pane: any;
+    try {
+      pane = this.runHerdr(['pane', 'get', handle])?.result?.pane;
+    } catch {
+      return null;
+    }
+    return typeof pane?.label === 'string' && pane.label ? pane.label : null;
+  }
+
+  /**
    * Does this agent exist? Asked after a spawn, before anyone is told the
    * activation succeeded.
    *

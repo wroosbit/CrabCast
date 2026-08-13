@@ -347,8 +347,25 @@ export interface MeasuredAgentCost extends AgentCost {
   sampledAt: number;
   /** Length of the window that closed the measurement, in seconds. */
   windowSeconds: number;
-  /** Agent trees the per-tree figures were averaged over. */
+  /**
+   * Agent trees the per-tree figures were averaged over.
+   *
+   * SINCE KAN-338 THIS IS A SUBSET AND NOT A CENSUS: only trees attributed to
+   * a chargeable agent of this daemon are in it. {@link treesSeen} is the
+   * population it was drawn from.
+   */
   agentTrees: number;
+  /**
+   * Agent-runtime trees the window saw on the machine, ours or not.
+   *
+   * REQUIRED, NOT OPTIONAL, and that is deliberate (KAN-338). Every reader of
+   * this figure is judging how representative the divisor is, and a field that
+   * can be omitted would be omitted exactly where the two numbers differ — by
+   * a fixture written to prove some other point, which then quietly asserts
+   * that the whole machine was ours. `treesSeen === agentTrees` is a claim,
+   * and the type makes somebody make it.
+   */
+  treesSeen: number;
 }
 
 /**
@@ -509,22 +526,56 @@ export function startingAgentCores(cost: AgentCost, costSource: CostSource): num
  * two figures on one report drift into disagreeing.
  *
  * WHY A FLOOR AT ALL, since a measurement is supposed to beat a seed. Because
- * this daemon cannot tell whose process trees it is measuring. `agent-cost.ts`
+ * this daemon could not tell whose process trees it was measuring. `agent-cost.ts`
  * enumerates every agent-runtime tree on the machine and groups by process
- * ancestry; nothing joins a tree to an agent record, so a machine running
+ * ancestry; nothing joined a tree to an agent record, so a machine running
  * another orchestrator's fleet — or this one's own supervising agents, which
- * are deliberately never charged — contributes samples to a figure that is then
+ * are deliberately never charged — contributed samples to a figure that is then
  * divided into a budget for CHARGED agents. Measured here on 2026-08-12: 0.135
  * core/agent averaged over four trees, none of which this daemon managed, which
  * derived `capByCpu 18` on a four-core box. Cheap foreign trees drag the
  * divisor down, and a smaller divisor is a LARGER cap — the discount arrives as
  * a permission rather than a saving.
  *
- * So the floor bounds the damage from a divisor whose population is not known
- * to be ours, WITHOUT pretending to attribute it. Attribution is the better fix
- * and it is not available yet: the only handle on a running tree is its `cwd`,
- * and `herdr.ts` records — from a measured failure — that ownership is never
- * decided on `cwd`, because a process can `cd` and disown itself.
+ * ATTRIBUTION HAS LANDED (KAN-338) AND THE FLOOR STAYS. The sample is now the
+ * trees this daemon owns and charges for, joined process → herdr pane → the one
+ * ownership test. That removes the population the floor was bounding, and it
+ * does NOT make the floor redundant, per term:
+ *
+ *   - `cores`. A one-tree sample is an average over one number. Attribution
+ *     makes the sample correct and SMALLER, so it is more correct and less
+ *     stable at the same time — one agent idling through a window is now the
+ *     whole divisor rather than a quarter of it. The floor is what stands under
+ *     that, and it binds precisely in the small-sample case attribution creates.
+ *   - `residentBytes`. Same argument, and one more: the join is an environment
+ *     variable, which anything that can `export` can forge. Forgery buys a
+ *     foreign tree a place in the sample, and the floor bounds what that is
+ *     worth — a forger can no longer drive the divisor below the seed however
+ *     cheap their trees are.
+ *
+ * AND A THIRD, WHICH WAS MEASURED RATHER THAN ANTICIPATED. Attribution is not
+ * monotone: it removes whichever trees are not ours, and those can be the
+ * EXPENSIVE ones. Measured on this machine on 2026-08-13 over two 60s windows,
+ * same code, the two populations: every tree gave 827 MB per tree, and the
+ * attributed sample gave the 800 MB seed — so dropping the foreign trees LOWERED
+ * the memory divisor, which is the direction that admits more agents.
+ * `capByMemory` did not move (16 either way, on integer division), but the
+ * direction is the point and the net figure concealed it. The floor is what
+ * bounds that: however expensive the trees that leave, the divisor cannot fall
+ * below the seed.
+ *
+ * The empty sample is not on that list because it never reaches here: a window
+ * with no attributed tree is rejected by `sampleFromMeasurement` and the report
+ * says `seed`. A divisor over an empty sample would be a gate that agrees with
+ * anything, and it is guarded at the sampler rather than floored here.
+ *
+ * WHAT ATTRIBUTION BUYS, GIVEN THAT THE FLOOR STILL FLOORS EVERY DIMENSION.
+ * Only readings ABOVE the seed can move the arithmetic — so what changes is
+ * that a cheap FOREIGN fleet can no longer hide an expensive fleet of OUR OWN.
+ * Four idle strangers averaged in with two agents costing 1.2 cores each gave
+ * 0.43, floored to 0.75; attributed, the divisor is 1.2 and the cap is smaller
+ * and true. The floor could never have reached that number: it raises to the
+ * seed, never to the measurement.
  *
  * WHAT IT COSTS, named because it is a real loss and not a rounding one: a
  * fleet of genuinely cheap agents can no longer earn a cap above the seed's.
@@ -1415,9 +1466,10 @@ export function describeCapacity(c: Capacity): string {
               `seed floor ${Math.round(MEASURED_AGENT_COST.residentBytes / MIB)} MB`
         )
         .join('; ') +
-      ` — a measured divisor is raised to the seed because nothing joins a measured ` +
-      `process tree to an agent record, so the sample is not known to be this daemon's. ` +
-      `The measurement can still charge MORE than the seed; it can no longer charge less`
+      ` — a measured divisor is raised to the seed. The sample IS this daemon's now ` +
+      `(KAN-338), and the floor survives that: it is what stands under a one-tree ` +
+      `average and under a join a process could lie about. The measurement can still ` +
+      `charge MORE than the seed; it can no longer charge less`
     );
   }
   if (c.measured) {
@@ -1428,17 +1480,23 @@ export function describeCapacity(c: Capacity): string {
     if (c.costSource.cores === 'override') {
       beaten.push(`CRABCAST_AGENT_CORES overrides its ${c.measured.cores} core`);
     }
-    // KAN-275: the tree count is NOT a count of this daemon's agents, and used
-    // to sit one line above `running: N charged agent(s)` as though it were.
-    // On the machine this was written on those read `4 tree(s)` and `running:
-    // 0` simultaneously, and the contradiction went unread for a day. The
-    // sampler measures every agent-runtime tree on the machine, whoever started
-    // it, because there is nothing to join a tree to an agent by.
+    // KAN-275 put a warning here: the tree count was NOT a count of this
+    // daemon's agents, and sat one line above `running: N charged agent(s)` as
+    // though it were — `4 tree(s)` and `running: 0` printed together for a day
+    // without the contradiction being read as one.
+    //
+    // KAN-338 makes the two counts comparable rather than the warning louder,
+    // and BOTH are printed for that reason. `N of M` is the whole claim: N is
+    // what divided, M is what was on the machine, and a reader who wants to
+    // know how representative the divisor is needs the pair. N should now
+    // track `running` — where it does not, one of the two is wrong, which is a
+    // thing this line can finally be used to notice.
     lines.push(
       `  measured (damped): ${Math.round(c.measured.residentBytes / MIB)} MB, ` +
-      `${c.measured.cores} core per agent tree — ${c.measured.agentTrees} agent-runtime ` +
-      `tree(s) found ON THIS MACHINE, not necessarily this daemon's and not compared ` +
-      `against its ${c.running} charged / ${c.exemptAgents} exempt agent(s); ` +
+      `${c.measured.cores} core per agent tree — averaged over ${c.measured.agentTrees} of ` +
+      `${c.measured.treesSeen} agent-runtime tree(s) on this machine, the ones joined by ` +
+      `herdr pane to a chargeable agent of this daemon (KAN-338), against its ` +
+      `${c.running} charged / ${c.exemptAgents} exempt agent(s); ` +
       `over a ${Math.round(c.measured.windowSeconds)}s window ` +
       `ending ${new Date(c.measured.sampledAt).toISOString()}` +
       (beaten.length ? `; ignored: ${beaten.join(', ')}` : '')

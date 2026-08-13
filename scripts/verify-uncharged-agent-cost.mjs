@@ -32,14 +32,20 @@
 //
 // The floor in §1 BOUNDS the damage from an unattributable divisor. It does not
 // ATTRIBUTE anything, and nothing here tests that the sampler measures this
-// daemon's agents rather than somebody else's — because the sampler cannot
-// currently tell, and no code in `src/` claims to. The only handle on a running
-// tree is its `cwd`, and `herdr.ts` records from a measured failure that
-// ownership is never decided on `cwd`, since a process can `cd` and disown
-// itself. Until a tree can be joined to an agent record, "the divisor is
-// measured from OUR chargeable agents" is a sentence no script in this
-// repository can make true. That work is KAN-275's open half; this file is
-// honest about being the bound and not the fix.
+// daemon's agents rather than somebody else's.
+//
+// WHO COVERS IT NOW (KAN-338, and this paragraph replaces the one that said
+// nobody could): `verify-agent-cost-attribution.mjs` holds the sampler's half —
+// which trees enter the divisor, and what happens at one tree and at none — and
+// `verify-agent-cost-attribution-live.mjs` holds the join itself against a real
+// herdr and a real pane, which no runner can do. THE SEAM BETWEEN THEM IS REAL
+// AND IS NAMED IN BOTH: the first supplies its own attributor, so it proves
+// what the sampler does with an answer and never that the answer arrives.
+//
+// What is still true of THIS file is that the floor and the reserve are
+// arithmetic, and are proved here as arithmetic. §1's floor is not made
+// redundant by attribution — see `flooredCost`'s per-dimension argument — so
+// nothing below was deleted when the sample became ours.
 //
 // Every fixture below is DERIVED from the shipped constants and from this
 // machine's own facts rather than written down (KAN-245: a hard-coded
@@ -95,6 +101,13 @@ console.log(
 // ---------------------------------------------------------------- 1. floor --
 rule('1. THE DIVISOR FLOOR — a cheap measurement cannot buy a bigger cap');
 
+// KAN-338: an attributed sample is a SUBSET of the trees on the machine, so a
+// fixture states BOTH counts. They are deliberately different numbers: an
+// assertion that the report names both would pass against a report that
+// printed one of them twice.
+const CHEAP_TREES = 2;
+const CHEAP_TREES_SEEN = 6;
+
 // Derived from the seed, not written down: a quarter of it is unambiguously
 // "cheaper", and it follows the seed if the seed ever moves.
 const CHEAP = {
@@ -102,14 +115,14 @@ const CHEAP = {
   cores: MEASURED_AGENT_COST.cores / 4,
   sampledAt: Date.parse('2026-08-12T00:00:00Z'),
   windowSeconds: 60,
-  agentTrees: 4
+  agentTrees: CHEAP_TREES, treesSeen: CHEAP_TREES_SEEN
 };
 const DEAR = {
   residentBytes: MEASURED_AGENT_COST.residentBytes * 2,
   cores: MEASURED_AGENT_COST.cores * 2,
   sampledAt: Date.parse('2026-08-12T00:00:00Z'),
   windowSeconds: 60,
-  agentTrees: 4
+  agentTrees: 4, treesSeen: 4
 };
 
 const seeded = computeCapacity(FACTS, 0);
@@ -233,9 +246,22 @@ check(
 // above `running: 0 charged agent(s)`, as though the trees were this daemon's
 // fleet. The count is still printed — it is real and it is evidence — but it
 // may never again be presented as a count of our agents.
+//
+// REWRITTEN BY KAN-338, AND NOT WEAKENED. Until attribution landed, the only
+// honest thing the report could do was DISCLAIM the count: "not necessarily
+// this daemon's". The count is now attributed, so that disclaimer would be a
+// lie in the other direction, and this check asserted its exact words. What
+// the check is FOR is unchanged and is what stays asserted: a reader must be
+// able to tell the trees that divided from the trees that were merely there.
+// One count could not say that and two can, so the assertion is now that both
+// are printed and distinguishable. If you are here because this failed: do not
+// re-word it to match the report. Ask first whether the report can still
+// answer "how representative is this divisor" — that is the question, and the
+// wording is only ever this check's grip on it.
 check(
-  text.includes('not necessarily this daemon') && text.includes('agent-runtime tree(s) found ON THIS MACHINE'),
-  'the tree count is not presented as a count of this daemon\'s agents'
+  text.includes(`averaged over ${CHEAP_TREES} of ${CHEAP_TREES_SEEN} agent-runtime tree(s)`) &&
+    text.includes('chargeable agent of this daemon'),
+  'the divisor names both what it averaged and the population it came out of'
 );
 
 const reserveText = describeCapacity(withExempt);

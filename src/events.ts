@@ -277,6 +277,7 @@ export const CAPACITY_FIELDS = {
   measuredAt: SCALAR,
   measuredWindowSeconds: SCALAR,
   measuredAgentTrees: SCALAR,
+  measuredTreesSeen: SCALAR,
   capByCpu: SCALAR,
   capByMemory: SCALAR,
   headroomByCap: SCALAR,
