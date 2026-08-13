@@ -179,7 +179,13 @@ import { fileURLToPath } from 'url';
 import { makeMutator } from './mutation.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const distDir = path.resolve(process.argv[2] ?? path.join(scriptDir, '..', 'dist'));
+// The dist dir is the first POSITIONAL argument. Flags are filtered out
+// deliberately (KAN-376): reading `process.argv[2]` directly would resolve
+// `--static-only` as a directory path, and the failure that produces is a
+// contract proof importing from a dist that does not exist — a red about the
+// invocation wearing the clothes of a red about the contract.
+const positional = process.argv.slice(2).filter((a) => !a.startsWith('--'));
+const distDir = path.resolve(positional[0] ?? path.join(scriptDir, '..', 'dist'));
 const repoRoot = path.join(scriptDir, '..');
 const CONTRACT_DOC = path.join(repoRoot, 'docs', 'read-path-contract.md');
 
@@ -752,6 +758,55 @@ function reconcile(mod, docText) {
     if (!(name in mod.VALUE_SETS)) problems.push(`values ${name}: documented, not declared`);
   }
 
+  // THE REFUSAL-KIND RULE ITSELF, WHICH NOTHING HELD UNTIL NOW (KAN-376).
+  //
+  // §8 note 2 states a rule rather than a count: `refused` is on the PRE-FLIGHT
+  // refusals, and the members of `activateRefused` are named after exactly those
+  // branches. Three mechanisms already existed around it and none of them was
+  // this one — the compiler binds the union to `VALUE_SETS`, the check above
+  // binds `VALUE_SETS` to §9's table, and §2d asserts each branch's key set
+  // against a real response. Every one of those can be satisfied while the rule
+  // is false: add `'doctored'` to the union, to `VALUE_SETS` and to §9 and all
+  // three stay green, because no branch has to carry it and nothing compares the
+  // two sets.
+  //
+  // So this asserts the join: THE BRANCHES WHOSE `always` CARRIES `refused` ARE
+  // EXACTLY THE MEMBERS OF `activateRefused`. A tenth branch that quietly gains
+  // the field is red; a member published for a branch that does not carry it is
+  // red. Static, because both sides are declarations — the WIRE half of the same
+  // claim is §2d, and neither subsumes the other.
+  //
+  // `refusedBy` deliberately gets the SAME treatment with a different join: its
+  // members name subsystems rather than branches, so the set is checked against
+  // the branches carrying `refusedBy` by COUNT rather than by name — one member,
+  // one branch. Naming them would encode `capacity`-the-branch and
+  // `capacity`-the-subsystem as the same fact, which they are not.
+  const branchesCarrying = (field) =>
+    Object.entries(mod.ACTIVATE_RESPONSE_BRANCHES)
+      .filter(([, spec]) => spec.always.includes(field))
+      .map(([name]) => name)
+      .sort();
+
+  const carryRefused = branchesCarrying('refused');
+  const declaredKinds = [...mod.VALUE_SETS.activateRefused].sort();
+  if (carryRefused.join(',') !== declaredKinds.join(',')) {
+    problems.push(
+      `the refusal-kind rule (§8 note 2): branches carrying \`refused\` are ` +
+        `[${carryRefused.join(',')}], activateRefused publishes [${declaredKinds.join(',')}] — ` +
+        `these must be the same set, because the members are named after the branches`
+    );
+  }
+
+  const carryRefusedBy = branchesCarrying('refusedBy');
+  if (carryRefusedBy.length !== mod.VALUE_SETS.activateRefusedBy.length) {
+    problems.push(
+      `the refusal-kind rule (§8 note 2): ${carryRefusedBy.length} branch(es) carry ` +
+        `\`refusedBy\` [${carryRefusedBy.join(',')}] but activateRefusedBy publishes ` +
+        `${mod.VALUE_SETS.activateRefusedBy.length} member(s) ` +
+        `[${mod.VALUE_SETS.activateRefusedBy.join(',')}]`
+    );
+  }
+
   // Every bucket named anywhere must be one of the four. A typo would
   // otherwise ride through every comparison above intact.
   for (const [name, fields] of tables) {
@@ -1209,6 +1264,27 @@ rule('1. THE DOCUMENT AGAINST THE DECLARATION — every field, both directions')
     `${problems.length} disagreement(s): ${problems.slice(0, 6).join('; ')}` +
       (problems.length > 6 ? ` … and ${problems.length - 6} more` : '')
   );
+}
+
+// `--static-only` STOPS HERE (KAN-376). §1 is the only section that needs no
+// daemon, and a caller that wants exactly it — `scripts/kan376-red-drive.mjs`
+// drives §1 four times over four mutated trees — would otherwise pay for a full
+// fleet lifecycle each time and then have to attribute a red among every other
+// section's assertions.
+//
+// ⚠ THE VERDICT THIS PRINTS IS ABOUT §1 AND NOTHING ELSE, and the line says so
+// rather than leaving a reader to notice the sections are missing. A partial run
+// reporting "ALL CHECKS PASSED" is precisely the artifact-claims-more-than-its-
+// mechanism defect this proof exists to catch, so the wording is part of the flag.
+if (process.argv.includes('--static-only')) {
+  console.log(`\n${'='.repeat(78)}`);
+  console.log(
+    failures === 0
+      ? 'SECTION 1 PASSED — document ↔ declaration only. Sections 2-6 were NOT run.'
+      : `${failures} CHECK(S) FAILED in section 1. Sections 2-6 were NOT run.`
+  );
+  console.log('='.repeat(78));
+  process.exit(failures ? 1 : 0);
 }
 
 // ================ 2. THE DECLARATION AGAINST A REAL DAEMON'S RESPONSES ======

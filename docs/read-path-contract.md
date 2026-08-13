@@ -1178,8 +1178,8 @@ of refusal it is holding.
 | `recordReconciled` | derived, optional | present only when the disk disagreed with the world and this call settled it |
 | `occupiedBy` | observed, optional | [PaneOccupant](#paneoccupant) rows — live panes here that are **not ours** |
 | `note` | derived, optional | prose for a human, beside a co-occupancy that was **reported and not refused** |
-| `refused` | derived, optional | the machine-readable kind — [activateRefused](#activaterefused). **On three of the nine refusals**; read the note below before branching on its absence |
-| `refusedBy` | derived, optional | which subsystem refused — [activateRefusedBy](#activaterefusedby). On the `capacity` refusal only |
+| `refused` | derived, optional | the machine-readable kind — [activateRefused](#activaterefused). **On the pre-flight refusals**, by the rule in note 2 below; read that note before branching on its absence |
+| `refusedBy` | derived, optional | which subsystem refused — [activateRefusedBy](#activaterefusedby). On the `capacity` refusal only — so a consumer branching on `refused` alone reads `undefined` on the **most actionable refusal this surface has**. See note 2 |
 | `missing` | derived, optional | what `configure` would have to supply. On `not-configured` |
 | `reason` | derived, optional | the capacity refusal in one sentence |
 | `derivation` | derived, optional | the capacity arithmetic behind it |
@@ -1301,14 +1301,80 @@ set as an **equality against a real response** — so that change cannot land
 quietly. It was watched going red in both directions rather than assumed; see
 `scripts/kan328-red-drive.mjs`.
 
-**2. Four of the nine refusals carry no machine-readable discriminator.**
-`refused` is on three of them and `refusedBy` on one. `bad-address`, `bad-flag`,
-`spawn-error` and `confirm-failed` are separated from each other **only by the
-prose in `error`** — and `bad-flag` and `spawn-error` have *identical* key sets,
-so no amount of shape inspection tells those two apart. **Do not read the
-absence of `refused` as "not refused"**; read `success: false`. Named here
-because a reader who meets `refused` on some refusals will otherwise assume it
-is on all of them.
+**2. Which refusals carry a machine-readable kind is a RULE, not a count.**
+
+This note used to say *"four of the nine refusals carry no discriminator"* and
+leave it there. A count rots: it is wrong the day a tenth branch lands, and it
+tells an author adding a refusal nothing about where theirs belongs. The rule
+([KAN-376](https://wroosbit.atlassian.net/browse/KAN-376)):
+
+> **`refused` names a condition CrabCast CHECKED AND FOUND before it attempted
+> anything. It is not a stage label for an attempt that lost.**
+
+**The pre-flight refusals carry a kind.** `not-configured`, `unverifiable` and
+`occupied` carry `refused`; `capacity` carries `refusedBy`, because it names a
+*subsystem* rather than a condition. On all four, nothing was spawned, nothing
+was charged and nothing needed unwinding — and each has a remedy a caller can
+**choose between** without reading prose: call `configure` (and `missing` says
+with what), bring herdr up, stop the pane named in `occupiedBy`, or wait /
+`override` / `preempt` with `preemption` naming whose work would end.
+
+**The post-attempt failures carry none, for two reasons rather than by
+omission.** Each of `spawn-error`, `attach-error` and `confirm-failed` ran an
+attempt and then had to settle what it left behind: `spawn-error` and
+`confirm-failed` unwind the start charge (`forgetAgentStart`), and
+`attach-error` leaves the record it converged on the way in. Their remedy is
+**identical**: retry or escalate. A
+discriminator would let a consumer branch on a distinction that changes nothing
+it can do. And `spawn-error`'s prose is **herdr's own string**, not CrabCast's,
+so publishing it as a kind would make one field mean both *"the daemon declined
+for reason X"* and *"an attempt failed at stage Y"*.
+
+**`bad-flag` is in neither category, and that is a conclusion rather than an
+omission.** The request never became a request about an agent: `override` and
+`preempt` are written by the caller's own code, so a non-boolean is a bug fixed
+by editing that code, never by branching at runtime.
+
+**Do not read the absence of `refused` as "not refused"** — read `success:
+false`.
+
+#### What this rule leaves lossy, disclosed rather than left to be inferred
+
+**Seven of the nine are machine-distinguishable and one pair is not.**
+`attach-error` is the only refusal carrying `paneName`+`paneId`+`alreadyRunning`,
+`confirm-failed` the only one carrying `verified` without `refused`, and
+`bad-address` the only one with no `path`.
+
+* **`bad-flag` and `spawn-error` have *identical* key sets — the only such pair
+  on this surface — and their remedies are opposite.** One means *your code is
+  wrong* and is fixed by editing the caller; the other means *herdr refused or
+  died* and is fixed by retrying or escalating. Only the prose in `error`
+  separates them. **That the other seven are separable is what makes this one
+  worth naming** rather than filing under "some refusals are vague".
+* **`bad-address` is distinguishable only by the ABSENCE of `path`** — and
+  branching on an absence is the discipline this daemon refuses everywhere else,
+  in those words.
+* **`bad-address` also flattens five causes into one prose string, and the
+  daemon already computes the discriminator it drops.** `canonicalPath` throws a
+  `PathError` carrying `PathProblem` — `not-a-string`, `not-absolute`,
+  `does-not-exist`, `uninspectable`, `not-a-directory` (`PathProblem` in
+  `src/identity.ts`, line 81 at `d4a851f`) — and
+  `MessageRouter.addressOfRequest` discards it on its `strict` path, returning
+  `{ error: e?.message ?? String(e) }` (`src/router.ts`). **The symbols are the
+  citation and the line number is corroboration**: the `router.ts` line moved
+  from 2837 to 2887 within the change that wrote this sentence, which is what a
+  line number is worth. **At least two of the five
+  are reachable by a *correct* caller against a changing world**:
+  `does-not-exist`, which `addressOfRequest`'s own header calls *"the normal way
+  an agent ends"*, and `uninspectable`, a race or a permission wall. Publishing
+  it moves the wire, so it is its own ticket rather than a note here.
+
+**And `capacity`'s discriminator is on the other field.** The split is right —
+`refused` answers *what condition*, `refusedBy` answers *which subsystem* — but
+the consequence is easy to miss and is stated here rather than left to be
+discovered: `capacity` is the ordinary refusal in a busy fleet and the one with
+the most distinct remedies, and **a consumer that branches on `refused` alone
+reads `undefined` there.**
 
 **3. `alreadyRunning` is never `false` *on a refusal*, and the absence is
 load-bearing.** On a **success** all three states are ordinary: `true` means it
@@ -1463,9 +1529,32 @@ Null when nothing measured.
 <a id="activaterefused"></a>
 ### `activate_response.refused`
 
-The machine-readable kind of refusal. **It is on three of the nine refusal
-branches** — see [§8](#three-things-about-this-surface-that-will-catch-you), and
-do not read its absence as *"not refused"*.
+The machine-readable kind of refusal. **It is on the pre-flight refusals — those
+naming a condition CrabCast checked and found before it attempted anything** —
+and the rule, with the reasoning per refusal, is note 2 of
+[§8](#three-things-about-this-surface-that-will-catch-you). Do not read its
+absence as *"not refused"*: read `success: false`.
+
+**What `undefined` means here, and the instrument that separates the two facts.**
+An absent `refused` is **two different facts wearing the same clothes**: *"this
+refusal has no kind"* and *"this daemon predates the field"*. The set is closed
+and partial by the rule above, so the ambiguity is real rather than
+hypothetical, and this section states which fact it is claiming rather than
+leaving a consumer to guess.
+
+**It is resolved by `contractVersion`, and the cost is a second call to a
+different surface.** `refused` arrived at version 5. A consumer that has read
+`contractVersion` **≥ 5** knows the field exists, so `undefined` from then on
+means unambiguously *"this refusal has no kind"* — one fact, not two. ⚠ **But
+`contractVersion` is published on `daemon_status` and nowhere else**
+([§2](#2-the-version-on-the-wire), which says so in those words) — not on
+`activate_response` and not on `list_agents` — so a
+consumer holding an `activate_response` in its hand **cannot date it from that
+response**. Read `daemon_status` once at connect and keep the answer; there is
+no way to do it from this response alone.
+
+**[activateRefusedBy](#activaterefusedby) has the identical shape with one
+member and the identical ambiguity**, resolved the same way.
 
 <!-- contract-values: activateRefused -->
 
@@ -1739,14 +1828,32 @@ compile when they drift.
 **Two of those unions were made unions by KAN-287 in order to be bound.**
 `refused` and `refusedBy` were bare string literals written out at nine `fail`
 sites, which is the shape that grows a tenth member silently; they are
-`ActivateRefusalKind` and `ActivateRefusedBy` now, so a new refusal kind **does
-not compile** until it has a line in the declaration and a row in
-[§9](#9-the-closed-vocabularies). **Prefer the type to the assertion where the
-choice exists** — an assertion can be deleted by a later author and the build
-still passes, while an unrepresentable state cannot be introduced at all. It
-earned its keep immediately: the first draft of the `artifactKind` list guessed
-`agy-mcp` for a constant whose value is `agy-mcp-config`, and the binding
-refused to compile rather than shipping a document that was wrong.
+`ActivateRefusalKind` and `ActivateRefusedBy` now. **Prefer the type to the
+assertion where the choice exists** — an assertion can be deleted by a later
+author and the build still passes, while an unrepresentable state cannot be
+introduced at all. It earned its keep immediately: the first draft of the
+`artifactKind` list guessed `agy-mcp` for a constant whose value is
+`agy-mcp-config`, and the binding refused to compile rather than shipping a
+document that was wrong.
+
+⚠ **This paragraph used to end *"so a new refusal kind does not compile until it
+has a line in the declaration and a row in §9"*, and the second half of that was
+false** — corrected by measurement rather than by reading
+([KAN-376](https://wroosbit.atlassian.net/browse/KAN-376)). **The compiler cannot
+see this document.** Driven at `d4a851f`: adding a fourth member to
+`ActivateRefusalKind` alone fails `tsc` at the `Exact<>` binding in
+`src/router.ts`; adding it to **both** the union **and**
+`VALUE_SETS.activateRefused`, with no row in §9, **typechecks clean**. Two
+different mechanisms hold the two halves, and calling both *"a compile error"*
+is the overclaim this section exists to prevent one level down:
+
+| what moves | what stops it |
+| --- | --- |
+| the union drifts from `VALUE_SETS` | **the compiler**, `Exact<>` in `src/router.ts` |
+| `VALUE_SETS` drifts from §9's table | **the proof**, `verify-read-contract.mjs` §1 |
+| a branch gains or loses `refused` against the union | **the proof**, `verify-read-contract.mjs` §1 — added by KAN-376, because nothing held the rule itself |
+
+`scripts/kan376-red-drive.mjs` drives all three and a false-positive control.
 
 **The response objects themselves have no such type.** They are assembled inline
 and spread into `respond({…})`, and TypeScript has no exact type for an object
