@@ -52,8 +52,7 @@ import { sampleFromMeasurement } from '../dist/agent-cost-damping.js';
 import {
   MEASURED_AGENT_COST,
   computeCapacity,
-  describeCapacity,
-  readMachineFacts
+  describeCapacity
 } from '../dist/capacity.js';
 
 const MIB = 1024 ** 2;
@@ -206,10 +205,21 @@ check(
 // A cheaper divisor is a LARGER cap: that is the whole reason a foreign
 // discount is dangerous rather than merely wrong. Asserted per term, because
 // `cap` is a `min` and can hide a term that moved (KAN-275).
+// A FIXED machine, not this one, and the reason is portability rather than
+// taste. `computeCapacity` is pure precisely so it can be run against hardware
+// nobody here owns, and the assertions below need the two divisors to produce
+// DIFFERENT cap terms: on a 2-core CI runner the whole CPU budget is
+// `2 − 1 reserved − 0.5 for herdr = 0.5` core, which floors to zero agents for
+// every divisor above half a core, so both columns would read 0 and the
+// "both terms moved" guard would go red on the runner rather than on a defect.
+// verify-agent-capacity.mjs pins its machine for the same reason.
+//
+// This is a fixture and not a claim about any box. The live machine is still
+// read where a live reading is the subject — §2 measures real /proc.
 const FACTS = {
-  cores: readMachineFacts().cores,
-  totalBytes: readMachineFacts().totalBytes,
-  availableBytes: readMachineFacts().availableBytes,
+  cores: 4,
+  totalBytes: 16 * 1024 * MIB,
+  availableBytes: 8 * 1024 * MIB,
   load1: 0.2,
   cpu: null,
   stall: null
