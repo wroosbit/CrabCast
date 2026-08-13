@@ -203,7 +203,7 @@ machine that ran it**, which is why the target names that limit in its own heade
 rather than leaving a reader to infer a permanence it does not have.
 
 Four arms, and only the fourth needs a pane. `second-interrupt` and
-`sequence-reordered` mutate `src/herdr.ts`; `composer-marker-gone` mutates
+`message-send-lost` mutate `src/herdr.ts`; `composer-marker-gone` mutates
 `src/delivery.ts`; all three then run the target under `--static-only`, which
 touches no herdr and no `claude` and finishes in well under a second.
 `control-is-inert` is the one that matters and the one that costs: it writes a

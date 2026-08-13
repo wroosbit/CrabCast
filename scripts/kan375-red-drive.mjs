@@ -126,18 +126,35 @@ const ARMS = [
     }
   },
   {
-    name: 'sequence-reordered',
-    what: 'the Enter moved BEFORE the message text, so the sequence §0 pins is no longer sent',
+    // RETARGETED AFTER KAN-383 MERGED, and the retarget is itself worth reading.
+    // This arm used to swap the `send-text` and its following `Enter`, which
+    // were adjacent lines. KAN-383 put `confirmTyped` between them, so that
+    // find matched 0 times and the arm reported "mutation could not be applied"
+    // — a red that said nothing about §0. Note what that means: the drive
+    // FAILED SAFE. It did not silently stop testing; it said the mutation never
+    // landed, which is the whole reason `mutate()` asserts its occurrence count
+    // before reading any verdict.
+    //
+    // The replacement isolates the ORDER assertion without touching the 'C-c'
+    // COUNT that `second-interrupt` owns: the message send becomes an Enter, so
+    // §0 extracts `C-c → Enter → Enter → Enter` and fails on composition while
+    // the count check beside it still passes. One arm, one subject.
+    name: 'message-send-lost',
+    what: 'the message send replaced by an Enter — the payload never goes out and the pinned order breaks',
     section: '§0',
     label: "sendToAgent's send CALL SITES, in order",
     run() {
       const file = path.join(repoRoot, 'src', 'herdr.ts');
       const ok = mutate({
         file,
-        find: `      this.runHerdr(['pane', 'send-text', paneId, message]);\n      this.runHerdr(['pane', 'send-keys', paneId, 'Enter']);\n`,
-        replace: `      this.runHerdr(['pane', 'send-keys', paneId, 'Enter']);\n      this.runHerdr(['pane', 'send-text', paneId, message]);\n`,
+        find: `      this.runHerdr(['pane', 'send-text', paneId, message]);\n`,
+        replace: `      this.runHerdr(['pane', 'send-keys', paneId, 'Enter']);\n`,
         expectBefore: 1,
-        expectAfter: 1
+        // TWO, not three: the Enter-only retry at the end of `sendToAgent` sits
+        // one nesting level out (4 spaces, not 6), so it does not match this
+        // 6-space replacement string. Asserting 3 here failed loudly rather
+        // than quietly, which is the point of counting at all.
+        expectAfter: 2
       });
       if (!ok || !validates(file)) return null;
       return runProbe(PROBE, ['--static-only']);
