@@ -66,14 +66,30 @@
 // pinned the target's section 2 to a SHA, so it no longer consults a ref at all,
 // and the NOT RUN this described cannot happen any more.
 //
-// THE MECHANISM IS UNCHANGED — this is a correction to a false disclosure, not a
-// fix. The sandbox's ref environment is still whatever the developer's shared
-// clone happens to carry, and still differs silently from a GitHub runner's.
-// That is Finding 3 in `docs/moving-baselines.md`, still open, and making it
-// deterministic is a fixture change with its own red-drive obligations. Nothing
-// in this script depends on it today: sections 5–7 drive the CURRENT target,
-// whose baseline is pinned, and section 4c pins BOTH arms' refs precisely so that
-// it does not inherit this.
+// AND THE MECHANISM IS NO LONGER INHERITED (KAN-364). Until now the paragraph
+// above ended by saying the ref environment was still whatever the developer's
+// shared clone happened to carry, and still differed silently from a GitHub
+// runner's — an honest description of a machine-dependence, holding nothing.
+// `buildSandbox` now CONSTRUCTS that environment instead: one local branch at a
+// fixed name, every inherited ref deleted. So `origin/main` does not resolve
+// inside the sandbox on ANY machine, and a section that reaches for one fails
+// loudly instead of quietly reading a commit 21 behind. That was Finding 3 in
+// `docs/moving-baselines.md`, now closed there.
+//
+// WHY DELETE RATHER THAN PIN TO A KNOWN COMMIT, which was the other option the
+// ticket named. Pinning invents a baseline that means nothing, and it lets an
+// ambient read SUCCEED against an arbitrary commit — the same silent wrong
+// answer, one step removed and harder to see. Deleting makes the read FAIL.
+// The difference is between a state that is wrong and a state that is not
+// nameable, and it is the difference this epic keeps asking for. Where a
+// section genuinely needs a second revision it pins its own, which is exactly
+// what §4c already does for both of its arms.
+//
+// SECTION 0b HOLDS IT, and reports what this machine handed over BEFORE
+// normalising — which is how the CI-versus-laptop difference is measured on
+// every run rather than described in a sentence. Read that section for which of
+// its assertions can fail on a runner and which cannot; the two are not the
+// same, and saying which is which is the point.
 //
 // WHAT THIS DOES NOT COVER, marked here because two scripts that are each honest
 // about themselves can still leave a hole between them. Every section below
@@ -191,8 +207,63 @@ function git(args, cwd = repoRoot) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
+/** KAN-364: the one branch the sandbox has, at a name no host can supply.
+ *
+ *  THE FIXED NAME IS THE HALF THAT CAN FAIL ANYWHERE. Deleting inherited refs
+ *  can only be shown to do something on a host that HAS some, and a runner's
+ *  detached `actions/checkout` does not — so an assertion about the deletions is
+ *  vacuous there. An assertion that the branch is called this is not: without
+ *  the construction the branch is the host's HEAD branch on a developer machine
+ *  (`butchr/KAN-364`) and `git`'s default on a runner, and neither is this.
+ *  Section 0b splits its assertions along exactly that line. */
+const SANDBOX_BRANCH = 'sandbox-baseline';
+
+/** What `git clone` handed us on THIS machine, captured before normalisation so
+ *  section 0b can report it. This is the CI-versus-laptop measurement itself,
+ *  taken on every run rather than reasoned about once and written down. */
+let inheritedRefs = null;
+
+/** The sandbox's ref environment, as sorted `"<sha> <refname>"` lines. Both the
+ *  construction check and the post-§4c restoration check read this. */
+const sandboxRefs = () =>
+  git(['for-each-ref', '--format=%(objectname) %(refname)'], sandbox)
+    .split('\n')
+    .filter(Boolean)
+    .sort();
+
+/**
+ * Replace the sandbox's inherited ref environment with a constructed one.
+ *
+ * WHY THERE IS ANYTHING TO REPLACE, because the mechanic is not the obvious one
+ * and getting it backwards is what left this undiagnosed for three tickets.
+ * `git clone <source>` maps the SOURCE'S LOCAL `refs/heads/*` into the clone's
+ * `refs/remotes/origin/*`. It does NOT copy the source's own remote-tracking
+ * refs. So a sandbox cloned from a worktree of the shared clone at
+ * `~/code/<org>/<repo>` inherits that clone's LOCAL `main` — which
+ * `prompts/task.md` forbids anybody to advance (`fetch` only, never `pull` or
+ * `checkout`), so it is frozen at whenever the clone was made and falls one
+ * commit further behind with every merge.
+ */
+function normaliseSandboxRefs() {
+  inheritedRefs = sandboxRefs();
+
+  // `-B` creates or resets, so this works whether the clone gave us a local
+  // branch (a source that has heads) or a detached HEAD (a source that has
+  // none). It goes FIRST so the deletions below cannot orphan HEAD.
+  git(['checkout', '--quiet', '-B', SANDBOX_BRANCH], sandbox);
+
+  for (const line of inheritedRefs) {
+    const ref = line.slice(line.indexOf(' ') + 1);
+    if (ref === `refs/heads/${SANDBOX_BRANCH}`) continue;
+    // `origin/HEAD` is symbolic and `--no-deref` takes it by name, so this
+    // deletes the symref rather than whatever it points at.
+    git(['update-ref', '--no-deref', '-d', ref], sandbox);
+  }
+}
+
 function buildSandbox() {
   git(['clone', '--quiet', repoRoot, sandbox]);
+  normaliseSandboxRefs();
   // The clone carries HEAD's committed content; this run is about the working
   // tree's version of the target, which on a branch under development is not the
   // same file. Copy what git tracks, over the top.
@@ -370,6 +441,102 @@ check(sandboxPorcelain() === '',
   'and it left the sandbox\'s ci.yml clean — which is also KAN-172 AC4 restated: the mutation ' +
   'table and the byte-identical assertion still hold with the marker being written',
   `git status: ${JSON.stringify(sandboxPorcelain())}`);
+
+// ===========================================================================
+rule('0b. THE SANDBOX\'S REF ENVIRONMENT IS CONSTRUCTED, NOT INHERITED (KAN-364)');
+// ===========================================================================
+//
+// WHAT THIS HOLDS. Every section below runs the target inside a sandbox that is
+// a real `git clone`, and a clone comes with a ref environment. Until KAN-364
+// that environment was inherited — the shared clone's LOCAL `main`, 21 commits
+// behind and frozen — and the script DISCLOSED it in a paragraph instead of
+// holding it. A paragraph is the artifact this epic exists to distrust: nothing
+// failed if the dependence changed, and nothing measured it.
+//
+// THE TWO ASSERTIONS BELOW HAVE DIFFERENT REACH, AND SAYING WHICH IS WHICH IS
+// THE POINT — a fixture whose every arm is vacuous on the machine that gates
+// merges would be this epic's own defect wearing a fixture's clothes:
+//
+//   * THE BRANCH NAME CAN FAIL ANYWHERE. Nothing but the construction produces
+//     `sandbox-baseline`: a developer's clone yields the host's HEAD branch,
+//     a runner's detached checkout yields git's default. Remove the
+//     construction and this goes red on every machine, CI included.
+//   * THE ABSENCE OF INHERITED REFS CAN ONLY FAIL WHERE THERE WERE SOME. On a
+//     runner whose `actions/checkout` leaves a detached HEAD with no local
+//     branches, the clone produces no remote-tracking refs to begin with and
+//     removing the construction changes nothing. It is asserted anyway, because
+//     it is the invariant the rest of the file actually rests on, and it is
+//     labelled rather than left for a reader to assume it bites everywhere.
+//
+// AND THE REPORT IS NOT DECORATION. The pre-normalisation state is printed
+// WITHOUT a verdict, because it is precisely the machine-dependent quantity —
+// asserting on it would re-import the dependence this section removes. Printing
+// it is what turns "the sandbox's baseline differs between CI and a laptop"
+// from a sentence somebody reasoned out into a measurement this run took. The
+// CI leg of that measurement has never been observed on a runner; this is the
+// instrument that observes it, and the PR for KAN-364 carries the first reading.
+
+// A COUNTED FAILURE RATHER THAN A THROW, and this line is here because the red
+// drive put it here. Removing the construction leaves `inheritedRefs` null, and
+// the first draft of this section then died on `null.find(...)` — no verdict
+// line, and every section from 1 to 7 silently never ran. That is the exact
+// defect `scripts/mutation.mjs` was written to stop (its property 4), reproduced
+// by the mutation designed to test the mechanism this section guards. The
+// section reports and moves on instead, so the run still says everything else it
+// knows.
+const inherited = inheritedRefs ?? [];
+const constructedRefs = sandboxRefs();
+const hostHead = git(['rev-parse', 'HEAD']).trim();
+const sandboxHead = git(['rev-parse', 'HEAD'], sandbox).trim();
+// The sandbox's own `sandbox baseline` commit sits ON TOP of what the clone
+// checked out, so it is the PARENT that is the commit under test — an earlier
+// draft of this section asserted the head itself and went red for saying
+// something untrue about the fixture, which is the check working.
+const sandboxBase = git(['rev-parse', 'HEAD^'], sandbox).trim();
+const inheritedOriginMain = inherited.find((l) => l.endsWith(' refs/remotes/origin/main'));
+
+console.log('\n  WHAT THIS MACHINE\'S `git clone` HANDED OVER, before normalisation — reported and');
+console.log('  deliberately not asserted, because it IS the machine-dependent quantity:');
+console.log(`    inherited refs:        ${inheritedRefs === null ? 'NOT RECORDED — the construction did not run' : inheritedRefs.length}`);
+console.log(`    of them remote-tracking: ${inherited.filter((l) => l.includes(' refs/remotes/')).length}`);
+console.log(`    inherited origin/main: ${inheritedOriginMain ? inheritedOriginMain.slice(0, 40) : '(none — this clone carried no origin/main)'}`);
+if (inheritedOriginMain) {
+  const sha = inheritedOriginMain.slice(0, 40);
+  let behind = '(not comparable)';
+  try { behind = `${git(['rev-list', '--count', `${sha}..${hostHead}`]).trim()} commit(s) behind the tree under test`; } catch { /* unrelated history */ }
+  console.log(`    …which is             ${behind}`);
+}
+console.log(`    host HEAD:             ${hostHead}`);
+
+check(inheritedRefs !== null,
+  'PRECONDITION: the sandbox construction ran at all — without it there is no record of what this ' +
+  'machine supplied, and the report above is empty rather than measured. Counted here rather than ' +
+  'thrown, so the sections after this one still run',
+  inheritedRefs !== null ? 'recorded before normalisation' : 'NOT RECORDED — `normaliseSandboxRefs` never ran');
+
+check(constructedRefs.length === 1 && constructedRefs[0] === `${sandboxHead} refs/heads/${SANDBOX_BRANCH}`,
+  `THE SANDBOX HAS EXACTLY ONE REF AND THE CONSTRUCTION NAMED IT — \`refs/heads/${SANDBOX_BRANCH}\`. ` +
+  'This is the arm that can go red on ANY machine: no host supplies this name, so a run that ' +
+  'stopped constructing the ref environment fails here on a runner exactly as on a laptop',
+  constructedRefs.length ? constructedRefs.join(' | ') : '(no refs at all — HEAD would be orphaned)');
+
+check(sandboxBase === hostHead,
+  '…and that branch descends from THE COMMIT UNDER TEST — the sandbox\'s baseline commit carries this ' +
+  'working tree and its parent is the host\'s HEAD, so the fixture is anchored to the tree this run is ' +
+  'about rather than to a commit inherited from somewhere else',
+  `sandbox HEAD ${sandboxHead.slice(0, 12)}, its parent ${sandboxBase.slice(0, 12)}, host HEAD ${hostHead.slice(0, 12)}`);
+
+let originMainResolves;
+try { originMainResolves = git(['rev-parse', 'refs/remotes/origin/main'], sandbox).trim(); } catch { originMainResolves = null; }
+check(originMainResolves === null,
+  'AND `origin/main` DOES NOT RESOLVE INSIDE THE SANDBOX — so a section that reaches for an ambient ' +
+  'baseline FAILS rather than silently reading whatever this machine had lying around. ' +
+  'REACH: this arm can only go red on a host that had refs to inherit; a runner whose checkout is ' +
+  'detached carries none, and there it passes without having been tested. That limit is why the ' +
+  'branch-name arm above exists, and it is measured rather than assumed — see the report above',
+  originMainResolves === null
+    ? 'unresolvable, as constructed'
+    : `resolves to ${originMainResolves} — the construction did not run, or something re-created it`);
 
 // ===========================================================================
 rule('1. SIGKILLED MID-ROW — the residue says what put it there');
@@ -907,6 +1074,22 @@ pinRefused: {
     'this ever reads equal, the fixture has stopped demonstrating anything and the paragraph above it ' +
     'has become a story again',
     `post-fix arm ${post.preFixFails} vs pre-fix arm ${pre.preFixFails}`);
+
+  // KAN-364. §4c is the ONE thing in this file that writes the sandbox's refs,
+  // and until now its restore path was unasserted — it saved `before`, wrote
+  // two arms' worth of `update-ref`, and put things back with nothing checking
+  // that it had. A leak there would hand every section after this one a ref
+  // environment section 0b already reported as constructed, which is the exact
+  // shape of a disclosure that has stopped being true.
+  //
+  // THIS ARM CAN GO RED ANYWHERE, including on a runner: it compares against
+  // what §0b constructed rather than against anything the host supplied, so it
+  // does not inherit that section's second arm's limit.
+  check(sandboxRefs().join('\n') === constructedRefs.join('\n'),
+    'AND §4c PUT THE REF ENVIRONMENT BACK — the two arms above each rewrote `origin/main` inside the ' +
+    'sandbox, and this is what says they restored it. Compared against what section 0b constructed, so ' +
+    'it holds on every machine rather than only on one that had refs to inherit',
+    sandboxRefs().join(' | ') || '(no refs at all)');
 }
 
 // ===========================================================================

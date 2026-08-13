@@ -221,6 +221,12 @@ different one.
 
 ## Finding 3 — the residue sandbox's `origin/main` is a per-machine artifact, and the script's own disclosure of it is false
 
+> **STATUS: closed by KAN-364** (the disclosure half was corrected earlier by
+> KAN-363/#87). The sandbox's ref environment is now constructed rather than
+> inherited, and this finding's own claim about what a CI runner would supply
+> turned out to be backwards. See *CLOSED by KAN-364* at the end of this section
+> — the paragraphs between here and there are kept as they were written.
+
 `verify-ci-proof-residue-is-legible` builds its sandbox with
 `git clone <repoRoot> <sandbox>`, and its header discloses:
 
@@ -259,6 +265,45 @@ mechanism has not been touched and this finding stays open.** Nothing in that
 script depends on the ambient ref any more: §§5–7 drive the current target, whose
 baseline KAN-354 pinned, and §4c pins both of its arms precisely so that it does
 not inherit this.
+
+### CLOSED by KAN-364 — and the inference in it was backwards
+
+**Re-measured at `a869df8`:** the sandbox inherits **98** refs, 97 of them
+remote-tracking; `origin/main` is `1f959175`, now **21** commits behind, and
+`refs/heads/main` is absent. The number is not worth inheriting — it grows by one
+with every merge, because `prompts/task.md` forbids `pull` and `checkout` in the
+shared clone, so its local `main` is frozen at whenever that clone was made.
+
+**The mechanic, which three tickets described without stating:** `git clone
+<source>` maps the source's **local** `refs/heads/*` into the clone's
+`refs/remotes/origin/*`. It does **not** copy the source's own remote-tracking
+refs. That is why the sandbox's `origin/main` is the shared clone's *local*
+`main` rather than the real one.
+
+**So this finding's own CI claim was wrong, and in the opposite direction to the
+one everybody assumed.** It said that on a runner "it would be the real
+`origin/main` instead". By the mechanic above, a detached `actions/checkout` with
+no local branches gives a clone with **no remote-tracking refs at all** —
+measured directly, in a constructed repository: a source with a detached HEAD and
+zero local heads produces a clone with **zero refs** and no `origin/main`. The
+sandbox's baseline on a runner was therefore likely *absent*, not *real*.
+
+**Fixed rather than disclosed.** `verify-ci-proof-residue-is-legible` now
+**constructs** its sandbox's ref environment — one local branch,
+`refs/heads/sandbox-baseline`, every inherited ref deleted — so `origin/main`
+does not resolve inside the sandbox on any machine. Deletion rather than pinning,
+because a pin lets an ambient read *succeed* against an arbitrary commit, which
+is the same silent wrong answer one step removed. §0b holds it, and **reports**
+the pre-normalisation state without a verdict, which is what makes the
+CI-versus-laptop difference a measurement taken on every run instead of a
+sentence. §0b names which of its arms can fail on a runner (the branch name) and
+which is vacuous there (the absence of inherited refs).
+
+**Still open and NOT closed by this:** §4's `preFixTarget()` reads the **host's**
+`['origin/main', 'main']` to decide whether the historical demonstration is
+dormant. That is a host-side ambient read, it is **Finding 1**, and it is
+untouched — the table above is still accurate. KAN-364 changed the *sandbox's*
+ref environment only.
 
 ---
 
