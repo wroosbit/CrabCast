@@ -624,8 +624,31 @@ const KAN172_MERGE = '13a247da47add54bdc28219553cf99e752a832c8';
 const PRE_FIX_TARGET_REV = '0edd2c1d203987fa9013f5a6e142aa0f61e456d2';
 /** KAN-148's parent, the last tree with the PRE-fix ci-workflow parser. This is
  *  what the historical target's own section 2 has to find to behave as it did
- *  when it shipped. RETYPED from the target's own KAN148_PARENT, so the
- *  precondition below checks the two still agree — see section 7's ANTI-DRIFT. */
+ *  when it shipped.
+ *
+ *  IT IS A FACT ABOUT THIS REPOSITORY'S HISTORY, NOT A COPY OF ANOTHER FILE'S
+ *  PIN, and the difference cost this section a guard. `verify-ci-wiring-guards`
+ *  names the same commit today because KAN-354 chose the pre-fix point as its
+ *  own baseline — a coincidence with a reason, not a dependency. The first draft
+ *  of section 4c asserted that the two still agree, modelled on section 7's
+ *  ANTI-DRIFT check, and THE ANALOGY DOES NOT HOLD: section 7 PLANTS a file that
+ *  the target then SWEEPS for, so a rename in the target leaves section 7
+ *  planting something nothing looks for — a real coupling whose failure is a
+ *  false GREEN. Section 4c reads nothing from the target at all.
+ *
+ *  MEASURED by `epic/KAN-59` reviewing #87 and reproduced here before removing
+ *  it: repin the target's section 2 to current `main` — a repin under which the
+ *  target itself still exits 0 — and the proof goes 52/53 with exactly ONE FAIL,
+ *  that precondition, while all three arms below stay correct in the same run
+ *  (11 `pre-fix:` FAILs, 0, and guard 2 passing 11 vs 0). The fixture is
+ *  unharmed and the guard announces that it is not. `docs/moving-baselines.md`
+ *  tables section 2's pin as a maintenance site, so the repin is FORESEEN and
+ *  the false red was scheduled, to land on whoever performs it.
+ *
+ *  A guard whose every possible red is false is the thing section 4 above
+ *  refuses to revive itself into being. It was three hundred lines from the
+ *  paragraph refusing it. It is gone, and the precondition that replaced it
+ *  guards a failure this section really has. */
 const KAN148_PARENT = 'dff24229869f2eb1b3089d2d4674582aaf065a49';
 
 function preFixTarget() {
@@ -795,16 +818,44 @@ pinRefused: {
     break pinRefused;
   }
 
-  // ANTI-DRIFT, the same discipline section 7 applies to the staging prefix: the
-  // pre-fix parser commit is retyped here, and a rename in the target would
-  // otherwise leave both arms pointing somewhere meaningless while still
-  // producing a tidy-looking contrast.
-  const currentTarget = fs.readFileSync(path.join(repoRoot, TARGET_REL), 'utf8');
-  check(currentTarget.includes(KAN148_PARENT),
-    `PRECONDITION: the CURRENT target still names ${KAN148_PARENT.slice(0, 7)} as its own pinned pre-fix ` +
-    'parser — retyped above, so a repin there would otherwise leave this fixture comparing two refs ' +
-    'that no longer mean what its labels say',
-    `found in ${TARGET_REL}: ${currentTarget.includes(KAN148_PARENT)}`);
+  // WHAT REPLACED THE ANTI-DRIFT CHECK, and it is not a softer version of it —
+  // it covers a failure that one never reached and that this section really has.
+  //
+  // The two SHAs above go straight to `git update-ref` inside
+  // `runHistoricalUnder`, with no `try` anywhere on the path. An unreachable one
+  // therefore does not FAIL, it THROWS, uncaught, and takes the verdict line
+  // with it — the defect `scripts/mutation.mjs`'s header exists for, where a run
+  // dies mid-file and every section after it silently never reports. Measured
+  // before this guard existed, with KAN148_PARENT set to a well-formed SHA that
+  // is not an object in this repository:
+  //
+  //     PROOF_EXIT=1
+  //     verdict line printed: NONE — the run died without reporting
+  //     fatal: update_ref failed for ref 'refs/remotes/origin/main'
+  //
+  // AND IT CANNOT EMIT A FALSE RED, which is the whole of what was wrong with
+  // what it replaces. An unreachable pinned commit is a shallow clone or a
+  // rewritten history — a fixable environment defect — and that is the SAME
+  // distinction section 4 draws for its own baseline a few hundred lines above,
+  // drawn the same way: red for a deficiency somebody can act on, silence for a
+  // legitimate change elsewhere that costs this section nothing.
+  const unreachable = [KAN172_MERGE, KAN148_PARENT].filter((sha) => {
+    try {
+      git(['cat-file', '-e', `${sha}^{commit}`]);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  check(unreachable.length === 0,
+    'PRECONDITION: BOTH of this fixture\'s OWN pinned commits are reachable — they are handed to ' +
+    '`git update-ref` below, where an unreachable one throws rather than fails and the run dies ' +
+    'with no verdict at all. This is the only thing section 4c needs of the world outside its own ' +
+    'two arms: it reads nothing from the target, and a repin ANYWHERE else cannot reach it',
+    unreachable.length === 0
+      ? `${KAN172_MERGE.slice(0, 7)} and ${KAN148_PARENT.slice(0, 7)} both resolve to commits`
+      : `unreachable: ${unreachable.map((s) => s.slice(0, 7)).join(', ')} — a shallow clone, or history rewritten under this pin`);
+  if (unreachable.length) break pinRefused;
 
   // DERIVED, NOT LITERAL. The expected FAIL count is read out of the historical
   // script's own case table. Writing `11` here would keep passing if that file

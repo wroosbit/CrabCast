@@ -97,6 +97,17 @@ demonstration script rather than a proof: it is not in the CI array, nothing
 gates on it, and it prints a before/after rather than asserting. Recorded here
 so the next sweep does not have to re-derive that.
 
+**If you are here to repin `verify-ci-wiring-guards` §2, read this first
+(KAN-363).** `verify-ci-proof-residue-is-legible` §4c pins the same commit
+`dff24229` for its own pre-fix arm, and **it does not depend on §2's pin** — it
+reads nothing from that file. The two coincide because KAN-354 chose the pre-fix
+point as §2's baseline, which is a reason and not a dependency. A first draft of
+§4c asserted the two still agreed; **measured, that assertion could only ever
+emit a false red** — repin §2 to current `main` and the target still exits 0,
+§4c's arms still read 11 and 0, guard 2 still passes, and the proof goes 52/53 on
+that one assertion alone. It was removed rather than reworded. **So repin §2
+freely: §4c is not downstream of it, and nothing in this table is.**
+
 **Channel 2 — network. Nothing.** No proof fetches anything at run time: no
 `fetch`, no HTTP client, no `npm view`, no registry read, no GitHub API. The one
 match was an error string telling the reader to run `npm install`. This is the
