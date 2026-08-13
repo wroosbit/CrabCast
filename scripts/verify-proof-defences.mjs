@@ -85,6 +85,10 @@
 //     goes red rather than going quietly stale (§3).
 //   - every 'none' names the behaviour it leaves undefended and classifies the
 //     cost, and 'expensive' carries a ticket key (§4)
+//   - the tally this file prints reconciles both with the register and with
+//     what git tracks, and THIS HEADER carries no second copy of it (§4b). The
+//     count lives in one place and is derived there; prose that restates it
+//     goes red, because prose that restated it is what KAN-355 was.
 //
 // JUDGEMENT (reviewed like code, and this script cannot check it):
 //
@@ -105,21 +109,54 @@
 // ---------------------------------------------------------------------------
 //
 // KAN-190's task agent asked whether "every assertion in every proof carries a
-// mutation" should be policy. The numbers, now that they exist — 45 proofs,
-// this file included:
+// mutation" should be policy. The numbers that answer it are deliberately NOT
+// written here. Run the script: it ends with a `=== THE DEFENCE REGISTER ===`
+// banner and a tally line derived from the register below, true of the ref you
+// ran it on. §4b requires that tally to reconcile with what git tracks, and
+// requires this header to carry no copy of it.
 //
-//   21 carry a mutation.  23 carry a non-mutation guard.
-//    1 carries nothing, and it names what that leaves undefended.
+// WHY THERE IS NO NUMBER IN THIS PARAGRAPH (KAN-355). It used to pin a
+// headcount — 45, with 21 / 23 / 1 under it — and by the time anybody
+// re-derived them the register held 63 / 32 / 30 / 1: short by eighteen and
+// wrong on every term but one. Nothing went red, because no check read this
+// comment. The register is what `verify-proof-registry`, `verify-proof-verdicts`
+// and §1-§4 below all check, and the prose above it drifted for four months
+// while every one of them stayed green.
 //
-// (18 / 21 / 3 when this register was first counted. KAN-197 closed the worst
-// of the three — see finding 3 below — and KAN-198 closed `verify-tab-per-agent`,
-// which was the expensive one: the count moved twice because the work happened,
-// which is what a register is for. The intervening 20 / 21 / 2 is what KAN-206
-// left behind when it added `verify-proof-verdicts`, 20 / 22 / 1 is what
-// KAN-200 arrived at before adding `verify-status-since`, and 21 / 22 / 1 is
-// what KAN-208 arrived at before adding `verify-cpu-headroom`.)
+// The rule that applies is KAN-180's — CHANGE THE COUNT TO A PRINT, NOT TO A
+// BIGGER NUMBER. It applies to THIS number and not to every number, and the
+// distinction is worth stating because the file argues from all three kinds:
 //
-// The answer this file's author gives, with those numbers in hand: **no, and
+//   A CENSUS is a headcount of a set that grows. It is true of a moment, no
+//   check owns it, and every merge that adds a proof falsifies it silently.
+//   Correcting 45 to 63 would have bought about a day — the suite grew by three
+//   while KAN-355 sat in the backlog. This was a census. It belongs in a print.
+//
+//   A MEASURED CONSEQUENCE is a claim about what the code DOES — KAN-228's
+//   "delete this line and it goes red with 12 failures". It ages only when the
+//   behaviour changes, and anyone can falsify it by running the thing. Keep
+//   those; they are the reason this file does not ban numbers in headers.
+//
+//   A DATED READING is a measurement with its moment attached: the changelog
+//   below, and finding 1's "17 of the 41 that existed". It cannot rot, because
+//   it never claimed to be current. Keep those too — dated.
+//
+// So the census is gone and the argument it supported is not. The argument is
+// STRONGER at the larger number: a suite that grew by eighteen while holding
+// its 'none' count at one is better evidence for "the register is the better
+// instrument" than the smaller suite was.
+//
+// (The register's history, each figure dated by the ticket that moved it, as
+// mutation / guard / none: 18 / 21 / 3 when this register was first counted.
+// KAN-197 closed the worst of the three — see finding 3 below — and KAN-198
+// closed `verify-tab-per-agent`, which was the expensive one: the count moved
+// twice because the work happened, which is what a register is for. The
+// intervening 20 / 21 / 2 is what KAN-206 left behind when it added
+// `verify-proof-verdicts`, 20 / 22 / 1 is what KAN-200 arrived at before adding
+// `verify-status-since`, and 21 / 22 / 1 is what KAN-208 arrived at before
+// adding `verify-cpu-headroom`.)
+//
+// The answer this file's author gives, with the register in hand: **no, and
 // the register is the better instrument.** Three findings support it, and none
 // of them was visible before the count.
 //
@@ -1608,6 +1645,31 @@ const USES_HELPER = /(?:from|import\s*\()\s*['"]\.\/mutation\.mjs['"]/;
 const DEFENCES = ['mutation', 'guard', 'none'];
 const COSTS = ['impossible', 'expensive', 'cheap'];
 
+/**
+ * The banner the tally is printed under, and the SAME string the header is
+ * required to cite (§4b). One source, two consumers: rename it and the header's
+ * pointer stops matching, so the pointer cannot rot into a dangling reference
+ * the way the census it replaced rotted into a wrong one. That is this file's
+ * own `anchor` idiom — the one every 'guard' entry below owes — turned on its
+ * own header.
+ */
+const TALLY_BANNER = '=== THE DEFENCE REGISTER ===';
+
+const count = (d) => PROOF_DEFENCES.filter((e) => e.defence === d).length;
+
+/**
+ * The tally, as one derived string. It is the only place the counts are stated,
+ * and it is computed rather than typed — which is the whole of what KAN-355
+ * changed. §4b reads what this RETURNS, not the source text that builds it.
+ */
+const tallyLine = () =>
+  `${PROOF_DEFENCES.length} proof(s): ${count('mutation')} carry a mutation, ` +
+  `${count('guard')} carry a non-mutation guard, ${count('none')} carry nothing.`;
+
+/** The shape §4b requires `tallyLine()` to still have, with the counts capturable. */
+const TALLY_SHAPE =
+  /^(\d+) proof\(s\): (\d+) carry a mutation, (\d+) carry a non-mutation guard, (\d+) carry nothing\.$/;
+
 // ---------------------------------------------------------------------------
 // 1. Reconciliation: scripts/ against the register, in both directions.
 // ---------------------------------------------------------------------------
@@ -1831,6 +1893,143 @@ for (const e of PROOF_DEFENCES.filter((x) => x.defence === 'none')) {
 }
 
 // ---------------------------------------------------------------------------
+// 4b. THE HEADER POINTS AT THE TALLY INSTEAD OF KEEPING ITS OWN COPY (KAN-355).
+//
+// The defect this section exists for is the one it was written in response to:
+// this file's header pinned a headcount, the register grew past it, and every
+// check in this repository stayed green because all of them read the register
+// and none of them read the comment above it. A register that drifts silently
+// reproduces the defect it documents — §1 says so about the register, and this
+// is the same sentence applied one level up, to the prose.
+//
+// Two properties, in opposite directions:
+//
+//   THE TALLY IS DERIVED AND RECONCILES. `tallyLine()` is checked on what it
+//   RETURNS, not on the source that builds it, and its total is required to
+//   equal what git tracks — so the printed number cannot drift from the suite
+//   even if the register and the array agreed with each other.
+//
+//   THE HEADER CARRIES NO COPY OF IT. Any second statement of the tally is a
+//   second source for a fact that already has one, and the second source is the
+//   one nothing checks.
+//
+// WHAT THIS DOES NOT COVER, and it is a real limit rather than a formality. The
+// detector matches the PHRASINGS the tally owns ("N proofs", "N carry a
+// mutation"); a census spelled out in words, or re-phrased, walks straight past
+// it. It is not a proof that the header is honest — it is a tripwire on the one
+// shape that actually rotted, and the honesty of the rest is a reading, exactly
+// as §5 says of the register itself. It also says nothing about the OTHER
+// numbers the header keeps on purpose: the dated changelog and finding 1's
+// measurement are chosen, not overlooked, and the header says why.
+//
+// WHICH ARMS BELOW ARE RED-DRIVEN, AND WHICH ARE NOT. §5 sabotages four of
+// them by name — `header-census-returns` (the census detector),
+// `tally-miscounts` (the bucket sum), `tally-total-drifts` (the reconciliation
+// with git) and `tally-pointer-dangles` (the banner pointer). Two are NOT
+// independently sabotaged: the setup guard on the header slice, and the arm
+// requiring `tallyLine()` to keep its shape. The second is exercised in
+// passing — `tally-miscounts` and `tally-total-drifts` both read numbers back
+// out through that regex, so a shape arm that had stopped matching would take
+// their rows down with it — but that is an argument, not a demonstration, and
+// it is recorded here as the weaker of the two rather than left to be assumed.
+// ---------------------------------------------------------------------------
+
+console.log('\n=== 4b. The header points at the tally instead of keeping its own copy ===\n');
+
+/**
+ * Read from `selfPath` rather than from the repository, so that a mutant §5
+ * spawns is audited on ITS OWN header — which is what makes the sabotage rows
+ * below mean anything.
+ */
+const selfSource = fs.readFileSync(selfPath, 'utf8');
+const headerEnd = selfSource.indexOf('\nimport ');
+const headerText = headerEnd > 0 ? selfSource.slice(0, headerEnd) : '';
+
+check(
+  headerText.length > 1000,
+  '(setup) the header comment was really read — an empty slice would agree with every rule below',
+  `${headerText.length} chars, up to the first import`
+);
+
+/** The phrasings the runtime tally owns. A header restating one has forked it. */
+const CENSUS_SHAPES = [
+  { what: 'a proof headcount', re: /\b\d+\s+proofs\b/i },
+  { what: 'the mutation count', re: /\b\d+\s+carr(?:y|ies)\s+a\s+mutation\b/i },
+  { what: 'the guard count', re: /\b\d+\s+carr(?:y|ies)\s+a\s+non-mutation\s+guard\b/i },
+  { what: 'the none count', re: /\b\d+\s+carr(?:y|ies)\s+nothing\b/i }
+];
+
+/**
+ * The sentence this header actually carried until KAN-355, verbatim. Every
+ * detector above is required to fire on it BEFORE any of them is trusted to
+ * report the header clean — a detector that matches nothing returns the same
+ * all-clear as one that matches everything, and this file has already been
+ * caught by a guard that read zero as confirmation when it was zero because
+ * there was nothing to catch. It lives here, below the imports, so it is
+ * outside the header region it is a fixture for.
+ */
+const CENSUS_CANARY =
+  '45 proofs, this file included: 21 carry a mutation, ' +
+  '23 carry a non-mutation guard, 1 carries nothing.';
+
+for (const s of CENSUS_SHAPES) {
+  check(
+    s.re.test(CENSUS_CANARY),
+    `(canary) the detector for ${s.what} fires on the census this header used to carry`,
+    String(s.re)
+  );
+}
+
+for (const s of CENSUS_SHAPES) {
+  const hit = headerText.match(s.re);
+  check(
+    !hit,
+    `the header states ${s.what} nowhere — the register prints it`,
+    hit
+      ? `found ${JSON.stringify(hit[0])} in the header. Nothing checks this comment, so it will ` +
+        `drift the moment the suite grows. Delete the number and point at ${TALLY_BANNER}.`
+      : ''
+  );
+}
+
+check(
+  headerText.includes(TALLY_BANNER),
+  'the header cites the banner the tally is printed under, so the pointer is not dangling',
+  headerText.includes(TALLY_BANNER)
+    ? JSON.stringify(TALLY_BANNER)
+    : `the header does not mention ${JSON.stringify(TALLY_BANNER)} — renaming the banner without ` +
+      'updating the header leaves the reader pointed at output that no longer exists'
+);
+
+const tally = tallyLine();
+const parts = tally.match(TALLY_SHAPE);
+check(
+  Boolean(parts),
+  'the tally still has the shape the header promises a reader',
+  parts ? tally : `got ${JSON.stringify(tally)}, which does not match ${TALLY_SHAPE}`
+);
+
+if (parts) {
+  const [, total, mutation, guard, none] = parts.map(Number);
+  const summed = mutation + guard + none;
+  check(
+    summed === total,
+    'every registered proof lands in exactly one bucket of the tally',
+    summed === total
+      ? `${mutation} + ${guard} + ${none} = ${total}`
+      : `${mutation} + ${guard} + ${none} = ${summed}, but the register holds ${total}. A ` +
+        'defence category that no bucket counts is invisible in the printed line.'
+  );
+  check(
+    total === proofs.length,
+    'the tally counts the suite git tracks, not just the array above it',
+    total === proofs.length
+      ? `${total} registered, ${proofs.length} tracked`
+      : `the tally says ${total} and git tracks ${proofs.length}`
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 5. THE CHECKS ABOVE CAN ACTUALLY FAIL.
 //
 // A register that has only ever been green is the thing this register is about,
@@ -1960,6 +2159,99 @@ if (IS_CHILD) {
       because:
         'the escape hatch has to cost something, or every entry takes it. An exemption that stops ' +
         'naming a real entry fails from both sides.'
+    },
+    {
+      id: 'header-census-returns',
+      what: 'the header takes back a copy of the count the register prints',
+      // THIS ROW IS KAN-355 ITSELF, RE-INJECTED. The defect was not a wrong
+      // number — it was a number in a place no check reads, which is why it
+      // survived four months and eighteen proofs. The sabotage restores the
+      // exact opening the header carried before the fix and requires §4b to
+      // name it. It edits ONLY the comment: §1-§4 are untouched, so a red here
+      // is this section's and cannot be borrowed from another.
+      // Built by concatenation for the reason `guard-fabricated` gives above:
+      // the `find` literal is itself text in this file, so written as one
+      // string it matches twice and the helper refuses it. Measured, not
+      // reasoned — it failed with `found 2` on the first attempt.
+      edits: [
+        {
+          find:
+            '// mutation" should be policy. The numbers that answer it are ' + 'deliberately NOT',
+          replace: '// mutation" should be policy. The numbers, now that they exist — 45 proofs:'
+        }
+      ],
+      expect: /FAIL\s+the header states a proof headcount nowhere/,
+      because:
+        'a census in prose is a second source for a fact the register already owns, and it is the ' +
+        'source nothing checks — so it is the one that drifts, silently, in the direction of ' +
+        'looking finished'
+    },
+    {
+      id: 'tally-miscounts',
+      what: 'a bucket goes missing from the tally the header points at',
+      // The reason the sum is asserted at all: §1 requires every entry to
+      // declare one of DEFENCES, so today the three buckets cannot fail to
+      // cover the register. That is an argument from a check somewhere else,
+      // and it stops holding the moment a fourth category is added — at which
+      // point the printed line quietly under-reports and reads exactly like a
+      // healthy one. This mutation produces that state directly.
+      edits: [
+        {
+          // Split for the same exact-count reason as the row above.
+          find: "${count('guard')} carry a non-mutation" + ' guard',
+          replace: "${count('guard') - 1} carry a non-mutation guard"
+        }
+      ],
+      expect: /FAIL\s+every registered proof lands in exactly one bucket of the tally/,
+      because:
+        'the print replaced a pinned number, so a print that can be wrong without saying so would ' +
+        'have moved the defect rather than fixed it — the counts have to reconcile with the ' +
+        'register and with git, not merely appear'
+    },
+    {
+      id: 'tally-total-drifts',
+      what: 'the printed total stops agreeing with the suite git tracks',
+      // WHY THIS ROW EXISTS SEPARATELY from `tally-miscounts`: that one proves
+      // the buckets reconcile with each other, which is a statement about the
+      // array alone. This one is the leg out to reality — a tally computed
+      // entirely from `PROOF_DEFENCES` would be perfectly self-consistent while
+      // the suite it claims to describe had grown past it, which is precisely
+      // the failure this whole ticket is about, relocated from prose into code.
+      //
+      // IT TRIPS TWO ARMS, said rather than hidden: dropping the total breaks
+      // the bucket sum as well. The row still isolates what it names, because
+      // `expect` requires the git-reconciliation line itself to appear — a red
+      // borrowed from the sum arm would not match it.
+      edits: [
+        {
+          // Split for the same exact-count reason as the rows around it.
+          find: '${PROOF_DEFENCES.length}' + ' proof(s): ',
+          replace: '${PROOF_DEFENCES.length - 1} proof(s): '
+        }
+      ],
+      expect: /FAIL\s+the tally counts the suite git tracks/,
+      because:
+        'the number the header now sends the reader to is only worth more than the number it ' +
+        'replaced if something ties it to the suite on disk rather than to the list beside it'
+    },
+    {
+      id: 'tally-pointer-dangles',
+      what: 'the banner is renamed and the header still points at the old one',
+      // The failure mode the pointer replaced the census WITH, if nothing held
+      // it: prose citing output that no longer exists sends a reader looking
+      // for a line the script does not print. One const feeds both the print
+      // and this check, so the rename is caught at the rename.
+      edits: [
+        {
+          // Split for the same exact-count reason as the two rows above.
+          find: 'const TALLY_BANNER = ' + "'=== THE DEFENCE REGISTER ===';",
+          replace: "const TALLY_BANNER = '=== THE DEFENCE LEDGER ===';"
+        }
+      ],
+      expect: /FAIL\s+the header cites the banner the tally is printed under/,
+      because:
+        'a pointer that rots is a worse artifact than the number it replaced, because it reads as ' +
+        'a live reference right up until somebody follows it'
     }
   ];
 
@@ -2037,7 +2329,7 @@ if (IS_CHILD) {
 // cannot quietly stop being true.
 // ---------------------------------------------------------------------------
 
-console.log('\n=== THE DEFENCE REGISTER ===\n');
+console.log(`\n${TALLY_BANNER}\n`);
 
 const width = Math.max(...PROOF_DEFENCES.map((e) => e.script.length));
 const order = { mutation: 0, guard: 1, none: 2 };
@@ -2056,11 +2348,7 @@ for (const e of [...PROOF_DEFENCES].sort(
   if (e.undefended) console.log(`  ${' '.repeat(width)}    UNDEFENDED: ${e.undefended.replace(/\s+/g, ' ')}`);
 }
 
-const count = (d) => PROOF_DEFENCES.filter((e) => e.defence === d).length;
-console.log(
-  `\n  ${PROOF_DEFENCES.length} proof(s): ${count('mutation')} carry a mutation, ` +
-    `${count('guard')} carry a non-mutation guard, ${count('none')} carry nothing.`
-);
+console.log(`\n  ${tallyLine()}`);
 console.log(
   `  Of the ${count('none')} with nothing: ` +
     COSTS.map((c) => `${PROOF_DEFENCES.filter((e) => e.defence === 'none' && e.cost === c).length} ${c}`).join(', ') +
