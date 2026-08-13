@@ -553,6 +553,17 @@ export function startingAgentCores(cost: AgentCost, costSource: CostSource): num
  *     worth — a forger can no longer drive the divisor below the seed however
  *     cheap their trees are.
  *
+ * AND A THIRD, WHICH WAS MEASURED RATHER THAN ANTICIPATED. Attribution is not
+ * monotone: it removes whichever trees are not ours, and those can be the
+ * EXPENSIVE ones. Measured on this machine on 2026-08-13 over two 60s windows,
+ * same code, the two populations: every tree gave 827 MB per tree, and the
+ * attributed sample gave the 800 MB seed — so dropping the foreign trees LOWERED
+ * the memory divisor, which is the direction that admits more agents.
+ * `capByMemory` did not move (16 either way, on integer division), but the
+ * direction is the point and the net figure concealed it. The floor is what
+ * bounds that: however expensive the trees that leave, the divisor cannot fall
+ * below the seed.
+ *
  * The empty sample is not on that list because it never reaches here: a window
  * with no attributed tree is rejected by `sampleFromMeasurement` and the report
  * says `seed`. A divisor over an empty sample would be a gate that agrees with
