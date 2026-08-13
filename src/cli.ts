@@ -1573,8 +1573,14 @@ function renderSend(reader: ResponseReader, request: Record<string, unknown>): s
       ? `${evidence.checks} pane read(s) over ${evidence.waitedMs}ms` +
         (evidence.landedBefore === null ? '' : `; submitted copies ${evidence.landedBefore} → ${evidence.landedAfter}`)
       : null),
+    // `0 submit (Enter)` is a true sentence that reads like a rounding error,
+    // and it is the one a human most needs to understand: the daemon typed and
+    // then deliberately did not press Enter (KAN-383). It gets words.
     field('keystrokes', typeof interrupts === 'number'
-      ? `${interrupts} interrupt (Ctrl+C), ${submits} submit (Enter)${retried ? ' — the second was the confirm-and-retry' : ''}`
+      ? submits === 0
+        ? `${interrupts} interrupt (Ctrl+C), NO submit — the Enter was withheld because the ` +
+          `typed text never appeared on the pane`
+        : `${interrupts} interrupt (Ctrl+C), ${submits} submit (Enter)${retried ? ' — the second was the confirm-and-retry' : ''}`
       : null),
     evidence?.tail
       ? lines(`${INDENT}pane the verdict was read from:`, indent(String(evidence.tail), INDENT + INDENT))
