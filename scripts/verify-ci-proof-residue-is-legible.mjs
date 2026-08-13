@@ -17,11 +17,23 @@
 // KAN-363 MADE (2026-08-12). Section 4 used to hold that demonstration by
 // loading the version that shipped on `main` at 0edd2c1 and running it. It has
 // asserted NOTHING since KAN-172 merged at 13a247d — 44 merged pull requests —
-// because it reaches for that version through `origin/main`, and `origin/main`
+// because it reached for that version through `origin/main`, and `origin/main`
 // has carried the fix ever since. Section 4 now states that dormancy, refuses
 // the obvious pin with a fixture rather than a story, and checks that section 5
 // really did the work it hands off to. See the section header for the decision
 // and the rejected options.
+//
+// AND SINCE KAN-369 THE DORMANCY IS STRUCTURAL RATHER THAN MEASURED. The
+// sentence above ended "nothing can make it live again", and while section 4
+// decided its own dormancy by reading the HOST's `origin/main` that was FALSE: a
+// host carrying a pre-KAN-172 copy — an old clone, a fork, a bisect, a mirror
+// that stopped fetching — loaded the historical target and ran it, and by
+// Finding 4 every red such a run can emit is a false one. The read is gone, the
+// branch it fed is gone, and `git()` now refuses any host-side revision that is
+// not a full object name or `HEAD`. Section 4d makes the removed read on every
+// run and asserts it is refused, so the claim is held by a mechanism instead of
+// by the next author's care. That was Finding 1 in `docs/moving-baselines.md`,
+// now closed there.
 //
 // AND THE HALF THAT COMES FIRST: SIGKILL, a reboot or a power cut lands between
 // the write and the restore and ci.yml is left carrying a deliberately-broken
@@ -203,7 +215,91 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   });
 }
 
+/**
+ * WHAT MAY NAME A REVISION AGAINST THE HOST — KAN-369, and it is the whole of
+ * what that ticket changed.
+ *
+ * Until KAN-369 this helper's `cwd` defaulted to `repoRoot` and it asked no
+ * questions, so `preFixTarget()` could read the HOST's `['origin/main', 'main']`
+ * to decide whether section 4 was dormant. KAN-364 constructed the SANDBOX's ref
+ * environment; this is the other read, on the other repository, and it was
+ * Finding 1 in `docs/moving-baselines.md`.
+ *
+ * THE RULE, and it is the definition of the class rather than a list of banned
+ * names: a host-side revision must be a FULL 40-character object name, which is
+ * immutable by construction, or `HEAD`. Everything else — a branch, a
+ * remote-tracking ref, an abbreviated SHA that can grow ambiguous — is refused.
+ * `moving-baselines.md` defines a moving baseline as one whose "identifier is not
+ * immutable", so this is that sentence made executable rather than a blocklist
+ * that a new ref name walks around.
+ *
+ * WHY `HEAD` IS ALLOWED AND A BRANCH IS NOT, because they look equally mutable.
+ * Finding 4's rule is "pin the comparand, never the subject". `HEAD` IS the
+ * subject — the tree this run is about — and a proof whose subject could not move
+ * would be the recording Finding 4 refuses. A branch reached for as a BASELINE is
+ * the comparand, and a comparand that moves is the whole defect.
+ *
+ * WHY IT IS ENFORCED HERE RATHER THAN BY A GREP. `docs/moving-baselines.md` names
+ * its own weakest link, and it names this file: "Channel 1 finds the invocation;
+ * the sweep then read each one to find its ref, and that read is manual. The
+ * nearest real case is `verify-ci-proof-residue-is-legible`'s `git()` helper,
+ * whose refs are supplied by three different callers." A guard on the helper sees
+ * the ref that actually arrives, so an ambient read assembled from a variable, a
+ * file or three call-frames away is caught where a grep over source text is not.
+ *
+ * IT IS CLOSED BY DEFAULT. A subcommand absent from `HOST_REVISION_ARGS` has ALL
+ * of its arguments treated as ambient and is refused, so a new kind of host read
+ * has to come here and say where its revision lives before it can run. That is
+ * deliberate: the failure this replaces was a read nobody had to declare.
+ */
+const SUBJECT_REVISIONS = new Set(['HEAD']);
+const IMMUTABLE_REV = /^[0-9a-f]{40}$/;
+
+/** Where a revision can hide, per host-side subcommand this script actually uses. */
+const HOST_REVISION_ARGS = {
+  'ls-files': () => [],
+  clone: () => [],
+  'rev-parse': (rest) => rest.filter((a) => !a.startsWith('-')),
+  'rev-list': (rest) => rest.filter((a) => !a.startsWith('-')).flatMap((a) => a.split('..')),
+  show: (rest) => rest.filter((a) => !a.startsWith('-')).map((a) => a.split(':')[0]),
+  'cat-file': (rest) => rest.filter((a) => !a.startsWith('-')).map((a) => a.replace(/\^\{.*\}$/, ''))
+};
+
+/**
+ * Every host-side read this run refused, recorded as well as thrown.
+ *
+ * THE LEDGER IS NOT BELT-AND-BRACES, IT CLOSES THE HOLE THE THROW LEAVES — and
+ * the hole is not hypothetical, it is the shape of the code KAN-369 deleted.
+ * `preFixTarget()` wrapped its `git show` in `try { … } catch { continue; }`, so a
+ * caller that swallows exceptions is exactly the caller an ambient read is likely
+ * to have. A refusal that only throws is a refusal that such a caller turns back
+ * into silence. This list survives the catch, and section 4d asserts on it.
+ */
+const refusedHostReads = [];
+
+function assertHostRevisionsAreImmutable(args) {
+  const [sub, ...rest] = args;
+  const reader = Object.prototype.hasOwnProperty.call(HOST_REVISION_ARGS, sub)
+    ? HOST_REVISION_ARGS[sub]
+    : null;
+  const ambient = (reader === null ? args : reader(rest))
+    .filter((rev) => rev !== '' && !IMMUTABLE_REV.test(rev) && !SUBJECT_REVISIONS.has(rev));
+  if (ambient.length === 0) return;
+  refusedHostReads.push({ args: [...args], ambient });
+  throw new Error(
+    `AMBIENT HOST REVISION REFUSED (KAN-369): \`git ${args.join(' ')}\` names ${JSON.stringify(ambient)} ` +
+    'against the host repository. A host-side revision must be a full 40-character object name or ' +
+    '`HEAD`. This is Finding 1 in docs/moving-baselines.md: a baseline acquired through an ' +
+    'identifier that can move is a baseline that differs per machine and per day. Pin the revision, ' +
+    'or take the read into the sandbox where the ref environment is constructed.' +
+    (reader === null
+      ? ` \`${sub}\` is not a declared host subcommand — add it to HOST_REVISION_ARGS saying where its revision lives.`
+      : '')
+  );
+}
+
 function git(args, cwd = repoRoot) {
+  if (cwd === repoRoot) assertHostRevisionsAreImmutable(args);
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
@@ -712,9 +808,10 @@ rule('4. THE HISTORICAL DEMONSTRATION IS DORMANT — the dormancy stated, and th
 //
 //   * STOPPED ASSERTING: that the version of `verify-ci-wiring-guards.mjs` which
 //     really shipped absorbed a residue, restored it, and exited 0 reporting ALL
-//     CHECKS PASSED — the seven assertions in the `else` branch below.
+//     CHECKS PASSED — seven assertions, which lived in an `else` branch here
+//     until KAN-369 removed the branch along with the read that fed it.
 //   * WHEN: KAN-172 merged at 13a247d and `origin/main` began carrying the fix.
-//     `preFixTarget()` then returns no text and the section announces NOT RUN.
+//     `preFixTarget()` then returned no text and the section announced NOT RUN.
 //     Measured 2026-08-12 at 2dd39eb: 44 merged pull requests since, every one of
 //     them with this section silent inside a green job.
 //   * WHAT COVERS IT: SECTION 5, deliberately and from the day this was written —
@@ -778,10 +875,93 @@ rule('4. THE HISTORICAL DEMONSTRATION IS DORMANT — the dormancy stated, and th
 //     carries the fix, which is the PERMANENT, EXPECTED consequence of the very
 //     change it demonstrates: making that red would make CI red for succeeding,
 //     for ever, with no fix available to anyone. The two conditions print the
-//     same three words and are structurally opposite. So the first assertion
-//     below adopts the principle exactly where it holds — an UNREACHABLE ref is
-//     red here now, where until KAN-363 it printed the same quiet NOT RUN as a
-//     baseline that had caught up.
+//     same three words and are structurally opposite.
+//
+// ===========================================================================
+// KAN-369: THE DORMANCY IS NOW STRUCTURAL, AND THE HOST READ IS GONE.
+// ===========================================================================
+//
+// Everything above stands as the reasoning for why this demonstration must not
+// be revived. What KAN-369 changed is that the reasoning is no longer carried by
+// a runtime read of somebody's `origin/main`.
+//
+// WHAT WAS HERE. `preFixTarget()` ran `git show <ref>:<target>` against the HOST
+// repository for `['origin/main', 'main']`, and the branch it took decided
+// whether this section stayed quiet, went LIVE, or went red. That was Finding 1
+// in `docs/moving-baselines.md` — untouched by KAN-364, which constructed the
+// SANDBOX's ref environment and said in its own closing paragraph that this read
+// was a different one on a different repository.
+//
+// WHY IT WENT RATHER THAN GOT PINNED: ALL THREE OF ITS OUTCOMES WERE WRONG OR
+// USELESS. That is the finding KAN-369 contributes, and it is only visible once
+// KAN-363 has already decided the section must stay dormant:
+//
+//   1. THE DORMANT OUTCOME WAS A TAUTOLOGY. `main` has carried the fix since
+//      KAN-172 merged at 13a247d and cannot stop having carried it. So the read
+//      asked a moving ref a question whose true answer is a CONSTANT, and the
+//      one way it could return a different answer was for the ref to be wrong.
+//   2. THE LIVE OUTCOME WAS THE REVIVAL THE SIXTY LINES ABOVE REFUSE. A host
+//      whose `origin/main` predates 13a247d — an old clone, a fork, a bisect, a
+//      mirror that stopped fetching — loads the historical target and runs it.
+//      By Finding 4 every red that run can emit is a false one. THE HEADER OF
+//      THIS FILE SAID "nothing can make it live again", AND THAT SENTENCE WAS
+//      FALSE while this read existed: an ordinary environment could make it
+//      live. A sentence claiming more than its mechanism covers is this epic's
+//      subject, and it was sitting in the paragraph refusing the revival.
+//   3. THE RED OUTCOME WAS A FALSE RED, and this is the part that reverses a
+//      decision taken one ticket ago, so it is argued rather than asserted.
+//      KAN-363 made an unreachable ref red on `verify-daemon-provenance`'s
+//      reasoning, and that reasoning is sound WHERE THE REF IS THE COMPARAND OF
+//      A LIVE DEMONSTRATION — reach it and something is demonstrated, miss it
+//      and nothing is. KAN-363 simultaneously decided that nothing may ever be
+//      demonstrated here again. Once both hold, the ref is loaded on NO path
+//      this section permits, and the red announced that you had failed to reach
+//      a baseline it must not use. Measured by `task/KAN-364` in a constructed
+//      detached-HEAD checkout with every host ref deleted: 57/58, the single red
+//      being that assertion, in an environment that was in every respect fine
+//      for the work this section actually does.
+//
+// SO THE PRINCIPLE IS NOT ABANDONED, ITS SUBJECT IS. Section 4c keeps its own
+// reachability precondition and must, because 4c genuinely LOADS the bytes it
+// pins — unreachable there really does mean nothing was demonstrated. The
+// discriminator KAN-363 drew is right; what changed is that section 4 no longer
+// has a baseline for it to apply to.
+//
+// THE OPTIONS KAN-369 WEIGHED, named because the ticket asked for them by name
+// and including do-nothing:
+//
+//   * PIN `preFixTarget()` TO `PRE_FIX_TARGET_REV`. Rejected, and it is
+//     self-defeating rather than merely wrong: 0edd2c1 is BY DEFINITION the
+//     pre-fix target, so its text never equals the current one and never carries
+//     the refusal — the pinned read returns bytes on every machine and the
+//     section goes permanently LIVE. That does not pin the dormancy decision, it
+//     abolishes dormancy. The ticket warned that conflating "pin the dormancy
+//     decision" with "revive the demonstration" would get this wrong, and the
+//     literal reading of its own first option is the instance.
+//   * PIN IT TO `KAN172_MERGE` INSTEAD, which does yield dormancy
+//     deterministically — 13a247d's copy carries the refusal, so the read
+//     returns `text: null` on every machine, for ever. Rejected as ceremony: it
+//     is an elaborate way of computing a constant, it costs a git read that can
+//     only fail on a shallow clone, and so it reintroduces outcome 3's false red
+//     to answer a question with one possible answer.
+//   * DO NOTHING, argue the exposure is cheaper than the fix. Rejected on
+//     outcome 2. The cost of the read is not the tautology, it is that an
+//     ordinary environment silently converts this section into the false-red
+//     generator its own header spends sixty lines refusing to become.
+//   * DELETE THE READ AND THE BRANCH IT FED. CHOSEN. Dormancy stops being
+//     measured and becomes a property of the code: there is no longer a path on
+//     which the historical demonstration runs, so "nothing can make it live
+//     again" is true by construction. THIS IS NOT "DELETE SECTION 4", which
+//     KAN-363 rejected and which stays rejected — the dormancy statement, the
+//     4c fixture and the checked pointer at section 5 are all still here. What
+//     went is the dead live branch and the ambient read that was the only thing
+//     that could wake it.
+//
+// AND WHAT HOLDS IT, because a deletion cannot go red and an unheld deletion is
+// just today's tidiness. `git()` now refuses any host-side revision that is not
+// a full object name or `HEAD`, and SECTION 4d below demonstrates that refusal
+// on every run by making the exact read this section used to make. The state
+// this ticket removed is unrepresentable rather than merely absent.
 
 /** KAN-172's merge: the first `origin/main` to carry the fix, and so the commit
  *  at which this section went dormant. Used below as the POST-fix arm. */
@@ -818,96 +998,18 @@ const PRE_FIX_TARGET_REV = '0edd2c1d203987fa9013f5a6e142aa0f61e456d2';
  *  guards a failure this section really has. */
 const KAN148_PARENT = 'dff24229869f2eb1b3089d2d4674582aaf065a49';
 
-function preFixTarget() {
-  const current = fs.readFileSync(path.join(repoRoot, TARGET_REL), 'utf8');
-  for (const ref of ['origin/main', 'main']) {
-    let text;
-    try {
-      text = git(['show', `${ref}:${TARGET_REL}`]);
-    } catch {
-      continue;
-    }
-    if (text === current) return { ref, text: null, why: `${ref} already carries this fix` };
-    if (text.includes(REFUSAL)) return { ref, text: null, why: `${ref}'s copy already refuses over a dirty ci.yml` };
-    return { ref, text, why: null };
-  }
-  return { ref: null, text: null, why: 'neither `origin/main` nor `main` is present in this clone' };
-}
-
-const preFix = preFixTarget();
-
-if (!preFix.text) {
-  // THE ONE DORMANCY THAT IS A DEFECT. `preFixTarget()` returns `ref: null` only
-  // when NEITHER `origin/main` NOR `main` exists — a shallow clone, which is a
-  // fixable environment defect and is exactly the condition
-  // `verify-daemon-provenance` refuses to pass over. The other two whys (the ref
-  // carries the fix, the ref already refuses) are the expected steady state and
-  // are reported without a verdict. Before KAN-363 all three printed the same
-  // NOT RUN and exited 0, so a shallow clone was indistinguishable from success.
-  check(preFix.ref !== null,
-    'THE BASELINE REF IS REACHABLE — a clone that cannot reach it has demonstrated nothing, and ' +
-    'saying so is the difference between the demonstration happening and its absence being ' +
-    'announced. Red ONLY for this cause: an unreachable ref is a fixable environment defect, ' +
-    'where a ref that has caught up is the permanent expected consequence of the fix this ' +
-    'section was written to demonstrate',
-    preFix.ref !== null
-      ? `reachable at \`${preFix.ref}\` — dormant because ${preFix.why}, which is the expected steady state`
-      : `NOT RUN — ${preFix.why}. This is a shallow clone, not a caught-up baseline.`);
-
-  console.log(`\n  DORMANT — ${preFix.why}.`);
-  console.log('  NOTHING ABOUT THE SHIPPED VERSION IS ASSERTED HERE, and has not been since KAN-172');
-  console.log(`  merged at ${KAN172_MERGE.slice(0, 7)}. What is missing is the demonstration that the shipped`);
-  console.log('  version absorbed the residue. SECTION 5 makes the same measurement against the current');
-  console.log('  code with the fix backed out, and the check after it asserts that section 5 really ran');
-  console.log('  — so this hand-off is a checked pointer rather than a sentence. The run on the KAN-172');
-  console.log('  pull request has this section live, and nothing can make it live again: see the header');
-  console.log('  above for why it is not pinned, and the fixture below for that reason measured.');
-} else {
-  const rel = path.join('scripts', 'kan172-prefix-verify-ci-wiring-guards.mjs');
-  fs.writeFileSync(path.join(sandbox, rel), preFix.text);
-  console.log(`   pre-fix target loaded from ${preFix.ref}:${TARGET_REL}\n`);
-
-  // 4a. The comment-only residue: the run goes entirely green over it.
-  green: {
-    const seeded = seed(COMMENT_RESIDUE);
-    if (seeded === null) break green;
-    const r = runVariant(rel);
-
-    check(r.code === 0 && r.out.includes('ALL CHECKS PASSED'),
-      'THE SHIPPED VERSION RAN TO COMPLETION OVER THE RESIDUE AND REPORTED ALL CHECKS PASSED — it ' +
-      'never looked at whether the file it snapshotted was the committed one',
-      `exit ${r.code}`);
-    check(/PASS\s+\.github\/workflows\/ci\.yml restored/.test(r.out),
-      '…including the assertion whose entire job is "the tree is as I found it". It is true and it is ' +
-      'useless: the thing it compared against WAS the residue',
-      (r.out.split('\n').find((l) => l.includes('ci.yml restored')) ?? '').trim());
-    check(readSandboxWorkflow() === seeded,
-      'AND THE CORRUPTED WORKFLOW IS STILL IN THE TREE afterwards, faithfully restored by the ' +
-      'cleanup path, by a run that exited 0. That is the failure-as-success this ticket is about.',
-      `residue byte-identical to what was seeded: ${readSandboxWorkflow() === seeded}`);
-    check(!r.out.includes(REFUSAL),
-      '…and at no point did it mention that ci.yml was dirty');
-  }
-
-  // 4b. And the residue a killed run actually leaves: it goes red, but for
-  //     entirely the wrong reason, and never says the file is corrupt.
-  wrongReason: {
-    const seeded = seed(MARKED_RESIDUE);
-    if (seeded === null) break wrongReason;
-    const r = runVariant(rel);
-
-    check(/PASS\s+\.github\/workflows\/ci\.yml restored/.test(r.out),
-      'over a real killed-run residue the shipped version again PASSES its byte-identical check, ' +
-      'having restored the corruption',
-      (r.out.split('\n').find((l) => l.includes('ci.yml restored')) ?? '').trim());
-    check(readSandboxWorkflow() === seeded,
-      '…leaving the broken workflow in the tree');
-    check(!r.out.includes(REFUSAL) && !/ci\.yml is already modified/.test(r.out),
-      '…and its output never says the file was dirty. Whatever red it does produce is about its own ' +
-      'rows, which sends the reader to hunt a parser bug that does not exist',
-      `exit ${r.code}; rows it reported red: ${(r.out.match(/^FAIL\s+\S+/gm) ?? []).slice(0, 4).map((s) => s.trim()).join(' | ') || '(none — it was entirely green)'}`);
-  }
-}
+console.log('\n  DORMANT — STRUCTURALLY, SINCE KAN-369. There is no code path here that loads a');
+console.log('  historical target, so this is a property of the file rather than a verdict read off');
+console.log('  the environment. Until KAN-369 it was decided by a `git show` against the HOST\'s');
+console.log('  `origin/main`, and a host carrying a pre-KAN-172 copy would have made it LIVE.');
+console.log('  NOTHING ABOUT THE SHIPPED VERSION IS ASSERTED HERE, and has not been since KAN-172');
+console.log(`  merged at ${KAN172_MERGE.slice(0, 7)}. What is missing is the demonstration that the shipped`);
+console.log('  version absorbed the residue. SECTION 5 makes the same measurement against the current');
+console.log('  code with the fix backed out, and the check after it asserts that section 5 really ran');
+console.log('  — so this hand-off is a checked pointer rather than a sentence. The run on the KAN-172');
+console.log('  pull request has this section live, and nothing can make it live again: see the header');
+console.log('  above for the decision, section 4c for why pinning was refused, and section 4d for the');
+console.log('  refusal that now holds the deletion.');
 
 // ---------------------------------------------------------------------------
 // 4c. THE PIN REFUSED, AS A FIXTURE RATHER THAN A STORY (KAN-363 AC2).
@@ -1090,6 +1192,122 @@ pinRefused: {
     'sandbox, and this is what says they restored it. Compared against what section 0b constructed, so ' +
     'it holds on every machine rather than only on one that had refs to inherit',
     sandboxRefs().join(' | ') || '(no refs at all)');
+}
+
+// ---------------------------------------------------------------------------
+// 4d. THE HOST READ REFUSED, DEMONSTRATED RATHER THAN DELETED (KAN-369).
+//
+// Section 4 no longer reads the host's `origin/main`. A deletion cannot go red,
+// so on its own it is worth exactly as much as the next author's care — and this
+// epic's whole subject is the artifact that stops covering what it claims while
+// staying green. `git()` therefore refuses an ambient host revision, and this
+// section makes THE EXACT READ THAT WAS REMOVED, on every run, and asserts it is
+// refused. The removal is a live demonstration rather than an absence.
+//
+// FOUR ARMS, AND THREE OF THEM EXIST TO STOP THE FIRST ONE PASSING VACUOUSLY —
+// which is the question the PR checklist asks: what would have to be true for
+// this to pass while the mechanism is broken?
+//
+//   * A POLICY THAT REFUSED EVERYTHING would satisfy arm 1 and break the script.
+//     Arm 2 is the negative control: the PINNED read still works.
+//   * A POLICY THAT REFUSED EVERYWHERE would break section 4c, whose two arms
+//     deliberately write `refs/remotes/origin/main` inside the sandbox. Arm 3
+//     asserts the guard is scoped to the host, so "ambient" keeps meaning
+//     "acquired from a ref nobody constructed" rather than "mentions origin".
+//   * A REFUSAL THAT ONLY THREW would be turned back into silence by a caller
+//     that swallows exceptions — and the deleted `preFixTarget()` was exactly
+//     such a caller, `try { … } catch { continue; }` around its `git show`. Arm 4
+//     reads the ledger instead, so a reintroduced ambient read anywhere in this
+//     file is counted even if its caller catches.
+//
+// WHAT THIS DOES NOT COVER, marked at its nearest point. Arm 4 counts refusals,
+// so it catches an ambient read that REACHES `git()`. It cannot catch one that
+// bypasses the helper by calling `execFileSync('git', …)` directly. Nothing here
+// owns that, and no sibling script does either; `docs/moving-baselines.md`
+// channel 1 is the manual sweep that would find it, and its own text names that
+// manual step as the weakest link in the method. Stated rather than left for a
+// reader to assume a coverage that does not exist.
+//
+// AND ARM 3 IS THE ONE WHOSE RED IS NOT A COUNTED FAIL, which is a limit on this
+// section rather than on the guard. Removing the `cwd === repoRoot` scope does
+// not turn arm 3 red: the sandbox is built long before section 4d runs and
+// `git checkout -B` is not a declared host subcommand, so the run dies inside
+// `buildSandbox` with the guard's own error and prints no verdict line at all.
+// The mechanism is therefore load-bearing and demonstrably so — but by killing
+// the run, which is the shape `scripts/mutation.mjs` exists to discourage. It is
+// driven in `scripts/kan369-red-drive.mjs` as what it is rather than dressed up,
+// and arm 3 is kept because it names the scope for a reader at the point where
+// the scope matters.
+
+hostReadRefused: {
+  const AMBIENT_PROBE = ['show', `origin/main:${TARGET_REL}`];
+  const ledgerBefore = refusedHostReads.length;
+
+  let probeThrew = null;
+  try {
+    git(AMBIENT_PROBE);
+    probeThrew = false;
+  } catch (err) {
+    probeThrew = /AMBIENT HOST REVISION REFUSED/.test(String(err?.message ?? err));
+  }
+
+  check(probeThrew === true,
+    'THE READ KAN-369 REMOVED IS NOW REFUSED — `git show origin/main:<target>` against the HOST is ' +
+    'the exact call `preFixTarget()` made to decide this section\'s dormancy, and making it here on ' +
+    'every run is what turns a deletion into a mechanism. A host whose `origin/main` predates ' +
+    'KAN-172 can no longer wake the historical demonstration, because the read that would load it ' +
+    'cannot complete',
+    probeThrew === true
+      ? `refused: \`git ${AMBIENT_PROBE.join(' ')}\``
+      : `NOT REFUSED — the read completed, or threw for some other reason. probeThrew=${probeThrew}`);
+
+  // NEGATIVE CONTROL. Without this, a policy that refused every host revision —
+  // including the pinned ones section 4c depends on — would satisfy the arm above
+  // while breaking the file.
+  let pinnedRead = null;
+  try {
+    pinnedRead = git(['show', `${PRE_FIX_TARGET_REV}:${TARGET_REL}`]).length;
+  } catch (err) {
+    pinnedRead = `threw: ${err?.message ?? err}`;
+  }
+  check(typeof pinnedRead === 'number' && pinnedRead > 0,
+    'AND THE PINNED READ IS STILL PERMITTED — the guard discriminates by whether the identifier is ' +
+    'immutable, not by whether a read happens. A policy that refused everything would pass the arm ' +
+    'above and break section 4c, so this is what makes that arm mean something',
+    typeof pinnedRead === 'number'
+      ? `${PRE_FIX_TARGET_REV.slice(0, 7)}:${TARGET_REL} read, ${pinnedRead} bytes`
+      : String(pinnedRead));
+
+  // SCOPE CONTROL. Section 4c's arms write `refs/remotes/origin/main` INSIDE the
+  // sandbox on purpose — that ref environment is constructed by this script, so
+  // it is not ambient. A guard that could not tell the two apart would be a guard
+  // against the wrong thing.
+  let sandboxAmbientOk = null;
+  try {
+    sandboxAmbientOk = git(['rev-parse', `refs/heads/${SANDBOX_BRANCH}`], sandbox).trim().length === 40;
+  } catch (err) {
+    sandboxAmbientOk = `threw: ${err?.message ?? err}`;
+  }
+  check(sandboxAmbientOk === true,
+    'AND THE GUARD DOES NOT REACH THE SANDBOX — a ref read inside the constructed environment still ' +
+    'resolves. "Ambient" means acquired from a ref nobody constructed, and section 4c writes ' +
+    '`refs/remotes/origin/main` in there deliberately; a guard that blocked that would have broken ' +
+    'the fixture that refuses the pin',
+    sandboxAmbientOk === true
+      ? `refs/heads/${SANDBOX_BRANCH} resolves inside the sandbox with the guard armed`
+      : String(sandboxAmbientOk));
+
+  // THE STANDING GUARD. Everything above tests the policy; this tests the RUN.
+  const unexpected = refusedHostReads.slice(0, ledgerBefore);
+  check(ledgerBefore === 0 && refusedHostReads.length === 1,
+    'AND NOTHING ELSE IN THIS RUN MADE AN AMBIENT HOST READ — the ledger holds exactly the probe ' +
+    'above and nothing before it. This is the arm that goes red if a future edit reintroduces the ' +
+    'read KAN-369 removed, and it reads a ledger rather than an exception precisely because the ' +
+    'code that was removed wrapped its own read in `catch { continue; }`',
+    ledgerBefore === 0
+      ? `${refusedHostReads.length} refusal(s), all from this section's probe`
+      : `${ledgerBefore} ambient host read(s) before this section: ` +
+        unexpected.map((r) => `\`git ${r.args.join(' ')}\` → ${JSON.stringify(r.ambient)}`).join(' | '));
 }
 
 // ===========================================================================

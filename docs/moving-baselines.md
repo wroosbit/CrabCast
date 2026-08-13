@@ -66,7 +66,10 @@ lands in the same net.
   concatenation several call-frames from the `git` invocation. Channel 1 finds
   the *invocation*; the sweep then read each one to find its ref, and that read
   is manual. The nearest real case is `verify-ci-proof-residue-is-legible`'s
-  `git()` helper, whose refs are supplied by three different callers.
+  `git()` helper, whose refs are supplied by three different callers. **That one
+  file now checks its own refs at the helper (KAN-369), which is the only place
+  the ref that actually arrives is visible — see Finding 1. The weakness in the
+  *method* is unchanged: every other script is still covered by a manual read.**
 * **A baseline that is not a second *version* but a second *machine*.** Channel 5
   covers a live daemon; it does not cover anything that would differ between this
   machine and a GitHub runner without being a version of anything. Finding 3 is
@@ -90,12 +93,25 @@ sites acquire a *second version* of a file:
 | `verify-ci-wiring-guards` §2 | `dff24229…` (`77ea91f^`) | **yes** — pinned by KAN-354 |
 | `verify-readme-is-current` HISTORY | `72db4cd`, `e7ffb58`, `0edd2c1` | **yes** |
 | `verify-daemon-provenance` | `e7ffb58`, `0edd2c1` | **yes** |
-| `verify-ci-proof-residue-is-legible` §4 | `['origin/main', 'main']` | **no** — Finding 1 |
+| `verify-ci-proof-residue-is-legible` §4 | ~~`['origin/main', 'main']`~~ — **the read is gone (KAN-369)** | **n/a** — see Finding 1 |
+
+**Every host-side revision in that script is now immutable by construction, not
+by review.** KAN-369 deleted §4's ambient read and put the rule in the `git()`
+helper itself: a revision named against `repoRoot` must be a full 40-character
+object name or `HEAD`, and anything else is refused and recorded. That closes
+this table's own stated weak point for the one file it named — see *What this
+method can miss*, first bullet, which singles out this helper because "its refs
+are supplied by three different callers". The greps still find the invocation;
+the helper now checks the ref, so an ambient read assembled through an
+indirection is caught where a manual read of the call site might not be.
 
 `kan114-send-before-and-after.mjs` also uses `origin/main`, and is a one-off
 demonstration script rather than a proof: it is not in the CI array, nothing
 gates on it, and it prints a before/after rather than asserting. Recorded here
 so the next sweep does not have to re-derive that.
+`kan369-red-drive.mjs` is the same kind of thing — the mutations behind §4d,
+run one at a time, for a pull request rather than for a gate. Neither is a
+standing guard and neither should be counted as one.
 
 **If you are here to repin `verify-ci-wiring-guards` §2, read this first
 (KAN-363).** `verify-ci-proof-residue-is-legible` §4c pins the same commit
@@ -143,6 +159,16 @@ compares against a wall-clock baseline.
 
 ## Finding 1 — `verify-ci-proof-residue-is-legible` §4 is on a moving ref, and has been dormant for 43 merged pull requests
 
+> **Status (KAN-369, 2026-08-13): CLOSED — the read is deleted and the deletion
+> is held by a mechanism.** §4 no longer acquires a baseline at all, so it no
+> longer has a moving one. Dormancy is now a property of the file rather than a
+> verdict read off the host, `git()` refuses any host-side revision that is not
+> a full object name or `HEAD`, and §4d makes the removed read on every run and
+> asserts it is refused. **The unreachable-ref red KAN-363 added is gone with
+> it** — that reversal is argued below rather than assumed, because it undoes a
+> decision taken one ticket earlier. See *CLOSED by KAN-369* at the end of this
+> section; the paragraphs between here and there are kept as they were written.
+>
 > **Status (KAN-363, 2026-08-12): decided.** §4 stays dormant and is no longer
 > silent about it — the dormancy is stated in the file, the unreachable-ref case
 > is now red, the pointer at §5 is a checked assertion, and §4c demonstrates with
@@ -171,6 +197,76 @@ byte-equality guard degrades loudly and wrongly.**
 same two observations. §5 was measured live and asserting. So the dormancy cost
 coverage of "the defect as it actually shipped" and did not leave the property
 unguarded.
+
+### CLOSED by KAN-369 — all three outcomes of the read were wrong or useless
+
+**Re-measured at `451aba4` before anything was changed**, because two tickets on
+this epic have had their premise move underneath them: `preFixTarget()` still
+read the host's `['origin/main', 'main']` with `cwd` defaulting to `repoRoot`,
+and §4 was still dormant on this machine — `58/58`, printing
+`DORMANT — origin/main already carries this fix`. The ticket was live.
+
+**The finding that decided it is only visible once KAN-363 has already ruled that
+§4 must stay dormant.** Given that ruling, each of the read's three outcomes is
+independently indefensible:
+
+| Outcome | When | Verdict |
+|---|---|---|
+| **Dormant** | the host's ref carries the fix — every honest clone | **A tautology.** `main` has carried the fix since `13a247d` and cannot stop having done so, so the read asked a moving ref a question whose true answer is a constant. |
+| **Live** | the host's ref predates `13a247d` — an old clone, a fork, a bisect, a mirror that stopped fetching | **The revival Finding 4 forbids.** By Finding 4 every red a revived §4 can emit is a false one. The file's own header said *"nothing can make it live again"*, and **that sentence was false while this read existed.** |
+| **Red** | neither ref is reachable | **A false red.** Measured by `task/KAN-364` in a constructed detached-HEAD checkout with every host ref deleted: `57/58`, the single red being the reachability assertion, in an environment that was in every respect fine for the work §4 actually does. |
+
+**The reversal of KAN-363's reachability red, argued rather than asserted.**
+KAN-363 made an unreachable ref red on `verify-daemon-provenance`'s reasoning —
+*"a shallow clone that cannot reach these revisions has demonstrated nothing"* —
+and that reasoning is sound **where the ref is the comparand of a live
+demonstration**: reach it and something is demonstrated, miss it and nothing is.
+KAN-363 simultaneously decided that nothing may ever be demonstrated in §4 again.
+Once both hold, the ref is loaded on no path the section permits, and the red
+announced that you had failed to reach a baseline it must not use. **The
+principle is not abandoned, its subject is:** §4c keeps its own reachability
+precondition and must, because §4c genuinely *loads* the bytes it pins.
+
+**The options weighed, including do-nothing.**
+
+| Option | Verdict | Why |
+|---|---|---|
+| **Pin `preFixTarget()` to `PRE_FIX_TARGET_REV`** | rejected | Self-defeating rather than merely wrong. `0edd2c1` is *by definition* the pre-fix target, so its text never equals the current one and never carries the refusal — the pinned read returns bytes on every machine and §4 goes permanently **live**. That does not pin the dormancy decision, it abolishes dormancy. The ticket warned that conflating the two questions would get this wrong; the literal reading of its own first option is the instance. |
+| **Pin it to `KAN172_MERGE`** | rejected | It *does* yield dormancy deterministically — `13a247d`'s copy carries the refusal. Rejected as ceremony: an elaborate way of computing a constant, costing a git read that can only fail on a shallow clone, which reintroduces outcome 3's false red to answer a question with one possible answer. |
+| **Do nothing; argue the exposure is cheaper** | rejected | On outcome 2. The cost is not the tautology — it is that an ordinary environment silently converts §4 into the false-red generator its own header spends sixty lines refusing to become. |
+| **Delete the read and the branch it fed** | **chosen** | Dormancy stops being measured and becomes a property of the code. **This is not "delete §4"**, which KAN-363 rejected and which stays rejected: the dormancy statement, the §4c fixture and the checked pointer at §5 are all still there. What went is the dead live branch and the ambient read that was the only thing that could wake it. |
+
+**What holds it, because a deletion cannot go red.** `git()` now enforces the
+rule this document defines: a host-side revision must be a full 40-character
+object name — immutable by construction — or `HEAD`, which is the *subject*
+rather than a comparand and so is allowed by Finding 4's own rule. A violation is
+**thrown and recorded**; the ledger exists because the code that was deleted
+wrapped its read in `try { … } catch { continue; }`, so a refusal that only threw
+would be turned back into silence by exactly the kind of caller an ambient read
+tends to have. §4d then makes the removed read on every run and asserts all four
+properties: it is refused, the pinned read still works, the sandbox is not
+reached, and nothing else in the run made one.
+
+**Measured after the change at `451aba4`:** the proof runs `61/61`, exit 0 — one
+assertion removed (the reachability red), four added (§4d), and the seven
+assertions of the deleted live branch were already never running. Every mechanism
+was driven red alone by `scripts/kan369-red-drive.mjs`, each mutation asserted
+applied with an exact occurrence count of 1: neutering the guard's call site
+reddens `refused` and `ledger`; removing the ledger write reddens `ledger` only,
+with `refused` still green — **which is the swallowing-caller case demonstrated**;
+allow-listing `origin/main` as a subject revision reddens `refused` and `ledger`;
+reintroducing the deleted read inside the same `catch` reddens `ledger` alone;
+and refusing an immutable revision reddens `pinned`, which is what stops that arm
+being vacuous.
+
+**Not covered, and named rather than left to be assumed:** the ledger sees only
+reads that reach the `git()` helper, so a direct `execFileSync('git', …)`
+elsewhere in that file would bypass it. Nothing owns that — channel 1's manual
+sweep below is what would find it, and this document already names that manual
+step as the weakest link in its own method. And §4d's third arm cannot be driven
+to a counted red: removing the host scope kills the run inside `buildSandbox`
+before §4d executes, so its mechanism is demonstrably load-bearing but only by
+killing the run, which the red drive reports as what it is.
 
 ## Finding 2 — pinning §4 does not fix it, because the pinned content is itself unpinned
 
@@ -304,6 +400,12 @@ which is vacuous there (the absence of inherited refs).
 dormant. That is a host-side ambient read, it is **Finding 1**, and it is
 untouched — the table above is still accurate. KAN-364 changed the *sandbox's*
 ref environment only.
+
+> **That last paragraph was written by KAN-364 and is now spent: KAN-369 closed
+> Finding 1** by deleting the host read rather than pinning it. Both ref
+> environments this script touches are therefore constructed or immutable — the
+> sandbox's by KAN-364, the host's by the `git()` guard. Kept as written because
+> it is the sentence that correctly refused to claim more than it had done.
 
 ---
 
