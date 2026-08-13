@@ -227,15 +227,28 @@ async function main() {
   // passing after sendToAgent stopped sending what it measures. Exact counts,
   // because "contains" would survive a second interrupt being added.
   //
-  // ⚠ THIS SECTION IS EXPECTED TO GO RED WHEN KAN-383 LANDS, AND THAT IS THE
-  // PIN WORKING RATHER THAN A DEFECT. KAN-383 makes the submit conditional —
-  // the pane is read between `send-text` and `Enter`, and the Enter is issued
-  // only when our own text is visible — so the flat four-call sequence asserted
-  // below stops being what `sendToAgent` emits. Whichever of the two lands
-  // second updates this assertion to the new sequence; it must not be loosened
-  // into a "contains" check, because the whole value of §0 is that it cannot be
-  // satisfied by a sequence nobody chose. This script is excluded from CI, so
-  // the red arrives on a hand-run rather than on anybody's required check.
+  // ⚠ WHAT THIS SECTION CANNOT SEE — measured, not predicted, and it is the
+  // honest limit of the pin. This reads CALL SITES AND THEIR ORDER out of the
+  // source text. It says nothing about whether any of them is REACHABLE.
+  //
+  // KAN-383 is the worked case. It makes the submit conditional — the pane is
+  // read between `send-text` and `Enter`, and the Enter is skipped by an early
+  // `return` when our own text never appeared — which is a change to whether
+  // the third keystroke happens at all. Run against that branch's `src/herdr.ts`
+  // (`origin/butchr/KAN-383`), this section extracts `C-c → TEXT → Enter →
+  // Enter` and PASSES, exactly as it does here, because the four call sites are
+  // textually untouched and only a guard above them moved.
+  //
+  // An earlier revision of this comment asserted the opposite — that §0 would
+  // go red when KAN-383 landed. That was wrong, and it was wrong in the
+  // direction that matters: it credited this section with catching a change it
+  // is structurally blind to. The claim was tested rather than reasoned about,
+  // which is the only reason it did not survive into the merge.
+  //
+  // So do not read a green §0 as "the send sequence is unchanged". Read it as
+  // "these four calls are still present, in this order". Whether the Enter is
+  // conditional is a question about control flow that nothing here asks, and
+  // after KAN-383 the answer is that it is.
   {
     const src = fs.readFileSync(path.join(repoRoot, 'src', 'herdr.ts'), 'utf8');
     const cCount = (src.match(/'C-c'/g) ?? []).length;
@@ -248,7 +261,7 @@ async function main() {
     // C-c, message, Enter — then the Enter-only retry, which is the 4th.
     check(
       seq.length === 4 && seq[0] === 'C-c' && seq[1] === 'TEXT' && seq[2] === 'Enter' && seq[3] === 'Enter',
-      'sendToAgent still issues C-c, text, Enter (+ the Enter-only retry)',
+      "sendToAgent's send CALL SITES, in order (says nothing about whether each is guarded)",
       seq.join(' → ')
     );
   }

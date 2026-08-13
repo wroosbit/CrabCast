@@ -129,7 +129,7 @@ const ARMS = [
     name: 'sequence-reordered',
     what: 'the Enter moved BEFORE the message text, so the sequence §0 pins is no longer sent',
     section: '§0',
-    label: 'sendToAgent still issues C-c, text, Enter',
+    label: "sendToAgent's send CALL SITES, in order",
     run() {
       const file = path.join(repoRoot, 'src', 'herdr.ts');
       const ok = mutate({

@@ -540,9 +540,17 @@ that may be sending to an agent at a dialog should establish that it is not —
 
 `scripts/verify-interrupt-at-dialog-live.mjs`, excluded from CI (it needs a real
 herdr, a real pane and an authenticated `claude`) and registered in
-`scripts/verify-proof-registry.mjs`'s `EXCLUSIONS`. Its §0 pins the three-keystroke
-sequence above to `src/herdr.ts` by exact occurrence count, and its §6 pins the
-`❯` collision this section's reasoning rests on — so both claims go red if the
-code moves underneath them. `scripts/kan375-red-drive.mjs` is the demonstration
-that they can: four mutations, each required to turn its named section red,
-including one that breaks §2's own control.
+`scripts/verify-proof-registry.mjs`'s `EXCLUSIONS`. Its §0 pins the three
+keystrokes above to `src/herdr.ts` by exact occurrence count, and its §6 pins the
+`❯` collision this section's reasoning rests on — so both go red if the code
+moves underneath them. `scripts/kan375-red-drive.mjs` is the demonstration that
+they can: four mutations, each required to turn its named section red, including
+one that breaks §2's own control.
+
+**What §0 does not reach, said here because the table above invites the wrong
+reading.** It pins the **call sites and their order**, not whether each one is
+**reachable**. A guard placed above the `Enter` — which is exactly what KAN-383
+adds — leaves all four calls textually intact, so §0 stays green while the third
+keystroke becomes conditional. Verified against that branch rather than assumed.
+**So the table above describes what a send issues when nothing withholds it, and
+`submits` on the response is what tells a caller how many actually went out.**
