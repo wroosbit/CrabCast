@@ -1255,24 +1255,40 @@ will file this again.
   that subsumed them arrived one slice later (KAN-125). **Read `config.priority`
   and `config.launcher` on both branches** and the asymmetry never reaches your
   code.
-* **`provisioned` and `resumedExistingConversation` are absent because there is
-  nothing to answer them from.** Both are facts about a *spawn*, and neither is
-  durable: `resumedExistingConversation` is the session's own `mayResume`, and
-  `provisioned` is the artifact list that spawn wrote. The idempotent branch
-  holds a session it may have obtained by `attachSession`, which decides neither.
-  The record cannot supply them the way it supplies `channelEnabled` — it does
-  not carry them at all. Emitting `provisioned: []` there would assert *"this
-  activation wrote nothing"*, which is true of the call and false of the agent:
-  an earlier activation may have written plenty.
+* **`provisioned` and `resumedExistingConversation` stay off because what the
+  idempotent branch *could* answer from is a different fact — not because
+  nothing durable exists.** Something durable exists for each of them, and it is
+  named here rather than left for a reader to find and conclude the argument was
+  careless:
+  * **`provisioned` is `session.provisioned` — every artifact *this activation*
+    wrote.** A durable record of what exists *for the agent* is kept separately,
+    in the agent's sidecar (`provisioned.json`, read by the exported
+    `readProvenance` in `src/provisioning.ts`). **They answer different
+    questions.** Publishing the durable one under this field's name would make
+    one field mean *"what this call wrote"* on one branch and *"what is there"*
+    on the other — which is worse than an absence, because an absence is legible
+    and a silent change of meaning is not. Emitting `[]` instead asserts *"this
+    activation wrote nothing"*: true of the call, false of the agent, since an
+    earlier activation may have written plenty.
+  * **`resumedExistingConversation` is `session.mayResume` — the resume decision
+    *this spawn made*.** Its durable *input* is `everActivated`, which is already
+    on both branches inside the echo; the decision itself is recorded nowhere.
+    And it cannot be recovered from `everActivated` afterwards, because the
+    activation that made the decision **sets `everActivated` to `true`** — so a
+    later read of the record answers with the post-activation value rather than
+    the one the resume rule actually saw.
+  * And the idempotent branch may hold a session obtained by `attachSession`,
+    which decides neither of them.
 
 **The `channelEnabled` precedent is cited for the distinction it draws, not as a
 rule this contradicts.** KAN-281 put that field on both branches with the
 argument that *"a field present only on the spawning branch would be absent
 exactly when it is asked for most"*, and that argument is right and applies here.
-It is satisfied for `priority` and `launcher` by the echo, and it cannot be
-satisfied for the other two by anything: `channelEnabled` is answerable on the
-idempotent branch **because it is on the record**, which is precisely what
-separates it from these two.
+It is satisfied for `priority` and `launcher` by the echo. It cannot be satisfied
+for the other two, and the reason is sharper than *"nothing is durable"*:
+`channelEnabled`'s durable value answers **the same question the field asks**,
+whereas the durable neighbours of these two answer **different ones**. A field
+that changes meaning by branch is not the symmetry KAN-281 was arguing for.
 
 **What would change this.** If the config echo ever stopped riding the idempotent
 branch, `priority` and `launcher` would become genuinely absent rather than

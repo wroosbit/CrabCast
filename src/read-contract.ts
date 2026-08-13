@@ -977,13 +977,19 @@ export interface ActivateBranchSpec {
  *   STAYING ON `already-running`: take the echo off that branch and these two
  *   become genuinely absent, and this comment becomes wrong on the same edit.
  *
- *   `provisioned` and `resumedExistingConversation` have no durable source at
- *   all. `mayResume` lives on the session and nowhere else; `provisioned` is
- *   what one spawn wrote. The idempotent branch may hold a session obtained by
- *   `attachSession`, which decides neither — so unlike `channelEnabled` (KAN-281)
- *   there is no record to re-read them from. That is the difference between
- *   "omitted by choice" and "unanswerable here", and it is why the KAN-281
- *   argument does not extend to them.
+ *   `provisioned` and `resumedExistingConversation` have durable NEIGHBOURS that
+ *   answer DIFFERENT questions, which is not the same as having no durable
+ *   source — do not shorten this to the latter, because a reader who greps will
+ *   find the neighbour and conclude the argument was careless. `provisioned` is
+ *   what THIS activation wrote; what exists for the agent is durable in the
+ *   sidecar (`provisioned.json` / `readProvenance`, `src/provisioning.ts`).
+ *   `resumedExistingConversation` is the resume decision THIS spawn made; its
+ *   durable input `everActivated` is already on both branches, and the decision
+ *   is unrecoverable from it afterwards because the activation sets it `true`.
+ *   Publishing either durable value under this field's name would make one field
+ *   mean different things on different branches. That is the difference from
+ *   `channelEnabled` (KAN-281), whose durable value answers the SAME question the
+ *   field asks — which is why that argument does not extend to these two.
  *
  * Changing any of this changes the wire, which is a decision and not a
  * description. `verify-read-contract.mjs` §2d asserts both branches' `always`
