@@ -374,6 +374,13 @@ pairwise in both directions.
   load-bearing assumption under every verdict on this page, and no shape
   contract can reach it. `verify-send-confirms-delivery-live.mjs` is what runs
   the same code against a real pane nobody wrote.
+* **The keystrokes a send issues, and what they do to a pane that is not at an
+  ordinary prompt.** Those are behaviour rather than shape, so they are not on
+  this contract's wire and carry no digest — but they are what a caller most
+  often needs, so they are written down in
+  [§10](#10-the-keystrokes-a-send-issues-and-why-the-interrupt-is-unconditional)
+  rather than left in `src/herdr.ts`. **Note in particular that no verdict on
+  this page can report that a send answered a dialog** (KAN-383).
 
 **This section is prose, and the read-path contract's §10 is data.** That is a
 real difference and it is stated rather than smoothed over: the list above can
@@ -427,3 +434,106 @@ five branches out of a real router by making them happen.
   only.
 * **Nothing here is evidence about a real Claude Code pane.** Every branch below
   is produced against a herdr shim. See the last bullet of [§8](#8-the-boundary--what-this-contract-covers-and-what-it-does-not).
+
+---
+
+## 10. The keystrokes a send issues, and why the interrupt is unconditional
+
+**This section is behaviour, not shape.** Nothing in it is on the wire, so it
+carries no digest and no version row. It is here because a caller cannot read
+`src/herdr.ts`, and because the first thing every consumer asks about this
+surface is why their agent gets interrupted.
+
+### What a send actually types
+
+A `send_to_agent` that reaches a pane issues exactly three things, in order:
+
+| # | keystroke | why |
+| --- | --- | --- |
+| 1 | one `Ctrl+C` | clears a partially typed line, so the message cannot be concatenated onto stray input |
+| 2 | the message text | the payload |
+| 3 | `Enter` | submits it |
+
+A confirmation follows, and **the retry presses `Enter` only** — it never types
+again and never interrupts again. **Exactly one `Ctrl+C` exists for the whole
+call including its retry**, because a second is how Claude Code quits and would
+kill the agent the caller is trying to reach.
+
+### The decision: the interrupt stays unconditional (KAN-375)
+
+**Decided 2026-08-13, on measurement rather than on argument.** The interrupt is
+not conditioned on anything, there is no opt-out flag, and there is no plan to
+add one.
+
+**The measurement is `scripts/verify-interrupt-at-dialog-live.mjs`**, which
+drives a real `claude` at a real startup dialog and reports:
+
+* **One `Ctrl+C` at a Claude Code selection dialog does nothing at all.** The
+  dialog is not dismissed, not cancelled, and its highlight does not move. This
+  is asserted **with a control that can fail** — a `Down` sent immediately
+  afterwards on the same pane *does* move the highlight, so the pane was
+  demonstrably listening. Without that control the finding would be
+  indistinguishable from a dead keystroke channel.
+* **At a shell with a half-typed line, one `Ctrl+C` clears it and the command
+  does not run.** The interrupt's stated justification is real and load-bearing.
+
+**So the interrupt is exonerated, and this is worth stating plainly because the
+opposite claim is written down elsewhere.** A consumer ticket records that
+CrabCast's send *"opens with a Ctrl+C, which is the one thing a startup dialog
+must not receive."* **Measured, that is false.** The Ctrl+C is the one thing such
+a dialog demonstrably does not care about. Anyone repeating the claim should run
+the probe before acting on it.
+
+### The options not taken, and why
+
+* **Condition it on something observable.** Rejected. The read that would drive
+  it cannot cheaply tell the state apart: `COMPOSER_MARKERS` is `['❯', '│ >']`,
+  and **`❯` is also the glyph a Claude Code dialog draws its selection cursor
+  with** — so `splitAtComposer` reads a dialog cursor as a composer. Telling
+  them apart needs Claude-Code-specific chrome (`Enter to confirm · Esc to
+  cancel`), which is a private UI string in a program this repository does not
+  version, on a daemon that also drives `shell` agents. That buys a new failure
+  mode — a guess wrong in either direction — to condition a keystroke measured
+  to be inert. **A wrong guess is worse than honest bluntness.**
+* **Make it a caller's flag.** Rejected, and the default is why. The honest
+  default is "send the interrupt", since that is what protects the common case;
+  a flag defaulting that way changes nothing for anyone who does not set it,
+  and a caller has no reliable way to know whether it wants the other value —
+  it would have to read the pane, which is the option above with the work moved
+  onto the caller.
+* **Remove it.** Rejected. It reintroduces the silent concatenation §1 of the
+  probe demonstrates it prevents.
+
+### What a caller with a dialog open should do instead
+
+**Not send.** And this is a real answer rather than a deflection, because the
+hazard at a dialog is **not** the interrupt:
+
+> **The `Enter` at step 3 confirms whatever option is highlighted.** Measured
+> twice, with the discriminator: with the highlight left at its default the
+> dialog resolved to option 1; with the highlight moved to option 2 first, the
+> same sequence resolved to **option 2** — an option that was neither the
+> default position nor the conservative answer, and whose only property was
+> being highlighted. The message text itself is swallowed and echoed nowhere.
+
+So a send to a pane at a dialog **loses its message and answers a question
+nobody was asked**, and no verdict on this page can say so — the response will
+truthfully report `not-delivered`, having no vocabulary for *"and I supplied an
+answer on your behalf"*.
+
+**That is tracked as KAN-383**, filed separately and deliberately: it is a
+property of the submit, not of the interrupt, and it deserves its own severity
+assessment rather than inheriting this one's. **Until it is resolved, a caller
+that may be sending to an agent at a dialog should establish that it is not —
+`tail_agent` reads the pane — and treat a send as unsafe if it cannot.**
+
+### Where this is enforced
+
+`scripts/verify-interrupt-at-dialog-live.mjs`, excluded from CI (it needs a real
+herdr, a real pane and an authenticated `claude`) and registered in
+`scripts/verify-proof-registry.mjs`'s `EXCLUSIONS`. Its §0 pins the three-keystroke
+sequence above to `src/herdr.ts` by exact occurrence count, and its §6 pins the
+`❯` collision this section's reasoning rests on — so both claims go red if the
+code moves underneath them. `scripts/kan375-red-drive.mjs` is the demonstration
+that they can: four mutations, each required to turn its named section red,
+including one that breaks §2's own control.

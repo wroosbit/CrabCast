@@ -154,6 +154,31 @@ green**: green means the guard caught both moves, so this drive going red means
 §2d has stopped seeing branch changes and the decision recorded in §8's note 1
 has lost the mechanism it leans on.
 
+`kan375-red-drive.mjs` is a sixth, and its baseline moves in a way none of the
+others do: **it is not in this repository at all.** Its target,
+`verify-interrupt-at-dialog-live.mjs`, measures what a real **Claude Code**
+dialog does with each of the three keystrokes a send issues — so the thing its
+§1–§5 are evidence about is a program nobody here versions, upgrades on its own
+schedule, and can change any morning without a commit in this tree. **Its output
+is therefore only ever evidence about the Claude Code build present on the
+machine that ran it**, which is why the target names that limit in its own header
+rather than leaving a reader to infer a permanence it does not have.
+
+Four arms, and only the fourth needs a pane. `second-interrupt` and
+`sequence-reordered` mutate `src/herdr.ts`; `composer-marker-gone` mutates
+`src/delivery.ts`; all three then run the target under `--static-only`, which
+touches no herdr and no `claude` and finishes in well under a second.
+`control-is-inert` is the one that matters and the one that costs: it writes a
+**copy** of the target to `scripts/kan375-variant.mjs` with §2's `Down` control
+replaced by another `C-c`, and requires the CONTROL line itself to go red.
+**That arm is the reason the drive exists** — §2's result is a NEGATIVE ("one
+Ctrl+C does nothing to a dialog"), and a negative measured by an instrument that
+cannot say otherwise is worth nothing. The three static arms mutate **tracked
+files in the working tree**, restoring on exit and on SIGINT/SIGTERM/SIGHUP but
+not on SIGKILL; `git checkout -- src/` is the recovery, and the drive asserts a
+clean tree as its last check. **Its expected verdict is green**, green meaning
+every arm produced its red.
+
 **If you are here to repin `verify-ci-wiring-guards` §2, read this first
 (KAN-363).** `verify-ci-proof-residue-is-legible` §4c pins the same commit
 `dff24229` for its own pre-fix arm, and **it does not depend on §2's pin** — it

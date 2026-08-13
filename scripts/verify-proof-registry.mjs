@@ -291,6 +291,36 @@ const EXCLUSIONS = [
       'out, which needs the refusal to be real for the same reason twice over — a mutant that ' +
       'reports nothing because nothing was refused looks exactly like one that swallowed a refusal.',
     evidence: 'scripts/verify-spawn-failure-legibility.mjs:68 runs against a private herdr server on its own socket'
+  },
+  {
+    script: 'verify-interrupt-at-dialog-live',
+    reason:
+      'Needs a real herdr server, real panes, AND an authenticated `claude` — a GitHub runner has ' +
+      'none of the three, and the third cannot be supplied unattended. Its subject is not our code ' +
+      'at all: it measures what a real Claude Code selection dialog does with each of the three ' +
+      'keystrokes a send issues, which is why no shim can stand in for it. A stub that answered ' +
+      '"the dialog ignored Ctrl+C" would be asserting the fixture. ' +
+      'WHY IT IS WORTH THE HAND-RUN: it is the entire evidential basis for a DECISION NOT TO ' +
+      'CHANGE ANY CODE (KAN-375, docs/send-contract.md §10), which makes it unusual and easy to ' +
+      'mis-file. A regression guard protects a change; this protects a recorded argument, and a ' +
+      'recorded argument whose measurement nobody can re-run decays into a claim. It is the only ' +
+      'thing in this repository that can distinguish "the interrupt is inert at a dialog, so ' +
+      'conditioning it would close nothing" from "that was true of the Claude Code build we ' +
+      'happened to measure in August". Run it when the decision is QUESTIONED — not on every ' +
+      'change to herdr.ts, because §0 and §6 already pin the parts of that decision which live in ' +
+      'OUR source and they run under --static-only in 55ms with no pane at all. ' +
+      'ITS NEGATIVE RESULT CARRIES A CONTROL, which is the half worth protecting: §2 concludes ' +
+      'that one Ctrl+C does nothing to a dialog, and immediately sends a `Down` that MUST move the ' +
+      'highlight — so "it did nothing" is distinguishable from "nothing was reaching this pane". ' +
+      'scripts/kan375-red-drive.mjs breaks that control deliberately and requires the CONTROL line ' +
+      'itself to go red. ' +
+      'WHAT IT DOES NOT COVER, named because the gap is between scripts: it drives herdr directly ' +
+      'rather than calling sendToAgent, so it proves what the keystrokes DO and not that ' +
+      'sendToAgent emits them. §0 covers that half statically by exact occurrence count. Nobody ' +
+      'drives the composition end to end against a real dialog, and that is deliberate — doing so ' +
+      'means answering a real consent dialog on a real agent.',
+    evidence:
+      'scripts/verify-interrupt-at-dialog-live.mjs:210 launches a real `claude` in a real pane and waits for its startup dialog, which no runner can authenticate or draw'
   }
 ];
 
