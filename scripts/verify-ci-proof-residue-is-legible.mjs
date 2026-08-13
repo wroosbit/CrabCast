@@ -255,10 +255,49 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
 const SUBJECT_REVISIONS = new Set(['HEAD']);
 const IMMUTABLE_REV = /^[0-9a-f]{40}$/;
 
-/** Where a revision can hide, per host-side subcommand this script actually uses. */
+/**
+ * Where a revision can hide, per host-side subcommand this script actually uses.
+ *
+ * `clone` IS THE ENTRY WORTH READING, and it was wrong in the first version of
+ * this guard — found by `epic/KAN-59` reviewing #89 and measured rather than
+ * argued: with `clone` declared revision-free, `git clone --branch main` was
+ * PERMITTED, completed, and brought back `1f959175` — the shared clone's stale
+ * local `main`, the same commit KAN-361, #87 and #88 each measured in turn. That
+ * is Finding 1's exact shape passing through the helper built to refuse it, with
+ * arm 4 reading one refusal and the run green.
+ *
+ * WHY IT WAS WRONG IN A WAY THE OTHER ENTRIES ARE NOT. Every other subcommand
+ * here names its revision POSITIONALLY, so filtering out flags finds it. Clone's
+ * positionals are PATHS — a `show`-shaped filter would flag `repoRoot` and the
+ * destination as ambient and break `buildSandbox` on the first call. `() => []`
+ * was the only entry of that shape that worked, and it silently also exempted the
+ * place clone's revision actually lives: the VALUE OF `--branch`/`-b`. So the one
+ * declared subcommand whose whole job is acquiring content from the host was the
+ * one that opted out of the closed-by-default rule.
+ *
+ * READ THE OPTION VALUE, NOT THE POSITIONALS. All three spellings, because `-b x`,
+ * `--branch x` and `--branch=x` are different argument shapes and covering two of
+ * them is how this class comes back. A full object name is not a legal `--branch`
+ * argument, so in practice this refuses every `clone --branch` — which is the
+ * right answer rather than an awkward consequence: the sandbox's branch is
+ * CONSTRUCTED by `normaliseSandboxRefs`, and acquiring a host branch by name is
+ * the ambient read this whole section deleted.
+ */
 const HOST_REVISION_ARGS = {
   'ls-files': () => [],
-  clone: () => [],
+  clone: (rest) => {
+    const revs = [];
+    for (let i = 0; i < rest.length; i += 1) {
+      const a = rest[i];
+      if (a === '--branch' || a === '-b') {
+        if (i + 1 < rest.length) revs.push(rest[i + 1]);
+        i += 1;
+      } else if (a.startsWith('--branch=')) {
+        revs.push(a.slice('--branch='.length));
+      }
+    }
+    return revs;
+  },
   'rev-parse': (rest) => rest.filter((a) => !a.startsWith('-')),
   'rev-list': (rest) => rest.filter((a) => !a.startsWith('-')).flatMap((a) => a.split('..')),
   show: (rest) => rest.filter((a) => !a.startsWith('-')).map((a) => a.split(':')[0]),
@@ -1264,19 +1303,28 @@ hostReadRefused: {
   // NEGATIVE CONTROL. Without this, a policy that refused every host revision —
   // including the pinned ones section 4c depends on — would satisfy the arm above
   // while breaking the file.
-  let pinnedRead = null;
+  //
+  // IT READS `hostHead` RATHER THAN `PRE_FIX_TARGET_REV`, and the difference is a
+  // false red this arm would otherwise have carried. Both are full object names,
+  // so both exercise the same branch of the policy — but 0edd2c1 is reachable
+  // only in a clone with history, so on a shallow one this arm would have gone
+  // red for HISTORY DEPTH while claiming to report on the guard. `hostHead` is
+  // this run's own commit: immutable, and present by definition. Reachability of
+  // 4c's pins is 4c's own precondition, which already reds for it and says so.
+  let immutableRead = null;
   try {
-    pinnedRead = git(['show', `${PRE_FIX_TARGET_REV}:${TARGET_REL}`]).length;
+    immutableRead = git(['show', `${hostHead}:${TARGET_REL}`]).length;
   } catch (err) {
-    pinnedRead = `threw: ${err?.message ?? err}`;
+    immutableRead = `threw: ${err?.message ?? err}`;
   }
-  check(typeof pinnedRead === 'number' && pinnedRead > 0,
+  check(typeof immutableRead === 'number' && immutableRead > 0,
     'AND THE PINNED READ IS STILL PERMITTED — the guard discriminates by whether the identifier is ' +
     'immutable, not by whether a read happens. A policy that refused everything would pass the arm ' +
     'above and break section 4c, so this is what makes that arm mean something',
-    typeof pinnedRead === 'number'
-      ? `${PRE_FIX_TARGET_REV.slice(0, 7)}:${TARGET_REL} read, ${pinnedRead} bytes`
-      : String(pinnedRead));
+    typeof immutableRead === 'number'
+      ? `${hostHead.slice(0, 7)}:${TARGET_REL} read, ${immutableRead} bytes — a full object name, and ` +
+        'reachable at any clone depth, so this arm reports on the policy rather than on history'
+      : String(immutableRead));
 
   // SCOPE CONTROL. Section 4c's arms write `refs/remotes/origin/main` INSIDE the
   // sandbox on purpose — that ref environment is constructed by this script, so
@@ -1297,15 +1345,50 @@ hostReadRefused: {
       ? `refs/heads/${SANDBOX_BRANCH} resolves inside the sandbox with the guard armed`
       : String(sandboxAmbientOk));
 
+  // THE SECOND AMBIENT PROBE, AND IT IS HERE BECAUSE THE FIRST VERSION OF THIS
+  // GUARD LET IT THROUGH. `epic/KAN-59`, reviewing #89, measured `git clone
+  // --branch main` completing against the host and returning `1f959175` — the
+  // stale local `main` — while arm 1 above was green and arm 4 read one refusal.
+  // The declaration was the defect, not the policy; see `HOST_REVISION_ARGS`.
+  //
+  // IT ASSERTS ON THE LEDGER AND THE OUTCOME SEPARATELY, WHICH IS THE REVIEWER'S
+  // OWN CORRECTION ADOPTED. Their first probe keyed only on the refusal pattern,
+  // so a clone that failed for any unrelated reason would have read identically
+  // to one the guard refused; they threw it away and re-measured. A throw is
+  // therefore not sufficient evidence here — the ledger has to have grown, which
+  // is the difference between "the guard refused it" and "the clone broke".
+  const cloneProbeDest = path.join(scratch, 'kan369-clone-probe');
+  const ledgerBeforeClone = refusedHostReads.length;
+  let cloneThrew = null;
+  try {
+    git(['clone', '--quiet', '--branch', 'main', repoRoot, cloneProbeDest]);
+    cloneThrew = false;
+  } catch (err) {
+    cloneThrew = /AMBIENT HOST REVISION REFUSED/.test(String(err?.message ?? err));
+  }
+  const cloneRefused = cloneThrew === true
+    && refusedHostReads.length === ledgerBeforeClone + 1
+    && !fs.existsSync(cloneProbeDest);
+  check(cloneRefused,
+    'AND SO IS `clone --branch <ref>` — the one declared subcommand whose job is acquiring content ' +
+    'from the host, and the one this guard exempted until `epic/KAN-59` measured a clone completing ' +
+    'through it and returning the stale local `main`. Asserted on the ledger AND on the destination ' +
+    'not existing, not on the throw alone: a clone that failed for an unrelated reason would throw too',
+    cloneRefused
+      ? 'refused: `git clone --branch main <host>` — ledger +1, nothing cloned'
+      : `NOT REFUSED as required — threw with the guard's pattern: ${cloneThrew}; ` +
+        `ledger +${refusedHostReads.length - ledgerBeforeClone}; ` +
+        `destination created: ${fs.existsSync(cloneProbeDest)}`);
+
   // THE STANDING GUARD. Everything above tests the policy; this tests the RUN.
   const unexpected = refusedHostReads.slice(0, ledgerBefore);
-  check(ledgerBefore === 0 && refusedHostReads.length === 1,
-    'AND NOTHING ELSE IN THIS RUN MADE AN AMBIENT HOST READ — the ledger holds exactly the probe ' +
-    'above and nothing before it. This is the arm that goes red if a future edit reintroduces the ' +
-    'read KAN-369 removed, and it reads a ledger rather than an exception precisely because the ' +
-    'code that was removed wrapped its own read in `catch { continue; }`',
+  check(ledgerBefore === 0 && refusedHostReads.length === 2,
+    'AND NOTHING ELSE IN THIS RUN MADE AN AMBIENT HOST READ — the ledger holds exactly this ' +
+    'section\'s two probes and nothing before them. This is the arm that goes red if a future edit ' +
+    'reintroduces the read KAN-369 removed, and it reads a ledger rather than an exception precisely ' +
+    'because the code that was removed wrapped its own read in `catch { continue; }`',
     ledgerBefore === 0
-      ? `${refusedHostReads.length} refusal(s), all from this section's probe`
+      ? `${refusedHostReads.length} refusal(s), all from this section's probes`
       : `${ledgerBefore} ambient host read(s) before this section: ` +
         unexpected.map((r) => `\`git ${r.args.join(' ')}\` → ${JSON.stringify(r.ambient)}`).join(' | '));
 }

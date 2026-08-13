@@ -247,17 +247,51 @@ tends to have. §4d then makes the removed read on every run and asserts all fou
 properties: it is refused, the pinned read still works, the sandbox is not
 reached, and nothing else in the run made one.
 
-**Measured after the change at `451aba4`:** the proof runs `61/61`, exit 0 — one
-assertion removed (the reachability red), four added (§4d), and the seven
+**Measured after the change at `451aba4`:** the proof runs `62/62`, exit 0 — one
+assertion removed (the reachability red), five added (§4d), and the seven
 assertions of the deleted live branch were already never running. Every mechanism
 was driven red alone by `scripts/kan369-red-drive.mjs`, each mutation asserted
 applied with an exact occurrence count of 1: neutering the guard's call site
-reddens `refused` and `ledger`; removing the ledger write reddens `ledger` only,
-with `refused` still green — **which is the swallowing-caller case demonstrated**;
-allow-listing `origin/main` as a subject revision reddens `refused` and `ledger`;
-reintroducing the deleted read inside the same `catch` reddens `ledger` alone;
-and refusing an immutable revision reddens `pinned`, which is what stops that arm
-being vacuous.
+reddens `refused`, `cloneRef` and `ledger`; removing the ledger write reddens
+`ledger` and `cloneRef`, with `refused` still green — **which is the
+swallowing-caller case demonstrated**; allow-listing `origin/main` as a subject
+revision reddens `refused` and `ledger`; reintroducing the deleted read inside the
+same `catch` reddens `ledger` alone; re-exempting `clone` reddens `cloneRef` and
+`ledger`; and refusing an immutable revision reddens `pinned`, which is what stops
+that arm being vacuous.
+
+### The `clone` exemption — found in review, and it is the interesting one
+
+**The first version of this guard declared `clone` revision-free, and it was
+wrong.** `epic/KAN-59`, reviewing [#89](https://github.com/wroosbit/CrabCast/pull/89),
+measured `git clone --branch main` **completing** against the host with the guard
+armed and returning `1f959175` — the shared clone's stale local `main`, the same
+commit KAN-361, #87 and #88 each measured in turn. Finding 1's exact shape,
+passing through the helper built to refuse Finding 1's exact shape, with the
+ledger arm reading one refusal and the run green.
+
+**Why that entry and no other.** Every other subcommand in `HOST_REVISION_ARGS`
+names its revision *positionally*, so filtering out flags finds it. `clone`'s
+positionals are **paths** — a `show`-shaped filter would flag `repoRoot` and the
+destination as ambient revisions and break `buildSandbox` on the first call. So
+`() => []` was the only entry of that shape that worked, and it silently also
+exempted the place `clone`'s revision actually lives: the value of
+`--branch`/`-b`. **The closed-by-default rule held for every undeclared
+subcommand; `clone` was declared, and that is what opted it out.**
+
+The entry now reads the option value in all three spellings (`-b x`,
+`--branch x`, `--branch=x`), because covering two of them is how this class comes
+back. A full object name is not a legal `--branch` argument, so this refuses every
+`clone --branch` — the right answer rather than an awkward consequence, since the
+sandbox's branch is *constructed* by `normaliseSandboxRefs`, and acquiring a host
+branch by name is the ambient read §4 deleted.
+
+**§4d's fifth arm holds it, and it asserts on the ledger and on the destination
+rather than on the throw** — the reviewer's own correction adopted. Their first
+probe keyed only on the refusal pattern, so a clone that failed for an unrelated
+reason would have read identically to one the guard refused; they discarded it and
+re-measured. A throw is therefore not sufficient evidence here: the ledger must
+have grown **and** nothing must have been cloned.
 
 **Not covered, and named rather than left to be assumed:** the ledger sees only
 reads that reach the `git()` helper, so a direct `execFileSync('git', …)`
