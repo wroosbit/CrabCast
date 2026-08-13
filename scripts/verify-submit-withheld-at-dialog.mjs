@@ -550,6 +550,84 @@ rule('4.1 THE RECOVERY PATH — the SAME message can be sent again after a withh
 }
 
 // ===========================================================================
+rule('4.2 THE SHORT FINGERPRINT — a one-character message must not be submitted by somebody else\'s redraw');
+// ===========================================================================
+//
+// FOUND IN REVIEW OF THIS PR, and it is the failure direction that matters:
+// the guard failed OPEN. `deliveryFingerprint` has no floor, so "y" yields a
+// one-character needle. Counted over the WHOLE tail that needle also matches
+// the dialog's option labels and anything the pane redraws, so an ordinary
+// streaming line — "* Analysing your repository…", three incidental `y`s,
+// nothing adversarial — raised the count and the Enter went out AT THE DIALOG.
+//
+// The fix is scope, not a minimum length: `y`, `ok` and `go` are exactly what
+// a supervisor sends to unstick an agent, so refusing to send them answers
+// nothing. The count now reads the region our keystrokes actually land in.
+{
+  const streamed = (frame) => {
+    // Transcript output, inserted where a real pane puts it: above the box.
+    const at = frame.indexOf('\n', frame.indexOf('─'));
+    return frame.slice(0, at) + '\n* Analysing your repository...' + frame.slice(at);
+  };
+
+  for (const [label, frame, highlighted] of [
+    ['tool-permission dialog', PERMISSION_DIALOG, '1. Yes'],
+    ['startup trust dialog',   TRUST_DIALOG,      '1. Yes, I trust this folder']
+  ]) {
+    console.log(`\n   --- ${label}, message "y", pane redraws while we are looking`);
+    // The pane the send will read: the dialog, which then gains a streaming
+    // line between the baseline read and the confirmation.
+    dialogPane(frame, highlighted);
+    const mark = invocations().length;
+    const r = await send('y');
+    showVerdict('short message:', r);
+
+    check(r.submits === 0,
+      'a one-character message at a dialog still withholds its submit',
+      `submits=${r.submits}`);
+    check(!keysSince(mark).includes('Enter'),
+      'no Enter reached the pane', JSON.stringify(keysSince(mark)));
+    check(rawPane().resolved === undefined,
+      'and the dialog is still UNANSWERED', JSON.stringify(rawPane().resolved));
+
+    // The counting property directly, on the exact frames, so the section
+    // fails on the mechanism rather than only on the outcome.
+    const before = visibleCount(frame, 'y');
+    const after = visibleCount(streamed(frame), 'y');
+    console.log(`      composer-scoped count across the redraw: ${before} -> ${after}`);
+    check(after <= before,
+      'and the count does NOT rise on a redraw that never contained our text',
+      `${before} -> ${after}`);
+  }
+
+  // THE REVIEWER'S CONTROL 2, kept because it is what makes the section a
+  // finding rather than a complaint: a distinctive message must behave
+  // identically on the identical redraw.
+  console.log('\n   --- CONTROL: a distinctive message on the same redraw');
+  const distinctive = 'please re-run the migration and report the row counts';
+  check(visibleCount(streamed(PERMISSION_DIALOG), distinctive) === 0 &&
+        visibleCount(PERMISSION_DIALOG, distinctive) === 0,
+    'a distinctive message is absent before AND after the redraw — the guard held for the right reason');
+
+  // AND THE FALSE-POSITIVE HALF, which the scope change could have broken:
+  // "y" must still be deliverable, or the fix is worse than the defect.
+  console.log('\n   --- CONTROL: "y" must still SEND to a real composer and a real shell');
+  composerPane();
+  let r = await send('y');
+  showVerdict('"y" to a composer:', r);
+  check(r.verdict === 'delivered' && r.submits === 1,
+    'a one-character message to a composer is DELIVERED — no minimum length was imposed',
+    `verdict=${r.verdict} submits=${r.submits}`);
+
+  shellPane();
+  r = await send('y');
+  showVerdict('"y" to a shell:', r);
+  check(r.verdict === 'delivered' && r.submits === 1,
+    'and to a bare shell, where the whole tail is the region because there is no marker',
+    `verdict=${r.verdict} submits=${r.submits}`);
+}
+
+// ===========================================================================
 rule('5. THE RED DRIVE — remove the guard from the compiled build and watch the dialog get answered');
 // ===========================================================================
 //
@@ -719,6 +797,56 @@ redDriveDeadlock: {
   check(retried.verdict !== 'delivered',
     'RED: so §4.1 is load-bearing — it is the only section that fails on this mutation',
     retried.verdict);
+}
+
+// ---------------------------------------------------------------------------
+// A FOURTH MUTATION, for §4.2. Put the count back to the whole tail — the scope
+// this shipped with until review — and the guard fails OPEN again: an ordinary
+// redraw submits a one-character message at a dialog. This is the arm that
+// keeps the scope from being "tidied" back later by someone who reads
+// `visibleCount` as "is it on the pane".
+// ---------------------------------------------------------------------------
+redDriveShortFingerprint: {
+  const mutantDir = mutate(
+    'count-over-the-whole-tail',
+    'delivery.js',
+    'const region = composerAt === -1 ? tail : composer;',
+    'const region = tail;'
+  );
+  if (!mutantDir) break redDriveShortFingerprint;
+
+  const mutatedFile = path.join(mutantDir, 'delivery.js');
+  let parses = true;
+  let parseError = '';
+  try {
+    execFileSync(process.execPath, ['--check', mutatedFile], { stdio: 'pipe' });
+  } catch (e) {
+    parses = false;
+    parseError = String(e.stderr ?? e);
+  }
+  check(parses, 'the fourth mutant parses — `node --check`', parseError);
+  if (!parses) break redDriveShortFingerprint;
+
+  const { visibleCount: wholeTailCount } = await import(path.join(mutantDir, 'delivery.js'));
+  const streamed = (frame) => {
+    const at = frame.indexOf('\n', frame.indexOf('─'));
+    return frame.slice(0, at) + '\n* Analysing your repository...' + frame.slice(at);
+  };
+
+  const before = wholeTailCount(PERMISSION_DIALOG, 'y');
+  const after = wholeTailCount(streamed(PERMISSION_DIALOG), 'y');
+  console.log(`   whole-tail count across the same redraw: ${before} -> ${after}`);
+  check(after > before,
+    'RED: counted over the whole tail, an ordinary redraw raises the count for "y" — the guard ' +
+    'would read TRUE and press Enter at the dialog',
+    `${before} -> ${after}`);
+
+  // And the reviewer's control on the mutant too: the bug is specific to a
+  // short needle, not a general failure of the count.
+  const distinctive = 'please re-run the migration and report the row counts';
+  check(wholeTailCount(streamed(PERMISSION_DIALOG), distinctive) === 0,
+    'RED-control: the same mutant holds correctly for a distinctive message, so §4.2 is about ' +
+    'fingerprint distinctiveness rather than about the count being broken');
 }
 
 // ===========================================================================

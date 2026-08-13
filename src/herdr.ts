@@ -2139,6 +2139,23 @@ export class HerdrBridge {
    * was echoed in none of herdr's three read sources and left the frame
    * otherwise byte-identical.
    *
+   * WHAT THIS DOES NOT COVER, AND IT IS NOT HYPOTHETICAL — it was found in
+   * review of the change that introduced it. The question *"is our message on
+   * the pane"* is only as sharp as the fingerprint asking it, and
+   * `deliveryFingerprint` has no floor: a one-character message asks a
+   * one-character question. {@link visibleCount} now counts only the composer
+   * region, which is what our keystrokes can reach, and that closes the case
+   * review found — an ordinary transcript redraw inflating the count for `y`
+   * until the Enter went out at a live dialog. **It does not close the class.**
+   * A redraw INSIDE the composer region would still inflate a short needle, and
+   * the failure that remains is the one this whole function exists to prevent:
+   * a submit that should have been withheld. The shortest messages carry the
+   * most of that risk, and `y`, `ok` and `go` are exactly what a supervisor
+   * sends to unstick an agent. A minimum length is NOT the fix — a short
+   * message still has to be sendable — so this is a named gap rather than a
+   * closed one, and §4.2 of `verify-submit-withheld-at-dialog.mjs` holds the
+   * half that is closed.
+   *
    * AND AN UNREADABLE PANE WITHHOLDS THE ENTER TOO. *"We could not tell"* must
    * not resolve to *"press it anyway"* — that is the whole failure this exists
    * to prevent, and it is the same rule {@link Occupancy} states for spawning
@@ -2382,6 +2399,15 @@ export class HerdrBridge {
       // REMOVES text, so the earlier count is greater than or equal to the true
       // one, and a baseline that is too high can only withhold a submit. It
       // cannot cause one.
+      //
+      // THE COST OF THAT FALLBACK, stated because it is the deadlock the line
+      // above exists to prevent, reappearing for exactly one send: if this read
+      // fails AND a copy of this message is already sitting in the composer,
+      // the too-high baseline withholds again. It fails closed — a withheld
+      // submit is reported and recoverable, and the next send whose
+      // post-interrupt read succeeds clears it — so this is a cost rather than
+      // a hazard. Raised in review of KAN-383 and left as it is deliberately:
+      // the alternative is trusting a count nobody could read.
       const afterInterrupt = this.readDeliveryEvidence(agentPath, message);
       checks++;
       const visibleBefore = afterInterrupt.readable ? afterInterrupt.visible : visibleBeforeInterrupt;

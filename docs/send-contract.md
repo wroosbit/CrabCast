@@ -360,6 +360,18 @@ vocabulary exists to prevent. **No vocabulary member was added and no field was
 added**; the contract digest is unchanged, and an exhaustive consumer switch
 gains no new case.
 
+**The limit of the check, because a caller should not have to infer it.** *"Is
+our message on the pane"* is only as sharp as the fingerprint asking it, and the
+fingerprint has no minimum length — a one-character message asks a
+one-character question. The count is taken over the **composer region** rather
+than the whole pane precisely so that unrelated redraws cannot answer it, and
+that closes the case found in review (an ordinary streaming line inflating the
+count for `y` until the submit went out at a live dialog). **It does not close
+the class:** a redraw inside the composer region could still inflate a short
+needle, and the residual failure is a submit that should have been withheld.
+**No minimum length is imposed** — `y`, `ok` and `go` must stay sendable — so
+this is a named gap rather than a fixed one.
+
 **And the cost, stated rather than hidden.** A withheld submit can leave a
 message typed-and-unsubmitted in a composer — which is precisely the KAN-114
 failure the delivery confirmation was built to catch. That is the deliberate

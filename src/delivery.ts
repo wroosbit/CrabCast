@@ -194,41 +194,81 @@ export function landedCount(tail: string, message: string): number {
 }
 
 /**
- * How many times this message appears in the pane AT ALL — submitted output,
- * composer, anywhere.
+ * How many times this message appears IN THE REGION OUR TYPING LANDS IN — the
+ * composer when the pane has one, and the whole pane when it does not.
  *
  * WHY A SECOND COUNT EXISTS, when {@link landedCount} looks so similar. They
  * answer different questions and only one of them can be asked before a
  * submit:
  *
- *   landedCount   did the agent RECEIVE it?   (submitted region only)
- *   visibleCount  did our typing TAKE EFFECT? (the whole pane)
+ *   landedCount   did the agent RECEIVE it?   (the SUBMITTED region)
+ *   visibleCount  did our typing TAKE EFFECT? (the COMPOSER region)
  *
- * The second is the precondition for pressing Enter, and it is deliberately
- * indifferent to WHERE the text is. A `claude` pane holds freshly typed text
- * in its composer; a bare shell holds it on the command line with no composer
- * marker anywhere; and {@link messageInComposer} is false for the shell in both
- * the "not typed" and "typed fine" cases, so it cannot be the test. What is
- * common to every pane that accepted our keystrokes is simply that the text is
- * NOW ON SCREEN AND WAS NOT BEFORE.
+ * The second is the precondition for pressing Enter. Both use
+ * {@link splitAtComposer}; they read opposite sides of it, which is the whole
+ * distinction between "we typed it" and "they got it".
  *
  * MEASURED, KAN-383, against a real Claude Code at a real dialog: `send-text`
  * at a startup trust dialog and at a tool-permission dialog is **silently
  * destroyed** — the message is echoed in none of herdr's three read sources,
  * and the frame is otherwise byte-identical. So a pane that swallowed our
  * typing is distinguishable from one that took it, and it is distinguishable
- * WITHOUT recognising what is on screen. That matters more than it looks: this
- * is an observation about our own message, not a guess about somebody else's
- * TUI, so it does not rot when Claude Code redraws its dialogs.
+ * WITHOUT recognising what is on screen: an observation about our own message
+ * rather than a guess about somebody else's TUI.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE SCOPE IS THE COMPOSER AND NOT THE WHOLE PANE. This counted the whole
+ * flattened tail until review caught it, and the bug it had is the one this
+ * function exists to prevent — **it failed OPEN.**
+ *
+ * `deliveryFingerprint` has no floor, so a one-character message yields a
+ * one-character needle. Counted across the whole tail, that needle also matches
+ * the dialog's own option labels AND anything the pane happens to redraw. The
+ * count is then not a fact about our typing at all:
+ *
+ *     message "y", real tool-permission dialog, verbatim frames
+ *       whole tail       4 -> 7   after one ordinary streaming redraw
+ *                                 ("* Analysing your repository…", three
+ *                                 incidental `y`s, nothing adversarial)
+ *                                 -> the guard reads TRUE and presses Enter
+ *                                 AT THE DIALOG. Our text landed nowhere.
+ *       composer region  1 -> 1   -> holds
+ *
+ * The redraw is transcript output, so it lands ABOVE the last composer marker
+ * and the composer region does not move. Scoping to that region is therefore
+ * not a heuristic about dialogs — it is counting in the only place our
+ * keystrokes could have gone.
+ *
+ * A MINIMUM MESSAGE LENGTH WOULD NOT HAVE FIXED IT, which is why there is not
+ * one: `y`, `ok` and `go` are exactly what a supervisor sends to unstick an
+ * agent, so refusing to send them is not an answer to being unable to see them.
+ *
+ * WHAT THIS STILL DOES NOT COVER, named rather than left to be discovered:
+ * a redraw INSIDE the composer region can still inflate a short needle. The
+ * region measured here is static across a transcript redraw on both dialog
+ * kinds, but nothing makes that true by construction, and a pane that animates
+ * its own selection area would be counted. The residual failure is the same
+ * one — a submit that should have been withheld — and the shortest messages
+ * carry the most of it.
+ *
+ * AND ON A PANE WITH NO COMPOSER MARKER the whole tail is the region, because a
+ * bare shell echoes onto its command line and there is nothing to scope to.
+ * That is weaker, and it is the same degradation {@link landedCount} already
+ * documents — but it does not reinstate the hazard, because the hazard is a
+ * CONSENT DIALOG, and a pane showing one always has a marker. It is the
+ * highlight caret.
+ * ---------------------------------------------------------------------------
  *
  * A COUNT AND NOT A BOOLEAN, for the reason {@link landedCount} gives: the same
- * message may legitimately be on the pane already from an earlier send, so what
- * proves THIS typing took effect is that the count went up.
+ * message may legitimately be on the pane already, so what proves THIS typing
+ * took effect is that the count went up.
  */
 export function visibleCount(tail: string, message: string): number {
   const needle = deliveryFingerprint(message);
   if (!needle) return 0;
-  return flatten(tail).split(needle).length - 1;
+  const { composer, composerAt } = splitAtComposer(tail);
+  const region = composerAt === -1 ? tail : composer;
+  return flatten(region).split(needle).length - 1;
 }
 
 /**
