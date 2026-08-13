@@ -137,6 +137,23 @@ the four claim checks CANNOT see the starve, so the drive going green is the
 measurement KAN-349 recorded, and it going red means the split has changed and
 §7's coverage note is now the stale artifact.
 
+`kan328-red-drive.mjs` is a fifth. It drives `verify-read-contract.mjs` §2d with
+`activate_response`'s two successful branches mutated in opposite directions —
+`priority` and `launcher` added to `already-running`, and the same two removed
+from `spawned` — leaving `src/read-contract.ts` and the document untouched, which
+is the question: what happens when the WIRE moves and the contract does not. It
+is not in the CI array and nothing gates on it. Three things are worth knowing
+before it is next run. It mutates a **copy** of `dist` under a scratch directory
+and never touches the working tree, so it needs no restore. It **symlinks the
+repo's `node_modules` into that scratch** — without it a mutant under `/tmp`
+cannot resolve `node-pty`, the daemon dies at import, and the proof exits 1 for a
+reason the mutation had nothing to do with; that is a false red available to any
+future drive that copies `dist` somewhere else, and it is why every arm asserts
+the red **by name** rather than on the exit code. And its **expected verdict is
+green**: green means the guard caught both moves, so this drive going red means
+§2d has stopped seeing branch changes and the decision recorded in §8's note 1
+has lost the mechanism it leans on.
+
 **If you are here to repin `verify-ci-wiring-guards` §2, read this first
 (KAN-363).** `verify-ci-proof-residue-is-legible` §4c pins the same commit
 `dff24229` for its own pre-fix arm, and **it does not depend on §2's pin** — it

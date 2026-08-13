@@ -1162,8 +1162,8 @@ of refusal it is holding.
 | `status` | observed, optional | our session's lifecycle — [sessionStatus](#status--sessionstatus) |
 | `createdAt` | observed, optional | when the session was created |
 | `verified` | observed, optional | **the agent was found in herdr's census before this was sent.** `true` on both successes; `false` on the three refusals that looked and could not confirm; absent on the refusals that never looked. Success is never reported without it |
-| `priority` | durable, optional | from the frozen record. On the spawning branch and the `capacity` refusal |
-| `launcher` | durable, optional | from the frozen record. **On the spawning branch only** |
+| `priority` | durable, optional | from the frozen record. On the spawning branch and the `capacity` refusal. **A duplicate of `config.priority` wherever the echo is also present** — which is both successful branches. On `capacity` there is no echo, so it is the only copy and the only branch where it is load-bearing |
+| `launcher` | durable, optional | from the frozen record. **On the spawning branch only, and a duplicate of `config.launcher`** — which the echo carries on both successful branches. Its absence from the idempotent branch removes no information from that response. Read the echo, and see the first note below |
 | *config echo* | durable, optional | the five fields [above](#configecho), **re-read after the activation's own durable write** rather than taken from the intent this call opened with — which is how `everActivated` can read `true` here and remain a purely durable fact |
 | `channelEnabled` | durable, optional | whether this spawn was channel-enabled — [channelEnabled](#channelenabled--was-this-spawn-channel-enabled). Answered from the record, not from the session, so this surface and `agent_status` agree **by construction** |
 | `resume` | derived, optional | which cause the resume prompt was written for — [resumeCause](#resumecause). Only on a restore |
@@ -1231,14 +1231,73 @@ exercised ten.
 
 ### Three things about this surface that will catch you
 
-**1. The two successful branches are not symmetric, and the one that says less
-is the one you will read most.** `priority`, `launcher`, `provisioned` and
-`resumedExistingConversation` ride the **spawning** branch and not the
-idempotent one. A reconciling caller's ordinary call is `activate` on an agent
-that is already up — so the response a reconciler sees most often is the one
-missing four fields. **This is documented rather than repaired**: repairing it
-changes the wire, which is a decision and not a description. See
-[KAN-328](https://wroosbit.atlassian.net/browse/KAN-328).
+**1. The two successful branches are not symmetric — and for two of the four
+fields the asymmetry is in a *duplicate*, not in the information.**
+`priority`, `launcher`, `provisioned` and `resumedExistingConversation` ride the
+**spawning** branch and not the idempotent one. A reconciling caller's ordinary
+call is `activate` on an agent that is already up, so the response a reconciler
+sees most often is the one missing those four keys.
+
+[KAN-328](https://wroosbit.atlassian.net/browse/KAN-328) was staffed to decide,
+per field, whether that is a defect. **The decision is that no field moves**, and
+the reasoning is recorded here for all four rather than only for the two that
+were ever in doubt — because a reader who finds two fields absent and no argument
+will file this again.
+
+* **`priority` and `launcher` are absent from the idempotent branch, and the
+  information is not.** Both are read from the frozen record, and the record's
+  whole `config` object is echoed on **both** successful branches — so
+  `config.priority` and `config.launcher` answer the same question on the branch
+  the top-level pair is missing from. Adding them would not close a gap; it would
+  publish a second copy of a value already on that response, on the branch a
+  reconciler reads most, forever. The pair predates the echo rather than
+  complementing it: they arrived with `activate` itself (KAN-124), and the echo
+  that subsumed them arrived one slice later (KAN-125). **Read `config.priority`
+  and `config.launcher` on both branches** and the asymmetry never reaches your
+  code.
+* **`provisioned` and `resumedExistingConversation` stay off because what the
+  idempotent branch *could* answer from is a different fact — not because
+  nothing durable exists.** Something durable exists for each of them, and it is
+  named here rather than left for a reader to find and conclude the argument was
+  careless:
+  * **`provisioned` is `session.provisioned` — every artifact *this activation*
+    wrote.** A durable record of what exists *for the agent* is kept separately,
+    in the agent's sidecar (`provisioned.json`, read by the exported
+    `readProvenance` in `src/provisioning.ts`). **They answer different
+    questions.** Publishing the durable one under this field's name would make
+    one field mean *"what this call wrote"* on one branch and *"what is there"*
+    on the other — which is worse than an absence, because an absence is legible
+    and a silent change of meaning is not. Emitting `[]` instead asserts *"this
+    activation wrote nothing"*: true of the call, false of the agent, since an
+    earlier activation may have written plenty.
+  * **`resumedExistingConversation` is `session.mayResume` — the resume decision
+    *this spawn made*.** Its durable *input* is `everActivated`, which is already
+    on both branches inside the echo; the decision itself is recorded nowhere.
+    And it cannot be recovered from `everActivated` afterwards, because the
+    activation that made the decision **sets `everActivated` to `true`** — so a
+    later read of the record answers with the post-activation value rather than
+    the one the resume rule actually saw.
+  * And the idempotent branch may hold a session obtained by `attachSession`,
+    which decides neither of them.
+
+**The `channelEnabled` precedent is cited for the distinction it draws, not as a
+rule this contradicts.** KAN-281 put that field on both branches with the
+argument that *"a field present only on the spawning branch would be absent
+exactly when it is asked for most"*, and that argument is right and applies here.
+It is satisfied for `priority` and `launcher` by the echo. It cannot be satisfied
+for the other two, and the reason is sharper than *"nothing is durable"*:
+`channelEnabled`'s durable value answers **the same question the field asks**,
+whereas the durable neighbours of these two answer **different ones**. A field
+that changes meaning by branch is not the symmetry KAN-281 was arguing for.
+
+**What would change this.** If the config echo ever stopped riding the idempotent
+branch, `priority` and `launcher` would become genuinely absent rather than
+merely un-duplicated, and this decision would be wrong the moment that happened.
+`ACTIVATE_RESPONSE_BRANCHES` in `src/read-contract.ts` lists the echo's fields on
+both branches, and `verify-read-contract.mjs` §2d asserts each branch's `always`
+set as an **equality against a real response** — so that change cannot land
+quietly. It was watched going red in both directions rather than assumed; see
+`scripts/kan328-red-drive.mjs`.
 
 **2. Four of the nine refusals carry no machine-readable discriminator.**
 `refused` is on three of them and `refusedBy` on one. `bad-address`, `bad-flag`,

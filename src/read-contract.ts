@@ -961,9 +961,40 @@ export interface ActivateBranchSpec {
  * THE TWO SUCCESSFUL BRANCHES ARE NOT SYMMETRIC, and that is the fact a consumer
  * is most likely to be caught by. `priority`, `launcher`, `provisioned` and
  * `resumedExistingConversation` ride the SPAWNING branch and not the idempotent
- * one — so the reconciling caller's most common read is the one that says less.
- * This is documented rather than repaired: repairing it changes the wire, which
- * is a decision and not a description.
+ * one — so the reconciling caller's most common read is the one carrying fewer
+ * keys.
+ *
+ * KAN-328 DECIDED, PER FIELD, WHETHER THAT IS A DEFECT, AND NO FIELD MOVED. The
+ * reasoning is in the document (§8, note 1) rather than only here, because it is
+ * a consumer's question; what belongs beside the declaration is the half that
+ * constrains the NEXT edit to this object:
+ *
+ *   `priority` and `launcher` are not absent information. The whole `config`
+ *   object is echoed on BOTH successful branches, so `config.priority` and
+ *   `config.launcher` are on the branch the top-level pair is missing from —
+ *   the asymmetry is in a duplicate. They predate the echo (KAN-124) rather
+ *   than complementing it (KAN-125). SO THE DECISION DEPENDS ON THE ECHO
+ *   STAYING ON `already-running`: take the echo off that branch and these two
+ *   become genuinely absent, and this comment becomes wrong on the same edit.
+ *
+ *   `provisioned` and `resumedExistingConversation` have durable NEIGHBOURS that
+ *   answer DIFFERENT questions, which is not the same as having no durable
+ *   source — do not shorten this to the latter, because a reader who greps will
+ *   find the neighbour and conclude the argument was careless. `provisioned` is
+ *   what THIS activation wrote; what exists for the agent is durable in the
+ *   sidecar (`provisioned.json` / `readProvenance`, `src/provisioning.ts`).
+ *   `resumedExistingConversation` is the resume decision THIS spawn made; its
+ *   durable input `everActivated` is already on both branches, and the decision
+ *   is unrecoverable from it afterwards because the activation sets it `true`.
+ *   Publishing either durable value under this field's name would make one field
+ *   mean different things on different branches. That is the difference from
+ *   `channelEnabled` (KAN-281), whose durable value answers the SAME question the
+ *   field asks — which is why that argument does not extend to these two.
+ *
+ * Changing any of this changes the wire, which is a decision and not a
+ * description. `verify-read-contract.mjs` §2d asserts both branches' `always`
+ * sets as equalities against a real daemon, and `scripts/kan328-red-drive.mjs`
+ * watches that catch a move in each direction rather than assuming it does.
  *
  * FOUR OF THE NINE REFUSALS CARRY NO MACHINE-READABLE DISCRIMINATOR.
  * `bad-address`, `bad-flag`, `spawn-error` and `confirm-failed` are separated
