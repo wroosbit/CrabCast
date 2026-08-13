@@ -123,17 +123,67 @@ type Respond = (msg: any) => void;
  *
  * These were bare literals at the `fail` calls, which is the shape that grows a
  * fourth member silently — and this one is published: `VALUE_SETS.activateRefused`
- * carries it, so a consumer branches on it. Written as a type, a new kind is a
- * COMPILE ERROR until it has a line in the contract and a row in the document.
- * An assertion could only have noticed afterwards, and only if somebody ran it.
+ * carries it, so a consumer branches on it.
  *
- * THREE OF THE NINE REFUSALS CARRY THIS AND SIX DO NOT, which the document
- * states rather than smoothing over. Making it nine is a change to the wire and
- * therefore a decision, not a description — see KAN-328.
+ * WHICH REFUSALS CARRY IT IS A RULE, NOT A COUNT (KAN-376). This comment used to
+ * say "three of the nine carry this and six do not" and point at KAN-328 for the
+ * decision. A count rots — it is wrong the day a tenth branch lands, and it tells
+ * the next author nothing about where their new refusal belongs. The rule:
+ *
+ *   `refused` NAMES A CONDITION CRABCAST CHECKED AND FOUND BEFORE IT ATTEMPTED
+ *   ANYTHING. IT IS NOT A STAGE LABEL FOR AN ATTEMPT THAT LOST.
+ *
+ * So the four discriminated refusals are the PRE-FLIGHT ones — `not-configured`,
+ * `unverifiable`, `occupied` here, and `capacity` under `refusedBy` because it
+ * names a subsystem rather than a condition. Nothing was spawned, nothing was
+ * charged, nothing needed unwinding, and each has a remedy a caller can CHOOSE
+ * BETWEEN without reading prose.
+ *
+ * `spawn-error`, `attach-error` and `confirm-failed` are POST-ATTEMPT and carry
+ * no kind, for two reasons rather than by omission. Their remedy is IDENTICAL —
+ * retry or escalate — so a discriminator would let a consumer branch on a
+ * distinction that changes nothing it can do. And `spawn-error`'s prose is
+ * HERDR'S OWN STRING: publishing it as a kind would make one field mean both
+ * "the daemon declined for reason X" and "an attempt failed at stage Y".
+ *
+ * `bad-flag` is in neither category, and that is a conclusion rather than an
+ * omission: the request never became a request about an agent.
+ *
+ * Widening this union is a change to the wire and therefore a decision, not a
+ * description — the reasoning is §8 note 2 of `docs/read-path-contract.md`, and
+ * the lossy edges this rule leaves are disclosed there rather than here.
+ *
+ * WHAT ACTUALLY STOPS A FOURTH MEMBER, MEASURED RATHER THAN ASSERTED (KAN-376).
+ * This comment used to claim a new kind "is a COMPILE ERROR until it has a line
+ * in the contract and a row in the document". THE SECOND HALF WAS FALSE, and the
+ * compiler cannot hold it: adding a member to this union AND to
+ * `VALUE_SETS.activateRefused` while leaving the document alone typechecks
+ * CLEAN. Driven at d4a851f — union only: `tsc` exit 2 at the `Exact<>` binding
+ * below; union plus contract, no document row: `tsc` exit 0.
+ *
+ *   the compiler  holds the union against `VALUE_SETS.activateRefused`
+ *   the proof     holds `VALUE_SETS` against the document's §9 table, and holds
+ *                 THIS RULE — that the branches carrying `refused` are exactly
+ *                 these members — in `verify-read-contract.mjs` §1
+ *
+ * Both are real; they are different mechanisms, and saying "compile error" for
+ * both is the overclaim this epic keeps finding. See `scripts/kan376-red-drive.mjs`.
  */
 export type ActivateRefusalKind = 'not-configured' | 'unverifiable' | 'occupied';
 
-/** Which subsystem refused. One member today, and published as a set for the same reason. */
+/**
+ * Which subsystem refused. One member today, and published as a set for the same
+ * reason.
+ *
+ * THE CONSEQUENCE OF SPLITTING THE TWO FIELDS, stated because it is invisible
+ * from either declaration (KAN-376). `capacity` is the most actionable refusal
+ * on this surface — it is the ordinary one in a busy fleet, and the caller has
+ * three distinct answers to it (wait, `override`, `preempt`, with `preemption`
+ * naming whose work would end). A consumer that branches on `refused` ALONE
+ * reads `undefined` there. The split is right — `refused` answers WHAT
+ * CONDITION and this answers WHICH SUBSYSTEM — but a reader who meets only one
+ * of the two fields will not discover the other from the wire.
+ */
 export type ActivateRefusedBy = 'capacity';
 
 type ActivateRefusalFields = Record<string, unknown> & {
