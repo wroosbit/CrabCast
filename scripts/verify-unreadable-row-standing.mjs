@@ -105,6 +105,7 @@ import { fileURLToPath } from 'node:url';
 // surface form to grep for. A devDependency `npm ci` already installs.
 import ts from 'typescript';
 import { makeMutator } from './mutation.mjs';
+import { READ_CONTRACT_VERSION } from '../dist/read-contract.js';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
@@ -611,10 +612,27 @@ console.log('\n=== 3. On the wire — both surfaces, from a real daemon over its
     const list = await ask({ action: 'list_agents', id: 2 });
 
     check(status.success === true && list.success === true, 'both surfaces answered');
+    // WAS `=== 7`, AND THAT LITERAL EXPIRED (KAN-338). The version this row
+    // shape was introduced at is 7, and the wire has to carry it — but the
+    // contract is additive, so ANY later slice that adds a field bumps it and
+    // this check went red for a change that touched nothing here. It was found
+    // by exactly that: KAN-338 added `measuredTreesSeen` to `capacity`, took
+    // the contract to 8, and this line failed in CI while every assertion below
+    // it passed. That is the KAN-245 shape — a hard-coded number that expires
+    // silently — except this one expires LOUDLY and at the wrong file.
+    //
+    // TWO ASSERTIONS REPLACE IT, and neither is the tautology `wire === wire`:
+    //   - the wire must equal what src DECLARES, which catches a daemon
+    //     publishing a version its own code does not claim;
+    //   - and the declared version must be at least 7, which is what keeps
+    //     this check about THIS row shape — a rollback below the version that
+    //     introduced `standing`/`claimsAt`/`claimsEvent` still goes red here.
+    // Reconciling the version against the document and its digest is
+    // verify-read-contract's job and is not duplicated.
     check(
-      status.contractVersion === 7,
-      'the wire reports read-contract version 7 — the version this row shape belongs to',
-      `contractVersion=${status.contractVersion}`
+      status.contractVersion === READ_CONTRACT_VERSION && READ_CONTRACT_VERSION >= 7,
+      'the wire reports the read-contract version src declares, and it is at least the 7 this row shape belongs to',
+      `wire=${status.contractVersion} declared=${READ_CONTRACT_VERSION}`
     );
 
     for (const [name, res] of [['daemon_status', status], ['list_agents', list]]) {
