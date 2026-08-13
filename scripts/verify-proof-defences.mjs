@@ -108,6 +108,14 @@
 // THE POLICY QUESTION THIS WAS COMMISSIONED TO INFORM, AND ITS ANSWER
 // ---------------------------------------------------------------------------
 //
+// NO NUMBER IN THIS HEADER IS A QUANTITY THE REGISTER CURRENTLY HOLDS, and §4b
+// enforces that against the VALUES the tally prints rather than against any
+// wording — so rephrasing does not get past it. That matters because the first
+// version of this fix keyed on wording, and swapping the noun "proofs" for
+// "scripts" walked a complete census straight back in with the digits and the
+// verb phrase intact. Every figure below is a reading of a PAST state, dated by
+// the ticket that took it.
+//
 // KAN-190's task agent asked whether "every assertion in every proof carries a
 // mutation" should be policy. The numbers that answer it are deliberately NOT
 // written here. Run the script: it ends with a `=== THE DEFENCE REGISTER ===`
@@ -115,13 +123,13 @@
 // ran it on. §4b requires that tally to reconcile with what git tracks, and
 // requires this header to carry no copy of it.
 //
-// WHY THERE IS NO NUMBER IN THIS PARAGRAPH (KAN-355). It used to pin a
-// headcount — 45, with 21 / 23 / 1 under it — and by the time anybody
-// re-derived them the register held 63 / 32 / 30 / 1: short by eighteen and
-// wrong on every term but one. Nothing went red, because no check read this
-// comment. The register is what `verify-proof-registry`, `verify-proof-verdicts`
-// and §1-§4 below all check, and the prose above it drifted for four months
-// while every one of them stayed green.
+// WHY THIS SECTION STATES NO CURRENT QUANTITY (KAN-355). It used to open with a
+// headcount of the whole suite and a three-way split under it. The register
+// then grew past it while every check in this repository stayed green, because
+// all of them read the register and none read the comment above it —
+// `verify-proof-registry`, `verify-proof-verdicts` and §1-§4 below are every
+// one of them register-side. The prose was unowned, and unowned prose rots.
+// The figures it carried, and what it should have said, are dated below.
 //
 // The rule that applies is KAN-180's — CHANGE THE COUNT TO A PRINT, NOT TO A
 // BIGGER NUMBER. It applies to THIS number and not to every number, and the
@@ -129,8 +137,10 @@
 //
 //   A CENSUS is a headcount of a set that grows. It is true of a moment, no
 //   check owns it, and every merge that adds a proof falsifies it silently.
-//   Correcting 45 to 63 would have bought about a day — the suite grew by three
-//   while KAN-355 sat in the backlog. This was a census. It belongs in a print.
+//   Correcting the number rather than deleting it would have bought about a
+//   day: the suite grew again while KAN-355 sat in the backlog, and again
+//   between the branch being cut and this paragraph being rewritten. This was a
+//   census. It belongs in a print.
 //
 //   A MEASURED CONSEQUENCE is a claim about what the code DOES — KAN-228's
 //   "delete this line and it goes red with 12 failures". It ages only when the
@@ -139,15 +149,19 @@
 //
 //   A DATED READING is a measurement with its moment attached: the changelog
 //   below, and finding 1's "17 of the 41 that existed". It cannot rot, because
-//   it never claimed to be current. Keep those too — dated.
+//   it never claimed to be current. Keep those too — dated, and in the past
+//   tense. A dated reading of TODAY'S counts is not one of these; it is the
+//   census with a label on it, and §4b refuses it for that reason.
 //
 // So the census is gone and the argument it supported is not. The argument is
-// STRONGER at the larger number: a suite that grew by eighteen while holding
-// its 'none' count at one is better evidence for "the register is the better
-// instrument" than the smaller suite was.
+// STRONGER at the larger number: a suite that has grown by half again while
+// holding its 'none' count where it was is better evidence for "the register is
+// the better instrument" than the smaller suite was.
 //
 // (The register's history, each figure dated by the ticket that moved it, as
-// mutation / guard / none: 18 / 21 / 3 when this register was first counted.
+// mutation / guard / none. The pre-KAN-355 header pinned 21 / 23 / 1 over a
+// suite of 45, measured when it was written and never again. Before that:
+// 18 / 21 / 3 when this register was first counted.
 // KAN-197 closed the worst of the three — see finding 3 below — and KAN-198
 // closed `verify-tab-per-agent`, which was the expensive one: the count moved
 // twice because the work happened, which is what a register is for. The
@@ -1913,25 +1927,59 @@ for (const e of PROOF_DEFENCES.filter((x) => x.defence === 'none')) {
 //   second source for a fact that already has one, and the second source is the
 //   one nothing checks.
 //
-// WHAT THIS DOES NOT COVER, and it is a real limit rather than a formality. The
-// detector matches the PHRASINGS the tally owns ("N proofs", "N carry a
-// mutation"); a census spelled out in words, or re-phrased, walks straight past
-// it. It is not a proof that the header is honest — it is a tripwire on the one
-// shape that actually rotted, and the honesty of the rest is a reading, exactly
-// as §5 says of the register itself. It also says nothing about the OTHER
-// numbers the header keeps on purpose: the dated changelog and finding 1's
-// measurement are chosen, not overlooked, and the header says why.
+// TWO NETS, AND THE SECOND ONE IS THE GATE. This section shipped for review
+// with only the first, and the finding that came back is the reason the second
+// exists — so the difference between them is worth stating precisely rather
+// than described as belt and braces.
 //
-// WHICH ARMS BELOW ARE RED-DRIVEN, AND WHICH ARE NOT. §5 sabotages four of
-// them by name — `header-census-returns` (the census detector),
-// `tally-miscounts` (the bucket sum), `tally-total-drifts` (the reconciliation
-// with git) and `tally-pointer-dangles` (the banner pointer). Two are NOT
-// independently sabotaged: the setup guard on the header slice, and the arm
-// requiring `tallyLine()` to keep its shape. The second is exercised in
-// passing — `tally-miscounts` and `tally-total-drifts` both read numbers back
-// out through that regex, so a shape arm that had stopped matching would take
-// their rows down with it — but that is an argument, not a demonstration, and
-// it is recorded here as the weaker of the two rather than left to be assumed.
+//   THE VOCABULARY NET matches the PHRASINGS the tally owns ("N proofs", "N
+//   carry a mutation"). It is cheap, it names exactly which clause it found,
+//   and it is NOT a closed category: review measured `// The register holds N
+//   scripts: N scripts carry a mutation` walking past every arm of it with the
+//   digits and the verb phrase intact. One noun had changed. Keep it for its
+//   error messages and for small counts; do not rely on it.
+//
+//   THE VALUE GATE asks a closed question instead — does this header state a
+//   number the register CURRENTLY HOLDS? — in digits or in English, anywhere in
+//   the comment. The register holds finitely many numbers and this file already
+//   computes all of them, which is what makes the category finishable where
+//   "ways to phrase a census" is not.
+//
+// WHAT THE VALUE GATE STILL DOES NOT COVER, named because a gate described as
+// closed invites more trust than this one has earned:
+//
+//   - CARDINALS UNDER TEN are excluded, so a census of the 'none' count in
+//     fresh wording is caught by the vocabulary net or not at all. Gating them
+//     would fire on "§1", "finding 3" and ordinary English, and a false red at
+//     a maintainer is the failure this file's own doc ranks worst.
+//   - ENGLISH STOPS AT NINETY-NINE. Above that only the digit arm works.
+//   - A WRONG NUMBER IS NOT A CENSUS AND IS NOT CAUGHT. The gate fires on
+//     today's values, which is the right moment: a census is stale later
+//     BECAUSE it was accurate when written, so it is caught at the commit that
+//     introduces it. A figure that was never true is a different defect.
+//   - IT SAYS NOTHING ABOUT WHETHER THE PROSE IS HONEST. It is a gate on one
+//     class of rot, not a reading. The honesty of the rest is a reviewer's job,
+//     exactly as §5 says of the register itself.
+//
+// WHICH ARMS ARE RED-DRIVEN, AND WHICH ARE NOT. §5 sabotages six by name:
+// `header-census-returns` (vocabulary net), `header-census-rephrased` and
+// `header-census-spelled-out` (value gate, digits and words, both with the
+// injected number COMPUTED from the live count so the rows cannot go stale),
+// `tally-miscounts` (bucket sum), `tally-total-drifts` (reconciliation with
+// git) and `tally-pointer-dangles` (banner pointer). Two are NOT independently
+// sabotaged: the setup guard on the header slice, and the arm requiring
+// `tallyLine()` to keep its shape. The second is exercised in passing —
+// `tally-miscounts` and `tally-total-drifts` both read numbers back out through
+// that regex — but that is an argument, not a demonstration, and it is recorded
+// here as the weaker of the two rather than left to be assumed.
+//
+// AND A NOTE ON THE CANARIES, because the first version got this wrong. Firing
+// a detector on the census it was written against proves only that it is not
+// dead; it says nothing about coverage, which is Round 15 §7's rule and the
+// objection that sank the vocabulary net. The value gate's canaries are
+// therefore drawn from OUTSIDE its own vocabulary — a swapped noun, spelled-out
+// English, a bare table cell — and generated from the live values so they
+// cannot go stale.
 // ---------------------------------------------------------------------------
 
 console.log('\n=== 4b. The header points at the tally instead of keeping its own copy ===\n');
@@ -1988,6 +2036,149 @@ for (const s of CENSUS_SHAPES) {
     hit
       ? `found ${JSON.stringify(hit[0])} in the header. Nothing checks this comment, so it will ` +
         `drift the moment the suite grows. Delete the number and point at ${TALLY_BANNER}.`
+      : ''
+  );
+}
+
+// --- the primary gate: no LIVE VALUE inside the policy region, in any wording ---
+//
+// The four detectors above key on the census's vocabulary, and vocabulary is
+// not a closed category — swapping the noun `proofs` for `scripts` walks a
+// complete census past every one of them, digits and verb phrase intact. That
+// was measured on the first version of this fix, not imagined. What follows
+// inverts the question: instead of asking "is this one of the ways a census can
+// be phrased?", which cannot be finished, it asks "does this region state a
+// number the register currently holds?" — which is closed, because the register
+// holds finitely many numbers and this file already computes all of them.
+//
+// WHY KEYING ON THE VALUE IS NOT THE SAME TRICK ONE LEVEL OVER: a census is
+// stale later precisely BECAUSE it was accurate when written. An author adding
+// one writes today's number, so the gate fires at the commit that introduces
+// it — the only moment anybody can act on it.
+
+/**
+ * THE GATE COVERS THE WHOLE HEADER, and deliberately has no sub-region to
+ * scope-attack. An earlier draft delimited a "policy region" and gated only
+ * that; the reviewer's own probe put its census on the line immediately before
+ * the first `import` — inside the header, outside any such region — and a gate
+ * you can walk around by choosing a different paragraph is not a gate. There is
+ * no number the register CURRENTLY holds that belongs anywhere in this comment,
+ * because the tally prints all of them.
+ *
+ * Dated readings of PAST states survive this untouched, and not by exemption:
+ * the suite grows, so its historical figures are all smaller than its live ones.
+ * A "dated" reading of the PRESENT state is the one thing this refuses, and
+ * refusing it is the point — that is the census this ticket removed, wearing a
+ * label a reader skims past.
+ */
+for (const anchor of [
+  'A CENSUS is a headcount',
+  'A MEASURED CONSEQUENCE is a claim',
+  'A DATED READING is a measurement'
+]) {
+  check(
+    headerText.includes(anchor),
+    `the taxonomy the gate rests on is still stated — "${anchor}…"`,
+    headerText.includes(anchor)
+      ? ''
+      : 'deleting the reasoning leaves a rule nobody can account for'
+  );
+}
+
+const TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+const ONES = [
+  '', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven',
+  'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'
+];
+/**
+ * English for a cardinal under a hundred, and EMPTY above it rather than
+ * "undefined-three". Stated as a limit because it is one: when this suite
+ * passes ninety-nine the digit arm still covers every value and the words arm
+ * silently stops, so a spelled-out census would get through. Whoever crosses
+ * that line extends this — the `(setup)` arm below prints the values in play,
+ * which is where it will be visible.
+ */
+const toWords = (n) =>
+  n >= 100 ? '' : n < 20 ? ONES[n] : `${TENS[Math.floor(n / 10)]}${n % 10 ? `-${ONES[n % 10]}` : ''}`;
+
+/**
+ * Every quantity the tally states, de-duplicated. `proofs.length` is in here as
+ * well as `PROOF_DEFENCES.length` so the gate does not depend on §1 having
+ * already reconciled them.
+ */
+const liveValues = [
+  ...new Set([PROOF_DEFENCES.length, count('mutation'), count('guard'), count('none'), proofs.length])
+]
+  // Cardinals under ten are ordinary English ("one", "§1", "finding 3") and
+  // gating them fires false reds at maintainers, which this file's own doc
+  // names as the worse failure. The cost is stated rather than hidden: a census
+  // of a single-digit quantity is caught only by the vocabulary net above.
+  .filter((n) => n >= 10)
+  .sort((a, b) => a - b);
+
+check(
+  liveValues.length > 0,
+  '(setup) there is at least one live quantity large enough to gate on',
+  liveValues.join(', ')
+);
+
+/**
+ * A live value written any way a person writes numbers: digits, or English.
+ *
+ * THE ROUND-TENS TAIL is why this is not a one-liner. `\bthirty\b` matches
+ * inside "thirty-two", so with a live guard count of thirty a DATED reading of
+ * "thirty-two" would fire the wrong arm — a false red at a maintainer, which
+ * this file's own doc calls the worse failure. A round ten therefore refuses a
+ * hyphen-or-space continuation into a ones word.
+ */
+const ONES_WORDS = ONES.slice(1, 10).join('|');
+const valuePattern = (n) => {
+  const alts = [String(n)];
+  const word = toWords(n);
+  if (word) {
+    const tail = n >= 20 && n % 10 === 0 ? String.raw`(?![- ](?:${ONES_WORDS}))` : '';
+    alts.push(word.replace('-', '[- ]') + tail);
+  }
+  return new RegExp(String.raw`\b(?:${alts.join('|')})\b`, 'i');
+};
+
+/**
+ * CANARIES DRAWN FROM OUTSIDE THE DETECTOR'S OWN VOCABULARY, which is the whole
+ * point of them. Firing a wording-detector on the wording it was written
+ * against proves it is not dead and says nothing about coverage — the objection
+ * that sank the first version of this section. These are generated from the
+ * LIVE values (so they cannot go stale) and phrased in the vocabularies the
+ * gate is deliberately blind to: a swapped noun, spelled-out English, and a
+ * bare table cell with no sentence around it at all.
+ */
+const evasions = liveValues.length
+  ? [
+      { how: 'the noun swapped from "proofs" to "scripts"', text: `The register holds ${liveValues[0]} scripts.` },
+      { how: 'the number spelled out in English', text: `The suite currently holds ${toWords(liveValues[0])} entries.` },
+      { how: 'a bare table cell, no sentence at all', text: `| tracked | ${liveValues[0]} |` }
+    ]
+  : [];
+
+for (const e of evasions) {
+  const caught = liveValues.some((n) => valuePattern(n).test(e.text));
+  check(
+    caught,
+    `(canary) the value gate catches a census with ${e.how}`,
+    caught ? JSON.stringify(e.text) : `${JSON.stringify(e.text)} walked past every live value`
+  );
+}
+
+for (const n of liveValues) {
+  const hit = headerText.match(valuePattern(n));
+  check(
+    !hit,
+    `the header states no current quantity — ${n} appears nowhere in it, in digits or in words`,
+    hit
+      ? `found ${JSON.stringify(hit[0])}, which is a number the register holds RIGHT NOW. It is ` +
+        'true today and false at the next merge that moves it, and nothing outside this check ' +
+        'would notice — which is exactly how the census this file used to carry survived. Delete ' +
+        'it and let the tally print it. If it is genuinely a measured consequence rather than a ' +
+        'headcount, say what falsifies it, in words, without the figure.'
       : ''
   );
 }
@@ -2207,6 +2398,53 @@ if (IS_CHILD) {
         'the print replaced a pinned number, so a print that can be wrong without saying so would ' +
         'have moved the defect rather than fixed it — the counts have to reconcile with the ' +
         'register and with git, not merely appear'
+    },
+    {
+      id: 'header-census-rephrased',
+      what: 'a census returns in wording the vocabulary detectors do not know',
+      // THE ROW THAT EXISTS BECAUSE THE FIRST VERSION OF §4b DID NOT CATCH IT.
+      // Review of this PR measured `// The register holds N scripts: …` walking
+      // past all four wording detectors with the digits and the verb phrase
+      // intact — only the noun had changed, `proofs` to `scripts`. The value
+      // gate is what closed it, and this row is what keeps it closed.
+      //
+      // ITS `replace` IS COMPUTED, NOT TYPED. A hardcoded number stops being a
+      // census the moment the suite grows, and the row would then fail for the
+      // wrong reason on somebody else's PR. Built from `proofs.length`, the
+      // injected sentence carries whatever the live count is on the day it runs.
+      edits: [
+        {
+          // Split for the exact-count reason the rows above give.
+          find: "// KAN-190's task agent " + 'asked whether',
+          replace: `// The register holds ${proofs.length} scripts. KAN-190's task agent asked whether`
+        }
+      ],
+      expect: /FAIL\s+the header states no current quantity/,
+      because:
+        'vocabulary is not a closed category and a gate keyed to it can be walked around by a ' +
+        'synonym; the set of numbers the register holds IS closed, and this file already computes ' +
+        'every one of them'
+    },
+    {
+      id: 'header-census-spelled-out',
+      what: 'a census returns with the number written in English rather than digits',
+      // The other half of the same evasion, and the one a digit-only gate would
+      // miss entirely. Also computed rather than typed, for the same reason.
+      // IT REWRITES A LINE RATHER THAN PREPENDING TO ONE. A `replace` that
+      // preserves the text it matched puts a second copy of the `find` into
+      // this file, and the helper then refuses it as ambiguous — measured, with
+      // `found 2`, when this row was first written against the same anchor the
+      // row above uses.
+      edits: [
+        {
+          find: '// ran it on. §4b requires that tally ' + 'to reconcile with what git tracks, and',
+          replace: `// ran it on. The suite currently holds ${toWords(proofs.length) || proofs.length} entries, and`
+        }
+      ],
+      expect: /FAIL\s+the header states no current quantity/,
+      because:
+        'an author writing prose reaches for words as readily as digits, and a census spelled out ' +
+        'is exactly as stale a week later as one in numerals'
     },
     {
       id: 'tally-total-drifts',
