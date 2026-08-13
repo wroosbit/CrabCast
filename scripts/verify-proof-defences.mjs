@@ -384,7 +384,19 @@ const PROOF_DEFENCES = [
       'what put it there, and refuses to start over another run\'s residue rather than adopting it ' +
       'as its baseline — and (KAN-341) that ci.yml is never observable in a state that is neither ' +
       'the committed file nor a complete marked mutation, so there is no torn write for the residue ' +
-      'to be caught in and no ending that leaves it unattributable.'
+      'to be caught in and no ending that leaves it unattributable. KAN-363 ADDED THREE THAT ARE ' +
+      'ABOUT THE PROOF ITSELF rather than about residue, because §4 had been dormant for 44 merged ' +
+      'pull requests while reading as a section that asserts: its baseline being UNREACHABLE is now ' +
+      'a counted failure where a baseline that has merely CAUGHT UP is a stated dormancy (the two ' +
+      'print the same three words and are opposite); §4c demonstrates with a fixture, not a ' +
+      'paragraph, that pinning the ref would not revive it, by running identical historical bytes ' +
+      'under two pinned ref environments and watching the verdict flip; and §5b asserts that §5 — ' +
+      'which §4 NAMES as its cover — really ran, so a dormant section cannot go on promising ' +
+      'coverage that has been deleted. SEAM: §4c asserts only on the loaded script\'s `pre-fix:` ' +
+      'lines, never that it runs wholly green, because the wider assertion would couple this proof ' +
+      'to today\'s ci.yml and to verify-proof-registry and verify-cli-parity — the coupling that is ' +
+      'the stated reason §4 is not revived. Nothing owns the historical script\'s behaviour against ' +
+      'a drifting tree, deliberately: see docs/moving-baselines.md Finding 4.'
   },
   {
     script: 'verify-config-echo-contract',

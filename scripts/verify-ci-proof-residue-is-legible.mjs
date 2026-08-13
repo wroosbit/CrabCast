@@ -7,11 +7,21 @@
 // the end. Started over a previous run's residue it therefore adopts the
 // RESIDUE as its baseline, restores the residue, and PASSES its own
 // "byte-identical to how this run found it" check — because the file does match
-// what it found. Section 4 below runs the version that shipped on `main` at
-// 0edd2c1 over a seeded residue and shows it print ALL CHECKS PASSED, exit 0,
-// and leave the corrupted workflow in the tree. A cleanup assertion reporting an
-// all-clear over a corrupted tracked file is the failure-as-success shape this
-// epic exists to catch, sitting in the cleanup path of the script that guards CI.
+// what it found. Section 5 below backs that fix out of the CURRENT code over a
+// seeded residue and shows the result print ALL CHECKS PASSED, exit 0, and leave
+// the corrupted workflow in the tree. A cleanup assertion reporting an all-clear
+// over a corrupted tracked file is the failure-as-success shape this epic exists
+// to catch, sitting in the cleanup path of the script that guards CI.
+//
+// SECTION 5 IS NAMED THERE AND SECTION 4 IS NOT, AND THAT IS THE CORRECTION
+// KAN-363 MADE (2026-08-12). Section 4 used to hold that demonstration by
+// loading the version that shipped on `main` at 0edd2c1 and running it. It has
+// asserted NOTHING since KAN-172 merged at 13a247d — 44 merged pull requests —
+// because it reaches for that version through `origin/main`, and `origin/main`
+// has carried the fix ever since. Section 4 now states that dormancy, refuses
+// the obvious pin with a fixture rather than a story, and checks that section 5
+// really did the work it hands off to. See the section header for the decision
+// and the rejected options.
 //
 // AND THE HALF THAT COMES FIRST: SIGKILL, a reboot or a power cut lands between
 // the write and the restore and ci.yml is left carrying a deliberately-broken
@@ -39,15 +49,31 @@
 // sandbox's copy. Nothing here can leave residue a reviewer would see.
 //
 // WHAT THE SANDBOX CHANGES, said because a fixture that differs from the real
-// thing silently is worse than one that differs loudly: the clone's `origin` is
-// this working tree rather than GitHub, so it has no `main` ref and the target's
-// own section 2 — which loads the PRE-FIX ci-workflow parser out of
-// `origin/main` — reports NOT RUN there. That section is KAN-148's subject, not
-// this one's, it asserts nothing when it does not run, and it runs for real on
-// every PR from the `verify` job's full-history checkout. Section 0 below
-// requires the target to go GREEN in the sandbox before anything else is
-// measured, so a sandbox that had broken the target in some other way is a
-// failed precondition rather than a quiet distortion of every section after it.
+// thing silently is worse than one that differs loudly. Section 0 below requires
+// the target to go GREEN in the sandbox before anything else is measured, so a
+// sandbox that had broken the target in some other way is a failed precondition
+// rather than a quiet distortion of every section after it.
+//
+// THIS PARAGRAPH USED TO SAY the clone "has no `main` ref", so the target's own
+// section 2 — which loaded the PRE-FIX ci-workflow parser out of `origin/main` —
+// reported NOT RUN there. BOTH HALVES WERE FALSE, and KAN-361 found the first:
+// cloning this worktree DOES produce `refs/remotes/origin/main`, because the
+// shared clone it came from has a local `main` and a clone copies it. Re-measured
+// by KAN-363 at 2dd39eb: the sandbox's `origin/main` resolves to the shared
+// clone's LOCAL main, 20 commits behind the real one, and it is `refs/heads/main`
+// that is absent rather than the remote. So the ref that existed was the one this
+// paragraph said was missing. The second half is stale rather than wrong: KAN-354
+// pinned the target's section 2 to a SHA, so it no longer consults a ref at all,
+// and the NOT RUN this described cannot happen any more.
+//
+// THE MECHANISM IS UNCHANGED — this is a correction to a false disclosure, not a
+// fix. The sandbox's ref environment is still whatever the developer's shared
+// clone happens to carry, and still differs silently from a GitHub runner's.
+// That is Finding 3 in `docs/moving-baselines.md`, still open, and making it
+// deterministic is a fixture change with its own red-drive obligations. Nothing
+// in this script depends on it today: sections 5–7 drive the CURRENT target,
+// whose baseline is pinned, and section 4c pins BOTH arms' refs precisely so that
+// it does not inherit this.
 //
 // WHAT THIS DOES NOT COVER, marked here because two scripts that are each honest
 // about themselves can still leave a hole between them. Every section below
@@ -299,7 +325,8 @@ async function killWhileMutated(variantRel, label) {
 //             looks like. It matters because it is the residue that makes
 //             absorption completely invisible: the target's every row still
 //             behaves as designed, so the run goes fully GREEN over a corrupted
-//             baseline. Section 4 is that run.
+//             baseline. Section 5 is that run; section 4 was, until it went
+//             dormant.
 const STEP_LINE = '      - run: node scripts/verify-proof-registry.mjs';
 const JOB_LINE = '  proof-registry:';
 const DEAD_PID = 424242;
@@ -506,19 +533,123 @@ unmarked: {
 }
 
 // ===========================================================================
-rule('4. THE DEFECT, REPRODUCED AGAINST THE VERSION THAT SHIPPED ON main');
+rule('4. THE HISTORICAL DEMONSTRATION IS DORMANT — the dormancy stated, and the pin refused with a fixture');
 // ===========================================================================
 //
-// Sections 1–3 are a table of greens that could equally well describe a script
-// that was always right. This is where the claim earns its keep: the SAME seeded
-// residue, through the target as `origin/main` carries it, showing a run that
-// absorbs the residue and reports an all-clear over it.
+// WHAT THIS SECTION USED TO DO, and stopped. It ran the SAME seeded residue
+// through the target as `origin/main` carried it, showing a run that absorbs the
+// residue and reports an all-clear over it — the defect as it actually shipped,
+// rather than as a mutation of today's code reconstructs it.
 //
-// WHEN THE PRE-FIX SOURCE IS UNREACHABLE — a shallow clone with no `origin/main`,
-// or a run on `main` after this has merged, where `origin/main` IS this code —
-// that is ANNOUNCED and asserts nothing. It is not a pass. Section 5 is the
-// durable half for exactly that reason: it backs the fix out of the CURRENT code
-// and gets the same result, and it keeps working after this merges.
+// WHAT IT STOPPED ASSERTING, WHEN, AND WHAT COVERS IT NOW (KAN-363, AC3):
+//
+//   * STOPPED ASSERTING: that the version of `verify-ci-wiring-guards.mjs` which
+//     really shipped absorbed a residue, restored it, and exited 0 reporting ALL
+//     CHECKS PASSED — the seven assertions in the `else` branch below.
+//   * WHEN: KAN-172 merged at 13a247d and `origin/main` began carrying the fix.
+//     `preFixTarget()` then returns no text and the section announces NOT RUN.
+//     Measured 2026-08-12 at 2dd39eb: 44 merged pull requests since, every one of
+//     them with this section silent inside a green job.
+//   * WHAT COVERS IT: SECTION 5, deliberately and from the day this was written —
+//     it backs the same fix out of the CURRENT code and makes the same two
+//     observations. It is the durable half because its subject moves when the
+//     code moves. The pointer to it is no longer prose: the check after section 5
+//     asserts section 5 really ran, so this hand-off cannot outlive its referent.
+//
+// WHY IT IS NOT PINNED, which is the decision KAN-363 was filed to take. Pinning
+// the ref is the fix section 2 of the target got from KAN-354, and it does not
+// work here — but not for the reason it first appears, and the difference is the
+// whole finding:
+//
+//   * PINNING THE REF ALONE MAKES THIS SECTION RED. The target at 0edd2c1
+//     contains, at its own line 360, `for (const ref of ['origin/main','main'])`
+//     — it predates KAN-354, so the historical script REACHES FOR A MOVING REF
+//     ITSELF when executed. Its nested section 2 then resolves `origin/main` to a
+//     post-KAN-148 parser, emits eleven `pre-fix:` FAILs, and the headline
+//     assertion here fails on an exit code that has nothing to do with residue.
+//     PINNING A REF PINS THE BYTES. IT DOES NOT PIN WHAT THOSE BYTES DO.
+//
+//   * AND PINNING BOTH WOULD WORK, which is the part that had to be measured
+//     rather than assumed. Force the sandbox's `origin/main` to KAN148_PARENT as
+//     well and the historical script goes fully green — measured at 2dd39eb: 119
+//     PASS, 0 FAIL, exit 0. So this section is NOT refused because the pin is
+//     impossible. The fixture below is that measurement, wired in.
+//
+//   * IT IS REFUSED BECAUSE A REVIVED SECTION 4 COULD ONLY EVER GO RED FOR A
+//     REASON THAT IS NOT ITS SUBJECT. Its subject is 0edd2c1's bytes, and those
+//     are frozen. Its verdict is a function of {frozen bytes} x {seeded residue}
+//     x {environment}, and the first two cannot move — so nothing a future change
+//     does to the behaviour under test can ever change what this section says.
+//     Only environment drift can, and the historical script is coupled to a
+//     moving present in ways no ref pin reaches: its setup guard demands exactly
+//     one `      - run: node scripts/verify-proof-registry.mjs` and exactly one
+//     `  proof-registry:` line in a ci.yml that has been edited 21 times since
+//     13a247d, and it runs today's `verify-proof-registry.mjs` and
+//     `verify-cli-parity.mjs` as child processes. Those lines have survived all
+//     21 — measured — but surviving is not a mechanism. So every red a revived
+//     section 4 could emit would be a FALSE red, misattributed to whoever last
+//     touched ci.yml. That is section 2 of the target's own failure mode, which
+//     KAN-354 was filed to remove, reintroduced here one level up.
+//
+// THE OPTIONS REJECTED, named because the ticket asked for them by name:
+//
+//   * DELETE SECTION 4 AND RELY ON SECTION 5. Rejected: the dormancy statement
+//     above is the repository's only record of why the historical demonstration
+//     cannot be re-run, and deleting the section deletes the explanation along
+//     with the code. It would also remove the natural home for the checked
+//     pointer to section 5, which is new coverage rather than a consolation.
+//   * ASSERT SOMETHING ELSE ENTIRELY. Adopted in part rather than rejected — the
+//     fixture below and the section-5 pointer check are both "something else",
+//     and both hold today's code rather than history. What is rejected is the
+//     pure form, replacing section 4 outright, for the reason directly above.
+//   * TREAT NOT RUN AS A FAILURE, which `verify-daemon-provenance` does in its
+//     own words: "a shallow clone that cannot reach these revisions has
+//     demonstrated nothing." REJECTED AGAINST WHAT THAT FILE DOES, and adopted
+//     for the half where it is true. Its revisions are pinned AND reachable, so
+//     the only thing that makes them unreadable is a shallow clone — a fixable
+//     environment defect. This section's NOT RUN fires because `origin/main`
+//     carries the fix, which is the PERMANENT, EXPECTED consequence of the very
+//     change it demonstrates: making that red would make CI red for succeeding,
+//     for ever, with no fix available to anyone. The two conditions print the
+//     same three words and are structurally opposite. So the first assertion
+//     below adopts the principle exactly where it holds — an UNREACHABLE ref is
+//     red here now, where until KAN-363 it printed the same quiet NOT RUN as a
+//     baseline that had caught up.
+
+/** KAN-172's merge: the first `origin/main` to carry the fix, and so the commit
+ *  at which this section went dormant. Used below as the POST-fix arm. */
+const KAN172_MERGE = '13a247da47add54bdc28219553cf99e752a832c8';
+/** 13a247d^ — the last target that absorbed residue, and the bytes this section
+ *  would have been pinned to. */
+const PRE_FIX_TARGET_REV = '0edd2c1d203987fa9013f5a6e142aa0f61e456d2';
+/** KAN-148's parent, the last tree with the PRE-fix ci-workflow parser. This is
+ *  what the historical target's own section 2 has to find to behave as it did
+ *  when it shipped.
+ *
+ *  IT IS A FACT ABOUT THIS REPOSITORY'S HISTORY, NOT A COPY OF ANOTHER FILE'S
+ *  PIN, and the difference cost this section a guard. `verify-ci-wiring-guards`
+ *  names the same commit today because KAN-354 chose the pre-fix point as its
+ *  own baseline — a coincidence with a reason, not a dependency. The first draft
+ *  of section 4c asserted that the two still agree, modelled on section 7's
+ *  ANTI-DRIFT check, and THE ANALOGY DOES NOT HOLD: section 7 PLANTS a file that
+ *  the target then SWEEPS for, so a rename in the target leaves section 7
+ *  planting something nothing looks for — a real coupling whose failure is a
+ *  false GREEN. Section 4c reads nothing from the target at all.
+ *
+ *  MEASURED by `epic/KAN-59` reviewing #87 and reproduced here before removing
+ *  it: repin the target's section 2 to current `main` — a repin under which the
+ *  target itself still exits 0 — and the proof goes 52/53 with exactly ONE FAIL,
+ *  that precondition, while all three arms below stay correct in the same run
+ *  (11 `pre-fix:` FAILs, 0, and guard 2 passing 11 vs 0). The fixture is
+ *  unharmed and the guard announces that it is not. `docs/moving-baselines.md`
+ *  tables section 2's pin as a maintenance site, so the repin is FORESEEN and
+ *  the false red was scheduled, to land on whoever performs it.
+ *
+ *  A guard whose every possible red is false is the thing section 4 above
+ *  refuses to revive itself into being. It was three hundred lines from the
+ *  paragraph refusing it. It is gone, and the precondition that replaced it
+ *  guards a failure this section really has. */
+const KAN148_PARENT = 'dff24229869f2eb1b3089d2d4674582aaf065a49';
 
 function preFixTarget() {
   const current = fs.readFileSync(path.join(repoRoot, TARGET_REL), 'utf8');
@@ -539,11 +670,31 @@ function preFixTarget() {
 const preFix = preFixTarget();
 
 if (!preFix.text) {
-  console.log(`  NOT RUN — ${preFix.why}.`);
-  console.log('  NOTHING IS ASSERTED IN THIS SECTION. It is not a pass. What is missing is the');
-  console.log('  demonstration that the shipped version absorbed the residue; section 5 below makes');
-  console.log('  the same measurement against the current code with the fix backed out, and the run');
-  console.log('  on the KAN-172 pull request has this section live.');
+  // THE ONE DORMANCY THAT IS A DEFECT. `preFixTarget()` returns `ref: null` only
+  // when NEITHER `origin/main` NOR `main` exists — a shallow clone, which is a
+  // fixable environment defect and is exactly the condition
+  // `verify-daemon-provenance` refuses to pass over. The other two whys (the ref
+  // carries the fix, the ref already refuses) are the expected steady state and
+  // are reported without a verdict. Before KAN-363 all three printed the same
+  // NOT RUN and exited 0, so a shallow clone was indistinguishable from success.
+  check(preFix.ref !== null,
+    'THE BASELINE REF IS REACHABLE — a clone that cannot reach it has demonstrated nothing, and ' +
+    'saying so is the difference between the demonstration happening and its absence being ' +
+    'announced. Red ONLY for this cause: an unreachable ref is a fixable environment defect, ' +
+    'where a ref that has caught up is the permanent expected consequence of the fix this ' +
+    'section was written to demonstrate',
+    preFix.ref !== null
+      ? `reachable at \`${preFix.ref}\` — dormant because ${preFix.why}, which is the expected steady state`
+      : `NOT RUN — ${preFix.why}. This is a shallow clone, not a caught-up baseline.`);
+
+  console.log(`\n  DORMANT — ${preFix.why}.`);
+  console.log('  NOTHING ABOUT THE SHIPPED VERSION IS ASSERTED HERE, and has not been since KAN-172');
+  console.log(`  merged at ${KAN172_MERGE.slice(0, 7)}. What is missing is the demonstration that the shipped`);
+  console.log('  version absorbed the residue. SECTION 5 makes the same measurement against the current');
+  console.log('  code with the fix backed out, and the check after it asserts that section 5 really ran');
+  console.log('  — so this hand-off is a checked pointer rather than a sentence. The run on the KAN-172');
+  console.log('  pull request has this section live, and nothing can make it live again: see the header');
+  console.log('  above for why it is not pinned, and the fixture below for that reason measured.');
 } else {
   const rel = path.join('scripts', 'kan172-prefix-verify-ci-wiring-guards.mjs');
   fs.writeFileSync(path.join(sandbox, rel), preFix.text);
@@ -591,6 +742,173 @@ if (!preFix.text) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 4c. THE PIN REFUSED, AS A FIXTURE RATHER THAN A STORY (KAN-363 AC2).
+//
+// The paragraphs above assert that pinning the ref would not restore this
+// section, because the pinned bytes reach for a moving ref of their own. A
+// paragraph is exactly the artifact that goes stale, and this epic's whole
+// subject is a sentence claiming more than its mechanism covers — so the reason
+// is measured here instead, on every run.
+//
+// TWO ARMS, AND WHAT MAKES THE COMPARISON MEAN ANYTHING: the loaded bytes are
+// THE SAME FILE in both, asserted by hash, and both are pinned. The ONLY thing
+// that differs is what `origin/main` resolves to inside the sandbox. If the
+// verdict flips, the flip is caused by the ref environment and by nothing else —
+// which is the fourth shape demonstrated rather than described.
+//
+// WHY BOTH ARMS ARE PINNED, and this is the trap this section had to avoid
+// walking into while documenting it. The obvious fixture is "ambient refs
+// misfire, pinned refs do not" — but the ambient arm's verdict would then depend
+// on whatever `origin/main` happens to be, which differs between CI and every
+// developer machine (moving-baselines.md Finding 3, re-measured at 2dd39eb: the
+// sandbox's `origin/main` is the shared clone's LOCAL main, 20 commits behind).
+// A fixture for the moving-baseline class must not have one. So the POST-fix arm
+// is pinned to KAN172_MERGE, which MODELS the ambient reality deterministically.
+//
+// WHAT THIS DOES NOT COVER: the arms assert only on the nested section 2's
+// `pre-fix:` lines, deliberately. Asserting that the historical script goes
+// WHOLLY green — which it does today, 119 PASS and 0 FAIL — would couple this
+// fixture to today's ci.yml and to today's `verify-proof-registry.mjs` and
+// `verify-cli-parity.mjs`, and re-create the very coupling the header rejects
+// section 4's revival for. Scoping to `pre-fix:` is what keeps this section from
+// being the thing it is about.
+const HISTORICAL_REL = path.join('scripts', 'kan363-prefix-target-under-pinned-refs.mjs');
+
+async function runHistoricalUnder(refSha) {
+  const sandboxGitRefs = () => {
+    const read = (ref) => { try { return git(['rev-parse', ref], sandbox).trim(); } catch { return null; } };
+    return { origin: read('refs/remotes/origin/main'), local: read('refs/heads/main') };
+  };
+  const before = sandboxGitRefs();
+
+  git(['update-ref', 'refs/remotes/origin/main', refSha], sandbox);
+  // `main` is consulted second by the historical lookup, so leaving a stale one
+  // behind would make this arm's ref environment two things rather than one.
+  if (before.local !== null) git(['update-ref', '-d', 'refs/heads/main'], sandbox);
+
+  const seeded = seed(COMMENT_RESIDUE);
+  const r = seeded === null ? { code: null, out: '' } : runVariant(HISTORICAL_REL);
+  restoreSandbox();
+
+  if (before.origin !== null) git(['update-ref', 'refs/remotes/origin/main', before.origin], sandbox);
+  else git(['update-ref', '-d', 'refs/remotes/origin/main'], sandbox);
+  if (before.local !== null) git(['update-ref', 'refs/heads/main', before.local], sandbox);
+
+  return {
+    seeded,
+    code: r.code,
+    preFixFails: (r.out.match(/^FAIL\s+pre-fix:/gm) ?? []).length,
+    // BOTH ARM ASSERTIONS REQUIRE THIS NON-EMPTY, and that is the guard rather
+    // than a nicety: if a ref were wrong the nested section 2 would print NOT RUN
+    // and emit ZERO `pre-fix:` failures — which is exactly what the pre-fix arm
+    // expects to see. Without this the arm would pass for having skipped.
+    loadedLine: (r.out.split('\n').find((l) => l.includes('pre-fix parser loaded from')) ?? '').trim()
+  };
+}
+
+pinRefused: {
+  let historical;
+  try {
+    historical = git(['show', `${PRE_FIX_TARGET_REV}:${TARGET_REL}`]);
+  } catch (err) {
+    check(false, `PRECONDITION: ${PRE_FIX_TARGET_REV.slice(0, 7)}:${TARGET_REL} is reachable — without the ` +
+      'historical bytes there is nothing to demonstrate the pin against',
+      `git show failed: ${err?.message ?? err}`);
+    break pinRefused;
+  }
+
+  // WHAT REPLACED THE ANTI-DRIFT CHECK, and it is not a softer version of it —
+  // it covers a failure that one never reached and that this section really has.
+  //
+  // The two SHAs above go straight to `git update-ref` inside
+  // `runHistoricalUnder`, with no `try` anywhere on the path. An unreachable one
+  // therefore does not FAIL, it THROWS, uncaught, and takes the verdict line
+  // with it — the defect `scripts/mutation.mjs`'s header exists for, where a run
+  // dies mid-file and every section after it silently never reports. Measured
+  // before this guard existed, with KAN148_PARENT set to a well-formed SHA that
+  // is not an object in this repository:
+  //
+  //     PROOF_EXIT=1
+  //     verdict line printed: NONE — the run died without reporting
+  //     fatal: update_ref failed for ref 'refs/remotes/origin/main'
+  //
+  // AND IT CANNOT EMIT A FALSE RED, which is the whole of what was wrong with
+  // what it replaces. An unreachable pinned commit is a shallow clone or a
+  // rewritten history — a fixable environment defect — and that is the SAME
+  // distinction section 4 draws for its own baseline a few hundred lines above,
+  // drawn the same way: red for a deficiency somebody can act on, silence for a
+  // legitimate change elsewhere that costs this section nothing.
+  const unreachable = [KAN172_MERGE, KAN148_PARENT].filter((sha) => {
+    try {
+      git(['cat-file', '-e', `${sha}^{commit}`]);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  check(unreachable.length === 0,
+    'PRECONDITION: BOTH of this fixture\'s OWN pinned commits are reachable — they are handed to ' +
+    '`git update-ref` below, where an unreachable one throws rather than fails and the run dies ' +
+    'with no verdict at all. This is the only thing section 4c needs of the world outside its own ' +
+    'two arms: it reads nothing from the target, and a repin ANYWHERE else cannot reach it',
+    unreachable.length === 0
+      ? `${KAN172_MERGE.slice(0, 7)} and ${KAN148_PARENT.slice(0, 7)} both resolve to commits`
+      : `unreachable: ${unreachable.map((s) => s.slice(0, 7)).join(', ')} — a shallow clone, or history rewritten under this pin`);
+  if (unreachable.length) break pinRefused;
+
+  // DERIVED, NOT LITERAL. The expected FAIL count is read out of the historical
+  // script's own case table. Writing `11` here would keep passing if that file
+  // were ever a different file than this fixture thinks it is.
+  const expectedFails = historical.split('gap: true').length - 1;
+  const MOVING_REF_CONSTRUCT = "for (const ref of ['origin/main', 'main'])";
+  check(historical.includes(MOVING_REF_CONSTRUCT) && expectedFails > 0,
+    `PRECONDITION: the historical target really does reach for a moving ref itself, and really does ` +
+    `carry gap cases to misfire — this is the whole premise, read out of the loaded bytes rather than ` +
+    `taken from the ticket that reported it`,
+    `${JSON.stringify(MOVING_REF_CONSTRUCT)} present: ${historical.includes(MOVING_REF_CONSTRUCT)}; ` +
+    `\`gap: true\` cases: ${expectedFails}`);
+
+  fs.writeFileSync(path.join(sandbox, HISTORICAL_REL), historical);
+  const bytesBefore = fs.readFileSync(path.join(sandbox, HISTORICAL_REL));
+
+  const post = await runHistoricalUnder(KAN172_MERGE);
+  const pre = await runHistoricalUnder(KAN148_PARENT);
+
+  const bytesAfter = fs.readFileSync(path.join(sandbox, HISTORICAL_REL));
+  check(bytesBefore.equals(bytesAfter) && bytesAfter.equals(Buffer.from(historical)),
+    'VACUITY GUARD 1: both arms ran THE SAME BYTES — nothing in this fixture edited the historical ' +
+    'script between them, so the contrast below cannot be an artifact of two different files',
+    `${bytesAfter.length} bytes, unchanged across both arms`);
+
+  check(post.seeded !== null && pre.seeded !== null,
+    'PRECONDITION: both arms really were seeded with residue — an arm that ran over a clean tree ' +
+    'would be measuring something else entirely',
+    `post-fix arm seeded: ${post.seeded !== null}, pre-fix arm seeded: ${pre.seeded !== null}`);
+
+  check(post.preFixFails === expectedFails && post.loadedLine !== '',
+    `PINNING THE BYTES IS NOT ENOUGH: with \`origin/main\` pinned to ${KAN172_MERGE.slice(0, 7)} — the ` +
+    'commit that carries the fix, which is what every clone has resolved it to since KAN-172 merged — ' +
+    `the historical script's OWN section 2 loads a post-fix parser and misfires with ${expectedFails} ` +
+    '`pre-fix:` FAILs. Its exit code then has nothing to do with residue, which is why section 4 above ' +
+    'is not simply repinned',
+    `${post.preFixFails} \`pre-fix:\` FAIL(s) (expected ${expectedFails}), exit ${post.code}; ${post.loadedLine}`);
+
+  check(pre.preFixFails === 0 && pre.loadedLine !== '',
+    `AND THE BYTES ARE NOT AT FAULT: the SAME historical script, with \`origin/main\` pinned instead to ` +
+    `${KAN148_PARENT.slice(0, 7)} — the last tree carrying the parser it was written against — loads a ` +
+    'genuine pre-fix parser and misfires not at all. So the eleven failures above are caused by the ref ' +
+    'environment and by nothing in the file',
+    `${pre.preFixFails} \`pre-fix:\` FAIL(s), exit ${pre.code}; ${pre.loadedLine}`);
+
+  check(post.preFixFails !== pre.preFixFails,
+    'VACUITY GUARD 2: the two arms really did disagree. Identical bytes, identical residue, two pinned ' +
+    'ref environments, opposite verdicts — A PINNED BASELINE DOES NOT PIN WHAT THE BASELINE DOES. If ' +
+    'this ever reads equal, the fixture has stopped demonstrating anything and the paragraph above it ' +
+    'has become a story again',
+    `post-fix arm ${post.preFixFails} vs pre-fix arm ${pre.preFixFails}`);
+}
+
 // ===========================================================================
 rule('5. THE REFUSAL CHECKED GOING RED — back it out of the CURRENT code and the residue is absorbed again');
 // ===========================================================================
@@ -598,6 +916,26 @@ rule('5. THE REFUSAL CHECKED GOING RED — back it out of the CURRENT code and t
 // The durable half of section 4: it measures the code in this tree rather than a
 // ref that stops being pre-fix the moment this merges. Same seeded residue, same
 // two observations.
+//
+// AND SINCE KAN-363 IT IS ALSO SECTION 4'S NAMED COVER, which makes it load
+// bearing in a second way: section 4 tells its reader that what it stopped
+// asserting happens here. That sentence is checked below rather than trusted.
+
+/**
+ * What section 4's dormancy message promises about this section, recorded as it
+ * happens so the promise can be checked rather than read.
+ *
+ * WHY THIS IS NOT ENOUGH ON ITS OWN, and it is the reason the counter is here
+ * rather than a bare boolean: `mutateScript` already reports a failed mutation
+ * as a counted FAIL, so a section 5 that could not run is already red today. The
+ * hole this closes is the other one — a section 5 that is DELETED, or quietly
+ * reduced to preconditions, while section 4 goes on printing a pointer to
+ * coverage that no longer exists, inside a green job. That is this epic's own
+ * signature defect sitting in the hand-off between two honest sections.
+ */
+const sectionFive = { central: false, checks: 0, failures: 0 };
+sectionFive.checks = checks;
+sectionFive.failures = failures;
 
 noRefusal: {
   const variant = mutateScript(
@@ -612,6 +950,7 @@ noRefusal: {
   if (seeded === null) break noRefusal;
   const r = runVariant(rel);
 
+  sectionFive.central = true;
   check(!r.out.includes(REFUSAL) && r.out.includes('=== 3. Every shape'),
     'WITHOUT THE REFUSAL THE CURRENT CODE RUNS ANYWAY over the residue — so section 3 is measuring ' +
     'the refusal, and the defect is one deleted condition away rather than closed by something else ' +
@@ -637,6 +976,39 @@ noRefusal: {
     'it" stayed green. Two assertions doing different work, on the run where they disagree.',
     (r.out.split('\n').find((l) => l.includes('git agrees it is clean')) ?? '(not present)').trim());
 }
+
+// ---------------------------------------------------------------------------
+// 5b. SECTION 4'S HAND-OFF, CHECKED (KAN-363).
+//
+// Section 4 is dormant and says so, and it names section 5 as what covers what
+// it stopped asserting. Until now that was prose in a `console.log` — and a
+// pointer nothing checks is precisely the artifact this epic keeps finding: it
+// goes on claiming coverage after the coverage has gone, and it does so inside a
+// green job, which is the direction these things always degrade in.
+//
+// SO THE POINTER IS AN ASSERTION. If section 5 is deleted, renamed past its own
+// mutation anchor, or reduced to preconditions, section 4's message becomes false
+// and this goes red naming that — rather than section 4 quietly continuing to
+// promise a demonstration nobody is doing.
+//
+// THE LIMIT, AT ITS NEAREST POINT RATHER THAN ITS MOST GENERAL: this asserts that
+// section 5 RAN and PASSED. It does not, and cannot, assert that section 5's
+// assertions are strong ones — a section 5 weakened to `check(true, …)` would
+// satisfy every word of this. That is one file over: `verify-proof-defences`
+// records what stands behind this script's central assertion, and
+// `verify-proof-verdicts` says in its own header that a reachable verdict "does
+// NOT establish that any of their assertions can be false". The thing that holds
+// section 5's strength is section 5's own red drive, and nothing here replaces
+// it.
+
+const sectionFiveChecks = checks - sectionFive.checks;
+const sectionFiveFailures = failures - sectionFive.failures;
+check(sectionFive.central && sectionFiveChecks > 0 && sectionFiveFailures === 0,
+  'SECTION 4 NAMES SECTION 5 AS ITS COVER, AND SECTION 5 REALLY RAN — its central assertion executed ' +
+  'and its checks all passed. A dormant section pointing at a section that no longer asserts would be ' +
+  'a claim of coverage with nothing behind it, which is the shape this whole script exists to catch',
+  `section 5 central assertion reached: ${sectionFive.central}; ${sectionFiveChecks} check(s), ` +
+  `${sectionFiveFailures} failure(s)`);
 
 // ===========================================================================
 rule('6. NO STATE IN BETWEEN — every version of ci.yml a reader could catch explains itself');

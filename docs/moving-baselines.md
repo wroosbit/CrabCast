@@ -27,7 +27,10 @@ Three failure shapes, and §2 showed two of them:
 * **It goes tautological.** The baseline catches up entirely and the comparison
   compares a thing against itself.
 
-The sweep found a fourth, which is set out under Finding 2.
+The sweep found a fourth, which is set out under Finding 2. Taking the decision
+Finding 2 left open (KAN-363) found a fifth underneath it, which is set out under
+Finding 4 — and which is **not** a moving-baseline failure at all, but the reason
+one of them cannot be repaired by pinning.
 
 ---
 
@@ -94,6 +97,17 @@ demonstration script rather than a proof: it is not in the CI array, nothing
 gates on it, and it prints a before/after rather than asserting. Recorded here
 so the next sweep does not have to re-derive that.
 
+**If you are here to repin `verify-ci-wiring-guards` §2, read this first
+(KAN-363).** `verify-ci-proof-residue-is-legible` §4c pins the same commit
+`dff24229` for its own pre-fix arm, and **it does not depend on §2's pin** — it
+reads nothing from that file. The two coincide because KAN-354 chose the pre-fix
+point as §2's baseline, which is a reason and not a dependency. A first draft of
+§4c asserted the two still agreed; **measured, that assertion could only ever
+emit a false red** — repin §2 to current `main` and the target still exits 0,
+§4c's arms still read 11 and 0, guard 2 still passes, and the proof goes 52/53 on
+that one assertion alone. It was removed rather than reworded. **So repin §2
+freely: §4c is not downstream of it, and nothing in this table is.**
+
 **Channel 2 — network. Nothing.** No proof fetches anything at run time: no
 `fetch`, no HTTP client, no `npm view`, no registry read, no GitHub API. The one
 match was an error string telling the reader to run `npm install`. This is the
@@ -128,6 +142,12 @@ compares against a wall-clock baseline.
 ---
 
 ## Finding 1 — `verify-ci-proof-residue-is-legible` §4 is on a moving ref, and has been dormant for 43 merged pull requests
+
+> **Status (KAN-363, 2026-08-12): decided.** §4 stays dormant and is no longer
+> silent about it — the dormancy is stated in the file, the unreachable-ref case
+> is now red, the pointer at §5 is a checked assertion, and §4c demonstrates with
+> a fixture why pinning is refused. **Re-measured at `2dd39eb`: 44 merged pull
+> requests**, up one from the 43 below. The reasoning is under Finding 4.
 
 `preFixTarget()` asks `['origin/main', 'main']` for the pre-fix
 `verify-ci-wiring-guards.mjs`. Since KAN-172 merged at `13a247d`, `origin/main`
@@ -175,6 +195,30 @@ dormant section into a red one, which is the worse of the two failure modes.
 **The change was made, measured, and reverted.** The tree here carries no edit to
 that script.
 
+### KAN-363 correction — the one-line pin is not the only pin available
+
+**Re-measured at `2dd39eb`, and the reproduction holds exactly**: pin §4 to
+`0edd2c1` and the run goes 50/51, the single `FAIL` being §4's headline assertion
+on `exit 1`, with eleven `pre-fix:` failures inside the loaded script. `gap: true`
+appears 11 times in the historical target, so "eleven" is the case count and not a
+coincidence.
+
+**But the sentence above stops one measurement too early.** The loaded script's
+moving ref is `origin/main` *as resolved inside the sandbox*, and the sandbox's
+refs are this script's own to set. Measured at `2dd39eb`, running the historical
+target over comment-only residue under three ref environments:
+
+| sandbox `origin/main` | `pre-fix:` FAILs | verdict |
+|---|---|---|
+| as-is (`1f959175`, post-KAN-148) | 11 | exit 1, no `ALL CHECKS PASSED` |
+| forced to `dff24229` (pre-KAN-148) | 0 | **exit 0, `ALL CHECKS PASSED`, 119 PASS** |
+| both refs deleted | 0 (nested §2 `NOT RUN`) | exit 0, `ALL CHECKS PASSED`, 108 PASS |
+
+So **pinning the ref *and* the ref environment does restore §4**, and the claim
+that this shape has no pin is wrong. What is right is that it should not be
+pinned anyway — for the reason in Finding 4, which is a better reason and a
+different one.
+
 ## Finding 3 — the residue sandbox's `origin/main` is a per-machine artifact, and the script's own disclosure of it is false
 
 `verify-ci-proof-residue-is-legible` builds its sandbox with
@@ -205,6 +249,92 @@ sandbox's copy.
 This is left as a finding rather than a fix: making the sandbox's ref environment
 deterministic is a change to the fixture with its own red-drive obligations, and
 the epic agent reserves filing.
+
+**KAN-363 re-measured it at `2dd39eb` and corrects one detail, in the direction
+that makes the header's disclosure worse rather than better.** The sandbox's
+`origin/main` is `1f959175` — now **20** commits behind — and `refs/heads/main`
+is **absent**. So of the two things the header claimed, the ref it said was
+missing is the one that exists. The header has been corrected in place; **the
+mechanism has not been touched and this finding stays open.** Nothing in that
+script depends on the ambient ref any more: §§5–7 drive the current target, whose
+baseline KAN-354 pinned, and §4c pins both of its arms precisely so that it does
+not inherit this.
+
+---
+
+## Finding 4 — the fifth shape: a proof whose SUBJECT is immutable can only fail for reasons that are not its subject
+
+**This is what taking Finding 2's decision turned up, and it is the part worth
+keeping.** It is not a moving-baseline failure. It is the reason one of them must
+not be repaired by pinning, and it generalises past this repository.
+
+`verify-ci-proof-residue-is-legible` §4 loads a **frozen artifact** — the target
+as it stood at `0edd2c1` — and asserts on what it does to a **seeded** residue.
+Both inputs are constants. Its verdict is therefore a function of
+
+> {frozen bytes} × {seeded residue} × {environment}
+
+and the first two cannot move. **So nothing a future change does to the behaviour
+under test can ever change what that section says.** Only environment drift can.
+Every red it is capable of emitting is, by construction, a red about the
+environment — which is to say a **false** red, misattributed to whoever last
+touched the environment. That is precisely §2's failure mode, one level up, and
+KAN-354 was filed to remove it.
+
+Compare §5, which is why it is the durable half: its subject is *today's* code
+with the fix backed out. Change the code and §5's verdict changes. It can go red
+for a **true** reason.
+
+**The rule that falls out, and it is a rule about proofs rather than about refs:**
+
+> **Pin the comparand, never the subject.** A pinned revision is sound as
+> something to *compare against* — `verify-daemon-provenance` and
+> `verify-readme-is-current` both do it, and both stay live, because their
+> subject is what the program does *today*. A pinned revision is unsound as the
+> thing *under test*: once the subject is frozen the section has stopped being a
+> guard and become a recording, and a recording that can still go red is strictly
+> worse than one that cannot.
+
+**And the corollary for `NOT RUN`, because two conditions spell themselves
+identically and are opposite.** `verify-daemon-provenance` says, in its own
+words, *"a shallow clone that cannot reach these revisions has demonstrated
+nothing"*, and treats `NOT RUN` as a failure. That is right **there** and wrong in
+§4, and the discriminator is not the wording:
+
+* **`NOT RUN` because the environment is deficient** — a shallow clone, a missing
+  ref — is a **fixable defect**, and red is the correct verdict. Somebody can act
+  on it.
+* **`NOT RUN` because the baseline has caught up** is the **permanent, expected
+  consequence of the fix the section demonstrates**. Red there would mean CI is
+  red for succeeding, for ever, with nothing anyone can do. Quiet is correct — but
+  quiet **and stated**, which is what was missing.
+
+§4 now makes exactly that distinction: the unreachable-ref case is a counted
+assertion, the caught-up case is a stated dormancy.
+
+### The decision, and the options rejected
+
+**KAN-363 was filed as a decision ticket with four options. What was chosen is
+the third — keep the dormancy — with the part that made it worth choosing added:
+the dormancy is now *stated and partly asserted* rather than silently taken.**
+
+| Option | Verdict | Why |
+|---|---|---|
+| **Pin, and neutralise the loaded script's own moving ref** | rejected | **Not because it fails — measured, it works** (the table under Finding 2). Rejected because a revived §4's subject would be frozen, so by Finding 4 every red it could emit would be a false one, misattributed to whoever last edited `ci.yml`. The historical script's setup guard needs exactly one `      - run: node scripts/verify-proof-registry.mjs` and one `  proof-registry:` line in a file edited **21 times** since `13a247d`. Measured: all 21 kept both. Surviving is not a mechanism. |
+| **Delete §4 and rely on §5** | rejected | The dormancy statement is the only record of why the historical demonstration cannot be re-run; deleting the section deletes the explanation with it, and removes the home for the checked pointer at §5, which is new coverage. |
+| **Keep the dormancy and document it precisely** | **chosen** | It is what §4 was already doing silently. Now: the file states what it stopped asserting, when, and what covers it; the unreachable-ref case is red; §4c proves the pin-refusal with a fixture; §5b checks the pointer. |
+| **Assert something else** | adopted in part | §4c and §5b are both "something else", and both hold today's code. The pure form — replacing §4 outright — is rejected for the same reason as deleting it. |
+| **`NOT RUN` is a failure** (`verify-daemon-provenance`'s answer) | **split** | Adopted for the unreachable-ref half, where it is true and where that file's reasoning applies exactly. Rejected for the caught-up half: it would make CI permanently red for succeeding. See the corollary above. |
+
+**What was measured, and what was not.** Measured at `2dd39eb`: §4 dormant and
+printing `NOT RUN — origin/main already carries this fix`; the semantic guard
+still present; §5 live and asserting (5 checks); the pin reproducing KAN-361's
+red at 50/51; the three-way ref table; 44 merged PRs and 21 `ci.yml` edits since
+`13a247d`; the sandbox's `origin/main` at `1f959175`, 20 behind, with
+`refs/heads/main` absent; and all three new mechanisms driven red one at a time.
+**Inferred, not measured:** that the historical script's couplings to a moving
+present will eventually break — 21 `ci.yml` edits have not broken them, and the
+argument for Finding 4 does not rest on this happening.
 
 ---
 
