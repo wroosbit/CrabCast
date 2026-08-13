@@ -114,7 +114,7 @@ import type { ResumeCause } from './resume.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 7;
+export const READ_CONTRACT_VERSION = 8;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -439,6 +439,7 @@ const CAPACITY_BUCKETS: { [K in keyof typeof CAPACITY_FIELDS]: ProvenanceBucket 
   measuredAt: 'observed',
   measuredWindowSeconds: 'observed',
   measuredAgentTrees: 'observed',
+  measuredTreesSeen: 'observed',
   // The terms, each one arithmetic over the above.
   capByCpu: 'derived',
   capByMemory: 'derived',

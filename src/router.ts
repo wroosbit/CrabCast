@@ -810,6 +810,12 @@ function capacityDto(c: Capacity) {
     measuredAt: c.measured ? new Date(c.measured.sampledAt).toISOString() : null,
     measuredWindowSeconds: c.measured ? Math.round(c.measured.windowSeconds) : null,
     measuredAgentTrees: c.measured ? c.measured.agentTrees : null,
+    // KAN-338: the population the sample was drawn from. `measuredAgentTrees`
+    // is the trees this daemon owns and charges for; this is every
+    // agent-runtime tree the window saw. A consumer comparing the two is
+    // asking how representative the divisor is, which is a question the
+    // attributed count cannot answer alone.
+    measuredTreesSeen: c.measured ? c.measured.treesSeen : null,
     capByCpu: c.capByCpu,
     capByMemory: c.capByMemory,
     headroomByCap: c.headroomByCap,

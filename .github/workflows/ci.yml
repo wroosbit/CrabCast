@@ -897,6 +897,7 @@ jobs:
             verify-list-agents-survives-restart
             verify-agent-capacity
             verify-uncharged-agent-cost
+            verify-agent-cost-attribution
             verify-cpu-headroom
             verify-io-stall-gate
             verify-restore-admission

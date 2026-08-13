@@ -8,14 +8,19 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
-import { finishMeasurement, startMeasurement, MeasurementStart } from './agent-cost.js';
+import {
+  AgentCostMeasurement,
+  MeasurementStart,
+  finishMeasurement,
+  startMeasurement
+} from './agent-cost.js';
 import { dampCost, sampleFromMeasurement, MIN_MEASURED_CORES } from './agent-cost-damping.js';
 import { AgentCost, MEASURED_AGENT_COST, setMeasuredAgentCost } from './capacity.js';
 import { CpuWindow, finishCpuWindow, setObservedCpu, startCpuWindow } from './machine-cpu.js';
 import { ConfigError, CrabcastConfig, loadConfig, resolveConfigPath } from './config.js';
 import { daemonConfigPathArg } from './daemon-invocation.js';
 import { FleetObservation, FleetStatusMemory, MessageRouter, MissingAgent } from './router.js';
-import { HerdrBridge } from './herdr.js';
+import { HerdrBridge, ourPaneIn } from './herdr.js';
 import {
   HERDR_VERSION_NOTICE_FIELD,
   checkHerdrVersion,
@@ -478,10 +483,105 @@ function degradeCostMeasurement(reason: string) {
   }
 }
 
+/**
+ * Why a window's charged sample was empty — the VACUITY CASE, which
+ * attribution creates and which therefore has to be named rather than counted
+ * (KAN-338).
+ *
+ * A divisor over an empty sample is a gate that agrees with any register at
+ * all, so the sample being empty must reach `degradeCostMeasurement` and pull
+ * the arithmetic back to the labelled seed. That guard is NOT new — the
+ * `totals.agents <= 0` rejection in `sampleFromMeasurement` has always been
+ * there for an empty fleet — and attribution's contribution is to make it
+ * reachable in a state that LOOKS busy: seven agent trees on the machine,
+ * none of them ours, which used to produce a confident measurement of
+ * somebody else's fleet. This is the exact state of the machine this was
+ * written on (2026-08-13).
+ *
+ * Three causes, said apart, because the operator's next move differs: `foreign`
+ * is another orchestrator and needs nothing; `no-handle` is an agent runtime
+ * started outside a herdr pane; `handle-unreadable` is this daemon unable to
+ * read those processes at all, which is a configuration fault that would
+ * otherwise be indistinguishable from an idle machine.
+ */
+function describeEmptySample(seen: AgentCostMeasurement['seen']): string {
+  if (seen.trees === 0) return 'no agent trees running, nothing to measure';
+  const why: string[] = [];
+  if (seen.foreign > 0) why.push(`${seen.foreign} belonging to no chargeable record of ours`);
+  if (seen.noHandle > 0) why.push(`${seen.noHandle} carrying no herdr pane handle`);
+  if (seen.handleUnreadable > 0) {
+    why.push(`${seen.handleUnreadable} whose environment this daemon cannot read`);
+  }
+  return (
+    `${seen.trees} agent tree(s) are running and none is a chargeable agent of this daemon ` +
+    `(${why.join('; ')})`
+  );
+}
+
+/**
+ * The pane names of the agents this daemon may charge for, or null when herdr
+ * did not answer (KAN-338).
+ *
+ * THE ONE OWNERSHIP TEST DECIDES, AND IT IS `ourPaneIn`. This function asks it
+ * once per chargeable record and collects the answers; it does not re-derive a
+ * pane name from a path, compare a `cwd`, or hold any second opinion about
+ * what "ours" means. That is what keeps herdr.ts:552's rule intact while the
+ * sampler gains attribution: the join added by KAN-338 supplies a CANDIDATE
+ * pane, and this set — built out of the existing test's own answers — is what
+ * says whether the candidate is ours.
+ *
+ * `chargeable: false` agents are left out here rather than downstream, because
+ * that is the whole numerator/denominator point: the budget being divided is
+ * the budget for charged agents, so the divisor must be measured from charged
+ * agents. An exempt supervisor of our own is as wrong in this sample as a
+ * stranger's agent is.
+ *
+ * NULL IS NOT AN EMPTY SET, and the distinction is load-bearing exactly as it
+ * is for `Occupancy` (herdr.ts:464): an unreachable herdr returns an empty
+ * census, so treating silence as "none of them are ours" would attribute the
+ * whole machine away and read as a fleet that is not running. The caller
+ * degrades to the seed instead, and says which of the two happened.
+ */
+function chargedPaneNames(): Set<string> | null {
+  const census = herdrBridge.listHerdrAgentsChecked();
+  if (!census.reachable) return null;
+
+  const names = new Set<string>();
+  for (const intent of agentRegistry.intents().values()) {
+    const record = intent.record;
+    if (!record.config.chargeable) continue;
+    const ours = ourPaneIn(census, record.path, record.config.launcher);
+    if (ours) names.add(ours.name);
+  }
+  return names;
+}
+
 function sampleFleetCost() {
+  // Asked BEFORE the window is closed rather than lazily inside the
+  // attributor, so that "herdr is unreachable" is one fact read once. Asked
+  // per tree it would be N nulls that cannot be told apart from N panes that
+  // are genuinely not ours — the same conflation `listHerdrAgentsChecked`
+  // exists to prevent.
+  const charged = costWindow ? chargedPaneNames() : null;
+  if (costWindow && charged === null) {
+    // Reopen the window regardless: the next tick should measure a fresh
+    // minute, not one stretched across a herdr outage.
+    costWindow = startMeasurement();
+    degradeCostMeasurement(
+      'herdr did not answer, so no process tree can be attributed to an agent record'
+    );
+    return;
+  }
+
   let measurement;
   try {
-    measurement = costWindow ? finishMeasurement(costWindow) : null;
+    measurement =
+      costWindow && charged
+        ? finishMeasurement(costWindow, (paneHandle) => {
+            const paneName = herdrBridge.paneNameForHandle(paneHandle);
+            return paneName !== null && charged.has(paneName);
+          })
+        : null;
     costWindow = startMeasurement();
   } catch (e: any) {
     costWindow = null;
@@ -494,7 +594,7 @@ function sampleFleetCost() {
   if (!sample) {
     degradeCostMeasurement(
       measurement.totals.agents <= 0
-        ? 'no agent trees running, nothing to measure'
+        ? describeEmptySample(measurement.seen)
         : 'sample failed validation'
     );
     return;
@@ -513,7 +613,12 @@ function sampleFleetCost() {
     cores: Math.max(MIN_MEASURED_CORES, Math.round(costEstimate.cores * 1000) / 1000),
     sampledAt: Date.now(),
     windowSeconds: measurement.elapsed,
-    agentTrees: measurement.totals.agents
+    agentTrees: measurement.totals.agents,
+    // What the window SAW, beside what it charged. A divisor averaged over 2
+    // of 9 trees and one averaged over 2 of 2 are different claims about how
+    // representative the figure is, and the report cannot say so from
+    // `agentTrees` alone (KAN-338).
+    treesSeen: measurement.seen.trees
   };
   setMeasuredAgentCost(published);
   if (costSamplerState !== 'live') {
@@ -521,7 +626,8 @@ function sampleFleetCost() {
     log(
       `Agent-cost sampler: live measurement established — damped cost ` +
       `${Math.round(published.residentBytes / (1024 * 1024))} MB / ${published.cores} core per tree ` +
-      `(${published.agentTrees} tree(s), ${Math.round(published.windowSeconds)}s window)`
+      `(${published.agentTrees} of ${published.treesSeen} tree(s) attributed to this daemon, ` +
+      `${Math.round(published.windowSeconds)}s window)`
     );
   }
 }

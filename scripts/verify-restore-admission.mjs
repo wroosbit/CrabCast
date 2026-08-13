@@ -368,7 +368,7 @@ const settledMeasured = {
   cores: 0.117,
   sampledAt: Date.now(),
   windowSeconds: 60,
-  agentTrees: 6
+  agentTrees: 6, treesSeen: 6
 };
 const measuredRate = startingAgentCores({ residentBytes: 0, cores: 0.117 }, 'measured');
 check(

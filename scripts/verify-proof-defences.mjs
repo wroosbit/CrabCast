@@ -332,6 +332,29 @@ const PROOF_DEFENCES = [
       'reachability half exists.'
   },
   {
+    script: 'verify-agent-cost-attribution-live',
+    defence: 'mutation',
+    central:
+      'a process tree running in a pane CrabCast created is joined back to that agent — and every '
+      + 'other agent tree on the machine is not — by the real sampler over real /proc and a real '
+      + 'herdr.',
+    anchor: 'RED: with the handle variable renamed, our own live agent is no longer attributed',
+    note:
+      'THE MUTATION RENAMES THE ONE STRING THE JOIN STANDS ON (`HERDR_PANE_ID` in agent-cost.js) '
+      + 'and requires the live agent to fall OUT of the charged sample, with the reason recorded '
+      + 'as `no-handle` rather than as `foreign` — a red that named the wrong cause would send the '
+      + 'next reader to the census instead of to the environment. §4 is the negative case without '
+      + 'a mutation at all: an attributor that recognises nothing must charge nothing over the '
+      + 'same trees, which rules out a sampler that charges regardless of the answer. '
+      + 'SEAM, and it is the reason this file exists separately from its CI-side sibling: '
+      + '`verify-agent-cost-attribution` supplies its own attributor and therefore cannot fail '
+      + 'when the join breaks. The two are halves, not alternatives. What NEITHER covers: whether '
+      + 'herdr keeps setting that variable in a future release, or keeps resolving the handle it '
+      + 'sets — both are facts about a binary this repository does not build and may not edit, and '
+      + 'the finding on KAN-338 names the herdr-side change that would make the join robust '
+      + 'instead of observed.'
+  },
+  {
     script: 'verify-activated-by',
     defence: 'mutation',
     central:
@@ -945,6 +968,31 @@ const PROOF_DEFENCES = [
   // -------------------------------------------------------------------------
   // guard — a precondition, a negative case, a vacuity check or a canary
   // -------------------------------------------------------------------------
+  {
+    script: 'verify-agent-cost-attribution',
+    defence: 'guard',
+    central:
+      'the per-agent cost divisor is computed from the trees this daemon owns and charges for; a '
+      + 'window that attributes none of them yields NO measurement rather than an average over '
+      + 'zero trees.',
+    anchor: 'VACUITY: the foreign trees were dragging the divisor DOWN, and no longer are',
+    note:
+      'THE GUARDS ARE THE THREE VACUITIES, and each closes a way this could pass while proving '
+      + 'nothing. §1 requires the exclusion to MOVE the divisor and in which direction — five '
+      + 'equally-priced trees would make the two averages agree and the assertion vacuous — and '
+      + 'then requires both cap terms to move, per term rather than net, because `cap` is a `min` '
+      + 'and hid a 4x regression once already (KAN-275). §3 requires the machine to be BUSY while '
+      + 'the sample is empty, so the guard is answering "no tree of ours" and not "no tree at '
+      + 'all", and asserts the arithmetic it prevents is genuinely 0/0. §4 drives the KAN-275 '
+      + 'floor as a counterfactual — the same idle tree fed back as an OVERRIDE, which is the one '
+      + 'input the floor honours outright — so "the floor still earns its keep" is a number '
+      + '(capByCpu 3 floored against 2500 unfloored) rather than a claim. '
+      + 'SEAM, NAMED IN THE FILE\'S OWN HEADER: it supplies its own attributor, so it proves what '
+      + 'the sampler DOES with an ownership answer and never that a real answer arrives. A machine '
+      + 'where the join silently returned false for every tree passes this file top to bottom. '
+      + 'That half is `verify-agent-cost-attribution-live`, which is excluded from CI and must be '
+      + 'hand-run before any change to the join.'
+  },
   {
     script: 'verify-daemon-foreground',
     defence: 'guard',
