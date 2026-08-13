@@ -154,6 +154,44 @@ green**: green means the guard caught both moves, so this drive going red means
 §2d has stopped seeing branch changes and the decision recorded in §8's note 1
 has lost the mechanism it leans on.
 
+`kan376-red-drive.mjs` is a sixth, and it is the one whose **finding is a
+correction to a sentence rather than a verdict about a guard**. It asks what
+actually stops a fourth `ActivateRefusalKind` reaching the wire. It is not in the
+CI array and nothing gates on it. Four things are worth knowing before it is next
+run.
+
+It mutates **source**, not `dist`, and therefore does not use
+`scripts/mutation.mjs`: three of its five arms are about what the COMPILER does,
+and a mutated `dist` has already been compiled. It copies the tree into a
+`mkdtemp` scratch and symlinks the repo's `node_modules` in — the same
+false-red-avoidance `kan328-red-drive.mjs` records above, for the same reason —
+and never touches the working tree, so it needs no restore.
+
+It runs the **real** `verify-read-contract.mjs` via the `--static-only` flag
+KAN-376 added, rather than a reimplementation of its §1. That flag exists for
+this drive: §1 is the only section needing no daemon, and four arms would
+otherwise pay for four full fleet lifecycles and then have to attribute a red
+among every other section's assertions. **Its verdict line names the sections it
+did not run**, deliberately — a partial run printing `ALL CHECKS PASSED` is the
+defect that proof exists to catch, one level up.
+
+**Its expected verdict is green, and one arm's expectation is that `tsc`
+SUCCEEDS.** That arm is the finding: `src/router.ts` and §11 of the read-path
+contract both said a new refusal kind *"does not compile until it has a line in
+the declaration AND a row in the document"*, and **the compiler cannot see the
+document**. Measured at `d4a851f` — union alone, `tsc` exit 2 at the `Exact<>`
+binding; union plus `VALUE_SETS` with no §9 row, **`tsc` exit 0**. Both sentences
+were corrected rather than the mechanism changed. So this drive going red on the
+`union+values` arm means the compiler has somehow gained a view of the document,
+which would be worth reading about before believing.
+
+**And two of its arms drive a guard that did not exist before KAN-376.** The
+`fully-declared` arm satisfies the compiler AND §9's table and is caught only by
+the rule join added to §1 — the branches carrying `refused` are exactly the
+members of `activateRefused`. Without that join the arm is green. `branch-only`
+drives the same join from the other direction, because a join asserted in one
+direction only is half a join.
+
 **If you are here to repin `verify-ci-wiring-guards` §2, read this first
 (KAN-363).** `verify-ci-proof-residue-is-legible` §4c pins the same commit
 `dff24229` for its own pre-fix arm, and **it does not depend on §2's pin** — it

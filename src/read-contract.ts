@@ -912,9 +912,17 @@ export const ACTIVATE_RESPONSE_FIELDS = {
   occupiedBy: { bucket: 'observed', optional: true, rows: 'PaneOccupant' },
   /** Prose for a human, beside a co-occupancy that was reported and not refused. */
   note: { bucket: 'derived', optional: true },
-  /** See {@link VALUE_SETS.activateRefused}. On three of the nine refusals. */
+  /**
+   * See {@link VALUE_SETS.activateRefused}. On the PRE-FLIGHT refusals — those
+   * naming a condition checked and found before anything was attempted. Its
+   * absence is not "not refused": read `success: false`.
+   */
   refused: { bucket: 'derived', optional: true },
-  /** See {@link VALUE_SETS.activateRefusedBy}. On the capacity refusal only. */
+  /**
+   * See {@link VALUE_SETS.activateRefusedBy}. On the capacity refusal only —
+   * so a consumer branching on `refused` alone reads `undefined` on the most
+   * actionable refusal this surface has.
+   */
   refusedBy: { bucket: 'derived', optional: true },
   /** What `configure` would have to supply. On the `not-configured` refusal. */
   missing: { bucket: 'derived', optional: true },
@@ -997,13 +1005,41 @@ export interface ActivateBranchSpec {
  * sets as equalities against a real daemon, and `scripts/kan328-red-drive.mjs`
  * watches that catch a move in each direction rather than assuming it does.
  *
- * FOUR OF THE NINE REFUSALS CARRY NO MACHINE-READABLE DISCRIMINATOR.
- * `bad-address`, `bad-flag`, `spawn-error` and `confirm-failed` are separated
- * from each other only by the prose in `error` — and `bad-flag` and
- * `spawn-error` have IDENTICAL key sets, so no amount of shape inspection tells
- * them apart. `refused` and `refusedBy` exist and cover three and one of the
- * nine respectively. Named here because a reader who sees `refused` on some
- * refusals will otherwise assume it is on all of them.
+ * WHICH REFUSALS CARRY A KIND IS A RULE (KAN-376), and it is stated in
+ * `src/router.ts` on `ActivateRefusalKind` and argued in §8 note 2 of the
+ * document: `refused` names a condition CrabCast CHECKED AND FOUND before it
+ * attempted anything, and is not a stage label for an attempt that lost. What
+ * belongs beside THIS declaration is the half a reader of the branch table
+ * needs — what a consumer can actually tell apart from the key sets below.
+ *
+ * SEVEN OF THE NINE ARE MACHINE-DISTINGUISHABLE AND ONE PAIR IS NOT. `refused`
+ * separates three and `refusedBy` a fourth; `attach-error` is the only refusal
+ * carrying `paneName`+`paneId`+`alreadyRunning`, `confirm-failed` the only one
+ * carrying `verified` without `refused`, and `bad-address` the only one with no
+ * `path` at all.
+ *
+ * THE PAIR: `bad-flag` and `spawn-error` have IDENTICAL key sets, so no amount
+ * of shape inspection tells them apart, and their remedies are OPPOSITE — edit
+ * your code, versus retry or escalate. That the other seven are separable is
+ * what makes this one worth naming rather than filing under "some refusals are
+ * vague".
+ *
+ * AND `bad-address` IS DISTINGUISHABLE ONLY BY AN ABSENCE, which is the
+ * discipline this daemon refuses everywhere else. It also flattens FIVE causes
+ * into one prose string: `canonicalPath` throws a `PathError` carrying
+ * `PathProblem` (`src/identity.ts` — `not-a-string`, `not-absolute`,
+ * `does-not-exist`, `uninspectable`, `not-a-directory`) and
+ * `MessageRouter.addressOfRequest` discards it on its `strict` path
+ * (`return { error: e?.message ?? String(e) }`). Cited by symbol rather than by
+ * line: the `router.ts` line moved while this comment was being written. At
+ * least two of the five — `does-not-exist`, the ordinary way an agent's
+ * directory ends, and `uninspectable` — are reachable by a CORRECT caller
+ * against a changing world.
+ *
+ * ALL THREE OF THOSE ARE DISCLOSED RATHER THAN LEFT TO BE INFERRED, and none of
+ * them is fixed here: publishing a discriminator for any of them moves the
+ * wire, which is a decision and a version bump rather than a description. They
+ * are named so the next reader meets the limit rather than discovering it.
  */
 export const ACTIVATE_RESPONSE_BRANCHES = {
   /** `success: true` — this call started the agent. */
@@ -1266,9 +1302,18 @@ export const VALUE_SETS = {
    */
   startsChargeBasis: ['cpu-window', 'load1-period'],
   /**
-   * `activate_response.refused` (KAN-287) — the machine-readable kind, on the
-   * three refusals that carry one. **It is on three of the nine**, and the
-   * document says which; a consumer must not read its absence as "not refused".
+   * `activate_response.refused` (KAN-287) — the machine-readable kind.
+   *
+   * ON THE PRE-FLIGHT REFUSALS, BY THE RULE IN §8 NOTE 2 (KAN-376): it names a
+   * condition CrabCast checked and found before it attempted anything, and is
+   * not a stage label for an attempt that lost. THE MEMBERS ARE NAMED AFTER THE
+   * BRANCHES THAT CARRY THEM, and `verify-read-contract.mjs` §1 asserts that
+   * join in both directions — so this list and
+   * {@link ACTIVATE_RESPONSE_BRANCHES} cannot drift apart.
+   *
+   * A consumer must not read its absence as "not refused": read `success:
+   * false`. What an absent value means, and the one instrument that separates
+   * "no kind" from "an older daemon", is §9.
    */
   activateRefused: ['not-configured', 'unverifiable', 'occupied'],
   /**
