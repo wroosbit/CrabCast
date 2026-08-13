@@ -226,6 +226,16 @@ async function main() {
   // This script drives herdr itself, so without this section it would keep
   // passing after sendToAgent stopped sending what it measures. Exact counts,
   // because "contains" would survive a second interrupt being added.
+  //
+  // ⚠ THIS SECTION IS EXPECTED TO GO RED WHEN KAN-383 LANDS, AND THAT IS THE
+  // PIN WORKING RATHER THAN A DEFECT. KAN-383 makes the submit conditional —
+  // the pane is read between `send-text` and `Enter`, and the Enter is issued
+  // only when our own text is visible — so the flat four-call sequence asserted
+  // below stops being what `sendToAgent` emits. Whichever of the two lands
+  // second updates this assertion to the new sequence; it must not be loosened
+  // into a "contains" check, because the whole value of §0 is that it cannot be
+  // satisfied by a sequence nobody chose. This script is excluded from CI, so
+  // the red arrives on a hand-run rather than on anybody's required check.
   {
     const src = fs.readFileSync(path.join(repoRoot, 'src', 'herdr.ts'), 'utf8');
     const cCount = (src.match(/'C-c'/g) ?? []).length;

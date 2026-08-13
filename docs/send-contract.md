@@ -489,12 +489,21 @@ the probe before acting on it.
 * **Condition it on something observable.** Rejected. The read that would drive
   it cannot cheaply tell the state apart: `COMPOSER_MARKERS` is `['❯', '│ >']`,
   and **`❯` is also the glyph a Claude Code dialog draws its selection cursor
-  with** — so `splitAtComposer` reads a dialog cursor as a composer. Telling
-  them apart needs Claude-Code-specific chrome (`Enter to confirm · Esc to
-  cancel`), which is a private UI string in a program this repository does not
-  version, on a daemon that also drives `shell` agents. That buys a new failure
-  mode — a guess wrong in either direction — to condition a keystroke measured
-  to be inert. **A wrong guess is worse than honest bluntness.**
+  with** — so `splitAtComposer` reads a dialog cursor as a composer. Worse than
+  that, `splitAtComposer` takes the **furthest** marker by `lastIndexOf`, so on
+  a dialog frame it locks onto the **selected option** and identifies it as the
+  input line about to be typed into.
+
+  Telling a dialog from a composer therefore needs Claude-Code-specific chrome,
+  and **that does not work either — measured, on KAN-383.** The trust dialog's
+  footer is `Enter to confirm · Esc to cancel`; the tool-permission dialog's is
+  `Esc to cancel · Tab to amend · ctrl+e to explain`. **A detector keyed on the
+  obvious string misses the permission dialog completely, and a missed dialog is
+  the whole defect back.** Any such detector also inherits Claude Code's redraw
+  schedule as a dependency, on a daemon that drives `shell` agents too. That
+  buys a new failure mode — a guess wrong in either direction — to condition a
+  keystroke measured to be inert. **A wrong guess is worse than honest
+  bluntness.**
 * **Make it a caller's flag.** Rejected, and the default is why. The honest
   default is "send the interrupt", since that is what protects the common case;
   a flag defaulting that way changes nothing for anyone who does not set it,
