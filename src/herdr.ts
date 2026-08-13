@@ -17,7 +17,7 @@ import {
 } from './launchers.js';
 import type { AgentLauncher } from './launchers.js';
 import { diagnoseSpawnFailure } from './herdr-health.js';
-import { EVIDENCE_TAIL_CHARS, landedCount, messageInComposer } from './delivery.js';
+import { EVIDENCE_TAIL_CHARS, landedCount, messageInComposer, visibleCount } from './delivery.js';
 import type { SendEvidence, SendOutcome, SendVerdict } from './delivery.js';
 import { agentsDirFor, canonicalizeOrNull, paneNameFor, sidecarDirFor } from './identity.js';
 import {
@@ -262,6 +262,24 @@ const DELIVERY_CONFIRM_TIMEOUT_MS = 10_000;
 const DELIVERY_CONFIRM_POLL_MS = 500;
 
 /**
+ * How long freshly typed text gets to appear ANYWHERE on the pane before the
+ * submit is withheld (KAN-383).
+ *
+ * Much shorter than {@link DELIVERY_CONFIRM_TIMEOUT_MS}, and the two budgets
+ * are measuring different things. That one waits for an AGENT to swallow a
+ * message and echo it into its transcript, which is work. This one waits only
+ * for a TERMINAL to echo characters that were just written to it, which is a
+ * redraw — if it has not happened in this long the pane did not take them.
+ * Nothing is lost by being wrong in the impatient direction: a withheld submit
+ * leaves the text in the composer and says so, which is recoverable, where a
+ * blind Enter is not.
+ */
+const TYPED_CONFIRM_TIMEOUT_MS = 2_000;
+
+/** Gap between pane reads while waiting for typed text to show up. */
+const TYPED_CONFIRM_POLL_MS = 250;
+
+/**
  * Enough tail to hold a long message's echo and the composer beneath it.
  * Larger than {@link TAIL_DEFAULT_LINES} because the composer has to be on
  * screen for the positional test to mean anything: a window that stops above it
@@ -289,6 +307,30 @@ function notDeliveredMessage(paneName: string, timeoutMs: number, inComposer: bo
 }
 
 /** What an unconfirmable send tells its caller, and what it must not conclude. */
+/**
+ * Why no Enter was pressed. Says what was NOT done as well as what was, because
+ * a caller reading this needs to know the pane was left alone (KAN-383).
+ */
+function submitWithheldMessage(
+  paneName: string,
+  timeoutMs: number,
+  readable: boolean,
+  readError?: string
+): string {
+  return readable
+    ? `NOT DELIVERED to '${paneName}': the message was typed and did not appear anywhere on ` +
+      `the pane within ${timeoutMs}ms, so THE SUBMIT WAS WITHHELD — Enter was not pressed ` +
+      `(submits: 0). A pane that swallowed the text will not submit it for an Enter either, ` +
+      `and an Enter it cannot submit still confirms whatever that pane has highlighted, which ` +
+      `at a Claude Code dialog is a consent answer nobody gave. Nothing was changed on the ` +
+      `pane. Sending again is safe and does the same thing.`
+    : `UNVERIFIABLE for '${paneName}': the message was typed, and the pane could not be read ` +
+      `for ${timeoutMs}ms afterwards${readError ? ` (${readError})` : ''}, so whether the text ` +
+      `arrived is unknown. THE SUBMIT WAS WITHHELD — Enter was not pressed (submits: 0), ` +
+      `because an Enter at a pane nobody can observe may confirm a dialog rather than submit a ` +
+      `message. The text may be sitting in the composer; read the agent once herdr answers.`;
+}
+
 function unverifiableMessage(paneName: string, timeoutMs: number, readError?: string): string {
   return (
     `UNVERIFIABLE for '${paneName}': the message was typed and submitted, but the pane could ` +
@@ -2029,7 +2071,15 @@ export class HerdrBridge {
   private readDeliveryEvidence(
     agentPath: string,
     message: string
-  ): { readable: true; count: number; inComposer: boolean; tail: string; source: TailSource | null }
+  ): {
+      readable: true;
+      count: number;
+      /** Copies anywhere on the pane — the submit precondition. See {@link visibleCount}. */
+      visible: number;
+      inComposer: boolean;
+      tail: string;
+      source: TailSource | null;
+    }
     | { readable: false; error: string } {
     const tail = this.tailAgent(agentPath, DELIVERY_TAIL_LINES);
     if (!tail.success || typeof tail.text !== 'string') {
@@ -2038,10 +2088,143 @@ export class HerdrBridge {
     return {
       readable: true,
       count: landedCount(tail.text, message),
+      visible: visibleCount(tail.text, message),
       inComposer: messageInComposer(tail.text, message),
       tail: tail.text,
       source: tail.source ?? null
     };
+  }
+
+  /**
+   * Wait until the text we just typed is ON THE PANE — the precondition for
+   * pressing Enter.
+   *
+   * WHY THE SUBMIT IS CONDITIONAL AT ALL (KAN-383). An Enter is not a neutral
+   * keystroke. It confirms whatever the pane currently has selected, and at a
+   * Claude Code dialog that is a consent answer nobody gave: measured against a
+   * real agent, a startup trust dialog whose highlight was deliberately moved to
+   * *"No, exit"* resolved to **option 2** and `claude` exited with status 1,
+   * while a tool-permission dialog whose highlight was moved to *"Yes, and
+   * always allow…"* **ran the command and granted the standing permission.**
+   * Neither option was the default position or the conservative answer; the only
+   * property either had was being highlighted.
+   *
+   * WHAT THIS IS NOT, because the obvious design is the wrong one. It is **not a
+   * dialog detector.** Nothing here recognises a dialog, matches its wording, or
+   * reads its footer — and that is deliberate, because two dialog kinds measured
+   * on the same afternoon render their footers differently (*"Enter to confirm ·
+   * Esc to cancel"* against *"Esc to cancel · Tab to amend · ctrl+e to
+   * explain"*), so a detector tuned to either one misses the other, and both are
+   * somebody else's TUI that may be redrawn in the next release. This asks a
+   * question about OUR OWN MESSAGE instead: is the thing we just typed on the
+   * pane? That is an observation, and it stays true however Claude Code chooses
+   * to draw itself.
+   *
+   * AND A DETECTOR COULD NOT HAVE USED THE MARKER EITHER, which is the sharper
+   * half. A dialog's highlight caret is `❯`, already in `COMPOSER_MARKERS`, and
+   * `splitAtComposer` takes `lastIndexOf` reduced to the FURTHEST match — so on
+   * a dialog frame it does not merely find *a* caret, it locks onto the LAST
+   * one, which is the selected option. **The daemon identifies the highlighted
+   * choice as the input line it is about to type into.** Measured on real
+   * frames: `❯ 1. Yes, I trust this folder`, `❯ 2. No, exit`, `❯ 1. Yes`.
+   *
+   * THE THREE PANES IT HAS TO SEPARATE, and it separates them without knowing
+   * which it is looking at:
+   *
+   *   a claude composer  our text is in the composer          -> visible, submit
+   *   a bare shell       our text is on the command line      -> visible, submit
+   *   a dialog           our text is destroyed, echoed NOWHERE -> unseen, withhold
+   *
+   * The third is measured rather than assumed: `send-text` at both dialog kinds
+   * was echoed in none of herdr's three read sources and left the frame
+   * otherwise byte-identical.
+   *
+   * AND AN UNREADABLE PANE WITHHOLDS THE ENTER TOO. *"We could not tell"* must
+   * not resolve to *"press it anyway"* — that is the whole failure this exists
+   * to prevent, and it is the same rule {@link Occupancy} states for spawning
+   * and `confirmAgentPresent` states for liveness. The cost of withholding is
+   * real and is stated rather than hidden: the message sits typed-and-unsubmitted
+   * in the composer, which is exactly the KAN-114 failure this file was built to
+   * catch. That is the deliberate trade — an unsubmitted message is visible,
+   * recoverable and reported (`submits: 0`), while an answered consent dialog is
+   * none of the three.
+   *
+   * THIS IS THE RULE THE RETRY ALREADY FOLLOWED. The Enter-only retry has always
+   * pressed Enter only when the pane showed our text sitting in the composer.
+   * The FIRST Enter did not. Both are the same keystroke with the same
+   * consequence; this makes the discipline uniform rather than inventing one.
+   *
+   * ---------------------------------------------------------------------------
+   * THE THREE SHAPES NOT TAKEN, recorded because a decision without its
+   * alternatives is an assertion (KAN-383 AC1).
+   * ---------------------------------------------------------------------------
+   *
+   * 1. **Detect the dialog and refuse before typing.** The shape the ticket
+   *    floated, and the one this replaces. Rejected on a measurement rather
+   *    than on taste: the two dialog kinds measured render their footers
+   *    differently (*"Enter to confirm · Esc to cancel"* against *"Esc to
+   *    cancel · Tab to amend · ctrl+e to explain"*), so a detector tuned to
+   *    either misses the other — and a missed dialog is the whole defect back
+   *    again. Worse, the signal it would have to key on is `❯`, which is
+   *    ALREADY in `COMPOSER_MARKERS`: a real dialog's highlight caret is the
+   *    same glyph as the composer's, so `splitAtComposer` reports `❯ 1. Yes` as
+   *    the input line. A guess in the other direction is just as costly — a
+   *    heuristic that misfires refuses sends to a healthy agent, and a fleet
+   *    that stops working is worse than the bluntness it replaced.
+   *
+   * 2. **Answer `refused`.** The vocabulary exists ({@link SendRefusal}) and it
+   *    looks like a fit until the contract's own definition is read: `refused`
+   *    means the request never became a send, so **no pane was read and no
+   *    keystroke was issued**, and its branch carries neither `interrupts` nor
+   *    `submits`. By the time this is decided a pane HAS been read and a Ctrl+C
+   *    HAS been issued. Answering `refused` would be the exact defect this epic
+   *    keeps re-finding — a word whose stated basis is broader than what
+   *    happened. `not-delivered` is true in both outcome and basis: the pane was
+   *    read, and the message is not in it. It also needs no new member, so no
+   *    consumer's exhaustive switch grows a default case.
+   *
+   * 3. **Make it a caller's flag.** The default would be the real decision, and
+   *    neither default survives being written down: `submit: false` by default
+   *    breaks every existing caller, and `submit: true` by default leaves the
+   *    hazard exactly where it was for everyone who does not know to ask. A
+   *    caller cannot know which they want either — they would have to know what
+   *    is on a pane they cannot see, which is the daemon's job and the reason
+   *    this reads the pane at all.
+   */
+  private async confirmTyped(
+    agentPath: string,
+    message: string,
+    visibleBefore: number,
+    timeoutMs: number,
+    pollMs: number
+  ): Promise<{ visible: boolean; checks: number; last?: {
+    count: number; visible: number; inComposer: boolean; tail: string; source: TailSource | null;
+  }; error?: string }> {
+    const deadline = Date.now() + timeoutMs;
+    let checks = 0;
+    let last: { count: number; visible: number; inComposer: boolean; tail: string; source: TailSource | null } | undefined;
+    let lastError: string | undefined;
+
+    for (;;) {
+      const reading = this.readDeliveryEvidence(agentPath, message);
+      checks++;
+      if (reading.readable) {
+        last = reading;
+        lastError = undefined;
+        // Strictly greater than the baseline, for the reason every count on
+        // this path is compared rather than tested: the pane may legitimately
+        // have held this text already.
+        if (reading.visible > visibleBefore) return { visible: true, checks, last };
+      } else {
+        last = undefined;
+        lastError = reading.error;
+      }
+
+      if (Date.now() + pollMs >= deadline) break;
+      await delay(pollMs);
+    }
+
+    return { visible: false, checks, last, error: lastError };
   }
 
   /**
@@ -2079,10 +2262,17 @@ export class HerdrBridge {
   public async sendToAgent(
     agentPath: string,
     message: string,
-    opts: { confirmTimeoutMs?: number; pollMs?: number } = {}
+    opts: {
+      confirmTimeoutMs?: number;
+      pollMs?: number;
+      typedTimeoutMs?: number;
+      typedPollMs?: number;
+    } = {}
   ): Promise<SendOutcome> {
     const confirmTimeoutMs = opts.confirmTimeoutMs ?? DELIVERY_CONFIRM_TIMEOUT_MS;
     const pollMs = opts.pollMs ?? DELIVERY_CONFIRM_POLL_MS;
+    const typedTimeoutMs = opts.typedTimeoutMs ?? TYPED_CONFIRM_TIMEOUT_MS;
+    const typedPollMs = opts.typedPollMs ?? TYPED_CONFIRM_POLL_MS;
     const paneName = paneNameFor(agentPath);
     const startedAt = Date.now();
 
@@ -2132,6 +2322,10 @@ export class HerdrBridge {
       return outcome('unverifiable', { readable: false, readError: baseline.error }, error);
     }
     const landedBefore = baseline.count;
+    // Copies of this message ANYWHERE on the pane, from the same reading. This
+    // is only the FALLBACK baseline for the submit precondition — the one
+    // actually used is re-read after the interrupt, for the reason given there.
+    const visibleBeforeInterrupt = baseline.visible;
 
     let paneId: string;
     try {
@@ -2172,7 +2366,56 @@ export class HerdrBridge {
       this.runHerdr(['pane', 'send-keys', paneId, 'C-c']);
       interrupts++;
       await delay(INTERRUPT_SETTLE_MS);
+
+      // THE VISIBLE BASELINE IS TAKEN HERE, AFTER THE INTERRUPT, and taking it
+      // before instead is a deadlock rather than an inaccuracy. The interrupt
+      // clears a composer, so a copy of this message left sitting there by an
+      // earlier withheld send is present in the pre-send reading and gone by
+      // the time we type. Compared against the pre-send count, the fresh copy
+      // we are about to type does not raise the total, the precondition never
+      // holds, and THE SAME MESSAGE CAN NEVER BE SENT TO THAT AGENT AGAIN —
+      // the recovery path for a withheld submit, closed by the guard that
+      // needed it.
+      //
+      // A read that fails here falls back to the pre-interrupt count, which is
+      // the conservative direction rather than a guess: the interrupt only ever
+      // REMOVES text, so the earlier count is greater than or equal to the true
+      // one, and a baseline that is too high can only withhold a submit. It
+      // cannot cause one.
+      const afterInterrupt = this.readDeliveryEvidence(agentPath, message);
+      checks++;
+      const visibleBefore = afterInterrupt.readable ? afterInterrupt.visible : visibleBeforeInterrupt;
+
       this.runHerdr(['pane', 'send-text', paneId, message]);
+
+      // THE SUBMIT IS EARNED RATHER THAN AUTOMATIC (KAN-383). An Enter pressed
+      // at a pane that did not take our text cannot submit our message, and it
+      // is not therefore harmless: it confirms whatever that pane has
+      // highlighted. See `confirmTyped` for the measurement and for why this
+      // asks about our own message instead of trying to recognise a dialog.
+      const typed = await this.confirmTyped(agentPath, message, visibleBefore, typedTimeoutMs, typedPollMs);
+      checks += typed.checks;
+      if (!typed.visible) {
+        const readable = typed.last !== undefined;
+        console.error(
+          `[HerdrBridge] Withheld the submit to '${paneName}': the text was typed and never ` +
+          `appeared on the pane, so Enter was not pressed.`
+        );
+        return outcome(
+          readable ? 'not-delivered' : 'unverifiable',
+          {
+            readable,
+            landedBefore,
+            landedAfter: typed.last?.count ?? null,
+            inComposer: typed.last?.inComposer ?? false,
+            tail: capTail(typed.last?.tail ?? null),
+            ...(typed.last ? { tailSource: typed.last.source } : {}),
+            ...(typed.error ? { readError: typed.error } : {})
+          },
+          submitWithheldMessage(paneName, typedTimeoutMs, readable, typed.error)
+        );
+      }
+
       this.runHerdr(['pane', 'send-keys', paneId, 'Enter']);
       submits++;
     } catch (e: any) {

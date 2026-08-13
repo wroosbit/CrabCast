@@ -484,6 +484,40 @@ jobs:
       #                                      against. Its live sibling covers
       #                                      that and says so in both headers.
       #
+      #   verify-submit-withheld-at-dialog   the Enter is EARNED: a send
+      #                                      submits only what it can SEE it
+      #                                      typed. An Enter at a pane that
+      #                                      swallowed the text cannot submit
+      #                                      a message and does not do
+      #                                      nothing — it confirms whatever
+      #                                      that pane has highlighted, which
+      #                                      at a Claude Code dialog is a
+      #                                      consent answer nobody gave and
+      #                                      which nothing distinguishes from
+      #                                      one a human gave (KAN-383).
+      #                                      Its shim's pane has a KIND, so a
+      #                                      dialog that DESTROYS send-text
+      #                                      and a shell whose typed text is
+      #                                      visible with no composer marker
+      #                                      are both produced rather than
+      #                                      described — the second is the
+      #                                      false-positive case a
+      #                                      composer-only guard would ship
+      #                                      broken. Two mutations, because
+      #                                      the first leaves the
+      #                                      unreadable-pane section green.
+      #                                      WHAT IT CANNOT SEE: whether a
+      #                                      real herdr still destroys
+      #                                      send-text at a real dialog. Its
+      #                                      four pane frames are verbatim
+      #                                      captures from a real Claude Code
+      #                                      rather than drawings, and the
+      #                                      live measurement is on the
+      #                                      ticket; there is deliberately no
+      #                                      live sibling, because
+      #                                      reproducing it means answering a
+      #                                      consent dialog on a real agent.
+      #
       #   verify-state-read-echoes-config    every fleet category echoes the
       #                                      agent's frozen configuration, and
       #                                      `unstartedAgents` is distinct from
@@ -921,6 +955,7 @@ jobs:
             verify-reconfiguration-refuses
             verify-event-contract
             verify-send-confirms-delivery
+            verify-submit-withheld-at-dialog
             verify-tail-asks-every-source
             verify-proof-cleans-up-when-interrupted
             verify-event-durability

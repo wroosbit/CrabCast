@@ -117,18 +117,30 @@ const FINGERPRINT_CHARS = 60;
 /**
  * The part of a message worth looking for in a pane.
  *
- * The first line, flattened and capped short: a submitted message is echoed
- * into the transcript beginning with its first line, and a long one is
- * abbreviated after that, so nothing past the first line is reliably on screen
- * to match against.
+ * The first line WITH ANYTHING ON IT, flattened and capped short: a submitted
+ * message is echoed into the transcript beginning with its first non-empty
+ * line, and a long one is abbreviated after that, so nothing past it is
+ * reliably on screen to match against.
  *
- * Returns the empty string for a message with no non-whitespace first line,
- * which every caller here treats as "nothing to look for" rather than as a
- * match — an empty needle would otherwise be found everywhere and report a
+ * IT WAS `split('\n')[0]` UNTIL KAN-383, and the difference is only visible on
+ * a message that OPENS with a blank line — `"\n\nhello"`. `message.trim()` is
+ * truthy for that, so the router accepts it as a perfectly good message, and
+ * the old form returned the empty needle for it. That was survivable while the
+ * needle only decided a VERDICT: the message was still submitted and merely
+ * reported `not-delivered`. It stopped being survivable when the same needle
+ * became the precondition for pressing Enter at all — an empty fingerprint is
+ * never visible, so such a message would have had its submit withheld forever.
+ * A guard that refuses real sends is worse than the defect it fixes, and this
+ * is that guard's one reachable false positive.
+ *
+ * Returns the empty string only for a message with no non-whitespace content
+ * anywhere, which every caller here treats as "nothing to look for" rather than
+ * as a match — an empty needle would otherwise be found everywhere and report a
  * delivery for a message that could not have been echoed.
  */
 export function deliveryFingerprint(message: string): string {
-  return flatten(message.split('\n')[0]).slice(0, FINGERPRINT_CHARS);
+  const firstWithContent = message.split('\n').find((line) => line.trim() !== '') ?? '';
+  return flatten(firstWithContent).slice(0, FINGERPRINT_CHARS);
 }
 
 /**
@@ -179,6 +191,44 @@ export function landedCount(tail: string, message: string): number {
   const needle = deliveryFingerprint(message);
   if (!needle) return 0;
   return flatten(splitAtComposer(tail).submitted).split(needle).length - 1;
+}
+
+/**
+ * How many times this message appears in the pane AT ALL — submitted output,
+ * composer, anywhere.
+ *
+ * WHY A SECOND COUNT EXISTS, when {@link landedCount} looks so similar. They
+ * answer different questions and only one of them can be asked before a
+ * submit:
+ *
+ *   landedCount   did the agent RECEIVE it?   (submitted region only)
+ *   visibleCount  did our typing TAKE EFFECT? (the whole pane)
+ *
+ * The second is the precondition for pressing Enter, and it is deliberately
+ * indifferent to WHERE the text is. A `claude` pane holds freshly typed text
+ * in its composer; a bare shell holds it on the command line with no composer
+ * marker anywhere; and {@link messageInComposer} is false for the shell in both
+ * the "not typed" and "typed fine" cases, so it cannot be the test. What is
+ * common to every pane that accepted our keystrokes is simply that the text is
+ * NOW ON SCREEN AND WAS NOT BEFORE.
+ *
+ * MEASURED, KAN-383, against a real Claude Code at a real dialog: `send-text`
+ * at a startup trust dialog and at a tool-permission dialog is **silently
+ * destroyed** — the message is echoed in none of herdr's three read sources,
+ * and the frame is otherwise byte-identical. So a pane that swallowed our
+ * typing is distinguishable from one that took it, and it is distinguishable
+ * WITHOUT recognising what is on screen. That matters more than it looks: this
+ * is an observation about our own message, not a guess about somebody else's
+ * TUI, so it does not rot when Claude Code redraws its dialogs.
+ *
+ * A COUNT AND NOT A BOOLEAN, for the reason {@link landedCount} gives: the same
+ * message may legitimately be on the pane already from an earlier send, so what
+ * proves THIS typing took effect is that the count went up.
+ */
+export function visibleCount(tail: string, message: string): number {
+  const needle = deliveryFingerprint(message);
+  if (!needle) return 0;
+  return flatten(tail).split(needle).length - 1;
 }
 
 /**
@@ -317,7 +367,16 @@ export interface SendOutcome {
   verdict: SendVerdict;
   /** Ctrl+C keystrokes this send issued. Never more than 1, by construction. */
   interrupts: number;
-  /** Enter keystrokes this send issued: 2 means the confirm-and-retry fired. */
+  /**
+   * Enter keystrokes this send issued: 2 means the confirm-and-retry fired.
+   *
+   * **`0` MEANS THE SUBMIT WAS WITHHELD, and it is the field to read for that**
+   * (KAN-383). The message was typed and never appeared on the pane, so
+   * pressing Enter could not have submitted it — and an Enter that cannot
+   * submit our message can still answer somebody else's dialog. The daemon
+   * declines rather than pressing it blind. No field was added for this: a
+   * count that can be zero already said it.
+   */
   submits: number;
   /** Whether the Enter-only retry ran. */
   retried: boolean;
