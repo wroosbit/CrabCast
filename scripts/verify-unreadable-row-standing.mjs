@@ -635,6 +635,75 @@ console.log('\n=== 3. On the wire — both surfaces, from a real daemon over its
       `wire=${status.contractVersion} declared=${READ_CONTRACT_VERSION}`
     );
 
+    // AND IT IS NOT A TAUTOLOGY, DRIVEN RATHER THAN ARGUED. The obvious
+    // objection to comparing the wire against the constant the wire is built
+    // from is that it may assert nothing. It asserts that the ROUTER publishes
+    // that constant, unmodified, on that field — so a daemon publishing a
+    // literal, a stale copy, or nothing at all goes red here. This block is
+    // what shows it: a second daemon, spawned from a build whose router
+    // publishes a different number, and the same predicate evaluated against
+    // its answer.
+    versionRedDrive: {
+      const mutantDist = mutate(
+        'contract-version-on-the-wire',
+        'router.js',
+        'contractVersion: READ_CONTRACT_VERSION,',
+        'contractVersion: 0,'
+      );
+      if (!mutantDist) break versionRedDrive;
+      const mutantDir = path.join(tmp, 'wire-mutant');
+      fs.mkdirSync(mutantDir, { recursive: true, mode: 0o700 });
+      fs.copyFileSync(path.join(dir, 'agents.jsonl'), path.join(mutantDir, 'agents.jsonl'));
+      const mutantCfg = path.join(tmp, 'wire-mutant.config.json');
+      fs.writeFileSync(mutantCfg, JSON.stringify({ dataDir: mutantDir }));
+      const mutantSocket = path.join(mutantDir, 'crabcast.sock');
+      const mutantChild = spawn(
+        process.execPath,
+        [path.join(mutantDist, 'daemon.js'), mutantCfg],
+        { stdio: ['ignore', 'ignore', 'pipe'], env }
+      );
+      process.on('exit', () => { try { mutantChild.kill(); } catch {} });
+      const mutantUp = await (async () => {
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline) {
+          const ok = await new Promise((resolve) => {
+            const probe = net.connect(mutantSocket);
+            probe.once('connect', () => { probe.end(); resolve(true); });
+            probe.once('error', () => resolve(false));
+          });
+          if (ok) return true;
+          await sleep(100);
+        }
+        return false;
+      })();
+      // PRECONDITION, for the reason §6's starves carry one: a mutant that
+      // never came up produces an absence, and an absence is not a red.
+      check(mutantUp, 'contract-version-on-the-wire: the mutated daemon came up and is answering');
+      if (!mutantUp) break versionRedDrive;
+      const mutantStatus = await new Promise((resolve, reject) => {
+        const sock = net.connect(mutantSocket);
+        let buf = '';
+        const timer = setTimeout(() => { sock.destroy(); reject(new Error('timed out')); }, 10000);
+        sock.on('connect', () => sock.write(JSON.stringify({ action: 'daemon_status', id: 3 }) + '\n'));
+        sock.on('data', (d) => {
+          buf += d;
+          const nl = buf.indexOf('\n');
+          if (nl < 0) return;
+          clearTimeout(timer);
+          sock.end();
+          try { resolve(JSON.parse(buf.slice(0, nl))); } catch (e) { reject(e); }
+        });
+        sock.on('error', (e) => { clearTimeout(timer); reject(e); });
+      });
+      check(
+        mutantStatus.success === true &&
+          !(mutantStatus.contractVersion === READ_CONTRACT_VERSION && READ_CONTRACT_VERSION >= 7),
+        'RED: the same predicate FAILS against a daemon whose router publishes a different version — so it is about the wire, not about itself',
+        `mutant wire=${mutantStatus.contractVersion} declared=${READ_CONTRACT_VERSION}`
+      );
+      try { mutantChild.kill(); } catch {}
+    }
+
     for (const [name, res] of [['daemon_status', status], ['list_agents', list]]) {
       const rows = res.unreadableRecords ?? [];
       check(
