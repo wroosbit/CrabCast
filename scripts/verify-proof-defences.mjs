@@ -1645,6 +1645,34 @@ const PROOF_DEFENCES = [
       'which. A verdict alone still would not.'
   },
 
+  {
+    script: 'verify-interrupt-at-dialog-live',
+    defence: 'guard',
+    central:
+      'one Ctrl+C does NOTHING to a Claude Code selection dialog — not dismissed, not cancelled, ' +
+      'highlight unmoved — while the same pane acts on other keystrokes; which is why KAN-375 left ' +
+      'the interrupt unconditional rather than conditioning a keystroke measured to be inert.',
+    anchor: 'CONTROL: `Down` DOES move the highlight, so keystrokes were arriving',
+    note:
+      'THE CENTRAL ASSERTION HERE IS A NEGATIVE, which is the case this register exists for: ' +
+      '"the dialog ignored Ctrl+C" and "nothing was reaching this pane at all" produce identical ' +
+      'PASSes, and the second is the state a dead socket, a wrong pane id or a crashed agent all ' +
+      'leave behind. The anchor is the guard — a `Down` sent on the SAME pane immediately after ' +
+      'the interrupt, required to move the highlight from 1 to 2 — so the instrument is shown able ' +
+      'to say otherwise before the negative is believed. §3 and §4a then require the highlight to ' +
+      'be observed at 2 rather than at any fixed value, so a reader hardcoded to one answer fails ' +
+      'them. ' +
+      'WHAT IS NOT GUARDED HERE, and it is the reason this is `guard` and not `mutation`: nothing ' +
+      'in this file mutates anything. The demonstration that these assertions can go red lives in ' +
+      'scripts/kan375-red-drive.mjs, which is NOT in the CI array and nothing gates on it — four ' +
+      'arms, one of which rewrites this file\'s own `Down` into another `C-c` and requires the ' +
+      'CONTROL line above to fail. So the guard is standing here and the evidence that it bites is ' +
+      'a hand-run recorded in docs/moving-baselines.md. ' +
+      'AND THE SUBJECT IS NOT OUR CODE: §1-§5 measure a Claude Code build this repository does not ' +
+      'version, so a green run is evidence about the machine that ran it and not a standing fact. ' +
+      '§0 and §6 are the parts that live in `src/` and they are pinned by exact occurrence count.'
+  },
+
   // -------------------------------------------------------------------------
   // none — and each names what that leaves undefended. This is the half the
   // ticket that commissioned this file was written for.

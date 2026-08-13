@@ -459,6 +459,12 @@ pairwise in both directions.
   a "composer" at `❯ 1. Yes` and reports the selected option as the input line.
   That is measured (KAN-383) and it is why the submit precondition in
   [§6.1](#61-when-the-submit-is-withheld-submits-0) does not rely on the marker.
+* **The keystrokes a send issues, and what they do to a pane that is not at an
+  ordinary prompt.** Those are behaviour rather than shape, so they are not on
+  this contract's wire and carry no digest — but they are what a caller most
+  often needs, so they are written down in
+  [§10](#10-the-keystrokes-a-send-issues-and-why-the-interrupt-is-unconditional)
+  rather than left in `src/herdr.ts`.
 
 **This section is prose, and the read-path contract's §10 is data.** That is a
 real difference and it is stated rather than smoothed over: the list above can
@@ -512,3 +518,140 @@ five branches out of a real router by making them happen.
   only.
 * **Nothing here is evidence about a real Claude Code pane.** Every branch below
   is produced against a herdr shim. See the last bullet of [§8](#8-the-boundary--what-this-contract-covers-and-what-it-does-not).
+
+---
+
+## 10. The keystrokes a send issues, and why the interrupt is unconditional
+
+**This section is behaviour, not shape.** Nothing in it is on the wire, so it
+carries no digest and no version row. It is here because a caller cannot read
+`src/herdr.ts`, and because the first thing every consumer asks about this
+surface is why their agent gets interrupted.
+
+### What a send actually types
+
+A `send_to_agent` that reaches a pane issues exactly three things, in order:
+
+| # | keystroke | why |
+| --- | --- | --- |
+| 1 | one `Ctrl+C` | clears a partially typed line, so the message cannot be concatenated onto stray input |
+| 2 | the message text | the payload |
+| 3 | `Enter` | submits it — **only when the pane shows the text step 2 typed.** See [§6.1](#61-when-the-submit-is-withheld-submits-0) |
+
+**Step 3 is conditional and steps 1 and 2 are not**, which is the whole of the
+difference between this section and [§6.1](#61-when-the-submit-is-withheld-submits-0).
+Read them together: that one says when the submit is withheld, this one says why
+the interrupt in front of it is not.
+
+A confirmation follows, and **the retry presses `Enter` only** — it never types
+again and never interrupts again. **Exactly one `Ctrl+C` exists for the whole
+call including its retry**, because a second is how Claude Code quits and would
+kill the agent the caller is trying to reach.
+
+### The decision: the interrupt stays unconditional (KAN-375)
+
+**Decided 2026-08-13, on measurement rather than on argument.** The interrupt is
+not conditioned on anything, there is no opt-out flag, and there is no plan to
+add one.
+
+**The measurement is `scripts/verify-interrupt-at-dialog-live.mjs`**, which
+drives a real `claude` at a real startup dialog and reports:
+
+* **One `Ctrl+C` at a Claude Code selection dialog does nothing at all.** The
+  dialog is not dismissed, not cancelled, and its highlight does not move. This
+  is asserted **with a control that can fail** — a `Down` sent immediately
+  afterwards on the same pane *does* move the highlight, so the pane was
+  demonstrably listening. Without that control the finding would be
+  indistinguishable from a dead keystroke channel.
+* **At a shell with a half-typed line, one `Ctrl+C` clears it and the command
+  does not run.** The interrupt's stated justification is real and load-bearing.
+
+**So the interrupt is exonerated, and this is worth stating plainly because the
+opposite claim is written down elsewhere.** A consumer ticket records that
+CrabCast's send *"opens with a Ctrl+C, which is the one thing a startup dialog
+must not receive."* **Measured, that is false.** The Ctrl+C is the one thing such
+a dialog demonstrably does not care about. Anyone repeating the claim should run
+the probe before acting on it.
+
+### The options not taken, and why
+
+* **Condition it on something observable.** Rejected. The read that would drive
+  it cannot cheaply tell the state apart: `COMPOSER_MARKERS` is `['❯', '│ >']`,
+  and **`❯` is also the glyph a Claude Code dialog draws its selection cursor
+  with** — so `splitAtComposer` reads a dialog cursor as a composer. Worse than
+  that, `splitAtComposer` takes the **furthest** marker by `lastIndexOf`, so on
+  a dialog frame it locks onto the **selected option** and identifies it as the
+  input line about to be typed into.
+
+  Telling a dialog from a composer therefore needs Claude-Code-specific chrome,
+  and **that does not work either — measured, on KAN-383.** The trust dialog's
+  footer is `Enter to confirm · Esc to cancel`; the tool-permission dialog's is
+  `Esc to cancel · Tab to amend · ctrl+e to explain`. **A detector keyed on the
+  obvious string misses the permission dialog completely, and a missed dialog is
+  the whole defect back.** Any such detector also inherits Claude Code's redraw
+  schedule as a dependency, on a daemon that drives `shell` agents too. That
+  buys a new failure mode — a guess wrong in either direction — to condition a
+  keystroke measured to be inert. **A wrong guess is worse than honest
+  bluntness.**
+* **Make it a caller's flag.** Rejected, and the default is why. The honest
+  default is "send the interrupt", since that is what protects the common case;
+  a flag defaulting that way changes nothing for anyone who does not set it,
+  and a caller has no reliable way to know whether it wants the other value —
+  it would have to read the pane, which is the option above with the work moved
+  onto the caller.
+* **Remove it.** Rejected. It reintroduces the silent concatenation §1 of the
+  probe demonstrates it prevents.
+
+### What a caller with a dialog open should do instead — and what the daemon now does for them
+
+**The honest answer when this decision was taken was "not send", because the
+hazard at a dialog was never the interrupt:**
+
+> **The `Enter` at step 3 confirms whatever option is highlighted.** Measured
+> twice, with the discriminator: with the highlight left at its default the
+> dialog resolved to option 1; with the highlight moved to option 2 first, the
+> same sequence resolved to **option 2** — an option that was neither the
+> default position nor the conservative answer, and whose only property was
+> being highlighted. The message text itself is swallowed and echoed nowhere.
+
+**That was KAN-383, and it has since landed**, which changes this answer rather
+than leaving it as advice. The submit is now **earned**: the pane is read between
+step 2 and step 3, and the `Enter` goes out only when this message's own text is
+visible. A dialog destroys the text, so the text is not visible, so **no `Enter`
+is issued and the dialog is not answered.** `submits: 0` is what the response
+carries, and [§6.1](#61-when-the-submit-is-withheld-submits-0) is where that
+branch is specified.
+
+**So the caller-facing answer is now: send, and read `submits`.** A send to a
+pane at a dialog costs that pane nothing — one inert `Ctrl+C` and some text the
+dialog discards — and reports that it did not land. The advice this section used
+to give (establish the pane is not at a dialog first, with `tail_agent`) is no
+longer required, and is kept nowhere but this sentence so that a reader arriving
+from an older copy can see it was superseded rather than forgotten.
+
+**What did not change is the reason this section exists.** The interrupt is
+still unconditional, and the measurement above is still why: it is inert at the
+dialog, so it was never the thing that needed conditioning. **KAN-383 conditioned
+the keystroke that was.**
+
+### Where this is enforced
+
+`scripts/verify-interrupt-at-dialog-live.mjs`, excluded from CI (it needs a real
+herdr, a real pane and an authenticated `claude`) and registered in
+`scripts/verify-proof-registry.mjs`'s `EXCLUSIONS`. Its §0 pins the three
+keystrokes above to `src/herdr.ts` by exact occurrence count, and its §6 pins the
+`❯` collision this section's reasoning rests on — so both go red if the code
+moves underneath them. `scripts/kan375-red-drive.mjs` is the demonstration that
+they can: four mutations, each required to turn its named section red, including
+one that breaks §2's own control.
+
+**What §0 does not reach, said here because the table above invites the wrong
+reading.** It pins the **call sites and their order**, not whether each one is
+**reachable**. A guard placed above the `Enter` — which is exactly what KAN-383
+landed — leaves all four calls textually intact, so §0 stays green while the
+third keystroke becomes conditional. **Measured against KAN-383's branch before
+it merged, and again on the merged tree: green both times.** That is the pin's
+limit, not a defect in it.
+
+**So the table above describes what a send issues when nothing withholds it, and
+`submits` on the response is what tells a caller how many actually went out.**
