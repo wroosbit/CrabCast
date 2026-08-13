@@ -573,10 +573,10 @@ check(
 // So it was simultaneously too loose to constrain the claim and too tight to
 // let it move. What follows constrains the claim and lets it move: the
 // reboot paragraph must open with a status label from a closed vocabulary,
-// an observation must carry its date and its limits, and no sentence may
-// assert the survival as settled. BOTH states are sayable, which is the
-// point — the honest page is the one that passes most easily, whichever way
-// the world has gone.
+// an observation must date itself and the section must carry its limits, and
+// no sentence may assert the survival as settled. BOTH states are sayable,
+// which is the point — the honest page is the one that passes most easily,
+// whichever way the world has gone.
 //
 // WHAT THIS CANNOT DETECT, named rather than implied. It enforces the FORM of
 // the claim and never its truth: `**Observed once, on 2099-01-01**` satisfies
@@ -586,6 +586,58 @@ check(
 // outside it. And "asserted" is decided per sentence by looking for a
 // negation in the same sentence, so an overclaim spread across two sentences
 // ("Is it handled? Yes.") is not caught.
+//
+// ---------------------------------------------------------------------------
+// WHERE EACH CLAIM CHECK ACTUALLY LOOKS (KAN-349). The four checks below read
+// as four independent constraints on the observation, and they are not. Every
+// one of them tests `rebootSection` — the WHOLE section — so which of them can
+// see the EVIDENCE is a property of how this page happens to be written rather
+// than of the check. Measured by `scripts/kan349-red-drive.mjs` at `a9e9565`,
+// where `docs/supervision.md` and this section are byte-identical to what
+// KAN-345 landed at `5b5a200`:
+//
+//   * the STATUS LABEL check reads the label, by construction.
+//   * `not a guarantee` and `once` both sit INSIDE the label sentence —
+//     "**Observed once, on 2026-08-12, and not a guarantee:**" — so the
+//     GUARANTEE and NARROWNESS checks are satisfied by the label they sit
+//     beside. Delete every paragraph after the claim and keep the label, and
+//     both still pass; the section reads 1054 chars and only the commands
+//     check goes red. That is the mutation `epic/KAN-59` ran reviewing #81.
+//   * the COMMANDS check is the only one that can read anything outside the
+//     label, and it reads the SECTION rather than the evidence. The section's
+//     closing paragraph recommends the same two commands for a FUTURE reboot,
+//     so it is satisfied by advice as readily as by evidence: delete the two
+//     EVIDENCE paragraphs and keep that closing one and ALL FOUR are green,
+//     the section reads 1273 chars, and the whole proof exits 0.
+//
+// SO THE HONEST STATEMENT is that three of the four are satisfied by the label
+// sentence and the fourth by any paragraph in the section that names one of
+// three commands. NONE of them binds the evidence. The only thing standing
+// between this guard and an evidence-free page is the vacuity floor above —
+// and 1273 chars of label and advice clears it.
+//
+// LEFT AS IT IS, DELIBERATELY, and the reasoning is the record KAN-349 asked
+// for rather than a preference. Requiring the caveats IN THE LABEL is a
+// defensible design and probably the right one: a reader meets the label
+// first, and KAN-345's whole point was that the honest page should be the one
+// that passes most easily. Two tightenings were considered and both were
+// refused for the same reason. (a) Reading the caveats from the section MINUS
+// the claim paragraph reds the pristine page — "not a guarantee" appears
+// nowhere else, which `kan349-red-drive.mjs`'s calibration C shows by deleting
+// it from the label alone and watching the check go red. That is a red at a
+// maintainer who did nothing wrong — the failure `verify-proof-defences.mjs`
+// twice calls the worse one when it declines to gate cardinals under ten — and
+// it is the opposite of KAN-345's stated design goal, that the honest page be
+// the one that passes most easily. (b) Requiring a substantial
+// evidence region after the claim needs a length floor chosen to sit above the
+// one paragraph that happened to defeat the commands check, which is a check
+// drawn from its own mutation's vocabulary — the defect this epic keeps
+// finding, applied one level down inside the fix for it.
+//
+// WHO COVERS THE GAP: nobody, and there is no standing check for it. It is
+// named here, in the PROOF_DEFENCES entry, and reproduced on demand by
+// `scripts/kan349-red-drive.mjs`, which is a demonstration rather than a gate.
+// ---------------------------------------------------------------------------
 
 /**
  * The body of one `##` section, heading line excluded. Everything below reads
@@ -662,6 +714,13 @@ check(
 // An observation has to carry what makes it one, and its edges. These run
 // only when the page claims one, which is what lets the claim move without
 // the guard having to be rewritten again.
+//
+// READ THE HAYSTACK BEFORE READING THE LABELS (KAN-349): all three test
+// `rebootSection`, and on the current page the first two match INSIDE the
+// label sentence and the third matches a closing paragraph of advice. They
+// constrain the LABEL's completeness; none of them binds the evidence. The
+// header block "WHERE EACH CLAIM CHECK ACTUALLY LOOKS" has the measurement and
+// the reasons this was left as it is — read it before tightening any of them.
 if (observedOn) {
   check(
     /not a guarantee/i.test(rebootSection),

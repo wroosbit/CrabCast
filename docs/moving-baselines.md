@@ -122,6 +122,20 @@ output. It is not in the CI array, it needs a real herdr, and
 `verify-crabcast-runtime-live.mjs:15` says `CI-RUNNABLE: no`. **It is not
 evidence for KAN-117's AC1**, which asks for a herdr-free runner; it says so
 in its own header and the distinction is the whole reason that ticket exists.
+`kan349-red-drive.mjs` is a fourth, and it is the same kind of thing as
+`kan369-red-drive.mjs`: it starves the evidence out of `docs/supervision.md`'s
+reboot section, one mutation at a time, and reports which of
+`verify-daemon-foreground` §7's four claim checks notice. It is not in the CI
+array and nothing gates on it. Two things about it are worth knowing before it
+is next run. It **mutates a tracked file in the working tree** rather than a
+scratch copy — §7 derives `repoRoot` from its own location, so there is no path
+that points it at one — and it restores on exit and on SIGINT/SIGTERM/SIGHUP
+but cannot on SIGKILL; a run killed there leaves `docs/supervision.md` mutated,
+and `git checkout -- docs/supervision.md` is the recovery. And its **expected
+verdicts are the finding**, not a passing gate: the arms assert that three of
+the four claim checks CANNOT see the starve, so the drive going green is the
+measurement KAN-349 recorded, and it going red means the split has changed and
+§7's coverage note is now the stale artifact.
 
 **If you are here to repin `verify-ci-wiring-guards` §2, read this first
 (KAN-363).** `verify-ci-proof-residue-is-legible` §4c pins the same commit

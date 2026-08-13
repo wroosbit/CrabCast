@@ -965,14 +965,34 @@ const PROOF_DEFENCES = [
       'ExecStart out of docs/supervision.md and requires the verb it names to exist, because a ' +
       'unit template in prose cannot go red on its own. ' +
       'KAN-345 CHANGED §7\'s CHARACTER on one check: it used to require the WORD "predicted" ' +
-      'somewhere in the file, and now it holds the reboot claim to the SHAPE OF ITS EVIDENCE — ' +
-      'a status label from a closed vocabulary, a date and its limits when the label claims an ' +
-      'observation, and no sentence asserting the survival as settled. That check is a NEGATIVE ' +
+      'somewhere in the file, and now it holds the reboot claim to the SHAPE OF ITS LABEL — ' +
+      'a status label from a closed vocabulary, a date when that label claims an observation, ' +
+      'the caveats that make an observation one, and no sentence asserting the survival as ' +
+      'settled. That check is a NEGATIVE ' +
       'CASE with a VACUITY guard: the section slice must be substantial and must be that section ' +
       'only, because every check after it reads that slice and an empty one satisfies the ' +
       'overclaim ban with nothing behind it. Six mutations were driven against it and are ' +
       'recorded in KAN-345\'s PR, including the one that matters most — THE PRISTINE PRE-CHANGE ' +
       'PAGE STILL PASSES, so the guard did not merely swap one pinned word for another. ' +
+      'THE LABEL IS WHAT IT HOLDS, AND NOT THE EVIDENCE (KAN-349), and this entry said ' +
+      '"the shape of its evidence" until that ticket measured it. All four claim checks test the ' +
+      'WHOLE SECTION, so which of them can see the evidence is a property of how the page is ' +
+      'written rather than of the check: on the current page `not a guarantee` and `once` both ' +
+      'sit inside the label sentence, so the GUARANTEE and NARROWNESS checks are satisfied by ' +
+      'the label they sit beside, and the COMMANDS check is satisfied by a closing paragraph ' +
+      'recommending the same two commands for a FUTURE reboot. Measured, not reasoned about: ' +
+      'delete every paragraph after the claim and three of the four still pass (section 1054 ' +
+      'chars, commands red); delete the two EVIDENCE paragraphs and keep the closing advice and ' +
+      'ALL FOUR pass with the proof exiting 0 (section 1273 chars, pristine 2506). ' +
+      'NOTHING BINDS THE EVIDENCE — the vacuity floor is the only thing between this guard and ' +
+      'an evidence-free page, and 1273 chars clears it. LEFT AS IT IS DELIBERATELY: requiring ' +
+      'the caveats in the label is defensible and probably right, and both tightenings ' +
+      'considered were refused — reading them from the section minus the claim REDS THE PRISTINE ' +
+      'PAGE, and requiring a substantial evidence region needs a length floor chosen to exclude ' +
+      'the one paragraph that defeated the commands check, which is a check drawn from its own ' +
+      'mutation. WHO COVERS IT: nobody. `scripts/kan349-red-drive.mjs` reproduces both ' +
+      'measurements on demand and is a demonstration rather than a gate; §7\'s header block ' +
+      'WHERE EACH CLAIM CHECK ACTUALLY LOOKS carries the same finding beside the checks. ' +
       'WHAT IS NOT COVERED: NO REBOOT IS OBSERVED BY THIS SCRIPT and no systemd runs any of it — ' +
       'this script is itself the supervisor. Reboot survival was observed ONCE, on 2026-08-12, ' +
       'OUT OF BAND, and docs/supervision.md carries that with its date and its limits; the guard ' +
