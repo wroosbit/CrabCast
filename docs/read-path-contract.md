@@ -1810,12 +1810,24 @@ boundary rather than as a habit.
 | `deactivate_response` | reads `wasRunning` and `state` to tell a stand-down from a no-op | `verify-idempotent-lifecycle.mjs` — behaviour, not shape |
 | `configure_response` | reads the echo back and `configVersion` for compare-and-set | `verify-config-echo-contract.mjs`, `verify-reconfiguration-refuses.mjs` |
 | `forget_response` | reads the refusal when a live pane blocks the forget | `verify-refuses-occupied-directory.mjs` |
-| `pty_init` | a terminal client opens a session | `verify-pty-init-rejects-unknown-session.mjs` |
+| `pty_init` | an *external* terminal client opens a session — no `crabcast` command does; see below | `verify-pty-init-rejects-unknown-session.mjs` |
 | `pty_input` | writes to it | `verify-pty-payload-refusal.mjs` |
 | `pty_resize` | resizes it | `verify-pty-payload-refusal.mjs` |
 | `tail_agent` | reads the tail and which source answered | `verify-tail-asks-every-source.mjs` |
 
 **The rest of `daemon_status` is uncovered too** — `pid`, `build`, `freshness` and the agent counts — and it is not a row above because three of its fields *are* covered, which no single row can say. `verify-daemon-provenance.mjs` and `verify-daemon-status-over-mcp.mjs` hold it.
+
+#### The pty triple has a known live consumer, and it is not this repository's CLI
+
+**Read as a list of names, the three `pty_*` rows above suggest `crabcast attach`. There is no such command.** The CLI wraps none of the three, deliberately and on the record: `scripts/verify-cli-parity.mjs`'s exclusion register carries all three with the reason — *"CrabCast is a management layer and never embeds a terminal"* — so a reader who assumes the rows describe a first-party command has the audience exactly backwards. Every consumer of these three is external.
+
+**The known one is Butchr's sidepanel terminal** — how a human sees and types into an agent's terminal in that extension. It drives all three: `pty_init` to open the session, `pty_input` for keystrokes, `pty_resize` for geometry. `epic/KAN-39` disclosed this unprompted and against their own interest, having been told a reshape of this surface would owe them no notice.
+
+**Knowing who is on an uncovered surface changes what a considerate author does about it; it does not change what this document promises.** The three stay in `UNCOVERED_SURFACES` and stay under this heading. Naming a consumer adds no notice promise, no version-bump obligation and no compatibility promise, and the surface is exactly as uncovered as it was before this paragraph existed. **A list whose whole worth is that it promises nothing becomes worse than no list the moment it starts promising quietly** — so if a later edit reads this section as the beginning of a contract, that reading is wrong and this sentence is where it is refused. Another repository's dependency is evidence about the world, never a specification for this one.
+
+**One consequence, recorded as context and not as an obligation.** Butchr reports that their cutover sequence has a canary asserting *"the extension renders its terminal"* as a go/no-go check, so a reshape of the attach path would surface for them as a cutover acceptance failure. They state plainly that this is theirs to fix and not CrabCast's to accommodate. It is written down so that whoever reshapes the path knows what it will cost somebody — not so that the cost becomes a veto.
+
+**This does not, by itself, earn the pty triple a section.** [The rule for what belongs here](#the-rule-for-what-belongs-here) says a response earns one when a caller outside this repository branches on it, and a named external consumer makes that test look satisfied. Whether it actually is — a terminal client streams bytes rather than branching on documented fields — is a **decision** rather than something to infer from this paragraph, and it is [KAN-428](https://wroosbit.atlassian.net/browse/KAN-428). Until that is taken, the rows stay where they are.
 
 ### Covered by a sibling contract — described and reconciled, but not here
 
