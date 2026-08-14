@@ -607,9 +607,11 @@ export const BLOCK_SHAPES = {
  * `list_agents`, field by field.
  *
  * THE SUCCESS SHAPE. A refused `list_agents` is a different and much smaller
- * object — see {@link LIST_AGENTS_REFUSAL_FIELDS}, which is the one place on
- * this surface where a refusal carries LESS than `agent_status`'s does, and the
- * document says why rather than leaving a reader to find out.
+ * object — see {@link LIST_AGENTS_REFUSAL_FIELDS}, which since version 9 holds
+ * the same four fields an `agent_status` `bad-address` refusal does, so one
+ * code path reads the echo contract off either surface. Until then this
+ * sentence recorded the opposite, and KAN-279 removed the asymmetry rather
+ * than the complaint about it.
  */
 export const LIST_AGENTS_FIELDS = {
   action: { bucket: 'derived' },
