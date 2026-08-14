@@ -1778,7 +1778,13 @@ function keyProblems(where, obj, declared) {
     ['not-configured', 'refused', 'activateRefused'],
     ['unverifiable', 'refused', 'activateRefused'],
     ['occupied', 'refused', 'activateRefused'],
-    ['capacity', 'refusedBy', 'activateRefusedBy']
+    ['capacity', 'refusedBy', 'activateRefusedBy'],
+    // KAN-382. `bad-address` is produced above with a relative path, so the
+    // value checked here is `not-absolute` — ONE of the five. That this branch
+    // DISCRIMINATES between the five, rather than merely carrying one of them,
+    // is `scripts/verify-path-problem.mjs`, which produces four causes on this
+    // surface and asserts they differ; this line is the vocabulary check only.
+    ['bad-address', 'pathProblem', 'pathProblem']
   ]) {
     const value = produced[branch]?.[field];
     if (value !== undefined && !VALUE_SETS[set].includes(value)) {

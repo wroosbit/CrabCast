@@ -971,6 +971,7 @@ jobs:
             verify-daemon-started-at
             verify-daemon-status-over-mcp
             verify-read-contract
+            verify-path-problem
             verify-send-contract
             verify-channel-enabled
             verify-registry-survives-retired-rows

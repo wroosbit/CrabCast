@@ -154,6 +154,7 @@ would be N chances for the copy that goes stale.
 | 7 | 2026-08-12 | KAN-344 — three fields added to [UnreadableRecord](#unreadablerecord), and therefore to `unreadableRecords[]` on both `list_agents` and `daemon_status`: `claimsAt` and `claimsEvent` (`durable`, the row's own bytes quoted) and `standing` (`derived`, this daemon's verdict), with a new closed vocabulary [rowStanding](#rowstanding). **Additive: no documented field changed meaning, was removed, or changed type**, and no behaviour changed — the same rows are skipped, disclosed and carried across compaction as at version 4. What changed is that the disclosure now says whether a row MATTERS as well as why it could not be read. A consumer that ignores all three reads exactly what it read at version 6 and is not wrong; it is unable to tell a nine-day-old tombstone from a row claiming an agent, which is the question a real consumer asked and could not answer from the wire | `4d9c017c196c` |
 | 8 | 2026-08-13 | KAN-338 — one field added to `capacity`: `measuredTreesSeen`, beside the `measuredAgentTrees` it reframes. **Additive: no documented field changed meaning, was removed, or changed type** — but one changed POPULATION, and that is why this row is not a formality. `measuredAgentTrees` was every agent-runtime process tree on the machine, whoever started it; the divisor is now measured only from trees joined to a chargeable agent of this daemon, so the same field now counts a subset. `measuredTreesSeen` is the population it was drawn from, and the pair is what lets a consumer tell a divisor averaged over 2 of 9 trees from one averaged over 2 of 2. A consumer that ignores the new field reads a number that is smaller than it was and means something better — which is exactly the change a version exists to announce, because it cannot be seen by comparing field sets. **The old quantity is recoverable rather than lost: `measuredTreesSeen` IS the pre-v8 population of `measuredAgentTrees`** — every agent-runtime tree on the machine, whoever started it — so a v7 consumer that wants the number it was reading before this version reads that field and gets it exactly | `80fe941b363b` |
 | 9 | 2026-08-13 | KAN-279 — one field added to the **refused** `list_agents` response: `configEchoContract`, the same block a successful read carries, taking that refusal from three fields to four. No successful response changed, and no documented field changed meaning, was removed, or changed type. **What changed is that the two read surfaces stopped answering the same situation two different ways.** §2 of the [event contract](event-contract.md) states that the block rides *every* response so `undeclared: []` and "nobody looked" stay distinguishable; `agent_status` honoured that on all four branches — including `bad-address`, which resolves nothing and carries **no echo** and carried the block anyway — while a refused `list_agents` carried no block at all. The justification on record for that gap was "a refusal carries no echo, so there is nothing for the block to be about", which was true of `agent_status`'s `no-record-no-pane` branch and false of its `bad-address` branch; the surfaces were never divided by whether an echo was present, only by a wrapped responder against a bare `respond`. **What ignoring the new field costs a consumer:** it keeps the branch this version exists to remove — special-casing `list_agents` when reading the echo contract off whatever CrabCast answered, rather than one code path across both surfaces — and a consumer probing daemon vintage by the block's presence, which `crabcast_list_agents`'s own tool description tells it to do, read a **current** daemon as an older one off any refusal before this version | `4002acfc7a49` |
+| 10 | 2026-08-14 | KAN-382 — one field added to the `bad-address` branch of **both** `activate_response` and `agent_status`: [pathProblem](#pathproblem), a new closed vocabulary of five members saying **why** an address was refused. The daemon already computed it — `canonicalPath` throws a `PathError` carrying `PathProblem` — and `MessageRouter.addressOfRequest` discarded it at the boundary, so five conditions with **three different remedies** arrived as one undifferentiated refusal. No other branch changed and no documented field changed meaning, was removed, or changed type. **It is MANDATORY on that branch, not optional, and that is the substance of this version rather than a detail.** An optional discriminator would mean both *"not a path problem"* and *"an older daemon"* — the `undefined`-on-`refused` ambiguity [§8 note 2](#three-things-about-this-surface-that-will-catch-you) discloses, minted a second time on a new field. Present always, it instead **removes** an ambiguity: `bad-address` was previously distinguishable only by the **absence** of `path`, and a consumer now identifies the branch positively by a key that is there. **What ignoring it costs a consumer:** exactly what it cost before this version — a directory deleted under a configured agent (`does-not-exist`, which `addressOfRequest`'s own header calls *"the normal way an agent ends"*) is indistinguishable from a caller that passed a relative path, so the remedy — recreate the directory or `forget_agent`, versus fix your own code — cannot be chosen from the response, and a reconciler reports an ordinary end-of-life as a hard failure. A consumer that keeps branching on the absence of `path` still works and still cannot tell those two apart | `6076769dba77` |
 
 The digest is `sha256(readContractCanonical())`, first 12 hex characters, over
 `src/read-contract.ts`'s declarations. **What it buys:** changing a documented
@@ -991,7 +992,7 @@ record nor a pane fails, and only that one means the caller mistyped.
 | `live-session` | `success: true`, this daemon holds the session | `action` `success` `sessionless` `path` `paneName` `paneId` `sessionId` `createdAt` `status` `herdrStatus` `label` `configured` `state` `config` `configVersion` `configuredAt` `everActivated` `activatedBy` `channelEnabled` `provenance` `configEchoContract` |
 | `sessionless` | `success: true`, no session of ours — every agent that outlived a daemon restart, and every stopped one | `action` `success` `sessionless` `path` `paneName` `paneId` `sessionId` `createdAt` `status` `workDir` `herdrStatus` `label` `configured` `state` `config` `configVersion` `configuredAt` `everActivated` `activatedBy` `channelEnabled` `provenance` `configEchoContract` |
 | `no-record-no-pane` | `success: false` — nothing here has ever been an agent | `action` `success` `error` `path` `paneName` `configured` `state` `config` `configVersion` `configuredAt` `everActivated` `activatedBy` `channelEnabled` `provenance` `configEchoContract` |
-| `bad-address` | `success: false` — the address itself was rejected (relative, empty, not a directory) | `action` `success` `error` `configEchoContract` |
+| `bad-address` | `success: false` — the address itself was rejected (relative, empty, not a directory). `pathProblem` says **which** | `action` `success` `error` `pathProblem` `configEchoContract` |
 
 **`workDir` appears on the sessionless branch and nowhere else**, and on that
 branch `sessionId`, `createdAt` and `status` are explicit nulls. A field marked
@@ -1016,6 +1017,7 @@ not evidence.
 | `action` | derived | `"agent_status_response"` |
 | `success` | derived | |
 | `error` | derived, optional | refusals only |
+| `pathProblem` | derived, optional | **why** the address was refused — [pathProblem](#pathproblem). On **bad-address** only, and on every response taking it. `does-not-exist` cannot appear here: this verb resolves it lexically instead |
 | `sessionless` | observed, optional | absent on both refusals |
 | `path` | durable, optional | the canonical path. Absent on **bad-address**, where nothing was resolved |
 | `paneName` | derived, optional | |
@@ -1172,6 +1174,7 @@ of refusal it is holding.
 | `success` | derived | whether an agent is running at that path **because of or despite this call**. Not whether this call started it — that is `started` |
 | `started` | derived | **on all eleven branches.** Whether *this call* spawned the agent. `false` on every refusal, and on the idempotent success |
 | `error` | derived, optional | the whole refusal, in prose. On the nine refusals |
+| `pathProblem` | derived, optional | **why** the address was refused — [pathProblem](#pathproblem). On **bad-address** only, and on every response taking it. All five members are reachable here, `does-not-exist` included |
 | `path` | durable, optional | the agent's identity — its directory, resolved. Absent only on `bad-address`, where nothing was resolved |
 | `paneName` | derived, optional | the pane name this path derives |
 | `alreadyRunning` | observed, optional | `true` — it was already up; `false` — **this call started it**, on `spawned` and nowhere else; **absent** — a refusal that never reached the question. **Never `false` on a refusal**, and the compiler holds that half — see the note below |
@@ -1225,7 +1228,7 @@ condition named above, and nothing else may.
 | --- | --- | --- | --- |
 | `spawned` | `success: true`, `started: true` — this call started the agent | `action` `success` `path` `paneName` `alreadyRunning` `started` `paneId` `sessionId` `status` `createdAt` `priority` `launcher` `config` `configVersion` `configuredAt` `everActivated` `activatedBy` `channelEnabled` `verified` `resumedExistingConversation` `provisioned` | `durable` `durabilityError` `resume` `resumedConversation` `preempted` `capacityOverride` |
 | `already-running` | `success: true`, `started: false` — it was already up | `action` `success` `path` `paneName` `alreadyRunning` `started` `paneId` `sessionId` `status` `createdAt` `verified` `config` `configVersion` `configuredAt` `everActivated` `activatedBy` `channelEnabled` | `reattached` `recordReconciled` `durable` `durabilityError` `occupiedBy` `note` |
-| `bad-address` | the address was rejected — relative, empty, not a directory | `action` `success` `started` `error` | — |
+| `bad-address` | the address was rejected — relative, empty, not a directory, or **gone**. `pathProblem` says which | `action` `success` `started` `error` `pathProblem` | — |
 | `bad-flag` | `override` or `preempt` was not a boolean | `action` `success` `started` `error` `path` | — |
 | `not-configured` | no `configure` has ever run for this path | `action` `success` `started` `error` `path` `refused` `missing` | — |
 | `unverifiable` | herdr did not answer `agent list`, so occupancy could not be checked | `action` `success` `started` `error` `path` `refused` `verified` | — |
@@ -1356,34 +1359,47 @@ false`.
 
 #### What this rule leaves lossy, disclosed rather than left to be inferred
 
-**Seven of the nine are machine-distinguishable and one pair is not.**
+**Eight of the nine are machine-distinguishable and one pair is not.**
 `attach-error` is the only refusal carrying `paneName`+`paneId`+`alreadyRunning`,
 `confirm-failed` the only one carrying `verified` without `refused`, and
-`bad-address` the only one with no `path`.
+`bad-address` the only one carrying `pathProblem`.
 
 * **`bad-flag` and `spawn-error` have *identical* key sets — the only such pair
   on this surface — and their remedies are opposite.** One means *your code is
   wrong* and is fixed by editing the caller; the other means *herdr refused or
   died* and is fixed by retrying or escalating. Only the prose in `error`
-  separates them. **That the other seven are separable is what makes this one
+  separates them. **That the other eight are separable is what makes this one
   worth naming** rather than filing under "some refusals are vague".
-* **`bad-address` is distinguishable only by the ABSENCE of `path`** — and
-  branching on an absence is the discipline this daemon refuses everywhere else,
-  in those words.
-* **`bad-address` also flattens five causes into one prose string, and the
-  daemon already computes the discriminator it drops.** `canonicalPath` throws a
-  `PathError` carrying `PathProblem` — `not-a-string`, `not-absolute`,
-  `does-not-exist`, `uninspectable`, `not-a-directory` (`PathProblem` in
-  `src/identity.ts`, line 81 at `d4a851f`) — and
-  `MessageRouter.addressOfRequest` discards it on its `strict` path, returning
-  `{ error: e?.message ?? String(e) }` (`src/router.ts`). **The symbols are the
-  citation and the line number is corroboration**: the `router.ts` line moved
-  from 2837 to 2887 within the change that wrote this sentence, which is what a
-  line number is worth. **At least two of the five
-  are reachable by a *correct* caller against a changing world**:
-  `does-not-exist`, which `addressOfRequest`'s own header calls *"the normal way
-  an agent ends"*, and `uninspectable`, a race or a permission wall. Publishing
-  it moves the wire, so it is its own ticket rather than a note here.
+
+**Two further items stood in this list until version 10 and both are now closed
+by one field.** They are recorded rather than deleted, because what they say
+about *how* they were closed is the part worth keeping:
+
+* **`bad-address` used to be distinguishable only by the ABSENCE of `path`** —
+  branching on an absence, which is the discipline this daemon refuses
+  everywhere else, in those words. It now carries `pathProblem` on every
+  response taking the branch, so the test is a key that is **there**.
+* **`bad-address` used to flatten five causes into one prose string, while the
+  daemon already computed the discriminator it dropped.** `canonicalPath` throws
+  a `PathError` carrying `PathProblem`; `MessageRouter.addressOfRequest`
+  returned `{ error: e?.message ?? String(e) }` and the cause went no further.
+  **At least two of the five are reachable by a *correct* caller against a
+  changing world** — `does-not-exist`, which `addressOfRequest`'s own header
+  calls *"the normal way an agent ends"*, and `uninspectable`, a race or a
+  permission wall — and their remedy is not the remedy a caller bug has. That is
+  what [KAN-382](https://wroosbit.atlassian.net/browse/KAN-382) published, as
+  [pathProblem](#pathproblem).
+
+**Neither was closed by publishing a new `refused` member, and the reasoning is
+here because the rule above nearly admits them.** Read literally, all five
+`PathProblem` causes *are* conditions CrabCast checked and found before it
+attempted anything, so the rule does not exclude them. What excludes them is
+**granularity**: `refused` answers *"why did CrabCast decline this REQUEST?"* —
+`occupied`, `not-configured`, `unverifiable` — and `PathProblem` answers *"what
+is wrong with this one FIELD?"* Putting five path-validation members on `refused`
+would make one field carry request-level reasons and field-level validation
+detail at once, and a consumer switching on it would be switching across two
+categories. `refused` gained no members at version 10.
 
 **And `capacity`'s discriminator is on the other field.** The split is right —
 `refused` answers *what condition*, `refusedBy` answers *which subsystem* — but
@@ -1592,6 +1608,50 @@ claim that stops being true without anybody noticing.
 | value | what it means |
 | --- | --- |
 | `capacity` | the capacity gate. The only branch carrying `reason`, `derivation` and the full [Capacity](#capacity) report |
+
+<a id="pathproblem"></a>
+### `pathProblem` — why an address was refused
+
+On the **`bad-address`** branch of `activate_response` **and** `agent_status`,
+and on no other branch of either. **Mandatory there**: every response taking that
+branch carries it, so *"carries `pathProblem`"* identifies the branch positively
+rather than by the absence of `path`.
+
+**Why it is not optional, which is the substance of version 10.** An optional
+discriminator would be absent for two unrelated reasons — *"not a path problem"*
+and *"an older daemon"* — which is the `undefined`-on-`refused` ambiguity §8
+note 2 discloses, minted a second time on a new field. Present always, it
+removes an ambiguity instead of adding one.
+
+<!-- contract-values: pathProblem -->
+
+| value | what it means |
+| --- | --- |
+| `not-a-string` | the `path` argument was missing, not a string, or empty. **Your code** |
+| `not-absolute` | relative. An agent is addressed by an absolute path: this daemon runs detached and its working directory belongs to whichever client first spawned it, so resolving a relative path here would answer a different question. **Your code** — resolve against your own cwd first |
+| `does-not-exist` | absolute and well-formed, and nothing is there. **Not your code**: a deleted directory is *"the normal way an agent ends"*, and the record outlives it. Recreate the directory, or `forget_agent` the record |
+| `uninspectable` | it resolved and could not be `stat`'d — a race or a permission wall. **Not your code**: retry, or fix the permission |
+| `not-a-directory` | it exists and is a file, a socket, something. An agent runs in a directory. **Your code** |
+
+**Three remedies across five members, and that is the whole reason this field
+exists.** Before version 10 all five arrived as one refusal, so *"recreate the
+directory"* and *"fix your argument"* were indistinguishable from the response —
+and only one of them is a bug.
+
+**Which members a surface can emit differs, and the vocabulary does not.**
+`activate` requires the directory to exist (it is about to spawn into it), so all
+five are reachable there. `agent_status`, `deactivate` and `forget` must keep
+working *after* the directory is gone — that is exactly when *"stop expecting
+this"* is asked — so they resolve `does-not-exist` lexically and answer about the
+record instead. **`does-not-exist` therefore never appears on `agent_status`.**
+One published list rather than two: the difference is a property of the verb's
+strictness, and a second list would be wrong the day a verb changed it.
+
+**There is no `unknown` member and there will not be one by accident.** A sixth
+cause is a version bump with a notice — `src/read-contract.ts` binds this list to
+`PathProblem` with `Exact<>`, so a member added to the type and not to the
+contract does not compile. What the compiler cannot hold is *this table*; that
+join is `verify-read-contract.mjs` §1.
 
 <a id="resumecause"></a>
 ### `activate_response.resume`

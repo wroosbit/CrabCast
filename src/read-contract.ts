@@ -63,6 +63,7 @@ import type { RowStanding } from './agent-registry.js';
 import type { CapBound, CostSource, HeadroomBound } from './capacity.js';
 import { CAPACITY_FIELDS, type Exact } from './events.js';
 import type { HerdrAgentStatus } from './herdr.js';
+import type { PathProblem } from './identity.js';
 import type { StallSource } from './machine-pressure.js';
 import type { ArtifactKind, ArtifactOrigin } from './provisioning.js';
 import type { ResumeCause } from './resume.js';
@@ -114,7 +115,7 @@ import type { ResumeCause } from './resume.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 9;
+export const READ_CONTRACT_VERSION = 10;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -707,6 +708,18 @@ export const AGENT_STATUS_FIELDS = {
   success: { bucket: 'derived' },
   /** Only on a refusal. */
   error: { bucket: 'derived', optional: true },
+  /**
+   * WHY the address was refused — see {@link VALUE_SETS.pathProblem} (KAN-382).
+   * `derived`: this daemon's own verdict on the string it was handed, reached by
+   * `canonicalPath` from the identity rules and a filesystem look. Not
+   * `observed`, which on this surface means the census or session that answered
+   * THIS call, and no census was read on the branch that carries this.
+   *
+   * `optional` over the union and MANDATORY on `bad-address` — the only branch
+   * that carries it, and every response taking that branch carries it. See
+   * {@link AGENT_STATUS_BRANCHES}.
+   */
+  pathProblem: { bucket: 'derived', optional: true },
   /** Whether this daemon holds the agent's terminal attach. Absent on both refusals. */
   sessionless: { bucket: 'observed', optional: true },
   path: { bucket: 'durable', optional: true },
@@ -781,9 +794,20 @@ export const AGENT_STATUS_BRANCHES = {
   /**
    * `success: false` — the address itself was rejected (relative, empty, not a
    * directory). Nothing was looked up, so nothing is reported about a path this
-   * daemon never resolved.
+   * daemon never resolved — except WHY it was rejected, which is `pathProblem`
+   * (KAN-382) and is the one thing this branch did establish.
+   *
+   * IT IS ALSO WHAT NOW IDENTIFIES THE BRANCH. Until v10 this was the only
+   * `agent_status` branch with no `configured` key, so a consumer told the
+   * branches apart on an absence. `pathProblem` is present here and on no other
+   * branch, so the test is positive.
+   *
+   * THIS HANDLER IS `strict: false`, so `does-not-exist` cannot appear here:
+   * `addressOfRequest` resolves it lexically and answers about the record
+   * instead, which is the whole reason that fallback exists. Four of the five
+   * causes are reachable on this surface; all five are on `activate_response`.
    */
-  'bad-address': ['action', 'success', 'error', 'configEchoContract']
+  'bad-address': ['action', 'success', 'error', 'pathProblem', 'configEchoContract']
 } as const;
 
 // ----------------------------------------------------- activate_response ----
@@ -844,6 +868,22 @@ export const ACTIVATE_RESPONSE_FIELDS = {
   started: { bucket: 'derived' },
   /** Only on the nine refusals. */
   error: { bucket: 'derived', optional: true },
+  /**
+   * WHY the address was refused — see {@link VALUE_SETS.pathProblem} (KAN-382).
+   * `derived` for the reason given on `agent_status.pathProblem`, and the two
+   * are the same field with the same vocabulary on both surfaces deliberately: a
+   * consumer that learns to read one has learned to read the other.
+   *
+   * ON `bad-address` AND ON NO OTHER BRANCH, and MANDATORY there — the branch's
+   * `always` list, asserted as an equality against a real response by
+   * `verify-read-contract.mjs` §2d. It is what replaced *"tell `bad-address`
+   * apart by the ABSENCE of `path`"*.
+   *
+   * THIS SURFACE IS `strict: true`, so all five causes are reachable here,
+   * including `does-not-exist` — an agent whose directory has been deleted,
+   * which is the case this field was published for.
+   */
+  pathProblem: { bucket: 'derived', optional: true },
   /**
    * The agent's identity — its directory, resolved. `durable` for the same
    * reason `agent_status.path` is: it is the registry's own key, not a value
@@ -1025,8 +1065,8 @@ export interface ActivateBranchSpec {
  * SEVEN OF THE NINE ARE MACHINE-DISTINGUISHABLE AND ONE PAIR IS NOT. `refused`
  * separates three and `refusedBy` a fourth; `attach-error` is the only refusal
  * carrying `paneName`+`paneId`+`alreadyRunning`, `confirm-failed` the only one
- * carrying `verified` without `refused`, and `bad-address` the only one with no
- * `path` at all.
+ * carrying `verified` without `refused`, and `bad-address` the only one carrying
+ * `pathProblem` — which is also the only one with no `path` at all.
  *
  * THE PAIR: `bad-flag` and `spawn-error` have IDENTICAL key sets, so no amount
  * of shape inspection tells them apart, and their remedies are OPPOSITE — edit
@@ -1034,22 +1074,22 @@ export interface ActivateBranchSpec {
  * what makes this one worth naming rather than filing under "some refusals are
  * vague".
  *
- * AND `bad-address` IS DISTINGUISHABLE ONLY BY AN ABSENCE, which is the
- * discipline this daemon refuses everywhere else. It also flattens FIVE causes
- * into one prose string: `canonicalPath` throws a `PathError` carrying
- * `PathProblem` (`src/identity.ts` — `not-a-string`, `not-absolute`,
- * `does-not-exist`, `uninspectable`, `not-a-directory`) and
- * `MessageRouter.addressOfRequest` discards it on its `strict` path
- * (`return { error: e?.message ?? String(e) }`). Cited by symbol rather than by
- * line: the `router.ts` line moved while this comment was being written. At
- * least two of the five — `does-not-exist`, the ordinary way an agent's
- * directory ends, and `uninspectable` — are reachable by a CORRECT caller
- * against a changing world.
+ * `bad-address` USED TO BE THE SECOND HALF OF THAT DISCLOSURE AND IS NOT ANY
+ * MORE (KAN-382, v10). Two sentences stood here and both are now false, so they
+ * are replaced rather than softened — the first said this branch is
+ * distinguishable ONLY BY AN ABSENCE, the discipline this daemon refuses
+ * everywhere else; the second said it FLATTENS FIVE CAUSES into one prose
+ * string, `canonicalPath` throwing a `PathError` carrying `PathProblem` that
+ * `MessageRouter.addressOfRequest` then discarded. **Both were true of the same
+ * mechanism, and one field closed both.** `pathProblem` rides every response on
+ * this branch, so the branch is identified POSITIVELY, and it carries the cause
+ * the daemon was already computing — see {@link VALUE_SETS.pathProblem} for the
+ * five members and the three distinct remedies across them.
  *
- * ALL THREE OF THOSE ARE DISCLOSED RATHER THAN LEFT TO BE INFERRED, and none of
- * them is fixed here: publishing a discriminator for any of them moves the
- * wire, which is a decision and a version bump rather than a description. They
- * are named so the next reader meets the limit rather than discovering it.
+ * WHAT IS STILL DISCLOSED HERE, because the pair above is genuinely unfixed:
+ * `bad-flag`/`spawn-error` remains, and it is the `bad-flag`/`spawn-error`
+ * collision KAN-382's own ticket names as a candidate to batch with a later wire
+ * change. Nothing in v10 touched it.
  */
 export const ACTIVATE_RESPONSE_BRANCHES = {
   /** `success: true` — this call started the agent. */
@@ -1080,9 +1120,13 @@ export const ACTIVATE_RESPONSE_BRANCHES = {
       'reattached', 'recordReconciled', 'durable', 'durabilityError', 'occupiedBy', 'note'
     ]
   },
-  /** The address itself was rejected — relative, empty, not a directory. */
+  /**
+   * The address itself was rejected — relative, empty, not a directory, or gone.
+   * `pathProblem` says WHICH (KAN-382), and it is what tells this branch apart:
+   * it carries no `path`, and until v10 that absence was the whole of the test.
+   */
   'bad-address': {
-    always: ['action', 'success', 'started', 'error'],
+    always: ['action', 'success', 'started', 'error', 'pathProblem'],
     sometimes: []
   },
   /** `override` or `preempt` was not a boolean. Checked before anything is looked up. */
@@ -1354,7 +1398,39 @@ export const VALUE_SETS = {
    * "not a word I know" as "harmless" is precisely the wrong-conclusion-from-a-
    * short-list this field exists to prevent, arriving one level up.
    */
-  rowStanding: ['retired', 'claims-an-agent', 'unknown']
+  rowStanding: ['retired', 'claims-an-agent', 'unknown'],
+  /**
+   * `pathProblem` on the `bad-address` branch of `activate_response` and
+   * `agent_status` (KAN-382) — WHY an address was refused.
+   *
+   * THE SET IS ONE, AND WHICH MEMBERS A SURFACE CAN EMIT IS NOT. `activate` is
+   * `strict: true` and can answer with any of the five; `agent_status` is
+   * `strict: false`, so `does-not-exist` is resolved lexically there and never
+   * refuses. Publishing two lists would encode that flag in the vocabulary and
+   * make one of them wrong the day a verb changes its strictness — so it is one
+   * list, and §9's table names the surfaces per member.
+   *
+   * THREE REMEDIES ACROSS FIVE MEMBERS, which is the reason this field exists
+   * rather than the prose it sits beside:
+   *
+   *   not-a-string, not-absolute, not-a-directory   edit the calling code
+   *   does-not-exist                                recreate the directory, or
+   *                                                 `forget_agent` the record
+   *   uninspectable                                 retry, or fix a permission
+   *
+   * `does-not-exist` is the one a CORRECT caller meets against a changing world:
+   * `addressOfRequest`'s own header calls a deleted directory *"the normal way an
+   * agent ends"*. Before v10 it reached the wire as the same undifferentiated
+   * refusal as a relative path, whose remedy is the opposite kind of thing.
+   *
+   * NO `unknown` MEMBER, deliberately. A sixth cause is a version bump with a
+   * notice, which is the honest cost; a catch-all would let one land silently
+   * and would hand consumers a value that means "we will not say" on a field
+   * whose entire job is saying.
+   */
+  pathProblem: [
+    'not-a-string', 'not-absolute', 'does-not-exist', 'uninspectable', 'not-a-directory'
+  ]
 } as const;
 
 // `state` and `sessionStatus` are bound in `src/router.ts` instead, beside the
@@ -1406,6 +1482,20 @@ const _rowStandingValuesAreExact: Exact<
   RowStanding
 > = true;
 
+// KAN-382, and this is the binding the ticket most wanted: PREFER THE TYPE TO
+// THE ASSERTION WHERE THE CHOICE EXISTS. `PathProblem` was already a closed
+// union that the daemon computes and — until v10 — threw away at the boundary.
+// Now that it is published, a SIXTH cause added to `src/identity.ts` without a
+// line above is a COMPILE ERROR, not a check that runs later: the wire cannot
+// grow a value the contract does not publish. What the compiler still cannot
+// hold is the document's §9 table — that is `verify-read-contract.mjs` §1, the
+// same split KAN-376 measured on `ActivateRefusalKind` and is why this comment
+// does not say "compile error" for both halves.
+const _pathProblemValuesAreExact: Exact<
+  (typeof VALUE_SETS.pathProblem)[number],
+  PathProblem
+> = true;
+
 void _herdrStatusValuesAreExact;
 void _capBoundValuesAreExact;
 void _headroomBoundValuesAreExact;
@@ -1415,6 +1505,7 @@ void _resumeCauseValuesAreExact;
 void _artifactKindValuesAreExact;
 void _artifactOriginValuesAreExact;
 void _rowStandingValuesAreExact;
+void _pathProblemValuesAreExact;
 
 // ------------------------------------------------------------------ the digest
 
