@@ -247,10 +247,47 @@ const MARKER_LINE = /^[ \t]*BUTCHR-APPROVAL:[ \t]+([0-9a-f]{40})[ \t]+BY[ \t]+(\
  * to go red when the grammar is loosened. What this function does buy is that
  * the suggestion the check PRINTS and the line the check ACCEPTS cannot drift
  * apart — which is incident 1 and incident 2 in one sentence.
+ *
+ * AND WHAT IT DOES NOT BUY, because the first version of this docstring stopped
+ * at the sentence above and was quoted back at it in review. Self-consistency is
+ * not conformance. A rename applied to the grammar AND to this constructor
+ * together leaves every claim here true and the module speaking a language no
+ * agent in the fleet writes. Only `verify-approval-marker.mjs` §0 says
+ * otherwise, by holding {@link MARKER_TEMPLATE} against a transcription of
+ * `prompts/task.md` carried as text outside this module.
  */
 export function canonicalMarker({ sha, approver }) {
   return `BUTCHR-APPROVAL: ${String(sha ?? '').toLowerCase()} BY ${approver ?? '<approver>'}`;
 }
+
+/**
+ * The format DESCRIPTION, built by the same constructor that builds the concrete
+ * line — so a reason string cannot describe one grammar while suggesting
+ * another.
+ *
+ * THIS EXISTS BECAUSE THE FIRST VERSION OF THIS FILE GOT IT WRONG, and the
+ * review of KAN-402 caught it. The header above claimed the constructor meant
+ * "the suggestion the check PRINTS and the line it ACCEPTS cannot drift apart".
+ * That was true of the concrete line and FALSE of the format description printed
+ * beside it, which was a hand-written literal — a constant maintained next to a
+ * self-deriving one, which is the class this repository has six other instances
+ * of. `epic/KAN-59` measured it by renaming `BY` to `SIGNED-BY` at all three
+ * sites at once: the suite reported ALL CHECKS PASSED while one reason string
+ * told the approver the format in one clause and handed them a different line in
+ * the next.
+ *
+ * A CONSISTENT DRIFT IS NOT A LOOSENING, which is why no mutation in the proof
+ * modelled it and why every refusal fixture is blind to it — the incident
+ * transcriptions are refused under both grammars. What pins it is
+ * `verify-approval-marker.mjs` §0, which holds this value against a literal
+ * transcription of the spec line carried as TEXT in the proof rather than
+ * derived from this module. The property is "we still speak the language the
+ * pollers speak", and nothing else in this tree can say it.
+ */
+export const MARKER_TEMPLATE = canonicalMarker({
+  sha: '<full-40-char-head-sha>',
+  approver: '<type>/<KEY>'
+});
 
 /**
  * A comment that mentions the token but matches neither grammar above. This is
@@ -620,7 +657,7 @@ export function evaluate({ headSha, headRef, prBody, comments }) {
     reasons.push(
       'no approval marker was found in any comment on this pull request. An approval is a ' +
         'comment containing, on a line of its own and at the top level of the comment: ' +
-        '`BUTCHR-APPROVAL: <40-char-head-sha> BY <type>/<KEY>`. For this head that line is ' +
+        `\`${MARKER_TEMPLATE}\`. For this head that line is ` +
         'the following, which must be pasted UNINDENTED and NOT inside a code fence:\n' +
         // Deliberately not indented to line up with the reason above it. A
         // check printing its own suggestion indented by six spaces, in a design
@@ -688,8 +725,8 @@ export function evaluate({ headSha, headRef, prBody, comments }) {
   if (reasons.length > 0 && malformed.length > 0) {
     reasons.push(
       `${malformed.length} line(s) mention BUTCHR-APPROVAL at the top level of a comment and ` +
-        'match none of the grammar. THE TOKEN IS NOT ENOUGH: the SHA must be all 40 ' +
-        'characters, it must come BEFORE the approver, and the word `BY` must separate them. ' +
+        'match none of the grammar. THE TOKEN IS NOT ENOUGH — the whole line must have the ' +
+        `shape \`${MARKER_TEMPLATE}\`, with the SHA at full length and in that order. ` +
         malformed.map((m) => `Comment ${m.commentId ?? '?'} reads: ${JSON.stringify(m.line)}.`).join(' ') +
         ' The line this head needs is exactly: ' +
         canonicalMarker({ sha: head, approver: declared })

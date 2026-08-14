@@ -97,6 +97,7 @@ import {
   evaluate,
   exitCodeFor,
   EXIT_ON,
+  MARKER_TEMPLATE,
   parseMalformedMentions,
   parseMarkers,
   parseQuotedMarkers,
@@ -179,6 +180,82 @@ const pr = (comments, body = BODY, headSha = HEAD) =>
   evaluate({ headSha, headRef: HEAD_REF, prBody: body, comments });
 
 const comment = (id, body) => ({ id, body, user: { login: 'wroosbit' } });
+
+// ===========================================================================
+console.log('\n§0  THE SPEC ANCHOR — we still speak the language the pollers speak');
+// ===========================================================================
+//
+// WHY THIS SECTION EXISTS, and it is a defect this proof did not have on its
+// first submission. `epic/KAN-59` found it in review of KAN-402: the format
+// DESCRIPTION printed in a reason string was a hand-written literal sitting
+// beside the self-deriving `canonicalMarker`, which is KAN-245's class. They
+// measured it rather than asserting it — renaming `BY` to `SIGNED-BY` at all
+// three sites at once (both regexes and the constructor) — and the suite
+// reported ALL CHECKS PASSED while one reason string described one grammar and
+// suggested a line in another.
+//
+// A CONSISTENT DRIFT IS NOT A LOOSENING, which is why nothing else in this file
+// can see it. §7's mutations all widen what is accepted. §1d and §1e are
+// transcribed from incidents and are refused under EITHER grammar, so neither
+// constrains the token order at all. Every fixture below §0 is generated from
+// the module under test, so a module that changed its mind about the grammar
+// changes the fixtures with it and stays green.
+//
+// SO THE ANCHOR HAS TO COME FROM OUTSIDE THE MODULE, AS TEXT. `SPEC_LINE` below
+// is a literal transcription — retyped, not imported, not derived — of the line
+// mandated by `prompts/task.md` in `wroosbit/butchr`, read at `origin/main`
+// commit `5299e30`:
+//
+//     "a required check called `approval-recorded` now goes green only when a PR
+//      comment carries, on a line of its own, `BUTCHR-APPROVAL:
+//      <full-40-char-head-sha> BY <type>/<KEY>` naming the approver your PR body
+//      declares in a `BUTCHR-APPROVER:` line."
+//
+// THE PROPERTY THIS BUYS is not "the check is correct". It is narrower and it is
+// the one that matters here: **the shape this repository accepts is the shape
+// the fleet's agents are instructed to write and poll for.** Nothing else in
+// this tree can say that, and until this section existed only a human re-reading
+// two repositories could.
+//
+// THE FAILURE IT ADMITS is this ticket inverted: the check greens on a shape no
+// agent polls for, a marker in the real spec shape goes red, the approver reads
+// the red as the gate being broken, and the author merges anyway. That is the
+// pull request body's own "a second incompatible spelling would reintroduce this
+// exact defect, to every agent at once" — arriving through the GRAMMAR instead
+// of through the token.
+//
+// ⚠ THIS IS A COUPLING, DELIBERATELY, AND IT IS THE ONE PLACE IT LIVES. If
+// `prompts/task.md` ever changes the line, THIS SECTION IS WHAT GOES RED, and
+// that is the intended behaviour rather than a maintenance cost to route around:
+// the red is the notification. Change `SPEC_LINE` to the new transcription, in
+// the same commit that changes the grammar, and say on the ticket that the
+// fleet's agents need the same move. Do not delete it to make a red go away.
+
+/** Retyped from `prompts/task.md`. NOT imported, NOT derived. */
+const SPEC_LINE = 'BUTCHR-APPROVAL: <full-40-char-head-sha> BY <type>/<KEY>';
+
+check(
+  MARKER_TEMPLATE === SPEC_LINE,
+  '§0  the module\'s own format description is the spec line, character for character',
+  `module: ${JSON.stringify(MARKER_TEMPLATE)} · spec: ${JSON.stringify(SPEC_LINE)}`
+);
+
+{
+  // The template with its placeholders filled must be exactly what the
+  // constructor builds — so the description and the concrete line are one
+  // grammar rather than two that happen to agree.
+  const instantiated = SPEC_LINE.replace('<full-40-char-head-sha>', HEAD).replace('<type>/<KEY>', APPROVER);
+  check(
+    canonicalMarker({ sha: HEAD, approver: APPROVER }) === instantiated,
+    '§0  the constructor builds the SPEC LINE instantiated, not merely something self-consistent',
+    instantiated
+  );
+  // …and the grammar accepts that literal string. This is the assertion that
+  // fails under a consistent rename: the fixture is built from the transcription
+  // rather than from the module.
+  const v = evaluate({ headSha: HEAD, headRef: HEAD_REF, prBody: BODY, comments: [{ id: 0, body: instantiated }] });
+  check(v.ok, '§0  and the grammar ACCEPTS the spec line built from the transcription', v.ok ? '' : v.reasons[0]);
+}
 
 // ===========================================================================
 console.log('\n§1  THE FIVE ACCEPTANCE CASES — driven, not described');
@@ -577,6 +654,79 @@ await withMutant(
     check(v.ok, '§7 ignore-the-signer  a marker from an UNDECLARED agent is now accepted — so §3 was measuring the signer');
   }
 );
+
+// M5 — THE CONSISTENT DRIFT, which is not a loosening and which every other
+// mutation here is blind to. `epic/KAN-59`'s own reproduction: rename `BY` to
+// `SIGNED-BY` at all three sites at once — both regexes and the constructor —
+// which is the shape a refactor takes. The module stays perfectly
+// self-consistent; what breaks is that it no longer speaks the language
+// `prompts/task.md` tells every agent in this fleet to write.
+//
+// THIS MUTANT MUST BE MEASURED DIFFERENTLY FROM THE OTHERS, and that is the
+// point of the section rather than a wrinkle. The precondition used above —
+// "the mutant still accepts the canonical marker" — is exactly what a
+// consistently-drifted module DOES do, because `canonicalMarker` drifted with
+// it. So the assertion is against `SPEC_LINE`, retyped from outside the module,
+// and the flip required is that §0 goes RED.
+{
+  const drifted = mutator.mutateScript('consistent-drift-BY-to-SIGNED-BY', MODULE, [
+    { find: '[ \\t]+BY[ \\t]+(\\S+)[ \\t]*$/gim;', replace: '[ \\t]+SIGNED-BY[ \\t]+(\\S+)[ \\t]*$/gim;' },
+    { find: '[ \\t]+BY[ \\t]+(\\S+)[ \\t]*$/i;', replace: '[ \\t]+SIGNED-BY[ \\t]+(\\S+)[ \\t]*$/i;' },
+    { find: '.toLowerCase()} BY ${approver', replace: '.toLowerCase()} SIGNED-BY ${approver' }
+  ]);
+  if (drifted) {
+    const mod = await import(`file://${drifted}`);
+
+    // The precondition, INVERTED on purpose: this mutant is self-consistent, so
+    // it still accepts its OWN constructor's output. If it did not, the section
+    // below would be measuring a broken module rather than a drifted one.
+    const selfConsistent = mod.evaluate({
+      headSha: HEAD,
+      headRef: HEAD_REF,
+      prBody: BODY,
+      comments: [{ id: 0, body: mod.canonicalMarker({ sha: HEAD, approver: APPROVER }) }]
+    });
+    check(
+      selfConsistent.ok,
+      '§7 consistent-drift  (precondition) the drifted module is SELF-CONSISTENT — it accepts its own line',
+      'which is exactly why every fixture generated from the module stays green, and why §0 has to come from outside it'
+    );
+
+    // The three §0 assertions, re-run against the mutant. Each must now fail.
+    check(
+      mod.MARKER_TEMPLATE !== SPEC_LINE,
+      '§7 consistent-drift  §0 goes RED: the format description no longer matches the transcribed spec line',
+      `mutant: ${JSON.stringify(mod.MARKER_TEMPLATE)}`
+    );
+    const instantiated = SPEC_LINE.replace('<full-40-char-head-sha>', HEAD).replace('<type>/<KEY>', APPROVER);
+    check(
+      mod.canonicalMarker({ sha: HEAD, approver: APPROVER }) !== instantiated,
+      '§7 consistent-drift  §0 goes RED: the constructor no longer builds the spec line'
+    );
+    const v = mod.evaluate({ headSha: HEAD, headRef: HEAD_REF, prBody: BODY, comments: [{ id: 0, body: instantiated }] });
+    check(
+      !v.ok,
+      '§7 consistent-drift  §0 goes RED: a marker in the REAL SPEC SHAPE is now REFUSED',
+      'this is the ticket inverted — the fleet writes one shape and the gate demands another'
+    );
+
+    // And the control that makes the three above mean something: NONE of the
+    // other sections would have noticed. The incident transcriptions are refused
+    // under either grammar, so they cannot constrain the token order.
+    const stillRefusesMalformed = mod.evaluate({
+      headSha: HEAD, headRef: HEAD_REF, prBody: BODY, comments: [{ id: 0, body: MALFORMED }]
+    });
+    const stillRefusesFenced = mod.evaluate({
+      headSha: HEAD, headRef: HEAD_REF, prBody: BODY,
+      comments: [{ id: 0, body: `\`\`\`\n${mod.canonicalMarker({ sha: HEAD, approver: APPROVER })}\n\`\`\`` }]
+    });
+    check(
+      !stillRefusesMalformed.ok && !stillRefusesFenced.ok,
+      '§7 consistent-drift  CONTROL: §1d and §1e stay GREEN under this drift — they are blind to it by construction',
+      'refusal fixtures transcribed from incidents are refused under either grammar, which is why §0 is not redundant with them'
+    );
+  }
+}
 
 // ---------------------------------------------------------------------------
 // A last direct assertion on the parsers, so that a future edit which made
