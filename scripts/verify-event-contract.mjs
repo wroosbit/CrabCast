@@ -246,7 +246,8 @@ function owned(name) {
 
 const { paneNameFor } = await import(path.join(distDir, 'identity.js'));
 const { socketPathFor } = await import(path.join(distDir, 'ipc.js'));
-const { EVENT_NAMES, EVENT_CONTRACT } = await import(path.join(distDir, 'events.js'));
+const { EVENT_NAMES, EVENT_CONTRACT, CONFIG_FIELDS } =
+  await import(path.join(distDir, 'events.js'));
 
 // ------------------------------------------------------- mutated builds --
 //
@@ -1586,7 +1587,13 @@ mutation3: {
     fixedFrame?.config?.launcher === LAUNCHER &&
     fixedFrame?.config?.priority === 1 &&
     fixedFrame?.config?.refusable === true &&
-    Object.keys(fixedFrame?.outcomes ?? {}).length === 8 &&
+    // DERIVED FROM THE DECLARATION, NOT WRITTEN DOWN. This was the literal `8`
+    // until KAN-193 added a ninth knob, at which point it went red for a
+    // reason that had nothing to do with what this section is about — a
+    // projector dropping a whole composite. A count nobody can add a knob
+    // without editing is a check that reports the WRONG defect, and the
+    // KAN-263 lesson about literal anchors is exactly this one instrument over.
+    Object.keys(fixedFrame?.outcomes ?? {}).length === Object.keys(CONFIG_FIELDS).length &&
     Array.isArray(fixedFrame?.changed) && fixedFrame.changed.includes('launcher');
 
   verdict(

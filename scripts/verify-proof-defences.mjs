@@ -735,6 +735,14 @@ const PROOF_DEFENCES = [
       'refuses rather than resets, and survives ties and a moving fleet.'
   },
   {
+    script: 'verify-owner-filter',
+    defence: 'mutation',
+    central:
+      'an application finds its OWN agents by an opaque `owner` matched exactly, across every ' +
+      'row-carrying category and correctly under paging — and an agent that belongs to NOBODY ' +
+      'is returned by no filter while staying reachable by an unfiltered read.'
+  },
+  {
     script: 'verify-mutation-harness',
     defence: 'mutation',
     central:

@@ -852,6 +852,33 @@ jobs:
       #                                      named in its header and in the
       #                                      document.
       #
+      #   verify-owner-filter                an application finds ITS OWN agents
+      #                                      by an opaque `owner`, and an agent
+      #                                      belonging to NOBODY is handed to
+      #                                      nobody. §2 is the section to read:
+      #                                      absence is a real state, and a
+      #                                      filter written with a truthy test
+      #                                      returns every pre-`owner` agent on
+      #                                      the machine to the first caller
+      #                                      that asks for its own. The named
+      #                                      caller is a reconciler ending
+      #                                      "anything running that is not in my
+      #                                      desired list → off", so that is not
+      #                                      an over-reported listing, it is
+      #                                      other people's agents stopped. §5
+      #                                      asserts the filter is NOT a
+      #                                      security boundary, deliberately and
+      #                                      as intended behaviour, so nobody
+      #                                      can quietly start treating it as
+      #                                      one. WHAT IT CANNOT SEE: whether
+      #                                      the MCP tool and the CLI pass the
+      #                                      argument through — §9 reads their
+      #                                      DESCRIPTIONS and nothing joins the
+      #                                      surfaces to this handler — and
+      #                                      whether any consumer sets an owner
+      #                                      at all. Both are named in its
+      #                                      header.
+      #
       # And one whose subject is the only USER-FACING document, which until now
       # had no proof at all:
       #
@@ -978,6 +1005,7 @@ jobs:
             verify-daemon-foreground
             verify-timing-attribution
             verify-unreadable-row-standing
+            verify-owner-filter
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

@@ -1580,6 +1580,10 @@ const _configEchoContractMatchesTheContract: Exact<
   keyof ConfigEchoContract,
   keyof typeof BLOCK_SHAPES.ConfigEchoContract
 > = true;
+const _ownerFilterMatchesTheContract: Exact<
+  keyof OwnerFilterDto,
+  keyof typeof BLOCK_SHAPES.OwnerFilter
+> = true;
 const _provenanceMatchesTheContract: Exact<
   keyof ReturnType<typeof stateReadProvenance>,
   keyof typeof BLOCK_SHAPES.Provenance
@@ -1785,6 +1789,196 @@ function readFleetPageRequests(
     pages[category as PagedFleetCategory] = value as FleetPageRequest;
   }
   return { pages };
+}
+
+// ------------------------------------------------------- the owner filter
+
+/**
+ * The row-carrying categories an owner filter applies to: every category whose
+ * rows are AGENTS OF OURS and therefore have an owner to be asked about.
+ *
+ * DERIVED FROM NOTHING AND WRITTEN DOWN, because the alternative is worse than
+ * the repetition. `FleetCategories` has six members and two of them are not
+ * agents: `unbackedPanes` are our panes with nothing behind them and
+ * `foreignPanes` are somebody else's panes entirely. Neither has a record, so
+ * neither has an owner, and filtering them would mean this daemon deciding that
+ * an unowned thing belongs to the owner who asked — which is the wildcard
+ * reading of absence that {@link AgentConfig.owner} exists to refuse.
+ *
+ * So they are left COMPLETE, and the response says so rather than leaving a
+ * reader to notice: see {@link OwnerFilterDto.unfiltered}. *"Find all of X's
+ * agents"* that silently dropped X's MISSING ones would be worse than no
+ * filter, because it reads as a complete answer — and a filtered response that
+ * silently carried rows belonging to nobody would be the same defect pointing
+ * the other way.
+ */
+const OWNER_FILTERED_CATEGORIES = [
+  'agents',
+  'missingAgents',
+  'preemptedAgents',
+  'standbyAgents',
+  'unstartedAgents'
+] as const;
+
+/** Row-carrying categories an owner filter deliberately leaves whole. */
+const OWNER_UNFILTERED_CATEGORIES = ['unbackedPanes', 'foreignPanes'] as const;
+
+/**
+ * Every row-carrying category is either filtered or deliberately not, and the
+ * compiler holds that rather than a reader checking it.
+ *
+ * `foreignPanes` is a paged category that is not a member of
+ * {@link FleetCategories} — it is spread into the response separately — so the
+ * union is taken over both, and a SIXTH category added to `FleetCategories`
+ * without a decision about owner filtering is a build error here.
+ */
+type OwnerFilterableCategory = keyof FleetCategories | 'foreignPanes';
+type _EveryCategoryHasAnOwnerFilterDecision = Exact<
+  OwnerFilterableCategory,
+  (typeof OWNER_FILTERED_CATEGORIES)[number] | (typeof OWNER_UNFILTERED_CATEGORIES)[number]
+>;
+const _everyCategoryHasAnOwnerFilterDecision: _EveryCategoryHasAnOwnerFilterDecision = true;
+
+/**
+ * Every row-carrying array on a `list_agents` response that a filter leaves
+ * COMPLETE — the two categories above, and two more that are not categories at
+ * all and would otherwise go unmentioned.
+ *
+ * `priorities` is here because decision 6 of KAN-193 puts it here: owner must
+ * not touch capacity, priority or preemption. That list answers *"what would a
+ * would-be activation have to outrank"*, which is a question about the MACHINE.
+ * Narrowing it to one owner would produce a number that is wrong rather than
+ * partial — an activation is outranked by whatever is running, not by whatever
+ * is running and shares your name — so it is left whole and said so.
+ *
+ * `unreadableRecords` is here because it CANNOT be filtered and that fact is
+ * worth more than the row. A registry row this daemon could not parse may be
+ * the asking caller's own agent; there is no `config` to read an owner from, so
+ * any filtering of it would be a guess. Dropping those rows under a filter
+ * would hide precisely the agents a caller most needs to hear about — absent
+ * from every category, and now absent from the fault report too.
+ */
+const OWNER_UNFILTERED_ROWS = [
+  ...OWNER_UNFILTERED_CATEGORIES,
+  'priorities',
+  'unreadableRecords'
+] as const;
+
+/**
+ * What a caller is told about the filter it asked for. Present on a filtered
+ * response and ABSENT on an ordinary one, so "no filter was applied" is read
+ * from the shape rather than from a sentinel value nobody agreed on.
+ */
+interface OwnerFilterDto {
+  /** The owner asked for, echoed exactly as sent. Never normalised. */
+  owner: string;
+  /** Categories this filter applied to. Their `*Total`s count the FILTERED set. */
+  filtered: string[];
+  /**
+   * Row-carrying arrays the filter did NOT apply to, which are therefore
+   * complete and may carry rows belonging to nobody or to somebody else. Each
+   * is here for a stated reason: see {@link OWNER_UNFILTERED_ROWS}.
+   */
+  unfiltered: string[];
+  /**
+   * The one sentence somebody who reads a field called `owner` as access
+   * control most needs, on the wire rather than only in the docs.
+   */
+  note: string;
+}
+
+/**
+ * THE NON-BOUNDARY STATEMENT, in the place a consumer actually stands.
+ *
+ * Decision 5 of KAN-193 names two homes for it — `AgentConfig.owner` in
+ * `src/types.ts`, for whoever reads the type, and the MCP tool descriptions,
+ * for whoever reads the tool. This is a third, and it is the cheapest of the
+ * three to meet: it arrives attached to the answer the mistaken reading would
+ * be drawn from.
+ */
+const OWNER_FILTER_NOTE =
+  'An owner filter is a narrower QUESTION, not a smaller ANSWER. It is not a permission ' +
+  'boundary and hides nothing: any caller that can reach this socket can list every agent ' +
+  'on this machine by omitting the filter, deliberately and by design. The only auth ' +
+  'boundary is the socket\'s own file permission (0600 in a 0700 directory). Agents with no ' +
+  'owner are matched by NO filter and are reachable only by an unfiltered read.';
+
+/**
+ * The `owner` field of a request, validated, or the refusal naming what is
+ * wrong with it. `null` for the ordinary unfiltered read.
+ *
+ * BOTH REFUSALS BELOW EXIST BECAUSE ABSENCE IS A REAL STATE, and they are the
+ * same defect approached from two sides.
+ *
+ * `owner: null` is REFUSED rather than read as "no filter". A caller that meant
+ * to filter and whose own owner variable was unset sends exactly that, and
+ * answering it with the whole fleet hands a reconciler every agent on the
+ * machine as though they were candidates — whereupon its last step, *"anything
+ * running that is not in my desired list → off"*, stands down other people's
+ * work. A false NON-match omits a row from a listing; this is the direction
+ * that stops agents, so the ambiguity is refused rather than resolved. Omitting
+ * the field entirely is how you ask for everything, and it cannot be produced
+ * by an unset variable serialising itself.
+ *
+ * The empty string is refused for the same reason `configure` refuses to store
+ * one: no agent can ever carry it, so a filter for it can only ever mean a
+ * caller's mistake.
+ */
+function readOwnerFilter(raw: unknown): { owner: string | null } | { error: string } {
+  if (raw === undefined) return { owner: null };
+  if (raw === null) {
+    return {
+      error:
+        'Invalid owner: null. Omit `owner` entirely to read the whole fleet — an explicit null ' +
+        'is what an unset variable serialises to, and reading it as "no filter" would answer a ' +
+        'caller that meant to filter with every agent on this machine. A reconciler acting on ' +
+        'that answer stands down work that was never its own, which is why this is refused ' +
+        'rather than resolved.'
+    };
+  }
+  if (typeof raw !== 'string') {
+    return {
+      error:
+        `Invalid owner: expected a string, got ${JSON.stringify(raw)}. It is matched EXACTLY ` +
+        `against the opaque name frozen onto each agent's record — no prefix, no glob, no ` +
+        `hierarchy and no case-folding — so there is no structure here for a non-string to carry.`
+    };
+  }
+  if (!raw.trim()) {
+    return {
+      error:
+        `Invalid owner: ${JSON.stringify(raw)} is empty. \`configure\` refuses to store an empty ` +
+        `owner, so no agent can carry one and this filter could only ever return nothing. Agents ` +
+        `with NO owner are not matched by this or any other filter — read them with no \`owner\` ` +
+        `at all.`
+    };
+  }
+  return { owner: raw };
+}
+
+/**
+ * Whether one row belongs to the owner asked for.
+ *
+ * WRITTEN AS TWO EXPLICIT BRANCHES OVER A TRUTHY TEST, and that is the whole
+ * substance of this function rather than its style. `rows.filter((r) =>
+ * r.config?.owner === wanted)` is correct today and says nothing about WHY; the
+ * failure this is shaped against is a later author who reaches for
+ * `r.config?.owner ?? wanted` or `!r.config?.owner || …` to "handle the
+ * unconfigured row", and either one silently makes absence a wildcard. Both
+ * would read as tidying. So the unowned case is a branch a reader meets, with
+ * the reason on it, and `verify-owner-filter.mjs` mutates exactly here.
+ *
+ * A row with `config: null` — no record backs it at all — is unowned by the
+ * same rule and for a stronger reason: there is nothing to be owned.
+ */
+function ownedBy(row: ConfigEcho, wanted: string): boolean {
+  const owner = row.config?.owner;
+  // ABSENCE IS NOT A WILDCARD. An agent configured before `owner` existed, and
+  // one configured since without it, are UNOWNED — which is a real state and
+  // not a match for anybody. Returning true here would hand every legacy agent
+  // on the machine to the first caller that asked for its own.
+  if (owner === undefined) return false;
+  return owner === wanted;
 }
 
 /**
@@ -2180,6 +2374,44 @@ function parseAgentConfig(data: any): ConfigParse {
     label = data.label;
   }
 
+  // WHOSE AGENT THIS IS. Frozen onto the record verbatim and never examined
+  // again beyond an equality test — see `AgentConfig.owner` in `src/types.ts`
+  // for why that limit is the whole of what makes this field safe to have.
+  //
+  // THE EMPTY STRING IS REFUSED RATHER THAN STORED, and the reason is the same
+  // one that makes absence a real state. `owner: ''` is what a caller sends
+  // when their own owner variable was never set, and it is indistinguishable
+  // on the wire from a deliberate choice to be owned by the empty name. Stored,
+  // it would produce an agent that no filter for a real owner matches and that
+  // a filter for `''` does — a third category nobody designed, reachable only
+  // by accident. Refused, the caller learns at `configure` time rather than
+  // discovering it at the first reconcile.
+  //
+  // Whitespace is trimmed for the emptiness TEST and not for the VALUE: an
+  // owner of `' '` is refused, and an owner of `' butchr '` is stored exactly
+  // as sent, because trimming it would be this daemon deriving a value from
+  // the caller's bytes rather than matching them.
+  let owner: string | undefined;
+  if (data.owner !== undefined) {
+    if (typeof data.owner !== 'string') {
+      return refuse(
+        `Invalid owner: expected a string, got ${JSON.stringify(data.owner)}. It is an OPAQUE ` +
+          `name for whoever runs this agent — CrabCast matches it exactly and never parses it — ` +
+          `so it has no structure for a non-string to carry.`
+      );
+    }
+    if (!data.owner.trim()) {
+      return refuse(
+        `Invalid owner: ${JSON.stringify(data.owner)} is empty. An owner nobody can name is ` +
+          `what an unset variable looks like on the wire, and storing it would make an agent ` +
+          `that no filter for a real owner finds. Omit \`owner\` to leave this agent UNOWNED — ` +
+          `which is a real state, reachable by an unfiltered read and matched by no filter — ` +
+          `or send the name you will filter by.`
+      );
+    }
+    owner = data.owner;
+  }
+
   return {
     ok: true,
     config: {
@@ -2190,7 +2422,8 @@ function parseAgentConfig(data: any): ConfigParse {
       launcher: launcher.trim(),
       ...(prompt ? { prompt } : {}),
       ...(mcpServers ? { mcpServers } : {}),
-      ...(label !== undefined ? { label } : {})
+      ...(label !== undefined ? { label } : {}),
+      ...(owner !== undefined ? { owner } : {})
     }
   };
 }
@@ -2231,6 +2464,15 @@ export const RECONFIGURATION_COST: { [K in keyof Required<AgentConfig>]: Reconfi
   preemptable: 'in-place',
   // Nothing parses it; it is display text on a row.
   label: 'in-place',
+  // Metadata about WHOSE agent this is, read out of the record when a
+  // `list_agents` filter matches it and handed to the pane never. Nothing
+  // inside the pane has a copy, so changing it changes the next answer.
+  //
+  // AND THE CONSEQUENCE IS ON THE WIRE RATHER THAN ONLY HERE: because this is
+  // in-place, a filtered list is a SNAPSHOT — an agent can move between owners
+  // between two polls, so a consumer that diffs two filtered reads is looking
+  // at a set whose membership it does not control.
+  owner: 'in-place',
   // IT IS THE COMMAND THE PANE RUNS, resolved once when the agent was spawned.
   launcher: 'restart-required',
   // Written into the agent's sidecar and passed at spawn. The agent running
@@ -5608,6 +5850,33 @@ export class MessageRouter {
       return;
     }
 
+    // WHOSE AGENTS THIS CALLER IS ASKING ABOUT, before anything expensive
+    // happens and before any row is built — for the same reason the page
+    // request is read here. An `owner` that cannot be honoured is answered as a
+    // refusal rather than as an unfiltered read: see `readOwnerFilter`, where
+    // the null case is the one that matters.
+    const ownerRequest = readOwnerFilter(data?.owner);
+    if ('error' in ownerRequest) {
+      respondSwept({ action: 'list_agents_response', success: false, error: ownerRequest.error });
+      return;
+    }
+    const ownerFilter = ownerRequest.owner;
+
+    /**
+     * One category's rows, narrowed to the owner asked for.
+     *
+     * APPLIED BEFORE `pageFleetCategory` AND NOT AFTER, which is the whole of
+     * how paging stays correct under a filter. The pager computes `total`,
+     * `remaining` and `nextCursor` from the array it is handed, so handing it
+     * the filtered set makes every one of those numbers describe the filtered
+     * category by construction. Filtering a PAGE instead would leave `total`
+     * counting rows the caller cannot see and `nextCursor` walking a sequence
+     * that thins unpredictably — 25 rows in, 3 rows out, and a consumer told to
+     * follow the cursor until null with no way to know how far it has got.
+     */
+    const narrow = <T extends ConfigEcho>(rows: T[]): T[] =>
+      ownerFilter === null ? rows : rows.filter((row) => ownedBy(row, ownerFilter));
+
     // One read of the registry for the whole response. Several of the fields
     // below are derived from it, and asking it repeatedly was both several
     // whole-file parses per poll and several chances for an append landing
@@ -5668,20 +5937,23 @@ export class MessageRouter {
       // answering those four grounds, and `verify-agent-power-controls.mjs`
       // §15 goes red on a build that quietly flips the order or grows the row
       // a second timestamp.
-      ['missingAgents', this.missingAgents(agents, staleSessions, intents),
+      ['missingAgents', narrow(this.missingAgents(agents, staleSessions, intents)),
         (r: any) => r.since, (r: any) => r.path],
       // Work taken off the machine to make room, still owed a decision.
-      ['preemptedAgents', this.preemptedAgents(agents, intents),
+      ['preemptedAgents', narrow(this.preemptedAgents(agents, intents)),
         (r: any) => r.at, (r: any) => r.path],
       // Agents a person switched off. From the same census for the same
       // reason: an agent that is running must never be offered an On button.
-      ['standbyAgents', this.standbyAgents(agents, intents),
+      ['standbyAgents', narrow(this.standbyAgents(agents, intents)),
         (r: any) => r.since, (r: any) => r.path],
       // Agents that exist and have never run. Same census, same reason: an
       // agent that is running must never be offered as one that has yet to
       // start.
-      ['unstartedAgents', this.unstartedAgents(agents, intents),
+      ['unstartedAgents', narrow(this.unstartedAgents(agents, intents)),
         (r: any) => r.since, (r: any) => r.path],
+      // NOT NARROWED, and deliberately: a foreign pane is not our agent and has
+      // no owner to be asked about. See OWNER_FILTERED_CATEGORIES, and
+      // `ownerFilter.unfiltered` on the response, which says so to the caller.
       ['foreignPanes', foreignPanes,
         (r: any) => r.paneName, (r: any) => r.paneName]
     ] as Array<[PagedFleetCategory, any[], (r: any) => string, (r: any) => string]>) {
@@ -5704,6 +5976,14 @@ export class MessageRouter {
     const usage = readFdUsage();
 
     // CPU and memory headroom, for the same reason and in the same place.
+    //
+    // `agents` AND NEVER `narrow(agents)`, which is worth a line because the
+    // narrowed list is in scope right here and reads like the tidier argument.
+    // The gate counts AGENTS ON THIS MACHINE; an owner is a fact about who
+    // asked, not about the machine, and a cap that moved with the caller's
+    // filter would mean two callers reading two different headrooms off the
+    // same fleet. The moment `owner` reaches this line it has stopped being
+    // metadata and become policy — a different ticket (KAN-193 decision 6).
     const capacity = this.capacityOf(agents);
 
     // THE CATEGORIES, AS ONE TYPED VALUE. Spread into the response rather than
@@ -5714,7 +5994,15 @@ export class MessageRouter {
     // straight to `respond` below is not, and §3 of verify-activated-by.mjs is
     // what covers that. Both are stated on `FleetCategories`.
     const categories: FleetCategories = {
-      agents,
+      // NARROWED HERE RATHER THAN AT THE PAGER, because `agents` is never
+      // paged: it is built from the herdr census, bounded by what is running,
+      // and complete in every response. The filter still applies — a fleet read
+      // that narrowed the four not-running categories and returned everybody's
+      // RUNNING agents would be the worst of the available answers, since the
+      // running ones are what a reconciler acts on.
+      agents: narrow(agents),
+      // NOT NARROWED: our panes with nothing behind them. No record, so no
+      // owner. See OWNER_FILTERED_CATEGORIES.
       unbackedPanes,
       missingAgents: missing.rows,
       preemptedAgents: preempted.rows,
@@ -5816,6 +6104,24 @@ export class MessageRouter {
       // the field that says whether this daemon has been running long enough
       // for a null to mean anything.
       ...eventWatermark(this.deps.daemonStartedAt),
+      // WHAT THE FILTER DID, AND WHAT IT DID NOT TOUCH (KAN-193). Present only
+      // when a filter was asked for, so an ordinary read is byte-identical to
+      // what it was before this field existed and "unfiltered" is read off the
+      // shape rather than off a sentinel.
+      //
+      // IT IS ON THE RESPONSE BECAUSE A FILTERED ANSWER LOOKS COMPLETE. Every
+      // `*Total` beside it now counts the filtered set, which is what makes
+      // paging correct — and it means a caller cannot tell from the numbers
+      // alone that four of the six row-carrying arrays were narrowed and two
+      // were not. This block is the only thing on the wire that says which.
+      ...(ownerFilter !== null ? {
+        ownerFilter: {
+          owner: ownerFilter,
+          filtered: [...OWNER_FILTERED_CATEGORIES],
+          unfiltered: [...OWNER_UNFILTERED_ROWS],
+          note: OWNER_FILTER_NOTE
+        } satisfies OwnerFilterDto
+      } : {}),
       // Which fields above are durable, which were observed just now, and
       // which this daemon computed. See MessageRouter.provenance.
       provenance: stateReadProvenance(census),

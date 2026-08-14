@@ -189,11 +189,20 @@ export const CONFIG_FIELDS: { [K in keyof Required<AgentConfig>]: FieldShape } =
       "the caller's own server definitions, written into .mcp.json verbatim and never read " +
       'by this daemon — neither the names they chose nor the JSON under them is ours to declare'
   },
-  label: SCALAR
+  label: SCALAR,
+  // A SCALAR AND NOTHING MORE, which is the declaration doing the work rather
+  // than describing it. `owner` is opaque: CrabCast matches it and never
+  // derives meaning from one, so it has no interior for this contract to have
+  // an opinion about, and declaring it a leaf is what says so on the wire. An
+  // author who later gave it structure — a namespace, a pair of halves — would
+  // be sending an object where this says scalar, and §4's rule reports that as
+  // drift and drops the field rather than letting the structure travel
+  // unexamined. See `AgentConfig.owner` in `src/types.ts`.
+  owner: SCALAR
 };
 
 /** Which knobs `configure` may leave out. Absent ones are not `missing`. */
-const OPTIONAL_CONFIG_KEYS = ['prompt', 'mcpServers', 'label'] as const;
+const OPTIONAL_CONFIG_KEYS = ['prompt', 'mcpServers', 'label', 'owner'] as const;
 
 /** The optional keys of {@link AgentConfig}, derived rather than restated. */
 type OptionalConfigKeys = {

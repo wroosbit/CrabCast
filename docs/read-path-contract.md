@@ -155,6 +155,7 @@ would be N chances for the copy that goes stale.
 | 8 | 2026-08-13 | KAN-338 — one field added to `capacity`: `measuredTreesSeen`, beside the `measuredAgentTrees` it reframes. **Additive: no documented field changed meaning, was removed, or changed type** — but one changed POPULATION, and that is why this row is not a formality. `measuredAgentTrees` was every agent-runtime process tree on the machine, whoever started it; the divisor is now measured only from trees joined to a chargeable agent of this daemon, so the same field now counts a subset. `measuredTreesSeen` is the population it was drawn from, and the pair is what lets a consumer tell a divisor averaged over 2 of 9 trees from one averaged over 2 of 2. A consumer that ignores the new field reads a number that is smaller than it was and means something better — which is exactly the change a version exists to announce, because it cannot be seen by comparing field sets. **The old quantity is recoverable rather than lost: `measuredTreesSeen` IS the pre-v8 population of `measuredAgentTrees`** — every agent-runtime tree on the machine, whoever started it — so a v7 consumer that wants the number it was reading before this version reads that field and gets it exactly | `80fe941b363b` |
 | 9 | 2026-08-13 | KAN-279 — one field added to the **refused** `list_agents` response: `configEchoContract`, the same block a successful read carries, taking that refusal from three fields to four. No successful response changed, and no documented field changed meaning, was removed, or changed type. **What changed is that the two read surfaces stopped answering the same situation two different ways.** §2 of the [event contract](event-contract.md) states that the block rides *every* response so `undeclared: []` and "nobody looked" stay distinguishable; `agent_status` honoured that on all four branches — including `bad-address`, which resolves nothing and carries **no echo** and carried the block anyway — while a refused `list_agents` carried no block at all. The justification on record for that gap was "a refusal carries no echo, so there is nothing for the block to be about", which was true of `agent_status`'s `no-record-no-pane` branch and false of its `bad-address` branch; the surfaces were never divided by whether an echo was present, only by a wrapped responder against a bare `respond`. **What ignoring the new field costs a consumer:** it keeps the branch this version exists to remove — special-casing `list_agents` when reading the echo contract off whatever CrabCast answered, rather than one code path across both surfaces — and a consumer probing daemon vintage by the block's presence, which `crabcast_list_agents`'s own tool description tells it to do, read a **current** daemon as an older one off any refusal before this version | `4002acfc7a49` |
 | 10 | 2026-08-14 | KAN-382 — one field added to the `bad-address` branch of **both** `activate_response` and `agent_status`: [pathProblem](#pathproblem), a new closed vocabulary of five members saying **why** an address was refused. The daemon already computed it — `canonicalPath` throws a `PathError` carrying `PathProblem` — and `MessageRouter.addressOfRequest` discarded it at the boundary, so five conditions with **three different remedies** arrived as one undifferentiated refusal. No other branch changed and no documented field changed meaning, was removed, or changed type. **It is MANDATORY on that branch, not optional, and that is the substance of this version rather than a detail.** An optional discriminator would mean both *"not a path problem"* and *"an older daemon"* — the `undefined`-on-`refused` ambiguity [§8 note 2](#three-things-about-this-surface-that-will-catch-you) discloses, minted a second time on a new field. Present always, it instead **removes** an ambiguity: `bad-address` was previously distinguishable only by the **absence** of `path`, and a consumer now identifies the branch positively by a key that is there. **What ignoring it costs a consumer:** exactly what it cost before this version — a directory deleted under a configured agent (`does-not-exist`, which `addressOfRequest`'s own header calls *"the normal way an agent ends"*) is indistinguishable from a caller that passed a relative path, so the remedy — recreate the directory or `forget_agent`, versus fix your own code — cannot be chosen from the response, and a reconciler reports an ordinary end-of-life as a hard failure. A consumer that keeps branching on the absence of `path` still works and still cannot tell those two apart | `6076769dba77` |
+| 11 | 2026-08-14 | KAN-193 — `list_agents` takes an optional **request** argument, `owner`, and gains one field on the success response: [ownerFilter](#ownerfilter), a new block present **only** when that argument was passed. `configure_agent` gains the `owner` knob it filters on, which appears in the `config` echo with the others. **Additive: no documented field changed meaning, was removed, or changed type, and a caller that never passes `owner` receives byte-for-byte what it received at version 10.** What is new for a caller that DOES pass it is stated here rather than left to be inferred, because it is the one thing the field set cannot show: under a filter, `agents`, `missingAgents`, `preemptedAgents`, `standbyAgents` and `unstartedAgents` are narrowed **and their `*Total`s and `pages.<category>` counts describe the FILTERED set** — which is what keeps paging correct under it, and which means every count on a filtered response is honest about a category the numbers alone cannot say was narrowed. `unbackedPanes`, `foreignPanes`, `priorities` and `unreadableRecords` are **not** narrowed, each for a reason `ownerFilter.unfiltered` names. **`owner` is NOT a permission boundary**: an unfiltered read returns every agent whatever its owner, deliberately, and the socket's `0600` in a `0700` directory remains the only auth boundary. **An agent with no owner is matched by no filter** and is reachable only by an unfiltered read — absence is a real state, never a wildcard. **What ignoring the new field costs a consumer:** exactly what it cost before this version — there is no way to ask CrabCast which agents are its own, so it must identify them by parsing the pane name CrabCast derives from the path (`paneNameFor`, `crabcast-<slug>-<hash>`). That derivation is not API, it is the parseable-name coupling [KAN-103](https://wroosbit.atlassian.net/browse/KAN-103) and [KAN-123](https://wroosbit.atlassian.net/browse/KAN-123) deleted from the rest of this surface, and a consumer resting on it breaks silently the day the slug rule changes | `c67cbe8b8525` |
 
 The digest is `sha256(readContractCanonical())`, first 12 hex characters, over
 `src/read-contract.ts`'s declarations. **What it buys:** changing a documented
@@ -246,6 +247,7 @@ on a timer, and that five of its categories are **paged** and must be walked to
 | `priorities` | derived | what each running agent is worth, and therefore what a would-be activation would have to outrank — [PriorityRow](#priorityrow) rows |
 | `herdrHealth` | observed, optional | [HerdrHealth](#herdrhealth). **Absent** when this daemon could not read its own descriptor usage |
 | `configEchoContract` | derived | the declared-field report — [ConfigEchoContract](#configechocontract) |
+| `ownerFilter` | derived, optional | what an `owner` filter did to this response — [OwnerFilter](#ownerfilter). **Absent** on an unfiltered read, which is how the two are told apart |
 
 **`*Total` was never a remedy for paging and is not one now.** It says how many
 rows are missing and never which. `pages.<category>.nextCursor` is the handle,
@@ -869,6 +871,59 @@ on a refused `list_agents`, where it has never been present at all
 **Do not key behaviour off an undeclared field.** It is an internal value that
 has not been designed for you and can change or vanish without this document
 changing.
+
+<a id="ownerfilter"></a>
+### `ownerFilter` — OwnerFilter (optional)
+
+On a `list_agents` success response **only when the request passed `owner`**.
+Absent otherwise, and that absence is the signal: it is how a consumer tells a
+filtered answer from a complete one without a sentinel value, and it is what
+makes this field additive for everyone who never asks for a filter.
+
+<!-- contract-table: BLOCK_SHAPES.OwnerFilter -->
+
+| field | bucket | what it is |
+| --- | --- | --- |
+| `owner` | derived | the owner asked for, echoed **exactly** as sent. Never trimmed, cased or otherwise normalised |
+| `filtered` | derived | the categories this filter narrowed. **Their `*Total`s and `pages.<category>` counts describe the FILTERED set** |
+| `unfiltered` | derived | the row-carrying arrays it did **not** narrow. They are complete, and may carry rows that are nobody's or somebody else's |
+| `note` | derived | the non-boundary sentence, on the wire beside the answer somebody would draw the wrong conclusion from |
+
+**Read `unfiltered` before you treat the page as one owner's.** Four arrays are
+in it and each is there for its own reason: `unbackedPanes` and `foreignPanes`
+have no durable record and therefore no owner; `priorities` answers *what would
+a would-be activation have to outrank*, which is a fact about the **machine**,
+so narrowing it would make it wrong rather than partial; and `unreadableRecords`
+**cannot** be filtered, because the row could not be parsed — and may well be
+the asking caller's own agent, which is precisely the row a filter must not drop.
+
+**`owner` is not a permission boundary, and this block says so on every filtered
+response.** Any caller that can reach this socket lists **every** agent on the
+machine by omitting the filter, deliberately. The only auth boundary is the
+socket's own file permission — `0600` in a `0700` directory. A filter is a
+narrower **question**, never a smaller **answer**.
+
+**An agent with no owner is matched by no filter.** Absence is a real state and
+never a wildcard: every agent configured before `owner` existed, and every one
+configured since without it, is returned by **no** filtered read whatever you
+pass, and is reachable only by omitting the argument. The asymmetry is
+deliberate and it is the safety-critical half — a false *match* over-includes a
+row in a listing, while a false *non-match* can stop an agent, and the caller
+this field exists for is a reconciler whose last step is *"anything running that
+is not in my desired list → off"*. Such a caller must be able to tell **not
+mine** from **unknown to me**.
+
+**A filtered list is a snapshot.** `owner` is reconfigurable in place, so an
+agent can move between owners — or acquire or lose one — between two polls.
+
+**Three request-side refusals, and they are the same defect from three sides:** a
+filter request that cannot be honoured is refused rather than degraded into an
+unfiltered read. `owner: null` is refused (it is what an unset variable
+serialises to, and answering it with the whole fleet is how a reconciler acts on
+agents that were never its own), and so are the empty string — no agent can
+carry one, because `configure_agent` refuses to store it — and any non-string.
+**Omitting the key entirely is how you ask for everything**, and an unset
+variable cannot produce that.
 
 <a id="herdrhealth"></a>
 ### `herdrHealth` — HerdrHealth (optional)

@@ -1712,7 +1712,7 @@ const HISTORY = [
   },
   {
     rev: '0edd2c1',
-    note: 'the newest README before KAN-200/KAN-208 — three blocks still accurate, three not',
+    note: 'the newest README before KAN-200/KAN-208/KAN-193 — two blocks still accurate, four not',
     expect: [
       // Red because of the three lines KAN-200 added to `list` and `status`,
       // which is this check catching that change's own drift. KAN-208 adds a
@@ -1727,7 +1727,15 @@ const HISTORY = [
       // those lines, which is precisely the drift, and this is the change's
       // own drift caught by the check the change had to update the page for.
       { id: 'idempotent-activate', kind: 'lines' },
-      { id: 'capacity-refusal', kind: 'lines' }
+      { id: 'capacity-refusal', kind: 'lines' },
+      // MOVED FROM `green` BY KAN-193, and moved for DRIFT rather than for age
+      // — the same distinction, and the same direction, as KAN-208's two above.
+      // `owner` is a ninth knob on `AgentConfig`, so `configure`'s per-knob
+      // outcome list grew a line, and every block that renders one cannot be
+      // shown by a page written before it. This block renders one; the two
+      // still green below do not. So this is the change's own drift, caught by
+      // the check the change had to update the page for.
+      { id: 'occupied-directory', kind: 'lines' }
     ],
     // Three remain, and the green direction is what keeps this from measuring
     // the calendar. None of them renders a capacity derivation, `list` or
@@ -1735,7 +1743,13 @@ const HISTORY = [
     // same argument the header makes for why the green moved here in the first
     // place. If a change ever takes the last of these, the answer is a NEWER
     // revision to carry the green, not an empty `green` list.
-    green: ['occupied-directory', 'idempotent-deactivate', 'refused-config']
+    // TWO NOW, NOT THREE (KAN-193) — see the entry moved into `expect` above.
+    // Neither of these renders `configure`'s per-knob outcome list, which is
+    // why a ninth knob left them alone, and neither renders capacity, `list` or
+    // `status`. THE NUMBER TO WATCH IS STILL THIS ONE: at zero the fix is a
+    // NEWER revision to carry the green, never a shorter list — a detector that
+    // reported every older page as red would be measuring the calendar.
+    green: ['idempotent-deactivate', 'refused-config']
   }
 ];
 
