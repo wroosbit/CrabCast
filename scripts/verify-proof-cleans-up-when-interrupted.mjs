@@ -33,6 +33,21 @@
 // else's session left lying about. It also means this script never matches on
 // a pattern broad enough to kill a process it did not start.
 //
+// WHAT THIS SCRIPT COUNTS, AND WHAT IT DOES NOT (KAN-169). Its subject is
+// DAEMONS. The driving, the interrupting and the counting now live in
+// `interrupt-probe.mjs` with the counted thing as a parameter, because until
+// KAN-169 they lived here with the counted thing hard-wired: the word "pane"
+// did not appear in this file, so a herdr pane leaked by an interrupted run
+// was invisible to the one script in this suite whose whole job is to notice
+// what an interrupted run leaves behind. `verify-pane-reclaim-when-interrupted`
+// is the pane half, and it is in the live half of the suite because it needs a
+// real herdr. THIS FILE'S BEHAVIOUR IS UNCHANGED BY THAT MOVE — same target,
+// same counter, same two sections — and its counter is stricter in one place:
+// `ps` answering something too short to be a process table is now a refusal at
+// the point of counting rather than a canary asserted once at the top, so "no
+// daemons survived" cannot be read off a failed `ps` however far apart the
+// canary and the count drift.
+//
 // Needs node and nothing else: the target supplies its own herdr shim.
 //
 // Usage:
@@ -42,9 +57,9 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { makeMutator } from './mutation.mjs';
+import { daemonCounter, driveAndInterrupt, reapDaemons } from './interrupt-probe.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const TARGET = path.join(scriptDir, 'verify-send-confirms-delivery.mjs');
@@ -65,6 +80,16 @@ function rule(title) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Print a counter result without ever flattening a refusal into a number.
+ *
+ * `${result.survivors.length}` on a refusal reads `undefined`, which is at
+ * least loud; `?? 0` would read `0`, which is the exact false negative the
+ * discriminated shape exists to prevent. So a refusal prints its reason and no
+ * count at all.
+ */
+const describe = (r) => (r.ok ? `${r.survivors.length} ${JSON.stringify(r.survivors)}` : `REFUSED: ${r.reason}`);
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kan-cleanup-'));
 
 // The shared mutator, bound to THIS script's verdict — so a mutation that stops
@@ -82,95 +107,32 @@ const { mutateScript, mutationsSkipped } = makeMutator({
 });
 
 /**
- * Daemons whose config path is under `dir`, as pids.
+ * THE COUNTER, and it is the parameter this script used to have hard-wired.
  *
- * READ OFF THE PROCESS TABLE, which is the only place that answers the
- * question this script asks. And READABILITY IS ASSERTED where absence is
- * asserted: `ps` failing would return nothing, and "no daemons survived" read
- * off a failed `ps` is the same shape of false negative this whole epic keeps
- * finding. {@link psWorks} is the canary.
+ * Daemons whose config path is under this run's TMPDIR, read off the process
+ * table — the only place that answers the question this script asks. It returns
+ * a RESULT rather than a count, so an unreadable `ps` is a refusal rather than
+ * a confident zero; see the counter contract in `interrupt-probe.mjs`.
  */
-function daemonsUnder(dir) {
-  const out = execFileSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' });
-  return out
-    .split('\n')
-    .filter((line) => line.includes('dist/daemon.js') && line.includes(dir))
-    .map((line) => Number(line.trim().split(/\s+/)[0]))
-    .filter((pid) => Number.isFinite(pid));
-}
-
-/** That `ps` is answering at all, so a zero from it is a measurement. */
-function psWorks() {
-  try {
-    const out = execFileSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' });
-    return out.split('\n').length > 5;
-  } catch {
-    return false;
-  }
-}
+const countDaemons = daemonCounter();
 
 /**
- * Run a script, wait until it has actually started a daemon, interrupt it, and
- * report what was running at each point.
- *
- * Waiting for a daemon to EXIST before interrupting is the precondition that
- * keeps this honest: killing the target before it has spawned anything would
- * leave nothing behind whatever its handlers do, and the section would pass
- * against a script with no cleanup at all.
+ * Drive the target and interrupt it, with `distDir` PASSED EXPLICITLY as an
+ * operand — the mutant copy lives outside the repository and the target
+ * resolves `../dist` relative to its own file. The first version left that
+ * implicit; the mutant looked for `/tmp/dist`, died on import in milliseconds,
+ * and section 2 then measured a run that had never started a daemon. A mutant
+ * that cannot run is not a mutant.
  */
-async function interruptMidRun(scriptPath, label) {
-  const runTmp = path.join(root, `tmp-${label}`);
-  const home = path.join(root, `home-${label}`);
-  fs.mkdirSync(runTmp, { recursive: true });
-  fs.mkdirSync(home, { recursive: true });
-
-  // `distDir` PASSED EXPLICITLY, because the mutant copy lives outside the
-  // repository and the target resolves `../dist` relative to its own file. The
-  // first version left that implicit; the mutant looked for `/tmp/dist`, died
-  // on import in milliseconds, and section 2 then measured a run that had never
-  // started a daemon. A mutant that cannot run is not a mutant.
-  const child = spawn(process.execPath, [scriptPath, DIST], {
-    env: { ...process.env, HOME: home, TMPDIR: runTmp },
-    stdio: 'ignore'
-  });
-
-  const exited = new Promise((resolve) => child.on('exit', resolve));
-
-  let during = [];
-  let diedEarly = false;
-  const deadline = Date.now() + 180_000;
-  while (Date.now() < deadline) {
-    during = daemonsUnder(runTmp);
-    if (during.length > 0) break;
-    if (child.exitCode !== null || child.signalCode !== null) { diedEarly = true; break; }
-    await sleep(500);
-  }
-
-  // The listener is attached BEFORE the wait loop, so a child that exits during
-  // the loop is still awaited correctly. Attaching it after — as this did —
-  // waits forever for an event that has already fired, which node reports as
-  // exit code 13 and no output at all.
-  child.kill('SIGINT');
-  await exited;
-  // The handler kills the daemon and re-raises; give the daemon a moment to go.
-  await sleep(2000);
-
-  const after = daemonsUnder(runTmp);
-  return { during, after, runTmp, diedEarly };
-}
-
-/** Anything this script's subject left running, so the script is not itself a leak. */
-function reap(pids) {
-  for (const pid of pids) {
-    try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
-  }
-}
+const interruptMidRun = (scriptPath, label) =>
+  driveAndInterrupt({ target: scriptPath, argv: [DIST], root, label, count: countDaemons });
 
 // ===========================================================================
 rule('0. THE COUNTER IS LIVE — a zero from it means zero, not "could not look"');
 // ===========================================================================
 
-check(psWorks(), 'the process table is readable, so every count below is a measurement');
+check(countDaemons({ runTmp: root }).ok,
+  'the process table is readable, so every count below is a measurement');
 
 // ===========================================================================
 rule('1. INTERRUPTED MID-RUN, the daemon does not survive');
@@ -179,19 +141,19 @@ rule('1. INTERRUPTED MID-RUN, the daemon does not survive');
 let pristine;
 {
   pristine = await interruptMidRun(TARGET, 'pristine');
-  console.log(`   daemons under this run's TMPDIR while running: ${pristine.during.length} ${JSON.stringify(pristine.during)}`);
-  console.log(`   daemons under this run's TMPDIR after SIGINT:  ${pristine.after.length} ${JSON.stringify(pristine.after)}`);
+  console.log(`   daemons under this run's TMPDIR while running: ${describe(pristine.during)}`);
+  console.log(`   daemons under this run's TMPDIR after SIGINT:  ${describe(pristine.after)}`);
 
-  check(pristine.during.length > 0 && !pristine.diedEarly,
+  check(pristine.during.ok && pristine.during.survivors.length > 0 && !pristine.diedEarly,
     'PRECONDITION: the run really had a daemon up when it was interrupted — otherwise there ' +
     'would be nothing to leak and this section would pass against a script with no cleanup at all',
-    `during=${pristine.during.length} diedEarly=${pristine.diedEarly}`);
-  check(pristine.after.length === 0,
+    `during=${describe(pristine.during)} diedEarly=${pristine.diedEarly}`);
+  check(pristine.after.ok && pristine.after.survivors.length === 0,
     'and NOTHING survived the interrupt: the signal handler killed the daemon it started',
-    `survivors=${JSON.stringify(pristine.after)}`);
+    `survivors=${describe(pristine.after)}`);
   check(!fs.existsSync(pristine.runTmp) || fs.readdirSync(pristine.runTmp).every((e) => !e.startsWith('crabcast-')),
     "and it took its scratch directory with it, so the machine is where it was found");
-  reap(pristine.after);
+  if (pristine.after.ok) reapDaemons(pristine.after.survivors);
 }
 
 // ===========================================================================
@@ -244,26 +206,27 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   if (!mutantPath) break mutation;
 
   const mutant = await interruptMidRun(mutantPath, 'mutant');
-  console.log(`   mutant: daemons while running: ${mutant.during.length} ${JSON.stringify(mutant.during)}`);
-  console.log(`   mutant: daemons after SIGINT:  ${mutant.after.length} ${JSON.stringify(mutant.after)}`);
+  console.log(`   mutant: daemons while running: ${describe(mutant.during)}`);
+  console.log(`   mutant: daemons after SIGINT:  ${describe(mutant.after)}`);
 
-  check(mutant.during.length > 0 && !mutant.diedEarly,
+  check(mutant.during.ok && mutant.during.survivors.length > 0 && !mutant.diedEarly,
     'PRECONDITION: the mutant also really had a daemon up when it was interrupted — a mutant ' +
     'that died on startup would leak nothing and make this section prove the opposite of what ' +
     'it says',
-    `during=${mutant.during.length} diedEarly=${mutant.diedEarly}`);
-  check(mutant.after.length > 0,
+    `during=${describe(mutant.during)} diedEarly=${mutant.diedEarly}`);
+  check(mutant.after.ok && mutant.after.survivors.length > 0,
     'WITHOUT THE HANDLER THE DAEMON SURVIVES — so section 1 is measuring the handler rather ' +
     'than restating a hope. This is the leak, reproduced on demand.',
-    `survivors=${JSON.stringify(mutant.after)}`);
+    `survivors=${describe(mutant.after)}`);
 
   // Never leave the mutant's leak behind: this script must not become the
   // thing it exists to catch.
-  reap(mutant.after);
+  if (mutant.after.ok) reapDaemons(mutant.after.survivors);
   await sleep(500);
-  check(daemonsUnder(mutant.runTmp).length === 0,
+  const reaped = countDaemons(mutant.ctx);
+  check(reaped.ok && reaped.survivors.length === 0,
     'and the mutant\'s leaked daemon was reaped, so this proof leaves nothing running either',
-    JSON.stringify(daemonsUnder(mutant.runTmp)));
+    describe(reaped));
 }
 
 // ===========================================================================

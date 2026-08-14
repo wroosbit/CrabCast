@@ -757,7 +757,26 @@ const PROOF_DEFENCES = [
       'not on the happy path.',
     note:
       'It mutates a SIBLING SCRIPT (strips the signal handler) and watches the leak come back, and ' +
-      'it is the script in this suite that says PRECONDITION-that-the-mutant-ran out loud.'
+      'it is the script in this suite that says PRECONDITION-that-the-mutant-ran out loud. Its ' +
+      'subject is DAEMONS and only daemons; KAN-169 moved the driving and the counting into ' +
+      'interrupt-probe.mjs with the counted thing as a parameter, and ' +
+      'verify-pane-reclaim-when-interrupted is the pane half.'
+  },
+  {
+    script: 'verify-pane-reclaim-when-interrupted',
+    defence: 'mutation',
+    central:
+      'the signal handlers that put a herdr pane back actually FIRE — an interrupted run of a ' +
+      'pane-opening proof leaves no pane on the machine.',
+    note:
+      'It strips the handler block from a copy of its target and requires the survivor count to go ' +
+      'UP, then reaps what that mutant leaked by a name derived from a TMPDIR it minted itself. ' +
+      'BETWEEN THE TWO SITS A FALSE-POSITIVE CONTROL: the same copy in the same scratch layout, ' +
+      'unmutated, must still reclaim — so the red is the mutation and not the copy. Its counter is ' +
+      'held to a canary whose right answer no line-counter and no key-guesser could produce, and ' +
+      'required to REFUSE an unreadable census rather than report zero. WHAT IT CANNOT DECIDE: it ' +
+      'drives one target and one signal, and it is invisible to verify-panes-are-reclaimed\'s ' +
+      'static sweep because it opens no pane itself — it spawns a proof that does.'
   },
   {
     script: 'verify-reconfiguration-refuses',
