@@ -296,7 +296,51 @@ export const MARKER_TEMPLATE = canonicalMarker({
  * is what an approver looking at a comment they can see contains the word would
  * read as the check being broken.
  */
-const TOKEN_MENTION = /^[ \t]*BUTCHR-APPROVAL\b.*$/im;
+const TOKEN_START = /^BUTCHR-APPROVAL\b/i;
+
+/**
+ * The leading decorations that do not stop a line being an ATTEMPT: whitespace,
+ * emphasis, list bullets, ordered-list numbering, and headings. Blockquotes are
+ * absent on purpose — `scanQuoted` has already labelled those, and a quoted line
+ * never reaches here.
+ *
+ * WHY THIS EXISTS. Anchoring to the line start fixed a false positive on prose
+ * and bought a false negative on decoration, which `epic/KAN-59` drove and
+ * tabulated: `**BUTCHR-APPROVAL: <head> BY epic/KAN-59**`, the same line as a
+ * list item, and the same line under a heading were all refused by the grammar
+ * — correctly — and diagnosed by nothing.
+ *
+ * THAT IS THE WORSE HALF OF THE TRADE, because of who it lands on. A false
+ * positive on prose annoys somebody discussing the check. A false negative on
+ * decoration hits somebody who was TRYING TO APPROVE: a bolded marker renders on
+ * GitHub as an ordinary line, so the author sees their marker, sees the red, and
+ * reads "no approval marker was found in any comment" — which is the exact
+ * sentence this detector exists to stop anybody ever reading.
+ */
+const DECORATION = /^(?:[ \t]+|[*_]{1,3}|#{1,6}[ \t]*|[-+][ \t]*|\d{1,3}[.)][ \t]*)+/;
+
+/**
+ * A line with its leading decoration removed, for deciding whether it is an
+ * attempt. Exported so the proof can drive it directly rather than only through
+ * a verdict.
+ *
+ * IT STRIPS ONLY A PREFIX, which is what keeps the prose fix intact: the token
+ * must still come IMMEDIATELY after whatever was removed. `**Next from me:**
+ * when … BUTCHR-APPROVAL …` de-decorates to `Next from me:** when …`, which
+ * does not begin with the token and is still prose.
+ */
+export function undecorate(line) {
+  return String(line ?? '').replace(DECORATION, '');
+}
+
+// WHY A DECORATED MARKER IS DIAGNOSED AND STILL REFUSED, rather than accepted.
+// The grammar is pinned by `verify-approval-marker.mjs` §0 to the line
+// `prompts/task.md` mandates, and the spec says "on a line of its own" —
+// `**X**` is not `X`. Widening the grammar to swallow decoration would unpin it
+// from the fleet's own spelling to make one comment shape work, which is the
+// trade this whole ticket exists to refuse. So the decoration changes what is
+// EXPLAINED and never what is ACCEPTED: the reader is told they nearly had it,
+// and told the exact line to post.
 
 // WHY IT IS ANCHORED TO THE START OF THE LINE, and it was not on first
 // submission. An unanchored version matched any line MENTIONING the token
@@ -551,7 +595,11 @@ export function parseMalformedMentions(comments) {
     const quoted = scanQuoted(body);
     lines.forEach((line, i) => {
       if (quoted[i]) return; // a quoted line is somebody else's report
-      if (!TOKEN_MENTION.test(line)) return; // prose ABOUT a marker is not an attempt at one
+      // An ATTEMPT begins its line, once leading decoration is set aside. Prose
+      // that merely mentions the token mid-sentence is somebody TALKING about a
+      // marker, and reporting it as a broken one is noise in the one place that
+      // cannot afford any.
+      if (!TOKEN_START.test(undecorate(line))) return;
       if (MARKER_LINE.test(line)) return; // a well-formed marker is not a mention
       found.push({ line: line.trim(), commentId, author });
     });

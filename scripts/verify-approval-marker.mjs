@@ -99,6 +99,7 @@ import {
   EXIT_ON,
   MARKER_TEMPLATE,
   parseMalformedMentions,
+  undecorate,
   parseMarkers,
   parseQuotedMarkers,
   QUOTED,
@@ -564,6 +565,63 @@ console.log('\n§5  THE SCANNER, DRIVEN DIRECTLY');
   );
 }
 
+// ---------------------------------------------------------------------------
+// §5c — A DECORATED MARKER IS AN ATTEMPT, AND MUST BE DIAGNOSED.
+//
+// The line-initial anchor in §5b fixed a false positive on prose and bought a
+// false negative on decoration. `epic/KAN-59` drove it and tabulated the result:
+// a bolded marker, a list item, a numbered item and a heading were all refused
+// by the grammar — correctly — and diagnosed by NOTHING.
+//
+// THAT HALF OF THE TRADE IS THE WORSE ONE, because of who it lands on. A false
+// positive on prose annoys somebody discussing the check. A false negative on
+// decoration hits somebody who was TRYING TO APPROVE: a bolded marker renders on
+// GitHub as an ordinary line, so they see their marker, see the red, and read
+// "no approval marker was found in any comment" — the exact sentence this
+// detector exists to stop anybody reading.
+//
+// THE FIXTURES ARE THE REVIEWER'S TABLE, transcribed, including the two rows
+// that must NOT move.
+{
+  const rows = [
+    { n: 'bold', body: `**${GOOD}**`, attempt: true },
+    { n: 'list item', body: `- ${GOOD}`, attempt: true },
+    { n: 'numbered', body: `1. ${GOOD}`, attempt: true },
+    { n: 'heading', body: `## ${GOOD}`, attempt: true },
+    { n: 'bold incident 2', body: `**${MALFORMED}**`, attempt: true },
+    { n: 'italic underscore', body: `_${GOOD}_`, attempt: true },
+    { n: 'bold list item', body: `- **${GOOD}**`, attempt: true },
+    // The two that must stay where §5b put them. This is the control the
+    // reviewer asked for by name: the prose fix must not be traded back.
+    { n: 'prose, token mid-line', body: 'I will post `BUTCHR-APPROVAL: <sha> BY epic/KAN-59` later.', attempt: false },
+    { n: 'bold prose, token mid-line', body: `**Next from me:** I re-confirm and post \`BUTCHR-APPROVAL\` on its own line.`, attempt: false }
+  ];
+  for (const r of rows) {
+    const found = parseMalformedMentions([comment(30, r.body)]);
+    check(
+      (found.length === 1) === r.attempt,
+      `§5c  ${r.attempt ? 'DIAGNOSED' : 'ignored as prose'}: ${r.n}`,
+      found.length ? `reported ${JSON.stringify(found[0].line.slice(0, 56))}` : 'not reported'
+    );
+  }
+
+  // A decorated marker is diagnosed and STILL REFUSED — the decoration changes
+  // what is explained, never what is accepted, because the grammar is pinned to
+  // the spec by §0 and `**X**` is not `X`.
+  const v = pr([comment(31, `**${GOOD}**`)]);
+  check(!v.ok, '§5c  …and a decorated marker is still REFUSED — decoration explains, it never accepts');
+  check(
+    v.reasons.some((r) => r.includes('THE TOKEN IS NOT ENOUGH')),
+    '§5c  …with the reason that names the shape, so the reader learns they nearly had it'
+  );
+
+  // The de-decorator, driven directly, so a prefix bug is reported as a prefix
+  // bug rather than as an approval failure.
+  check(undecorate(`- **${GOOD}**`) === `${GOOD}**`, '§5c  undecorate strips only the PREFIX, leaving the rest intact');
+  check(undecorate('Next from me: post BUTCHR-APPROVAL') === 'Next from me: post BUTCHR-APPROVAL',
+    '§5c  …and strips nothing from a line that opens with a word');
+}
+
 // ===========================================================================
 console.log('\n§6  THE EXIT-CODE POLICY');
 // ===========================================================================
@@ -790,8 +848,8 @@ await withMutant(
   'unanchored-token-mention',
   [
     {
-      find: 'const TOKEN_MENTION = /^[ \\t]*BUTCHR-APPROVAL\\b.*$/im;',
-      replace: 'const TOKEN_MENTION = /^.*BUTCHR-APPROVAL.*$/im;'
+      find: 'if (!TOKEN_START.test(undecorate(line))) return;',
+      replace: 'if (!/BUTCHR-APPROVAL/i.test(line)) return;'
     }
   ],
   (at) => {
@@ -809,6 +867,48 @@ await withMutant(
       mutated.ok === real.ok,
       '§7 unanchored-token-mention  …and the VERDICT is unchanged, which is why no acceptance case could ever have seen this',
       'the defect lived entirely in the diagnostic — found by running --check against real data, not by a fixture'
+    );
+  }
+);
+
+// M7 — the de-decorator removed, which is the state this file shipped between
+// the §5b fix and the §5c one. §5c must flip in the OTHER direction from M6: a
+// bolded marker becomes an attempt nobody diagnoses.
+//
+// M6 AND M7 MUTATE THE SAME LINE IN OPPOSITE DIRECTIONS, and that pairing is the
+// point rather than a coincidence. This detector has two ways to be wrong and
+// they trade against each other: too loose and it calls prose a broken marker,
+// too strict and it goes silent on somebody who was actually trying to approve.
+// One mutation each is what stops a future fix for one from quietly buying the
+// other back — which is exactly what happened here, in review, twice.
+await withMutant(
+  'no-decoration-strip',
+  [
+    {
+      find: 'if (!TOKEN_START.test(undecorate(line))) return;',
+      replace: 'if (!TOKEN_START.test(line)) return;'
+    }
+  ],
+  (at) => {
+    const bolded = [comment(97, `**${GOOD}**`)];
+    const mutated = at(bolded);
+    const real = pr(bolded);
+    check(
+      mutated.malformed.length === 0 && real.malformed.length === 1,
+      '§7 no-decoration-strip  §5c goes RED: a BOLDED marker is refused with no diagnostic at all',
+      `mutant reports ${mutated.malformed.length}, the real module reports ${real.malformed.length}`
+    );
+    check(
+      !mutated.ok && !real.ok,
+      '§7 no-decoration-strip  …and BOTH still refuse it, so this is a diagnostic regression and not a grammar one',
+      'the decoration changes what is explained, never what is accepted'
+    );
+    // The control that keeps this from being satisfied by a mutant that simply
+    // reports everything: prose must stay prose under it too.
+    const prose = at([comment(98, 'I will post `BUTCHR-APPROVAL: <sha> BY epic/KAN-59` later.')]);
+    check(
+      prose.malformed.length === 0,
+      '§7 no-decoration-strip  CONTROL: prose stays prose under this mutant, so §5c is what moved'
     );
   }
 );
