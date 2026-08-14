@@ -918,6 +918,43 @@ const PROOF_DEFENCES = [
       'connection made it permanently null. What NOTHING here covers is a real herdr: the shim ' +
       'reports the statuses it is told to.'
   },
+  {
+    script: 'verify-scaffolding-past-the-gate',
+    defence: 'mutation',
+    central:
+      'every activation a proof in this suite makes is past the capacity gate, or classified in ' +
+      'that file\'s own register with a reason and an anchor a reader can act on — so a proof ' +
+      'added tomorrow whose SCAFFOLDING activates bare goes red on the pull request rather than ' +
+      'flaking on somebody\'s laptop months later and reporting the load average as a defect in ' +
+      'the code.',
+    note:
+      'THE MUTATION IS §5 AND IT DRIVES BOTH DIRECTIONS. It copies `scripts/` into a scratch git ' +
+      'repository, runs a CHILD of itself over the unmutated copy and requires GREEN (a red drive ' +
+      'on a broken baseline measures the runner), writes one scratch proof carrying a bare ' +
+      'activation and requires the child to go red NAMING THAT FILE and using the word ' +
+      'UNCLASSIFIED, then adds a register entry for it through `mutateScript` and requires the ' +
+      'same tree to pass. The register is the only thing that moved between the last two. ' +
+      '§1 IS A SEPARATE DEFENCE OF A DIFFERENT KIND and is the one that has already caught this ' +
+      'file: twelve fixtures carrying sixteen sites, ten of which must be FLAGGED and six of ' +
+      'which must not, with the counts asserted rather than described. FIVE OF THE TEN ARE TRAPS ' +
+      'rather than plain bare calls — a non-boolean `override: \'yes\'`, a `preempt: true`, a ' +
+      'spread of a `const … = { override: false }`, and two ADJACENCY cases where a bare call sits ' +
+      'beside an immunised one. That last pair is the false-green direction, which is the only one ' +
+      'this file must not fail in. The `handleActivate` span extractor was wrong on its first run ' +
+      'and a fixture said so; nothing in §3 would have, because the error over-reported rather ' +
+      'than under-reported. ' +
+      'SEAM, and it is the one `prompts/task.md` names: §5 WRITES THE PROOF IT THEN CATCHES, so it ' +
+      'establishes that the sweep and the register report correctly about a tree they were handed ' +
+      'and NOT that the register committed in that file is TRUE. Whether `census-seeded` is the ' +
+      'right word for `verify-owner-filter:265` is a reading, and the reader is what covers it — ' +
+      'which is why every entry names the mechanism and the router branch it returns at rather ' +
+      'than the category. `scripts/capacity-disclosure.mjs` is the backstop for a reading that was ' +
+      'WRONG (the proof still goes red on a loaded machine; the disclosure makes that run say ' +
+      '`refusedBy: \'capacity\'` instead of leaving the reader guessing), §6 requires it to have ' +
+      'at least one adopter so it cannot rot into dead code, and the gap between the two halves — ' +
+      'a proof that neither registers correctly NOR prints the disclosure — is uncovered by both ' +
+      'and named in that file\'s header rather than left to be inferred.'
+  },
 
   // -------------------------------------------------------------------------
   // mutation — not through the helper, because what they mutate is not a build
