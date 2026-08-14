@@ -57,6 +57,19 @@
 //   check on this script's isolation, not a guarantee: a release that damaged
 //   the live server some other way would not be seen here.
 //
+// * IT DOES NOT EXERCISE THE PANE-HANDLE JOIN, AND THAT ONE IS NAMED SEPARATELY
+//   BECAUSE IT FAILS QUIETLY (KAN-385). The cost attribution reads
+//   `HERDR_PANE_ID` — a `p_NNN` token — off a process and calls
+//   `herdr pane get` with it, and `herdr pane --help` documents that parameter
+//   as `<pane_id>`, which that token is not. A release that stopped accepting
+//   the form would PASS EVERY SECTION BELOW, green: the lifecycle never makes
+//   that call. Downstream, `paneNameForHandle` returns null for every tree, all
+//   of them are classified `foreign`, and the charged sample drops to zero —
+//   indistinguishable from a machine running none of our agents. Since we are
+//   pinned to 0.6.x, THIS script is the only place the change could ever be
+//   caught, which is why the assertion belongs here rather than in CI; KAN-386
+//   is writing it, and docs/herdr-pane-handle-join.md §4 is the reasoning.
+//
 // ---------------------------------------------------------------------------
 // ISOLATION — the hazard this script exists inside of
 //

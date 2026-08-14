@@ -1669,6 +1669,17 @@ export class HerdrBridge {
    * once a minute), and the remedy is on herdr's side of a boundary this
    * daemon does not edit: see the note on `PANE_HANDLE_VAR` in agent-cost.ts.
    *
+   * THE ARGUMENT IS A TARGET FORM `herdr pane --help` DOES NOT LIST (KAN-385).
+   * That help documents `pane get <pane_id>`, and a handle is not a `pane_id` —
+   * the two forms are different and both accepted, measured at 0.6.4. The one
+   * that would go wrong is quiet rather than loud: a herdr that stopped
+   * resolving `p_NNN` returns null here for every tree, every tree is then
+   * classified `foreign`, and the charged sample goes to zero — which reads
+   * exactly like a fleet with nothing of ours running. Nothing in CI would say
+   * so; scripts/verify-herdr-release.mjs is where that is being pinned
+   * (KAN-386). docs/herdr-pane-handle-join.md carries the measurement and the
+   * decision.
+   *
    * Null on every failure — an unknown handle, a herdr that will not answer, a
    * reply in a shape we do not recognise — because a caller can only degrade,
    * and a caller that cannot tell those apart must not guess a name. The

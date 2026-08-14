@@ -52,6 +52,18 @@ const PAGE_SIZE = 4096;
  * across `pane list`, `pane get` and `agent get`, which is why the join runs
  * from the process to the pane rather than the other way round.
  *
+ * AND THE FORM IS UNDOCUMENTED FOR THE SUBCOMMAND WE PASS IT TO (KAN-385).
+ * "Measured rather than assumed" is not the only caveat on this join, and a
+ * reader had no way to learn the other one from this file. `herdr pane --help`
+ * documents its parameter as `pane get <pane_id>` — and this handle is NOT a
+ * `pane_id`: `pane list` publishes `w65702dcc803d94-10` for the same pane that
+ * carries `p_252` here, and `pane get` happens to accept both. The phrase that
+ * covers the `p_NNN` form, "legacy pane ids", appears only in the target list
+ * of `herdr agent --help`. So this works on an observed behaviour rather than a
+ * published one. docs/herdr-pane-handle-join.md is the whole of it: the
+ * measurement with its controls, the request made of herdr's maintainer, and
+ * what we decided to do if the answer is no.
+ *
  * WHAT IT IS NOT. It is not an ownership test and must never become one: it
  * names a pane, and whether that pane is OURS is answered where it has always
  * been answered, by `ourPaneIn` in herdr.ts, from the pane's NAME (see the
