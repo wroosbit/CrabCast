@@ -286,13 +286,60 @@ It is hand-run and not in CI, so this costs the required check set nothing and
 fires exactly when the risk is real — at the moment somebody proposes a new
 release.
 
-That script's own *"WHAT IT DOES NOT COVER"* section already warns that it is a
-lifecycle and not the product, and it is right: **a release that stopped
-accepting `p_NNN` on `pane get` would pass it today, green, and the cost
-attribution would silently attribute every tree to nobody.** That gap is now
-named in the script's header. Writing the assertion needs a red drive against a
-real release, which is a slice with its own proof, so it is filed rather than
-smuggled in here: **KAN-386**, linked `Relates` to KAN-385.
+**Done — KAN-386, 2026-08-14. `verify-herdr-release.mjs` §4b is the assertion.**
+Until then this said *"a release that stopped accepting `p_NNN` on `pane get`
+would pass it today, green, and the cost attribution would silently attribute
+every tree to nobody"*, and that sentence is now false about that script. What
+it does, on a `--expect supported` run, after the release under test has spawned
+a real pane:
+
+```
+read HERDR_PANE_ID out of a real process inside that pane  ->  p_1
+herdr pane get p_1        -> crabcast-kan181probe-9411…    the name CrabCast minted
+herdr pane get p_11       -> UNRESOLVED (pane_not_found)   CONTROL: one digit appended
+```
+
+**The handle is not supplied by the script** — it is read from `/proc/<pid>/environ`
+the same way `agent-cost.ts` reads it, so the check covers the value *arriving*
+as well as the value *resolving*. Its verdict feeds the script's existing
+`process.exit(failures ? 1 : 0)`.
+
+**Three limits, because the section is narrower than "the join is covered".**
+`--expect spawn-broken` runs skip §4b entirely — there is no pane to read a
+handle out of, so a green on that branch says nothing about the join. §4b makes
+the `pane get` subprocess call itself rather than going through
+`HerdrBridge.paneNameForHandle`; that the *daemon* makes this exact call is
+covered by `verify-agent-cost-attribution-live.mjs`, which runs the bridge for
+real but against the herdr on `PATH` — so **neither script runs our code against
+the release under test, and that hole is between them rather than inside
+either.** And §4b pins the *behaviour*, not the *contract*: the form is still
+undocumented for that subcommand (§2.7), which is why §3's ask stands.
+
+**What the red drive found, because it is the part worth carrying forward.**
+`scripts/kan386-red-drive.mjs` breaks each of §4b's three legs in turn and
+requires the named check — and only the checks it declares — to go red. It found
+two defects in §4b itself before it found anything about herdr:
+
+* **A count where the invariant is agreement.** §4b first asserted *"exactly one
+  process"*; a pane's shell forks, and it went red on a run that was working
+  perfectly. The right invariant is that every process inside our panes agrees
+  on **one** handle — which is also the stronger one, because two different
+  handles is precisely what "the selector reached outside the pane" looks like.
+* **⚠ The selector reached outside the pane, and the descendant walk did not
+  stop it.** The private server is spawned by a script running inside a *live*
+  pane, so it inherits that pane's `HERDR_PANE_ID` — and **its own children
+  inherit it in turn.** Reproduced twice in three runs: a `curl` the private
+  server spawned, carrying `p_300`, which resolves on the live fleet to
+  `butchr-task-kan-386` — the pane of the agent writing this. It is a
+  descendant of our server and it carries our private socket path, so both
+  obvious gates pass it. §4b now also rejects anything carrying the server's own
+  inherited handle, and requires the process to be sitting inside the run's
+  scratch tree; rejected candidates are printed with the reason.
+
+The second one is the general lesson and it is the one this page already keeps
+learning: **an instrument that reaches the wrong population reports the shape you
+were hoping for.** Nothing about a green run would have said the handle came
+from the live fleet.
 
 **3. Disclose it where a reader of the join lands.** Not on a ticket, and not
 only on this page: the two docblocks a reader of the join actually reads —
@@ -302,20 +349,43 @@ here. Those are comment-only changes.
 
 ### Considered and not taken
 
-* **Move the join from `pane get` to `agent get`.** Tempting, because
-  `agent --help` *documents* that targets accept legacy pane ids, so the same
-  call on the other subcommand would rest on a documented form — and it resolved
-  7/7 of our trees today (§2.5). **Rejected for now because it is strictly
-  narrower and the narrowing is invisible when it bites**: `agent get` resolves
-  only registered agents (18 of 120 panes here; the other 102 answer
-  `agent_not_found`, control in §2.5). An agent-runtime tree of ours in a pane
-  herdr has not registered would resolve to nothing and drop out of the charged
-  sample — which under-counts our own cost, in the direction that looks like a
-  quiet fleet. We believe that state is unreachable, because CrabCast names every
-  pane it spawns and a named pane is an `agent list` row; *believe* is doing work
-  in that sentence, and it needs its own proof before it changes a divisor. It is
-  the second option on KAN-386 and the argument for it is recorded here so it is
-  not re-derived from scratch.
+* **Move the join from `pane get` to `agent get`. Offered again as KAN-386's
+  second, optional half, and DECLINED there on 2026-08-14 — with the reason
+  changed, which is why this bullet is rewritten rather than left standing.**
+  It is tempting because `agent --help` *documents* that targets accept legacy
+  pane ids, so the same call on the other subcommand would rest on a documented
+  form; it resolved 6/6 of our trees on a re-run of §2.5 on 2026-08-14, controls
+  moving. Three reasons against, and the first is new:
+
+  1. **§4b removed the motive.** The appeal of `agent get` was never the call
+     itself — it was insurance against `pane get` quietly ceasing to accept
+     `p_NNN`. That is now the thing the release gate asserts, with a red drive
+     behind it. So the risk this move was meant to mitigate is gated, while the
+     coverage cost it introduces would not be. Taking it now would be paying a
+     premium on a policy we have already bought.
+  2. **It is strictly narrower and the narrowing is invisible when it bites.**
+     `agent get` resolves only registered agents — re-measured 2026-08-14: 17
+     registrations against 119 panes, the other 102 answering `agent_not_found`,
+     with both controls in §2.5 moving. An agent-runtime tree of ours in a pane
+     herdr has not registered would resolve to nothing and drop out of the
+     charged sample, **under-counting our own cost in the direction that looks
+     like a quiet fleet** — the same failure signature as the bug §4b was
+     written to catch. KAN-385 believed that state unreachable because CrabCast
+     names every pane it spawns; nothing since has turned that belief into a
+     proof, and *"believes"* was always doing the work.
+  3. **It would change what the lookup IS.** `paneNameForHandle` is documented as
+     a lookup and not a judgement — *"which pane is that", never "is it ours"* —
+     and `agent-cost.ts` says the ownership test must never move into it.
+     `pane get` answers the first question. `agent get` answers *"which
+     registered agent is that"*, which folds a registration condition into a
+     step whose whole design is that it holds no opinion. That is an
+     architectural cost on top of the coverage one, and it does not show up in
+     a resolution count.
+
+  **What would change this.** A proof that every pane carrying a name
+  `ourPaneIn` accepts is necessarily an `agent list` row — not a sample of
+  today's fleet, which §2.5 already is, but an argument from how panes are
+  created. Until that exists, this stays where it is.
 * **Do nothing and say nothing.** Rejected: the join's docblocks read as though
   the only caveat is that the handle is measured rather than assumed. It is not —
   the target form is also undocumented for the subcommand we pass it to, and a
@@ -325,10 +395,13 @@ here. Those are comment-only changes.
 
 ## 5. What this page does not cover
 
-* **One machine, one herdr, one day.** Every reading is 0.6.4 on the development
-  machine on 2026-08-13. Nothing here says what 0.6.10 does, and §2.7's
-  documentation reading is of the help text those binaries print, not of any
-  published contract.
+* **One machine, one herdr, one day — with one exception, added 2026-08-14.**
+  Every reading in §2 is 0.6.4 on the development machine on 2026-08-13, and
+  §2.7's documentation reading is of the help text those binaries print, not of
+  any published contract. The exception is §4's `pane get p_1 -> …` block, which
+  is **0.6.10** through a private server: that is the release gate's own §4b
+  output, and it is the one reading here that is not about the installed
+  binary. It says nothing about 0.6.5–0.6.9, which nobody has run.
 * **It does not tell you whether the maintainer replied.** If the answer arrives,
   it belongs on KAN-385 and then here.
 * **The forgeability in ask 2 is stated, not fixed.** Until a pid exists, the

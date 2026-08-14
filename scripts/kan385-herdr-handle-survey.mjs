@@ -42,9 +42,12 @@
 //     it. `verify-agent-cost-attribution.mjs` is what covers them, and it
 //     supplies its own handles rather than reading a real herdr — so THE GAP
 //     BETWEEN THAT SCRIPT AND THIS ONE IS UNOWNED, and it is the gap where a
-//     herdr that stopped resolving `p_NNN` would sit unnoticed. KAN-386 is
-//     closing it in `verify-herdr-release.mjs`; until it lands, nobody covers
-//     it and this comment is the disclosure.
+//     herdr that stopped resolving `p_NNN` would sit unnoticed. KAN-386 closed
+//     it on 2026-08-14: `verify-herdr-release.mjs` §4b now makes that
+//     assertion against the release under test, so the gap is owned for the
+//     one moment it can change — a version move. It is still unowned in CI, by
+//     the same decision (docs/herdr-pane-handle-join.md §4), and §4b does not
+//     run on `--expect spawn-broken`.
 //   * IT READS THE HELP TEXT, NOT A CONTRACT. §7's claim is about what these
 //     binaries print.
 

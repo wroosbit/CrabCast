@@ -1675,10 +1675,14 @@ export class HerdrBridge {
    * that would go wrong is quiet rather than loud: a herdr that stopped
    * resolving `p_NNN` returns null here for every tree, every tree is then
    * classified `foreign`, and the charged sample goes to zero — which reads
-   * exactly like a fleet with nothing of ours running. Nothing in CI would say
-   * so; scripts/verify-herdr-release.mjs is where that is being pinned
-   * (KAN-386). docs/herdr-pane-handle-join.md carries the measurement and the
-   * decision.
+   * exactly like a fleet with nothing of ours running. Nothing in CI says so —
+   * deliberately, and `scripts/verify-herdr-release.mjs` §4b is where it IS
+   * pinned instead (KAN-386): on a `--expect supported` run that gate reads a
+   * handle out of a real process in the pane the release under test created
+   * and requires `pane get` to resolve it, with a mutated-handle control. It is
+   * hand-run at the moment somebody proposes a new release, which is the only
+   * moment the behaviour can change. docs/herdr-pane-handle-join.md carries the
+   * measurement, the decision and what that gate does not cover.
    *
    * Null on every failure — an unknown handle, a herdr that will not answer, a
    * reply in a shape we do not recognise — because a caller can only degrade,
