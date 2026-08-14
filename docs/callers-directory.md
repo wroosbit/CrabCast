@@ -595,10 +595,49 @@ discovered from workspace customization roots — measured never to happen — a
 `AGY_CLI_DISABLE_AUTO_UPDATE=1` did not prevent an auto-update). So the doc
 naming this path is not why we believe it. The measurement is.
 
-`scripts/verify-activated-by.mjs` covers the `CRABCAST_AGENT_PATH` half, and it
-is deliberately arranged so that it cannot pass without the identity genuinely
-arriving: it reads the `.mcp.json` the daemon wrote, spawns the real MCP server
-with the environment **out of that file**, and lets two agents build a
+**And that proof does not run in CI.** Unlike the three above it, it is not an
+entry in the `verify` array in `.github/workflows/ci.yml`. It is registered in
+`scripts/verify-proof-registry.mjs`'s `EXCLUSIONS`, because no GitHub runner has
+an `agy` binary and none can install one unattended — agy is distributed by
+Google and gated behind an account. The script fails rather than skipping when
+agy is absent, deliberately, so it can never go green on a machine that could not
+run it. This clause is here because its absence would otherwise read as
+continuity with the three proofs above, each of which does say where it runs.
+
+**And *"the measurement is"* is a present-tense sentence about something that
+happened once.** So, plainly: **nothing re-takes the measurement, and nothing is
+scheduled to.** It is a hand-run, and the only thing that makes it happen is a person
+choosing to run it before merging a change to the path — no job, no timer and no
+required check re-runs it. The interval between a real `agy` last starting a real
+server CrabCast defined and now is however long it has been since somebody last
+typed that command, and this document cannot tell you what that is. **What the
+gap leaves unnoticed is agy changing where it reads its MCP configuration.** It
+upgrades on its own schedule — as recorded above, `AGY_CLI_DISABLE_AUTO_UPDATE=1`
+did not prevent an auto-update — so the behaviour this proof is evidence about
+can move with no commit in this tree, and every check that does run would stay
+green while it did.
+
+**The CI-side guard that partially covers it has a limit, and it belongs here
+rather than only in the script.** `verify-agy-mcp-write-refusals.mjs` §0 compares
+`agyMcpConfigPath()` against `~/.gemini/config/mcp_config.json` **typed into the
+proof as a literal**, so a change to the path in `src/` goes red in CI without a
+real agy anywhere. That makes a change **loud**; it does not make the value
+**true**. **A wrong path changed in both places at once passes it without a
+murmur** — the literal is exactly as capable of being wrong as the code was. §0
+says so in its own header; it is repeated here because this paragraph is where
+the bound is claimed, and a reader arriving at the claim is not reading the
+script. Measured, and the reason the split matters rather than being bookkeeping:
+with `agyMcpConfigPath` reverted to the pre-KAN-235 path, both
+`verify-agy-mcp-write-refusals` and `verify-agy-mcp-reversal` exited 0, ALL PASS.
+**§0 makes the change loud. The hand-run makes the value true. Neither does the
+other's job**, and deleting or stubbing the hand-run would leave the literal an
+unverified assumption again — a confidently-asserted one, which is worse than the
+honest gap it replaced.
+
+`scripts/verify-activated-by.mjs`, also in CI, covers the `CRABCAST_AGENT_PATH`
+half, and it is deliberately arranged so that it cannot pass without the identity
+genuinely arriving: it reads the `.mcp.json` the daemon wrote, spawns the real
+MCP server with the environment **out of that file**, and lets two agents build a
 three-level chain. Nothing in that section types an identity in — because a
 proof that supplies its own input has not tested that the input arrives, which
 is precisely how this feature shipped broken elsewhere.
