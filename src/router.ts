@@ -82,6 +82,57 @@ import { BuildSnapshot, buildProvenanceReport } from './provenance.js';
 type Respond = (msg: any) => void;
 
 /**
+ * THE TWO HALVES OF A STREAMING PTY REPLY, split by TYPE and not by discipline
+ * (KAN-299). `handlePtyInput` and `handlePtyResize` are handed both, and which
+ * one a message may travel on is a thing the compiler decides rather than a
+ * thing a future author has to remember.
+ *
+ * The rule this encodes is stated in full where `ack` is defined, in
+ * {@link MessageRouter.handle}. In one line: **a refusal is not an ack.** A
+ * success is an ack and stays gated on the caller's `id`; a refusal is not and
+ * is delivered unconditionally.
+ *
+ * `success: true` and `success: false` as LITERALS is the whole mechanism, and
+ * it is a claim the compiler holds rather than one a comment makes:
+ *
+ *   ack({ …, success: false, … })     — REFUSED BY THE COMPILER. This is the
+ *                                       regression the ticket exists over: a
+ *                                       refusal routed down the correlated-only
+ *                                       path, silent to the caller that most
+ *                                       needs it.
+ *   refuse({ …, success: true, … })   — REFUSED BY THE COMPILER. The mirror,
+ *                                       and the one that turns this fix into
+ *                                       the ack-per-keystroke regression the
+ *                                       `id` gate exists to prevent.
+ *
+ * Neither direction is expressible, so neither needs an assertion to notice it
+ * afterwards — which is the point, because the failure both produce is silent
+ * on the wire and this file has twice shipped a rule outliving the reason
+ * written beside it.
+ *
+ * `sessionId` carries the second, smaller claim: a SUCCESS always names the
+ * session it happened to, a refusal may not have one to name (`ptySessionId`
+ * returns `null` for a request that arrived without a usable id, and that is
+ * itself a refusable condition).
+ *
+ * WHAT THIS DOES NOT REACH, marked because the types look more complete than
+ * they are: `Respond` is `(msg: any) => void`, so the two helpers `handle`
+ * builds are assignable to BOTH of these. The compiler stops a refusal being
+ * written to the ack parameter INSIDE a handler; it cannot stop a dispatch site
+ * passing `ack` in the refusal position. That second half is what
+ * `scripts/verify-pty-payload-refusal.mjs` §7 holds, and it is exactly the
+ * mutation that drove it red.
+ */
+type PtyAck = (msg: { action: string; success: true; sessionId: string }) => void;
+type PtyRefusal = (msg: {
+  action: string;
+  success: false;
+  sessionId: string | null;
+  refusal: string;
+  error: string;
+}) => void;
+
+/**
  * The extra fields an `activate` REFUSAL may carry — a type, because these two
  * claims are expressible as one and a claim the compiler holds cannot rot
  * (KAN-138 item 6).
@@ -2692,6 +2743,40 @@ export class MessageRouter {
 
     // Fire-and-forget actions only reply when a caller asked to be
     // correlated, so a streaming client doesn't get an ack per keystroke.
+    //
+    // A REFUSAL IS NOT AN ACK, AND DOES NOT COME THROUGH HERE (KAN-299). The
+    // sentence above justifies itself narrowly and correctly, and the rule it
+    // was written to justify used to be broader than it: a `pty_input` or
+    // `pty_resize` that was REFUSED went down this same path, so a caller that
+    // sent no `id` was never told. It typed into a session this daemon does not
+    // hold and received nothing, forever — a terminal that looks alive and is
+    // not, which is indistinguishable from success from the outside.
+    //
+    // So the split is per-OUTCOME on these two actions:
+    //
+    //   success  — an ack. It is what would arrive once per keystroke, it is
+    //              the entire subject of the sentence above, and it stays
+    //              gated on `id`.
+    //   refusal  — not an ack. Rare by construction, so it cannot spam
+    //              anything, and it is the one thing a caller must hear. Sent
+    //              unconditionally, through `respond`.
+    //
+    // WHAT MAKES THAT SAFE NOW AND DID NOT BEFORE: the refusal is routable
+    // without an `id`. It carries `action: '<action>_response'` and
+    // `refusal: 'unknown_session' | 'invalid_payload'` (KAN-280), so a client
+    // dispatching on `action` can place an uncorrelated one. The pre-KAN-280
+    // loudness on this path was worthless for the opposite reason — it escaped
+    // to the daemon's catch-all carrying neither field, and nothing could route
+    // it. That was an argument against THAT message, never against telling a
+    // caller it was refused.
+    //
+    // `pty_init` IS UNCONDITIONAL THROUGHOUT and is not an exception to any of
+    // this. It is request/response by nature — you ask for a session id and you
+    // need one back — so correlation is inherent, it takes `respond` for both
+    // outcomes, and it always has. It is the precedent this rule was read off
+    // rather than a case this rule bends around.
+    //
+    // The compiler holds the split; see {@link PtyAck} and {@link PtyRefusal}.
     const ack: Respond = (msg) => {
       if (data.id !== undefined) this.deps.send({ ...msg, id: data.id });
     };
@@ -2823,10 +2908,10 @@ export class MessageRouter {
         this.handlePtyInit(data, respond);
         return;
       case 'pty_input':
-        this.handlePtyInput(data, ack);
+        this.handlePtyInput(data, ack, respond);
         return;
       case 'pty_resize':
-        this.handlePtyResize(data, ack);
+        this.handlePtyResize(data, ack, respond);
         return;
       default:
         // `reset_by_key` lands here, by name, and that is the point of removing
@@ -6573,7 +6658,13 @@ export class MessageRouter {
     if (cleanup) this.activePtyListeners.set(sessionId, cleanup);
   }
 
-  private handlePtyInput(data: any, ack: Respond) {
+  /**
+   * `ack` carries the success; `refuse` carries every refusal, whether or not
+   * the caller asked to be correlated (KAN-299). The rule and its reasons are
+   * where `ack` is built, in `handle`; the types that hold it are {@link PtyAck}
+   * and {@link PtyRefusal}.
+   */
+  private handlePtyInput(data: any, ack: PtyAck, refuse: PtyRefusal) {
     const sessionId = this.ptySessionId(data);
     // The most dangerous of the three to answer approximately: keystrokes sent
     // to a session picked on the client's behalf land in some other agent's
@@ -6587,7 +6678,7 @@ export class MessageRouter {
     // session check has always had, and adds the payload check underneath it
     // rather than in front of it (KAN-280).
     if (sessionId === null || this.deps.herdrBridge.getSession(sessionId) === undefined) {
-      ack({
+      refuse({
         action: 'pty_input_response',
         success: false,
         sessionId,
@@ -6599,7 +6690,7 @@ export class MessageRouter {
 
     const payloadRefusal = this.ptyInputRefusal(data);
     if (payloadRefusal !== null) {
-      ack({
+      refuse({
         action: 'pty_input_response',
         success: false,
         sessionId,
@@ -6614,7 +6705,7 @@ export class MessageRouter {
     // session" as truly as a fabricated id is. Answering it the same way is
     // what keeps a race from being reported as a payload problem.
     if (!this.deps.herdrBridge.writePty(sessionId, data.data)) {
-      ack({
+      refuse({
         action: 'pty_input_response',
         success: false,
         sessionId,
@@ -6626,11 +6717,12 @@ export class MessageRouter {
     ack({ action: 'pty_input_response', success: true, sessionId });
   }
 
-  private handlePtyResize(data: any, ack: Respond) {
+  /** Refusals unconditional, success gated — the same split as `handlePtyInput`. */
+  private handlePtyResize(data: any, ack: PtyAck, refuse: PtyRefusal) {
     const sessionId = this.ptySessionId(data);
     // Session first, for the reason given in `handlePtyInput` above.
     if (sessionId === null || this.deps.herdrBridge.getSession(sessionId) === undefined) {
-      ack({
+      refuse({
         action: 'pty_resize_response',
         success: false,
         sessionId,
@@ -6642,7 +6734,7 @@ export class MessageRouter {
 
     const payloadRefusal = this.ptyResizeRefusal(data);
     if (payloadRefusal !== null) {
-      ack({
+      refuse({
         action: 'pty_resize_response',
         success: false,
         sessionId,
@@ -6653,7 +6745,7 @@ export class MessageRouter {
     }
 
     if (!this.deps.herdrBridge.resizePty(sessionId, data.cols, data.rows)) {
-      ack({
+      refuse({
         action: 'pty_resize_response',
         success: false,
         sessionId,

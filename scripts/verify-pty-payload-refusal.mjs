@@ -1,13 +1,17 @@
-// Live proof for KAN-280: a real CrabCast daemon REFUSES a PTY request whose
-// payload it cannot act on, in its own words, and a caller can tell that
-// refusal from the unknown-session one without reading either sentence.
+// Live proof for KAN-280 and KAN-299: a real CrabCast daemon REFUSES a PTY
+// request whose payload it cannot act on, in its own words; a caller can tell
+// that refusal from the unknown-session one without reading either sentence;
+// and (§7) the refusal REACHES a caller that sent no `id`, while a success
+// still does not.
 //
 // WHAT FAILURE THIS WOULD CATCH: a PTY handler that hands an unvalidated
-// payload to node-pty. That single absent check produced THREE defects failing
-// in three different directions, and this file keeps them named and sectioned
-// apart rather than collapsing them into "payloads are validated now" — they
-// are different failures with different remedies, and a future reader needs all
-// three names.
+// payload to node-pty, and — since KAN-299 — a refusal routed down the
+// correlated-only ack path, where it is silent to the one caller shape that
+// cannot ask to be correlated. That single absent check produced THREE defects
+// failing in three different directions, and this file keeps them named and
+// sectioned apart rather than collapsing them into "payloads are validated
+// now" — they are different failures with different remedies, and a future
+// reader needs all three names. DEFECT 4 is KAN-299's and is described at §7.
 //
 //   DEFECT 1 — THE LEAKED TYPE ERROR (§2, §3). `pty_input` with no `data`
 //   answered with the dependency's own sentence, `The first argument must be of
@@ -29,6 +33,17 @@
 //   ACCEPTED — `success: true` — because node-pty takes Array-likes, and
 //   `Buffer.from(['a'])` is a NUL byte. The daemon wrote a NUL into somebody's
 //   terminal and called it success.
+//
+//   DEFECT 4 — THE UNHEARD REFUSAL (§7, KAN-299). A `pty_input` or `pty_resize`
+//   sent with NO `id` was refused into a void: both refusal codes went down the
+//   correlated-only ack path, so the caller that could not ask to be correlated
+//   — the streaming-keystrokes shape, which is what a terminal UI is — received
+//   nothing and had no way to learn its keystrokes were being discarded. It is
+//   DEFECT 2's shape one level up: not a false success, but a silence that a
+//   caller cannot tell FROM success. Fixing it required deciding a question the
+//   ack convention had never been asked, which is why it is KAN-299's rather
+//   than KAN-280's — the answer changes the unknown-session refusal too, and
+//   that was explicitly out of scope there.
 //
 // WHICH OF THE THREE A CALLER COULD HAVE FOUND, which is the pattern worth
 // recording: only DEFECT 1. It came back as an error, and the first real
@@ -61,10 +76,17 @@
 //      defect §4 covers on the resize path, and a proof that accepted it here
 //      would be making the mistake it is checking for elsewhere.
 //   3. §4 requires a well-formed resize to succeed.
+//   4. §7 pairs the same way on a second axis (KAN-299). Its refusal half would
+//      pass against a daemon that had simply DELETED the `id` gate — which is
+//      the ack-per-keystroke regression the gate exists to prevent — so §7b
+//      requires a well-formed id-less request to answer NOTHING, and then
+//      requires the SAME request WITH an id to still be acked, so that the
+//      silence cannot be satisfied by a daemon that stopped answering at all.
 //
 // So "refuses" is never asserted on its own: every refusal in here is paired
 // with a case that must NOT be refused, and with the value that says which
-// refusal it is.
+// refusal it is. §7 extends that to "is delivered": every delivery is paired
+// with a case that must NOT be delivered.
 //
 // DEMONSTRATING IT GOING RED. This script takes `--dist`, so the recipe is two
 // runs rather than an argument:
@@ -76,6 +98,21 @@
 //
 // The red run is not a stack trace escaping the script: the pre-fix daemon
 // answers, and §3 reports the dependency sentence it answered with.
+//
+// §7 HAS ITS OWN RED DRIVE, and it is a source mutation rather than a merge
+// base, because the dispatch line it turns on did not exist before KAN-299. Both
+// mutations are one line in `MessageRouter.handle`'s dispatch and both COMPILE
+// — which is the point, since `PtyAck`/`PtyRefusal` make the obvious mutations
+// a type error, and a proof run after a failed build silently tests the
+// previous `dist`:
+//
+//   this.handlePtyInput(data, ack, ack)          # refusals silent again -> §7 RED
+//   this.handlePtyInput(data, respond, respond)  # ack per keystroke     -> §7b RED
+//
+// Rebuild between each (`npm run build`, and check its exit code without
+// piping it) and confirm `dist` is newer than `src` before reading a verdict:
+// this script imports nothing from `dist`, but it STARTS a daemon out of it,
+// so a stale build here means the verdict describes yesterday's code.
 //
 // ---------------------------------------------------------------------------
 // WHAT THIS DOES NOT PROVE — the edge of this file, marked so nobody infers past it
@@ -94,6 +131,22 @@
 //   - The `data` values it sends are the ones JSON can carry. A Buffer cannot
 //     cross this socket, so "a Buffer payload is accepted" is not a claim this
 //     proof makes or that the handler makes.
+//   - §7 proves an uncorrelated refusal is DELIVERED and is ROUTABLE — it
+//     carries `action` and `refusal` and no `id`. It does NOT prove any client
+//     handles one, because it is its own client. What is known about that was
+//     established by reading rather than by running, and belongs here because
+//     the decision rests on it: `src/cli.ts:2734` drops every id-less message
+//     with a bare `return`, and `src/mcp.ts:186` routes one to `forwardEvent`,
+//     which drops an action not on the event contract with a stderr warning.
+//     Neither faults. Neither is reachable in practice either — the router's
+//     `send` is per-connection (`src/daemon.ts:361`) so a PTY response goes
+//     only to the socket that asked, and the MCP server sends no `pty_*` at
+//     all. The stronger evidence is that this is not a new shape: `pty_init`
+//     registers a data listener whose `pty_output` has ALWAYS been sent
+//     uncorrelated, so any client that drives a PTY already tolerates
+//     uncorrelated inbound messages or it could never have rendered a
+//     terminal. An out-of-tree consumer is still unmeasured, and this proof
+//     does not speak for one.
 //
 // Everything here runs against real processes, isolated exactly as its sibling
 // `verify-pty-init-rejects-unknown-session.mjs` is: by $HOME, an explicit
@@ -250,6 +303,21 @@ await new Promise((resolve) => socket.once('connect', resolve));
 
 let buffer = '';
 const pending = new Map();
+
+/**
+ * EVERY INBOUND MESSAGE CARRYING NO `id` (KAN-299), which is the entire subject
+ * of §7. Before that ticket this handler dropped them on the floor and the
+ * script was right to: nothing but `pty_output` arrived without one.
+ *
+ * `pty_output` is why this is a list rather than a flag, and why §7 filters by
+ * `action` rather than asserting on emptiness. A real PTY streams: `pty_init`
+ * in §1 registered a data listener, and its output is unsolicited by design —
+ * the handler's own comment says it "must not carry the pty_init id, or a
+ * correlating transport would try to answer a request already closed". So the
+ * uncorrelated channel is NOT quiet on this socket, and a §7 that asserted
+ * "nothing arrived" would fail on a shell prompt.
+ */
+const uncorrelated = [];
 socket.on('data', (chunk) => {
   buffer += chunk.toString('utf8');
   let idx;
@@ -258,6 +326,10 @@ socket.on('data', (chunk) => {
     buffer = buffer.slice(idx + 1);
     if (!line.trim()) continue;
     const msg = JSON.parse(line);
+    if (msg.id === undefined) {
+      uncorrelated.push(msg);
+      continue;
+    }
     const resolve = pending.get(msg.id);
     if (resolve) {
       pending.delete(msg.id);
@@ -267,16 +339,50 @@ socket.on('data', (chunk) => {
 });
 
 let nextId = 0;
-// EVERY REQUEST CARRIES AN `id`. The PTY acks are correlated-only — a streaming
-// client that sends no id gets no ack, so that a terminal does not receive one
-// message per keystroke — and a proof that sent none would wait forever for a
-// refusal the daemon was never going to address to it.
+// EVERY REQUEST IN §1–§6 CARRIES AN `id`. PTY SUCCESSES are correlated-only — a
+// streaming client that sends no id gets no ack, so that a terminal does not
+// receive one message per keystroke — so a proof of the success path that sent
+// none would wait forever for an ack the daemon was never going to address to
+// it. §7 is the exception and it is the ticket: it sends WITHOUT an id, through
+// `fireAndForget` below, because whether a REFUSAL arrives on that path is
+// exactly the question KAN-299 answered. Until it did, nothing here sent an
+// id-less request and the defect was invisible to this file.
 const call = (action, data = {}) =>
   new Promise((resolve) => {
     const id = `kan280-${++nextId}`;
     pending.set(id, resolve);
     socket.write(JSON.stringify({ action, ...data, id }) + '\n');
   });
+
+/**
+ * The same socket, with NO `id` — the streaming-keystrokes shape §7 is about.
+ * There is nothing to await: whether anything comes back is the question.
+ */
+const fireAndForget = (action, data = {}) => {
+  socket.write(JSON.stringify({ action, ...data }) + '\n');
+};
+
+/**
+ * WAIT FOR THE DAEMON TO HAVE FINISHED WITH WHAT WAS SENT BEFORE, without
+ * sleeping on a guess.
+ *
+ * A `sleep(n)` here would be the defect this suite exists to catch, in the
+ * proof rather than the product: too short and §7's silence checks pass because
+ * the answer had not arrived yet, which is a green for the regression they
+ * exist to detect. The barrier instead is ORDERING. One socket, and `handle()`
+ * is synchronous for every PTY action, so the daemon reads and answers messages
+ * from this connection in the order they arrive. Once a CORRELATED request sent
+ * afterwards has been answered, anything the daemon was ever going to say about
+ * the id-less request before it has already been written to this socket and
+ * parsed by the reader above.
+ *
+ * So `uncorrelated` is complete with respect to everything sent before this
+ * call returns — an assertion about absence with a mechanism behind it rather
+ * than a duration.
+ */
+const drain = async () => {
+  await call('daemon_status');
+};
 
 /**
  * The dependency's own sentence, which is what must NOT come back.
@@ -613,6 +719,157 @@ record(
   'an empty string is a write of nothing, not a malformed payload',
   emptyWrite.success === true,
   emptyWrite.success === true ? undefined : emptyWrite.error
+);
+
+// --- 7. KAN-299: a refusal is not an ack ------------------------------------
+banner('7. KAN-299 — a REFUSAL reaches an id-less caller, and a SUCCESS still does not');
+
+// WHAT THIS SECTION IS FOR, AND WHY IT IS TWO HALVES RATHER THAN ONE.
+//
+// Everything above this line sends an `id`, which is stated at `call` and was
+// correct: the PTY acks are correlated-only, so a proof that sent none would
+// have waited forever. That is also exactly what left the defect invisible. A
+// caller sending no `id` — the streaming-keystrokes shape, which is what a
+// terminal UI is — was never told its request had been REFUSED, on either of
+// the two refusal codes. It typed into a session the daemon does not hold and
+// received nothing, indefinitely, with no way to learn that every keystroke was
+// being discarded. Silence is indistinguishable from success here, which makes
+// it the worse of the two failures for the same reason DEFECT 2 was.
+//
+// KAN-299 decided the question the convention had never been asked: a refusal
+// is not an ack. Refusals now go through `respond` unconditionally; successes
+// stay on `ack`, gated on `id`.
+//
+// AND THE SECOND HALF IS NOT A COURTESY — IT IS THE POINT. The `id` gate exists
+// so a streaming client does not receive one message per keystroke. A change
+// that delivered refusals by simply removing the gate would pass every check in
+// 7a–7d and have reintroduced precisely the regression the convention was
+// written to prevent, at a rate of one message per character typed. 7e and 7f
+// are what make 7a–7d mean "refusals were routed differently" instead of "the
+// guard was deleted". A proof of only the first half is a proof that the guard
+// was removed.
+//
+// THE MUTATIONS THAT DRIVE THIS RED, both one line in `MessageRouter.handle`'s
+// dispatch and both of which COMPILE — which matters, because the type-level
+// half of this fix (`PtyAck`/`PtyRefusal`) makes the obvious mutations a
+// compile error, and a proof run after a failed build tests the previous dist:
+//
+//   this.handlePtyInput(data, ack, ack)          -> 7a,7b RED (the pre-fix behaviour, exactly)
+//   this.handlePtyInput(data, respond, respond)  -> 7e RED  (the ack-per-keystroke regression)
+//
+// Both were run. See the PR body for the output.
+
+const uncorrelatedFor = (action) => uncorrelated.filter((m) => m.action === action);
+
+// 7a/7b/7c/7d — the refusals. Each is sent with NO `id` and must come back
+// anyway. Counted per action so that `pty_output` from the live shell, which is
+// legitimately uncorrelated, cannot be mistaken for one of these.
+const before = {
+  input: uncorrelatedFor('pty_input_response').length,
+  resize: uncorrelatedFor('pty_resize_response').length
+};
+
+fireAndForget('pty_input', { sessionId: 'kan-299-no-such-session', data: 'x' });
+fireAndForget('pty_input', { sessionId: SESSION, data: 42 });
+fireAndForget('pty_resize', { sessionId: 'kan-299-no-such-session', cols: 100, rows: 40 });
+fireAndForget('pty_resize', { sessionId: SESSION });
+await drain();
+
+const idlessInput = uncorrelatedFor('pty_input_response').slice(before.input);
+const idlessResize = uncorrelatedFor('pty_resize_response').slice(before.resize);
+console.log('\n  id-less pty_input, unknown session   →');
+console.log('  ' + JSON.stringify(idlessInput[0]));
+console.log('\n  id-less pty_input, malformed payload →');
+console.log('  ' + JSON.stringify(idlessInput[1]));
+console.log('\n  id-less pty_resize, unknown session  →');
+console.log('  ' + JSON.stringify(idlessResize[0]));
+console.log('\n  id-less pty_resize, no dimensions    →');
+console.log('  ' + JSON.stringify(idlessResize[1]));
+
+record(
+  'KAN-299: an id-less pty_input naming an unknown session IS refused, not silently dropped',
+  idlessInput[0]?.success === false && idlessInput[0]?.refusal === 'unknown_session',
+  idlessInput[0] === undefined
+    ? 'nothing came back at all — the caller is typing into a void'
+    : `refusal=${JSON.stringify(idlessInput[0].refusal)}`
+);
+record(
+  'KAN-299: an id-less pty_input with a malformed payload IS refused',
+  idlessInput[1]?.success === false && idlessInput[1]?.refusal === 'invalid_payload',
+  idlessInput[1] === undefined ? 'nothing came back at all' : `refusal=${JSON.stringify(idlessInput[1].refusal)}`
+);
+record(
+  'KAN-299: an id-less pty_resize naming an unknown session IS refused',
+  idlessResize[0]?.success === false && idlessResize[0]?.refusal === 'unknown_session',
+  idlessResize[0] === undefined ? 'nothing came back at all' : `refusal=${JSON.stringify(idlessResize[0].refusal)}`
+);
+record(
+  'KAN-299: an id-less pty_resize carrying no dimensions IS refused',
+  idlessResize[1]?.success === false && idlessResize[1]?.refusal === 'invalid_payload',
+  idlessResize[1] === undefined ? 'nothing came back at all' : `refusal=${JSON.stringify(idlessResize[1].refusal)}`
+);
+
+// THE PROPERTY THAT MAKES DELIVERING THESE SAFE, asserted rather than assumed.
+// KAN-299's argument for unconditional delivery is that the refusal is ROUTABLE
+// without an `id`: a client dispatching on `action` can place it, and can act
+// on `refusal` without reading the sentence. That is the whole of what
+// distinguishes it from the pre-KAN-280 loudness this proof's §3 exists over,
+// which escaped from the daemon's catch-all carrying neither field and which
+// nothing could route. If a refusal ever arrives here uncorrelated AND
+// unaddressed, the decision's premise has gone and this must say so.
+const idless = [...idlessInput, ...idlessResize];
+record(
+  'KAN-299: and every uncorrelated refusal is routable — it carries `action` and `refusal`, and no `id`',
+  idless.length === 4 &&
+    idless.every(
+      (m) => typeof m.action === 'string' && typeof m.refusal === 'string' && m.id === undefined
+    ),
+  idless.length === 4 ? undefined : `${idless.length} of 4 arrived`
+);
+
+// 7e/7f — THE HALF THAT STOPS THIS BECOMING AN ACK PER KEYSTROKE.
+banner('7b. and a WELL-FORMED id-less request still answers NOTHING — the gate is routed around, not removed');
+
+const quietBefore = {
+  input: uncorrelatedFor('pty_input_response').length,
+  resize: uncorrelatedFor('pty_resize_response').length
+};
+
+// `data: ''` is a well-formed write of nothing — §6 establishes it is accepted
+// — so this exercises the success path without typing into the real terminal.
+fireAndForget('pty_input', { sessionId: SESSION, data: '' });
+fireAndForget('pty_resize', { sessionId: SESSION, cols: 100, rows: 40 });
+await drain();
+
+const quietInput = uncorrelatedFor('pty_input_response').slice(quietBefore.input);
+const quietResize = uncorrelatedFor('pty_resize_response').slice(quietBefore.resize);
+console.log(`\n  id-less well-formed pty_input  → ${quietInput.length === 0 ? 'nothing, as required' : JSON.stringify(quietInput)}`);
+console.log(`  id-less well-formed pty_resize → ${quietResize.length === 0 ? 'nothing, as required' : JSON.stringify(quietResize)}`);
+
+record(
+  'KAN-299: a well-formed id-less pty_input is still answered with SILENCE — no ack per keystroke',
+  quietInput.length === 0,
+  quietInput.length === 0
+    ? 'the `id` gate still holds on the success path'
+    : `${quietInput.length} ack(s) arrived uncorrelated — the gate has been removed rather than routed around, and a terminal now gets one message per character`
+);
+record(
+  'KAN-299: a well-formed id-less pty_resize is still answered with SILENCE',
+  quietResize.length === 0,
+  quietResize.length === 0 ? undefined : `${quietResize.length} ack(s) arrived uncorrelated`
+);
+
+// AND THE GATE IS STILL A GATE RATHER THAN A DEAD PATH: the same well-formed
+// request WITH an `id` must still be answered. Without this, 7e and 7f pass
+// against a daemon that stopped answering successes altogether — which is the
+// vacuous version of a silence assertion, and this file's own header names that
+// shape as the thing every check in here is paired against.
+const correlatedSuccess = await call('pty_input', { sessionId: SESSION, data: '' });
+console.log(`\n  the SAME request with an id → ${JSON.stringify(correlatedSuccess)}`);
+record(
+  'KAN-299: and the same well-formed request WITH an id is still acked — silence is the gate, not a dead path',
+  correlatedSuccess.success === true && correlatedSuccess.action === 'pty_input_response',
+  correlatedSuccess.success === true ? undefined : JSON.stringify(correlatedSuccess)
 );
 
 await call('deactivate', { sessionId: SESSION });
