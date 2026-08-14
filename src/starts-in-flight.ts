@@ -34,17 +34,118 @@
 //     seconds ago is a rounding error in it. It fills the CPU-side slot only
 //     where nothing measured CPU, and it is charged here too — otherwise the
 //     blindness returns intact on exactly the machines that have no /proc/stat.
-//   * `headroomByMemory` — PARTLY blind, and deliberately NOT charged here.
-//     `MemAvailable` is read live per call so it sees each agent's memory as
-//     the kernel hands it over; what it cannot see is the ramp, the seconds
-//     between a spawn and that agent holding its steady-state resident set.
-//     Charging it would need a constant for how long that ramp takes, and this
-//     model has no such measurement — every reference period below is derived
-//     from what its own instrument IS, not from a number somebody picked. That
-//     hole is named rather than closed, and KAN-285 is filed against it —
-//     including the instruction that if the answer turns out to be "no charge
-//     is worth it", that decision is recorded HERE rather than leaving this
-//     paragraph pointing at a question nobody closed.
+//   * `headroomByMemory` — PARTLY blind, MEASURED, and DELIBERATELY NOT
+//     CHARGED. `MemAvailable` is read live per call so it sees each agent's
+//     memory as the kernel hands it over; what it cannot see is the ramp, the
+//     seconds between a spawn and that agent holding its steady-state resident
+//     set. This paragraph used to say that charging it would need a constant
+//     nobody had measured, and pointed at KAN-285. KAN-285 measured it, and
+//     the answer is that no charge should land. See THE RAMP, MEASURED below —
+//     the pointer is retired rather than left dangling.
+//
+// ---------------------------------------------------------------------------
+// THE RAMP, MEASURED — and why `headroomByMemory` is still charged nothing
+// (KAN-285)
+// ---------------------------------------------------------------------------
+//
+// THE INSTRUMENT. `scripts/kan285-start-ramp.mjs`, which samples every
+// agent-runtime tree on the machine through `agent-cost.ts`'s own walker — so a
+// tree here is a tree by exactly the definition the capacity model divides by,
+// rather than by a second walker that would answer about a different thing.
+//
+// THE POPULATION, STATED BECAUSE IT IS HALF THE READING. Five CrabCast agent
+// trees, started by this daemon through `crabcast activate`, over four windows
+// on 2026-08-14: three windows sampled at 1s (60s, 60s, 25s) and one at 250ms
+// (25s). They were IDLE agents — launcher `claude`, given a prompt telling them
+// to do nothing — which is a real CrabCast population and NOT a working one.
+// The settled trees in the same windows were another orchestrator's, and are
+// reported as the control rather than as data: 0.0–2.1% spread across six
+// trees, against 64–91% for the five that were ramping, which is what makes a
+// ramp separable from ordinary variation here at all.
+//
+// WHAT IT DOES. Resident set at first sighting is 72–246 MB, at one process.
+// It reaches 95% of that tree's own settled plateau in 1.0–4.0s and 99% in
+// 2.0–7.0s, and the plateau is 631–681 MB across the five.
+//
+// AND THE DEFICIT NEVER CLOSES, WHICH IS THE FINDING THAT DECIDES THIS. The
+// quantity a charge would add back is the memory the model assumed and the
+// kernel has not yet handed over — `(cost.residentBytes − resident) /
+// cost.residentBytes`, in agent-equivalents. Measured against the 800 MB
+// divisor it is 0.69–0.91 at first sighting, 0.13–0.46 at three seconds, and
+// then it stops falling: it settles on a FLOOR of 0.15–0.21 and stays there for
+// as long as the agent lives, because an idle tree plateaus BELOW the divisor.
+// So there is no instant at which "the ramp completed" and the charge should
+// stop. A reference period derived from this measurement would be the time to
+// reach a plateau that the model already over-counts — the charge would be
+// adding back memory that is not missing.
+//
+// THE COMPARISON THAT SETTLES THE SCALE, against the term that WAS charged.
+// Reconciliation restores every `RESTORE_STAGGER_MS` = 3s. Net of that floor,
+// a start is under-counted by between −0.05 and +0.30 of an agent across the
+// five — negative for one of them, meaning the model was still OVER-charging it
+// — at the moment the NEXT restore is gated. At most 238 MB against an 800 MB
+// divisor feeding an integer floor, so it cannot move the term except exactly
+// on a boundary. The CPU term's blindness was up to ten WHOLE starts against one
+// reading, because its instrument refreshes every 30s while the loop starts an
+// agent every 3s. That is the ratio the header above opens with, and it is the
+// whole difference between the two terms. The condition stated above for serial
+// gating to compose is that the gap between starts exceed the interval at which
+// the measurement refreshes; for `MemAvailable` that interval is ZERO, since it
+// is re-read on every call, so all that is left to clear is the LAG between a
+// spawn and that memory becoming visible — 2–4s against a 3s stagger. Note what
+// that is and is not: PARITY, not comfortable margin, and one of the five was
+// still 0.30 of an agent short at three seconds. The CPU term had a 30s refresh
+// against the same 3s stagger and failed the condition by a factor of ten. A
+// term at parity leaves a residue that is a fraction of one agent; a term off by
+// ten leaves ten whole ones, and that is the difference the two decisions turn
+// on rather than one being blind and the other not.
+//
+// AND THE CONSTANT WOULD NOT BE DERIVED FROM ITS INSTRUMENT, which is the
+// objection that would survive even if the numbers were larger. Every reference
+// period in this file is what its instrument IS — a CPU observation's own
+// `windowSeconds`, or `LOAD1_PERIOD_MS` as the definition of `os.loadavg()[0]`.
+// `MemAvailable` is instantaneous and has no window, so a ramp period would be
+// a property of this machine, this launcher and this day, with nothing to
+// notice when it stopped being true. That is the uncheckable number
+// `capacity.ts`'s header spends forty lines refusing, and measuring it once
+// does not convert it into a derived one.
+//
+// WHAT STILL BOUNDS A BURST, so that this is a decision rather than a hole:
+// `headroomByCap` is exact and instantaneous — `running` is re-surveyed before
+// every gate decision — so a simultaneous burst is bounded by the count term
+// whatever memory believes; and on a machine where memory genuinely binds,
+// `MemAvailable` falling IS the signal, within the 2–4s above.
+//
+// AND ON THE MACHINE THIS WAS MEASURED ON, MEMORY DOES NOT BIND. `crabcast
+// capacity` at measurement time: cap 3 bound by cpu (cpu allows 3, memory 16),
+// headroom 2 bound by cpu (count allows 3, cpu 2, memory 6). That is CrabCast's
+// own arithmetic and is worth reading off CrabCast rather than off whatever
+// other orchestrator is on the box — a figure measured off one population and
+// reported as another's is the mistake `MEASURED_AGENT_COST`'s own header
+// records having made. It does not carry to a machine where memory binds, which
+// is why the paragraphs above argue from the stagger and the count term rather
+// than from this reading.
+//
+// WHAT WOULD REOPEN THIS, named so the next reader has a test rather than a
+// verdict:
+//   * `RESTORE_STAGGER_MS` dropping below the ramp, or any caller path that
+//     issues activations SIMULTANEOUSLY rather than staggered. The argument
+//     above is that the stagger exceeds the ramp; it does not survive the
+//     stagger going away.
+//   * A population whose plateau EXCEEDS the divisor. The floor above is
+//     positive — an over-charge — only because these trees settle below 800 MB.
+//     For a population that settles above it the floor is negative and the
+//     under-charge is permanent rather than transient, which is a question
+//     about the seed and belongs to KAN-275, not here. Six settled trees in
+//     these same windows held 721–919 MB, so that population demonstrably
+//     exists on this machine; it is reported on KAN-285 and deliberately not
+//     acted on here.
+//
+// WHAT THIS MEASUREMENT DOES NOT COVER, and nobody else covers it either: a
+// tree that begins substantive work at spawn rather than sitting idle. All five
+// were idle by construction, so the plateau above is an idle plateau. Re-run
+// the script against a working fleet to close it — it needs no argument, only
+// agents that are doing something.
 //
 // WHAT THIS FILE IS NOT. It is not a second census and it is not authoritative
 // about which agents exist — `surveyAgents` is, and it asks herdr. This is a
