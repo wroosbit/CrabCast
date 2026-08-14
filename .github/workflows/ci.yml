@@ -1006,6 +1006,7 @@ jobs:
             verify-timing-attribution
             verify-unreadable-row-standing
             verify-owner-filter
+            verify-scaffolding-past-the-gate
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

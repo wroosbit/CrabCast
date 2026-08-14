@@ -147,6 +147,13 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 import { makeMutator } from './mutation.mjs';
+// KAN-179. This file is the one that was BITTEN by an unannounced capacity
+// refusal — 8 runs of 8 red at load 2.6-2.8, saying "drift not proven" about a
+// laptop — so it is where the disclosure earns its place first. The daemon said
+// `refusedBy: 'capacity'` on every one of those runs; `why()` below printed only
+// the first line of `error`, and nobody could tell from the output that the
+// machine rather than the code had answered.
+import { capacityDisclosure } from './capacity-disclosure.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(process.argv[2] ?? path.join(scriptDir, '..', 'dist'));
@@ -613,7 +620,15 @@ async function buildFleet(mcp, tag, { gate = PAST_THE_GATE, expectRefusals = fal
     await mcp.callTool('crabcast_activate_agent', { path: standby, ...gate }));
   const down = parsedText(await mcp.callTool('crabcast_deactivate_agent', { path: standby }));
 
-  const why = (r) => String(r?.error ?? JSON.stringify(r)).split('\n')[0].slice(0, 200);
+  // THE CAPACITY REFUSAL IS NAMED AHEAD OF THE ERROR TEXT (KAN-179), because it
+  // is the one refusal that is about the machine rather than about the daemon,
+  // and the reader's next move differs completely. `capacityDisclosure` answers
+  // null for every other refusal, so nothing else in this output changes.
+  const why = (r) => {
+    const disclosed = capacityDisclosure(r);
+    const err = String(r?.error ?? JSON.stringify(r)).split('\n')[0].slice(0, 200);
+    return disclosed ? `${disclosed}\n        (the daemon's own words: ${err})` : err;
+  };
   const steps = [
     ...configured.map((r, i) => [`configure ${['running', 'standby', 'unstarted'][i]}`, r]),
     ['activate running', upRunning],
