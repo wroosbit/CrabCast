@@ -226,7 +226,7 @@ where these fields came from — read at 2026-08-05T13:01:36.686Z
   derived  (computed from the two):                 paneName, state, occupies, reason, line, problem, rawTruncated, promptRedacted, standing
   remembered (this daemon's memory, not durable):   statusSince
 
-config echo: every knob echoed on this response is declared (priority, refusable, chargeable, preemptable, launcher, prompt, mcpServers, label)
+config echo: every knob echoed on this response is declared (priority, refusable, chargeable, preemptable, launcher, prompt, mcpServers, label, owner)
 
 capacity:
   1/3 charged agents, room for 2 more (4 cores, load 1.47, 9.5 GiB available; bound by cap)
@@ -270,7 +270,7 @@ where these fields came from — read at 2026-08-05T13:01:42.798Z
   derived  (computed from the two):                 paneName, state, occupies, reason, line, problem, rawTruncated, promptRedacted, standing
   remembered (this daemon's memory, not durable):   statusSince
 
-config echo: every knob echoed on this response is declared (priority, refusable, chargeable, preemptable, launcher, prompt, mcpServers, label)
+config echo: every knob echoed on this response is declared (priority, refusable, chargeable, preemptable, launcher, prompt, mcpServers, label, owner)
 
 other fields in the daemon's response:
   channelEnabled: false
@@ -389,6 +389,7 @@ A supervisor that holds desired state will eventually find a configuration that 
 | `priority` | **in place** | read out of the record at the moment a capacity or preemption decision is made |
 | `refusable` / `chargeable` / `preemptable` | **in place** | census arithmetic only; nothing in the pane sees them |
 | `label` | **in place** | nothing parses it |
+| `owner` | **in place** | read out of the record when a filtered `list` is answered; nothing in the pane sees it. The consequence is that a filtered list is a **snapshot** — an agent can move between owners between two polls |
 | `launcher` | **refused** | it *is* the process running in the pane, resolved once at spawn |
 | `prompt` | **refused** | written into the sidecar and handed over at spawn; the agent has already read it |
 | `mcpServers` | **refused** | written into `.mcp.json`, which the runtime reads once, at boot |
@@ -718,6 +719,7 @@ A config still declaring `workspaceTypes` is **refused rather than ignored**. Dr
 crabcast configure <dir> --priority 1 --launcher claude   # make an agent EXIST, or change one
 crabcast activate <dir>          # run it  (--override, --preempt; no other options)
 crabcast list                    # the whole fleet, plus capacity
+crabcast list --owner butchr     # only agents configured with that owner (NOT a permission boundary)
 crabcast status <dir>
 crabcast tail <dir> --lines 40   # its recent pane text, without attaching
 crabcast send <dir> 'run the tests'
@@ -729,7 +731,7 @@ crabcast daemon-status           # pid, uptime, config, registry — and WHICH B
 
 Every agent-addressing command takes exactly one operand: the directory. There is nothing to disambiguate — two agents cannot share a directory the way they could share a key — so there is no `--type` flag and no ambiguity to resolve.
 
-`configure`'s flags are `--priority` and `--launcher` (both required, neither defaulted), plus `--prompt <text>` or `--prompt-file <path>`, `--mcp a,b` and `--mcp-config <file>`, `--label`, and the gate triple `--refusable`/`--chargeable`/`--preemptable` (all default true, `--gate-exempt` is shorthand for all three false). It is also how an agent that already exists is **changed** — per attribute, refusing rather than respawning; see [above](#changing-an-agents-knobs-never-costs-it-its-conversation).
+`configure`'s flags are `--priority` and `--launcher` (both required, neither defaulted), plus `--prompt <text>` or `--prompt-file <path>`, `--mcp a,b` and `--mcp-config <file>`, `--label`, `--owner`, and the gate triple `--refusable`/`--chargeable`/`--preemptable` (all default true, `--gate-exempt` is shorthand for all three false). It is also how an agent that already exists is **changed** — per attribute, refusing rather than respawning; see [above](#changing-an-agents-knobs-never-costs-it-its-conversation).
 
 MCP servers arrive as **definitions rather than names** — the command, args and env that spawn each one — and are written into the agent's `.mcp.json` verbatim: `--mcp-config` reads them from a JSON file here and puts its *bytes* on the wire, the same hand-off `--prompt-file` makes. `--mcp` is for the one server CrabCast builds itself (`crabcast`), whose definition depends on facts about this daemon rather than about you. Supplying either **is** the consent to a `.mcp.json` appearing in your directory; there is no second flag, `configure`'s response names the file and keys it will write before anything is written, and `forget` takes them back out. Every server you asked for must be writable or the activation is refused — a `.mcp.json` holding only half of what you asked for is a file whose presence looks like success. [`docs/callers-directory.md`](docs/callers-directory.md) is the whole of what CrabCast writes into a directory you own, and how each of it comes back out.
 
@@ -797,6 +799,56 @@ The socket's two state reads — `list_agents` for the fleet and `agent_status` 
 Read it beside the event contract, not instead of it: events are the latency optimisation and `list_agents` is the authoritative read, so the delivery guarantees stay over there while the shape lives here.
 
 Three things worth knowing before you build on it. **The stability statement is a notice promise, not a freeze**: below 1.0 no field is guaranteed not to change, and what is promised is that a change to a documented field arrives with a consumer notice naming it — *you will not find out by breaking*. **The version is on the wire in exactly one place**, `daemon_status.contractVersion`; read it once and re-read it when `bootId` moves. And **the document is checked against the code**: `node scripts/verify-read-contract.mjs` reconciles it, `src/read-contract.ts` and a real daemon's responses in both directions, so a field added to a response and not to the document goes red in CI. It drives ten of `activate_response`'s eleven branches on a real daemon to do it — and **names the eleventh as unproduced** rather than letting a count of branches in the document imply a count of branches exercised.
+
+### Finding your own agents — the `owner` knob, and what it is not
+
+Freeze an opaque `owner` on an agent at `configure`, and ask `list` for only
+those:
+
+```
+crabcast configure /path/to/agent --priority 1 --launcher claude --owner butchr
+crabcast list --owner butchr
+```
+
+It exists so an application can find **its own** agents without parsing their
+names. CrabCast derives a pane name from the agent's path (`crabcast-<slug>-<hash>`);
+that derivation is not API, and a consumer resting on it breaks silently the day
+the rule changes — which is the parseable-name coupling this project deleted
+everywhere else.
+
+**It is not a permission boundary, and nothing about it hides anything.** Any
+caller that can reach the daemon's socket lists **every** agent on the machine
+by leaving the filter off, deliberately. The only auth boundary CrabCast has is
+the socket's own file permission — `0600` in a `0700` directory. A filter is a
+narrower **question**, never a smaller **answer**.
+
+**It is matched exactly and never interpreted.** No prefix, no glob, no
+hierarchy, no case-folding, and no value means anything to the daemon: it is
+whatever string you already call yourself. The first prefix match would invite a
+namespace, and a namespace is vocabulary CrabCast would then owe you
+compatibility on.
+
+**An agent with no owner is matched by no filter.** Absence is a real state, not
+a wildcard. Every agent configured before this knob existed is unowned, is
+returned by **no** filtered read whatever you pass, and is reachable only by
+omitting the argument. The asymmetry is deliberate and it is the half that
+matters: a false *match* over-includes a row in a listing, while a false
+*non-match* can **stop an agent** — the caller this exists for is a reconciler
+whose last step is *"anything running that is not in my desired list → off"*, and
+such a caller has to be able to tell **not mine** from **unknown to me**.
+
+**A filtered response says what it narrowed and what it did not.** `agents`,
+`missingAgents`, `preemptedAgents`, `standbyAgents` and `unstartedAgents` are
+narrowed, and their `*Total`s and `pages.<category>` counts describe the
+**filtered** set — which is what keeps paging correct under it, and which means
+the numbers alone cannot tell you a filter was applied. The `ownerFilter` block
+on the response is the only thing that can, and it also names the four arrays
+left **complete**: `unbackedPanes` and `foreignPanes` (no record, so no owner),
+`priorities` (a fact about the machine, not about you) and `unreadableRecords`
+(the row could not be parsed, and may well be yours).
+
+It changes **in place** like `label`, with the consequence that a filtered list
+is a snapshot. `node scripts/verify-owner-filter.mjs` is the proof.
 
 ### The send path
 

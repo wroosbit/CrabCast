@@ -150,6 +150,55 @@ export interface AgentConfig {
    * through which a lookup by label could be written.
    */
   label?: string;
+  /**
+   * WHOSE AGENT THIS IS, in the caller's own word for themselves — so an
+   * application can find its own agents without parsing their names.
+   *
+   * **NOT A PERMISSION BOUNDARY, and this is the sentence to read before any
+   * other.** Anyone who can reach the daemon's socket can list EVERY agent on
+   * this machine whatever its owner: `list_agents` without a filter returns the
+   * whole fleet, deliberately, and that is intended behaviour rather than a
+   * leak. The only auth boundary CrabCast has is the socket's own filesystem
+   * permission — `0600` in a `0700` directory — and nothing else. A field
+   * called `owner` reads like access control to almost everybody who meets it;
+   * a consumer that relies on filtering to HIDE anything has a claim this
+   * mechanism does not support. It is a way to ASK a narrower question, not a
+   * way to be told less.
+   *
+   * **CRABCAST MAY MATCH THIS STRING AND MUST NEVER DERIVE MEANING FROM ONE.**
+   * That single distinction is what makes this field safe to have at all, given
+   * that KAN-103 and KAN-123 deleted `type`, `key` and the parseable agent name
+   * on the rule that no consumer's vocabulary lives inside CrabCast. An
+   * equality test against an opaque value is not vocabulary — `owner === 'x'`
+   * requires this daemon to know nothing whatever about what `x` is. The moment
+   * anything here parses it, splits it, folds its case, infers a namespace from
+   * it or attaches behaviour to a particular value, that rule is broken and
+   * this field was a mistake. So: EXACT MATCH ONLY. No prefix, no glob, no
+   * hierarchy, no case-folding — the first prefix match invites a namespace,
+   * and a namespace is vocabulary CrabCast would then owe compatibility on.
+   *
+   * **ABSENCE IS A REAL STATE AND NEVER A WILDCARD.** Every agent configured
+   * before this field shipped has no owner, and an agent with no owner is
+   * matched by NO filter — not by a filter for `''`, not by a filter for
+   * anything else. It is still reachable, because an unfiltered read returns
+   * it. That asymmetry is deliberate and it is the safety-critical half rather
+   * than the tidy one: a false MATCH over-includes a row in a listing, while a
+   * false NON-MATCH can stop an agent. The caller this exists for is a
+   * reconciler whose last step is *"anything running that is not in my desired
+   * list → off"*, and such a caller must be able to tell **not mine** from
+   * **unknown to me**. Silently matching absence collapses those two into the
+   * destructive one.
+   *
+   * It is metadata rather than runtime, so it is reconfigurable in place like
+   * {@link AgentConfig.label} — with the consequence that a filtered list is a
+   * SNAPSHOT: an agent can move between owners, or acquire or lose one,
+   * between two polls.
+   *
+   * Optional. `configure` is a desired-state document, so a reconfiguration
+   * that omits it removes the owner, exactly as omitting `label` removes the
+   * label.
+   */
+  owner?: string;
 }
 
 /** Every daemon reply carries `success`; failures carry `error`; both echo `id`. */

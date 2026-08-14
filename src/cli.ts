@@ -42,7 +42,9 @@ import {
   socketPathFor,
   writeJsonLine
 } from './ipc.js';
+import type { Exact } from './events.js';
 import { HERDR_VERSION_NOTICE_FIELD } from './herdr-health.js';
+import type { AgentConfig } from './types.js';
 import { MAX_PROMPT_CHARS } from './router.js';
 
 // ---------------------------------------------------------------- exit codes
@@ -633,8 +635,33 @@ function gateFlags(a: any): string {
  */
 const CONFIG_FIELDS = [
   'priority', 'refusable', 'chargeable', 'preemptable', 'launcher',
-  'prompt', 'mcpServers', 'label'
+  'prompt', 'mcpServers', 'label', 'owner'
 ] as const;
+
+/**
+ * And the list above is TOTAL over {@link AgentConfig}, held by the compiler
+ * rather than by whoever edits it next.
+ *
+ * WHY THIS WAS ADDED, because it is a fix for a defect this file's own leftovers
+ * pass caught rather than a precaution. `owner` (KAN-193) was rendered by an
+ * explicit line in `configBlock` and left out of this list, so the block printed
+ * it twice — once deliberately and once through the undeclared-knob fallback at
+ * the bottom of `configBlock`. The fallback was doing exactly its job: it made
+ * the omission VISIBLE instead of silent. But visible-as-a-duplicated-line is a
+ * defect a reviewer has to notice, and it was found by running the CLI by hand,
+ * which is not a mechanism.
+ *
+ * `RECONFIGURATION_COST` (router.ts) and `CONFIG_FIELDS` (events.ts) are both
+ * total maps over `keyof Required<AgentConfig>` for the same reason, so a knob
+ * cannot reach the wire undeclared or unclassified. This is that guard applied
+ * to the third surface — the one a human reads — and it makes the NEXT knob's
+ * omission a red typecheck rather than a duplicated line nobody looks twice at.
+ */
+type _CliRendersEveryKnob = Exact<
+  (typeof CONFIG_FIELDS)[number],
+  keyof Required<AgentConfig>
+>;
+const _cliRendersEveryKnob: _CliRendersEveryKnob = true;
 
 /**
  * The MCP server names on a config block, with the builtin ones marked.
@@ -695,6 +722,14 @@ function configBlock(row: any, pad = INDENT + INDENT): string | null {
       ? `${pad}mcp servers: ${mcpServerNames(config.mcpServers)}`
       : null,
     config.label !== undefined ? `${pad}label: ${config.label}` : null,
+    // ONLY WHERE THE RECORD CARRIES ONE, exactly as `label` above, and the
+    // absence is the substance rather than an omission: an agent with no owner
+    // is UNOWNED, which is a real state that no `list --owner` matches. Printing
+    // `owner: (none)` on every row would be twenty lines of noise saying what
+    // is true of most of the fleet; printing `owner: -` or an empty value would
+    // be worse, because a reader could take the empty string for a value —
+    // which is precisely why `configure` refuses to store one.
+    config.owner !== undefined ? `${pad}owner: ${config.owner}` : null,
     // The fact that decides what the next activation does. Only where the
     // daemon answered it: absent is not `false`, and printing anything for a
     // field nobody sent would be inventing the answer.
@@ -1245,9 +1280,47 @@ function renderForget(reader: ResponseReader, request: Record<string, unknown>):
   );
 }
 
+/**
+ * The banner a filtered `list` opens with, and nothing at all on an ordinary
+ * one (KAN-193).
+ *
+ * WHY IT IS A BANNER AND NOT A FOOTNOTE. A filtered response is
+ * indistinguishable from a whole fleet by its numbers: `*Total` counts the
+ * filtered set — which is what makes paging correct under a filter — so every
+ * count on the page is honest about a category the reader has not been told
+ * was narrowed. A reader who scrolled past a line at the bottom would take
+ * "missing agents (0)" for "the fleet is whole".
+ *
+ * IT NAMES WHAT WAS *NOT* NARROWED TOO, which is the half that is easy to drop.
+ * `foreignPanes`, `unbackedPanes`, `priorities` and `unreadableRecords` are
+ * complete on a filtered read, each for its own reason, and a reader who
+ * assumed the whole page was one owner's would read somebody else's pane as
+ * their own. The daemon sends the list rather than this file holding a copy of
+ * it, so the two cannot drift.
+ */
+function ownerFilterBlock(filter: any): string | null {
+  if (!filter) return null;
+  const list = (xs: unknown) => (Array.isArray(xs) && xs.length ? xs.join(', ') : '(none)');
+  return lines(
+    `FILTERED to owner ${JSON.stringify(filter.owner)} — this is NOT the whole fleet.`,
+    `${INDENT}narrowed (counts and pages below describe the FILTERED set): ${list(filter.filtered)}`,
+    `${INDENT}NOT narrowed, still complete and possibly not yours: ${list(filter.unfiltered)}`,
+    `${INDENT}agents with no owner match no filter and are absent from every narrowed list above;`,
+    `${INDENT}run \`crabcast list\` with no --owner to see them.`,
+    filter.note ? `${INDENT}${filter.note}` : null,
+    ''
+  );
+}
+
 function renderList(reader: ResponseReader, request: Record<string, unknown>): string {
   if (!reader.success) return lines(failure(reader, 'list agents'), residue(reader));
 
+  // WHAT THIS READ WAS NARROWED TO, taken FIRST and printed FIRST (KAN-193).
+  // Every count below describes the filtered set, so the page a reader is
+  // looking at is indistinguishable from a whole fleet — the heading is the
+  // only thing that can say otherwise, and it has to be above the numbers it
+  // qualifies rather than in the residue at the bottom.
+  const ownerFilter = reader.take<any>('ownerFilter');
   const agents = reader.take<any[]>('agents') ?? [];
   const unbacked = reader.take<any[]>('unbackedPanes') ?? [];
   const foreign = reader.take<any[]>('foreignPanes') ?? [];
@@ -1281,6 +1354,8 @@ function renderList(reader: ResponseReader, request: Record<string, unknown>): s
   const health = reader.take('herdrHealth');
 
   return lines(
+    ownerFilterBlock(ownerFilter),
+
     `agents (${agents.length})`,
     ...(agents.length ? agents.map(agentRow) : [`${INDENT}(none)`]),
 
@@ -1913,6 +1988,7 @@ const CONFIGURE_FLAGS: FlagSpec[] = [
   { name: 'mcp', kind: 'string', value: '<a,b>', help: 'comma-separated MCP servers CrabCast builds itself (crabcast) (RESTART: .mcp.json is read at boot)' },
   { name: 'mcp-config', kind: 'string', value: '<file>', help: 'JSON file of your own server DEFINITIONS, {"name":{"command":…}}; its bytes cross the wire and are written verbatim (RESTART)' },
   { name: 'label', kind: 'string', value: '<text>', help: 'display text; never parsed, never an address, duplicates fine (changes in place)' },
+  { name: 'owner', kind: 'string', value: '<name>', help: 'whose agent this is; matched EXACTLY by `list --owner`. NOT a permission boundary — an unfiltered list shows every owner\'s agents. Omit to leave it unowned, which no filter matches (changes in place)' },
   { name: 'refusable', kind: 'boolean', help: 'may the capacity gate refuse it (default true; --refusable=false to exempt; changes in place)' },
   { name: 'chargeable', kind: 'boolean', help: 'does it occupy a charged slot (default true; changes in place)' },
   { name: 'preemptable', kind: 'boolean', help: 'may it be stood down to make room (default true; changes in place)' },
@@ -2105,6 +2181,7 @@ export const COMMANDS: CommandSpec[] = [
       prompt: promptText(flags),
       mcpServers: mcpServers(flags),
       label: flags.label,
+      owner: flags.owner,
       // Booleans or absent, never the strings the shell handed us: the daemon
       // refuses a non-boolean here rather than reading it for truthiness.
       refusable: flags.refusable,
@@ -2195,16 +2272,27 @@ export const COMMANDS: CommandSpec[] = [
       { name: 'after', kind: 'string', value: '<cursor>',
         help: 'continue that category from a cursor printed by a previous list' },
       { name: 'limit', kind: 'number', value: '<n>',
-        help: 'rows in that category\'s page (default 25, max 200)' }
+        help: 'rows in that category\'s page (default 25, max 200)' },
+      // ORTHOGONAL TO THE THREE ABOVE, and it has to be: a filter that only
+      // took effect when the caller happened also to be paging would be the
+      // silence KAN-163 removed, one argument over.
+      { name: 'owner', kind: 'string', value: '<name>',
+        help: 'only agents whose `owner` is EXACTLY this. NOT a permission boundary — omitting it lists every owner\'s agents. Agents with NO owner match no filter and are reachable only without it' }
     ],
     spawnsDaemon: false,
-    build: ({ flags }) =>
-      flags.category
+    build: ({ flags }) => ({
+      ...(flags.category
         ? { pages: { [String(flags.category)]: { after: flags.after, limit: flags.limit } } }
         // No `--category` is the ordinary fleet read: every category takes its
         // default page. The daemon refuses an unknown category name, so a typo
         // is answered rather than silently ignored here.
-        : {},
+        : {}),
+      // Only when the flag was GIVEN. The daemon reads an absent `owner` as
+      // "no filter" and REFUSES an explicit null, and those are two different
+      // answers it has to be able to tell apart — so an unset flag must not
+      // become a key on the wire.
+      ...(flags.owner !== undefined ? { owner: flags.owner } : {})
+    }),
     render: renderList
   },
   {

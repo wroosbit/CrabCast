@@ -115,7 +115,7 @@ import type { ResumeCause } from './resume.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 10;
+export const READ_CONTRACT_VERSION = 11;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -510,6 +510,23 @@ export const BLOCK_SHAPES = {
     note: { bucket: 'derived' }
   } satisfies FieldTable,
 
+  /**
+   * `list_agents.ownerFilter` — what an `owner` filter did to this response,
+   * and what it deliberately did not touch (KAN-193). Present only when a
+   * filter was asked for.
+   *
+   * `owner` is `derived` rather than `durable` even though it is a value the
+   * caller sent and this daemon compared against durable records: the bucket
+   * says where THIS RESPONSE'S copy came from, and this one was computed for
+   * this call out of the request. Nothing read it off the registry.
+   */
+  OwnerFilter: {
+    owner: { bucket: 'derived' },
+    filtered: { bucket: 'derived' },
+    unfiltered: { bucket: 'derived' },
+    note: { bucket: 'derived' }
+  } satisfies FieldTable,
+
   /** `list_agents.herdrHealth` — present only when the descriptor count could be read. */
   HerdrHealth: {
     pid: { bucket: 'observed' },
@@ -660,7 +677,19 @@ export const LIST_AGENTS_FIELDS = {
   priorities: { bucket: 'derived', rows: 'PriorityRow' },
   /** Absent when this daemon could not read its own descriptor usage. */
   herdrHealth: { bucket: 'observed', optional: true, block: 'HerdrHealth' },
-  configEchoContract: { bucket: 'derived', block: 'ConfigEchoContract' }
+  configEchoContract: { bucket: 'derived', block: 'ConfigEchoContract' },
+  /**
+   * What an `owner` filter did to this response (KAN-193, v11). **Absent on an
+   * unfiltered read**, which is how a consumer tells the two apart without a
+   * sentinel — and which is what makes the field additive: a caller that never
+   * sends `owner` receives exactly the response it received at version 10.
+   *
+   * Present, it is the ONLY thing on the wire that says the counts beside it
+   * were narrowed. Every `*Total` above counts the FILTERED set under a filter,
+   * which is what keeps paging correct; the cost of that correctness is that
+   * the numbers alone cannot say a filter was applied at all.
+   */
+  ownerFilter: { bucket: 'derived', optional: true, block: 'OwnerFilter' }
 } as const satisfies FieldTable;
 
 /**
