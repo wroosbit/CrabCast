@@ -148,7 +148,7 @@
 //   those; they are the reason this file does not ban numbers in headers.
 //
 //   A DATED READING is a measurement with its moment attached: the changelog
-//   below, and finding 1's "17 of the 41 that existed". It cannot rot, because
+//   below, and finding 1's "17 of the suite as it then stood". It cannot rot, because
 //   it never claimed to be current. Keep those too — dated, and in the past
 //   tense. A dated reading of TODAY'S counts is not one of these; it is the
 //   census with a label on it, and §4b refuses it for that reason.
@@ -176,14 +176,23 @@
 //
 //   1. THE SUITE IS BETTER DEFENDED THAN ANYONE SAID. The ticket that
 //      commissioned this named six proofs with mutations and said that for
-//      all the rest, nobody had looked. It is 17 of the 41 that existed, and 21
-//      of the remainder carry a real guard. A blanket rule would have been
-//      written against a picture that was wrong by a factor of nearly three.
+//      all the rest, nobody had looked. It is 17 of the suite as it then stood,
+//      and 21 of the remainder carry a real guard. A blanket rule would have
+//      been written against a picture that was wrong by a factor of nearly
+//      three.
 //      (The ticket's own figure for "all the rest" is not quoted here on
 //      purpose: this file's own header guard forbids any number the register
 //      currently holds, and a quotation is indistinguishable from a headcount
 //      to a textual check. It became one the day the register's mutation count
-//      reached it — which is the guard working, not misfiring.)
+//      reached it — which is the guard working, not misfiring.
+//      IT HAS NOW HAPPENED A SECOND TIME, to the size of the suite this finding
+//      was taken over. KAN-402 added a proof, the mutation count reached that
+//      figure too, and §4b named it. The repair is the same one and it is worth
+//      stating as the rule rather than the incident: A DATED READING SURVIVES
+//      ONLY UNTIL A LIVE COUNT WALKS INTO IT, so where the figure is not what
+//      the sentence is about, spend the words instead of the digits. "17" and
+//      "21" are what this finding is about and they stay; the denominator was
+//      only scale, and the sentence says the same thing without it.)
 //
 //   2. THE 'none' ENTRIES ARE NOT WHERE A BLANKET RULE WOULD HAVE LOOKED. Two
 //      of the three were LIVE proofs CI cannot run — the half a blanket rule
@@ -1051,6 +1060,52 @@ const PROOF_DEFENCES = [
       'watches ONE global file. A launcher added tomorrow that writes some other global path is ' +
       'outside this and outside everything else: nothing holds a launcher to declaring its writes ' +
       'through `LauncherSetupContext.note`. Named in that file\'s header; covered by nobody.'
+  },
+  {
+    script: 'verify-approval-marker',
+    defence: 'mutation',
+    central:
+      'the approval decision in `scripts/approval-marker.mjs` accepts the canonical marker at the ' +
+      'CURRENT head from the DECLARED approver and refuses every other shape this epic has ' +
+      'actually posted — no marker, a marker for a superseded head, the token in the wrong ' +
+      'arrangement, and a correct marker shown inside a fence, a blockquote, an indented block or ' +
+      'an HTML comment — so that a missing or malformed approval is a RED CHECK naming the line to ' +
+      'post, where each of them was previously a silence indistinguishable from "not yet given".',
+    note:
+      'THE MUTATIONS ARE §7 AND THERE ARE FOUR, one per behaviour, each requiring the §1 case that ' +
+      'names it to FLIP to accepted: the reader loosened to the SUBSTRING INSTRUMENT the epic agent ' +
+      'really verified their own fix with (the malformed #108 marker gets through), the head ' +
+      'comparison removed (the superseded marker gets through), `assertedText` dropped from ' +
+      '`parseMarkers` (the fenced marker gets through), and the signer comparison removed (a marker ' +
+      'from an undeclared agent gets through). ' +
+      'EACH RE-MEASURES ITS OWN PRECONDITION FIRST — the mutant must STILL ACCEPT the canonical ' +
+      'marker — and that precondition is not decoration: it caught the first substring mutation, ' +
+      'which loosened the regex without keeping the approver capture and therefore refused ' +
+      'EVERYTHING. A mutant that refuses everything satisfies "the refusal flipped" for the wrong ' +
+      'reason, and the run said `the mutant is broken rather than loosened` by name rather than ' +
+      'recording a green. ' +
+      '§2 IS A SEPARATE DEFENCE OF A DIFFERENT KIND, because a check that refuses everything passes ' +
+      'every §1 case but one. It holds the false-positive direction — the canonical line in inline ' +
+      'code is not an approval, and, the half that matters more, an ASSERTED marker must still be ' +
+      'accepted on a pull request that ALSO quotes one, which the pull request for this very change ' +
+      'does. Its last pair is the control on the control: two fixtures differing by ONE CHARACTER ' +
+      'of the SHA with opposite required verdicts, so a harness that ignored its input fails exactly ' +
+      'one. §1\'s heads are the repository\'s own `HEAD` and `HEAD~1` read at run time rather than ' +
+      'invented constants, so "superseded" is a real relation between two real commits, and the ' +
+      'accepted marker is built by `canonicalMarker` — the same constructor the check PRINTS when it ' +
+      'refuses — so the line suggested and the line accepted cannot drift apart. The REFUSED shapes ' +
+      'are transcribed from the incidents verbatim and deliberately NOT derived, because generating ' +
+      'them from that constructor would test its inverse rather than the grammar. ' +
+      'SEAM, and it is the KAN-145 one: this file SUPPLIES ITS OWN COMMENTS, so it establishes the ' +
+      'decision is right about a conversation it is handed and NOT that any conversation arrives. ' +
+      'Reading the GitHub event, paging the comments, reconciling the count against the one the pull ' +
+      'request reports, and POSTing the status are all in `scripts/check-approval-recorded.mjs`, and ' +
+      'NOTHING HERE EXECUTES A LINE OF THAT FILE. What covers it is a run against a real pull ' +
+      'request with the output pasted there; no script owns that, and both headers say so. ' +
+      'AND WHAT NO MUTATION CAN REACH: the check does not establish the marker is TRUE. Under one ' +
+      'shared GitHub identity an author can post a well-formed marker naming their own declared ' +
+      'approver, and every assertion here passes on it, correctly. Forgery is out of scope and ' +
+      'permanent until per-agent identities (KAN-366).'
   },
 
   // -------------------------------------------------------------------------
