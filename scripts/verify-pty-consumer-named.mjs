@@ -246,7 +246,98 @@ if (section && section.trim().length > 0) {
   );
 }
 
-// ------------------------------------------------------------------- §5 verdict
+// ------------------------------- §5 the section's claims about THIS repository
+//
+// §1-§3 assert that things are TRUE. §4 asserts that SENTENCES ARE PRESENT —
+// and the sentences are where the section's factual claims about other files in
+// this repository live. `epic/KAN-59` demonstrated the gap on review with two
+// mutations that left every check above green: adding an `attach` command to
+// `src/cli.ts`, which makes the section's headline sentence FALSE, and
+// rewording the exclusion reason the section quotes, which makes the document
+// MISQUOTE a file sitting beside it. Neither was visible here.
+//
+// That is this ticket's own defect one level in. KAN-394 exists because a
+// document quietly stopped being true about who was on a surface; the paragraph
+// fixing it can quietly stop being true about `src/cli.ts`, and a check whose
+// sentence outruns its mechanism is the class this epic has recorded most.
+//
+// EVERY CLAIM BELOW IS DERIVED FROM THE DOCUMENT, NEVER RESTATED HERE. The
+// command name, and the phrase quoted from the exclusion register, are read out
+// of the section at run time — so this file holds no third copy to drift
+// against (KAN-245). Reword the document and the assertion follows it; reword
+// the file the document quotes and this goes red.
+console.log('\n§5  and its factual claims about THIS repository are still true');
+
+const cliText = fs.readFileSync(path.join(repoRoot, 'src', 'cli.ts'), 'utf8');
+
+if (section && section.trim().length > 0) {
+  // (a) the command the section says does not exist, read OUT of the section.
+  const claimed = /`crabcast ([a-z][a-z-]*)`/.exec(section);
+  // NOT anchored to the start of a line. An earlier version was, and
+  // kan394-red-drive arm 6 caught it: a command written inline as
+  // `{ name: 'attach' },` slipped straight past and the check reported the
+  // claim intact. A parse tied to one formatting is a check that holds only
+  // while nobody reformats. This over-matches instead — nested `name:` keys on
+  // argument specs are collected too — which can only make an
+  // absence assertion STRICTER, never falsely green.
+  const cliNames = [...cliText.matchAll(/\bname:\s*'([a-z][a-z-]*)'/g)].map((m) => m[1]);
+
+  if (
+    vacuity(
+      claimed !== null,
+      'the section names no `crabcast <command>` whose absence it asserts — the claim moved or was reworded'
+    ) &&
+    vacuity(
+      cliNames.length >= 10,
+      `only ${cliNames.length} command name(s) parsed from src/cli.ts — the parse, not the CLI, is what changed`
+    )
+  ) {
+    console.log(`      parsed ${cliNames.length} command name(s); the section's claim is about '${claimed[1]}'`);
+    check(
+      !cliNames.includes(claimed[1]),
+      `no CLI command is named '${claimed[1]}', as the section says`,
+      cliNames.includes(claimed[1])
+        ? 'the command now EXISTS and the section\'s headline sentence is false'
+        : ''
+    );
+  }
+
+  // (b) the stronger fact behind it: the CLI drives none of the three. A
+  //     command wrapping one would have to name it somewhere in this file.
+  if (vacuity(/COMMANDS/.test(cliText), 'src/cli.ts does not look like the CLI — no COMMANDS table found')) {
+    for (const action of PTY_ACTIONS) {
+      check(
+        !cliText.includes(action),
+        `src/cli.ts does not mention '${action}' — the CLI wraps none of the triple`,
+        cliText.includes(action) ? 'a first-party command now drives this surface' : ''
+      );
+    }
+  }
+
+  // (c) the quotation is still a quotation. The document reproduces a phrase
+  //     from the exclusion register verbatim; nothing tied the two, so a reword
+  //     one side left the document misquoting a file in the same repository.
+  const parityRel = path.join('scripts', 'verify-cli-parity.mjs');
+  const parityLine = section.split('\n').find((l) => l.includes('verify-cli-parity.mjs'));
+  const quoted = /\*"([^"]+)"\*/.exec(parityLine ?? '');
+
+  if (
+    vacuity(
+      parityLine !== undefined,
+      'the section no longer cites verify-cli-parity.mjs — the citation moved or was dropped'
+    ) &&
+    vacuity(quoted !== null, 'the section cites verify-cli-parity.mjs but quotes nothing from it')
+  ) {
+    const parityText = fs.readFileSync(path.join(repoRoot, parityRel), 'utf8');
+    check(
+      parityText.includes(quoted[1]),
+      `the phrase the section quotes appears literally in ${parityRel}`,
+      parityText.includes(quoted[1]) ? `"${quoted[1]}"` : `the document now MISQUOTES it: "${quoted[1]}"`
+    );
+  }
+}
+
+// ------------------------------------------------------------------- §6 verdict
 console.log('');
 if (failures > 0) {
   console.log(`FAILED — ${failures} problem(s) above.`);

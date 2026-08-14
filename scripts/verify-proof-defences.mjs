@@ -1936,7 +1936,7 @@ const PROOF_DEFENCES = [
       'epic has twice had a check report a tree clean on an input that silently emptied. ' +
       'WHAT IS NOT GUARDED HERE, and it is why this is `guard` and not `mutation`: nothing in this ' +
       'file mutates anything. The demonstration that these assertions can go red is ' +
-      'scripts/kan394-red-drive.mjs — six arms, control first, including one that renames the whole ' +
+      'scripts/kan394-red-drive.mjs — eight arms, control first, including one that renames the whole ' +
       'declaration away and requires the vacuity wording rather than the ordinary failure — and it ' +
       'is NOT in the CI array and nothing gates on it, so the evidence that this guard bites is a ' +
       "hand-run pasted on KAN-394's pull request. " +

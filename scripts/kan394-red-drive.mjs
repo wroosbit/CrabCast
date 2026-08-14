@@ -6,12 +6,20 @@
 // the tree says. `verify-pty-consumer-named.mjs` is a handful of substring and
 // membership tests over two text files, which is exactly the shape that passes
 // forever if a regex is subtly wrong — and its output looks identical either
-// way. Six arms mutate the two inputs and require the proof to go red NAMING
-// THE RIGHT THING; an arm that goes red by the wrong route is reported as a
-// failure of this drive rather than as a success of the guard.
+// way. Eight arms mutate the four files the proof reads and require it to go
+// red NAMING THE RIGHT THING; an arm that goes red by the wrong route is
+// reported as a failure of this drive rather than as a success of the guard.
+//
+// ARMS 6-8 EXIST BECAUSE THE FIRST FIVE WERE NOT ENOUGH, and that is worth
+// keeping rather than smoothing over. Arms 1-5 all mutate what the proof
+// asserts is TRUE. `epic/KAN-59` pointed out on review that §4 asserts only
+// that SENTENCES ARE PRESENT — and the sentences carry factual claims about
+// `src/cli.ts` and `scripts/verify-cli-parity.mjs`. They falsified two of them
+// and the proof returned `exit 0 · 17 PASS · 0 FAIL` to both. Arms 6-8 are
+// those mutations, kept as arms so the gap cannot reopen quietly.
 //
 // ⚠ THE WORKING TREE IS NEVER TOUCHED. Every arm runs against a COPY of the
-// three files the proof reads, in a temp directory, laid out in the same shape
+// files the proof reads, in a temp directory, laid out in the same shape
 // so the proof's own `..`-relative paths resolve. In-place mutation with a
 // restore is the obvious alternative and it is worse: an interrupted run
 // leaves the repository holding a deliberately broken contract document, and
@@ -21,7 +29,7 @@
 //
 // THE CONTROL IS ARM 0 AND IT IS NOT A FORMALITY. A drive whose baseline is
 // not demonstrated is measuring the runner as much as the guard: if the copied
-// layout were wrong, every arm would go red and the drive would read as six
+// layout were wrong, every arm would go red and the drive would read as eight
 // successes.
 //
 // THE VACUITY ARM IS THE ONE WORTH THE MOST. Arm 5 does not remove `pty_init`
@@ -48,12 +56,15 @@ const repoRoot = path.join(scriptDir, '..');
 const PROOF = path.join('scripts', 'verify-pty-consumer-named.mjs');
 const SRC = path.join('src', 'read-contract.ts');
 const DOC = path.join('docs', 'read-path-contract.md');
+/** §5's subjects: the files the document makes factual claims ABOUT. */
+const CLI = path.join('src', 'cli.ts');
+const PARITY = path.join('scripts', 'verify-cli-parity.mjs');
 
 let failures = 0;
 
-/** The two mutated files as they stood BEFORE any arm ran — see section 6. */
+/** Every mutated file as it stood BEFORE any arm ran — see section 6. */
 const digestsBefore = Object.fromEntries(
-  [SRC, DOC].map((rel) => [rel, fs.readFileSync(path.join(repoRoot, rel), 'utf8')])
+  [SRC, DOC, CLI, PARITY].map((rel) => [rel, fs.readFileSync(path.join(repoRoot, rel), 'utf8')])
 );
 
 function check(ok, label, detail = '') {
@@ -61,10 +72,10 @@ function check(ok, label, detail = '') {
   if (!ok) failures += 1;
 }
 
-/** A fresh temp tree holding just the three files the proof reads. */
+/** A fresh temp tree holding just the files the proof reads. */
 function stage() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kan394-'));
-  for (const rel of [PROOF, SRC, DOC]) {
+  for (const rel of [PROOF, SRC, DOC, CLI, PARITY]) {
     const dest = path.join(dir, rel);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(path.join(repoRoot, rel), dest);
@@ -215,6 +226,85 @@ console.log('\narm 5  VACUITY — the whole UNCOVERED_SURFACES declaration renam
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// ------------------------------------ arm 6: the claimed-absent command exists
+//
+// ARMS 6-8 ARE `epic/KAN-59`'S FINDING ON REVIEW, TURNED INTO ARMS. They ran
+// the first two of these against the proof as it stood and got `exit 0 · 17
+// PASS · 0 FAIL` from both: §1-§4 assert that things are true and that
+// sentences are present, and the sentences are where the section's factual
+// claims about OTHER FILES IN THIS REPOSITORY live. Nothing checked those.
+console.log("\narm 6  CLAIM FALSIFIED — an 'attach' command added to src/cli.ts");
+{
+  const dir = stage();
+  if (
+    edit(dir, CLI, (t) =>
+      t.replace(/export const COMMANDS: CommandSpec\[\] = \[\n/, (m) => `${m}  { name: 'attach' },\n`)
+    )
+  ) {
+    const { code, out } = runProof(dir);
+    check(code !== 0, 'the proof goes red', `exit ${code}`);
+    check(
+      /FAIL {2}no CLI command is named 'attach'/.test(out),
+      "and names the command whose existence falsifies the section's headline sentence"
+    );
+    check(
+      /the command now EXISTS and the section's headline sentence is false/.test(out),
+      'and says what that does to the document rather than only that a name was found'
+    );
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ------------------------------------- arm 7: the CLI reaches for the surface
+console.log("\narm 7  STRONGER CLAIM FALSIFIED — src/cli.ts starts driving 'pty_input'");
+{
+  const dir = stage();
+  if (edit(dir, CLI, (t) => `${t}\n// send raw keystrokes: { action: 'pty_input', sessionId }\n`)) {
+    const { code, out } = runProof(dir);
+    check(code !== 0, 'the proof goes red', `exit ${code}`);
+    check(
+      /FAIL {2}src\/cli\.ts does not mention 'pty_input'/.test(out),
+      'and names the action the CLI has started to reach for'
+    );
+    check(
+      /PASS {2}src\/cli\.ts does not mention 'pty_init'/.test(out),
+      'while the other two still pass — the arm is specific, not a blanket red'
+    );
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ------------------------------------------------ arm 8: the quotation rots
+//
+// The document reproduces a phrase from the exclusion register verbatim, and
+// until this arm nothing tied them: a reword on either side left the document
+// MISQUOTING a file sitting beside it in the same repository, silently. That is
+// KAN-245's class — a hand-maintained copy of another file's text.
+console.log('\narm 8  QUOTATION ROTS — verify-cli-parity.mjs reworded away from the quoted phrase');
+{
+  const dir = stage();
+  if (
+    edit(dir, PARITY, (t) =>
+      t.replace(
+        'CrabCast is a management layer and never embeds a terminal',
+        'CrabCast does not ship an embedded terminal'
+      )
+    )
+  ) {
+    const { code, out } = runProof(dir);
+    check(code !== 0, 'the proof goes red', `exit ${code}`);
+    check(
+      /FAIL {2}the phrase the section quotes appears literally in scripts\/verify-cli-parity\.mjs/.test(out),
+      'and names the file the document now misquotes'
+    );
+    check(
+      /the document now MISQUOTES it/.test(out),
+      'and prints the phrase it went looking for, so the fix is one edit rather than a hunt'
+    );
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 // ------------------------------------------------- §6 the tree is still clean
 //
 // A BEFORE/AFTER COMPARISON, NOT `git status`. The first draft of this section
@@ -246,7 +336,7 @@ console.log('');
 if (failures > 0) {
   console.log(`FAILED — ${failures} problem(s) above.`);
 } else {
-  console.log('OK — the guard goes red on all five mutations, and vacuity is distinguishable from a finding.');
+  console.log('OK — the guard goes red on all eight mutations, and vacuity is distinguishable from a finding.');
 }
 
 process.exit(failures ? 1 : 0);
