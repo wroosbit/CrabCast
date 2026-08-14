@@ -1546,8 +1546,9 @@ const PROOF_DEFENCES = [
     defence: 'guard',
     central:
       'a PTY request whose PAYLOAD the daemon cannot act on is refused in the daemon\'s own words, ' +
-      'and a caller tells that refusal from the unknown-session one by value rather than by ' +
-      'reading either sentence.',
+      'a caller tells that refusal from the unknown-session one by value rather than by ' +
+      'reading either sentence, and (KAN-299) the refusal reaches a caller that sent no `id` ' +
+      'while a success still does not.',
     anchor: 'and its keystrokes reach the real terminal — the refusal did not widen to everything',
     note:
       'NEGATIVE/POSITIVE PAIR plus a VALUE assertion, on a predicate whose vacuous version is ' +
@@ -1565,7 +1566,17 @@ const PROOF_DEFENCES = [
       '19/19. Both swaps have since been applied and watched failing, one per handler: moving the ' +
       'payload check in front of the session check makes a doubly-wrong request answer ' +
       'invalid_payload, and §5b goes red naming which handler drifted. It is the difference ' +
-      'between a comment warning about a change and a check that notices one.'
+      'between a comment warning about a change and a check that notices one. ' +
+      '§7 IS A SECOND WATCHED MUTATION, on a second axis (KAN-299): whether a refusal reaches a ' +
+      'caller that sent no `id` at all. It is paired the same way §5b is, and the pairing is what ' +
+      'the section is for — `handlePtyInput(data, ack, ack)` restores the pre-fix silence and takes ' +
+      '§7 red at 27/30 naming pty_input while pty_resize stays green, and ' +
+      '`handlePtyInput(data, respond, respond)` — the "fix" that delivers refusals by DELETING the ' +
+      '`id` gate rather than routing around it — passes every refusal check in §7 and is caught ' +
+      'only by §7b at 29/30. That second mutation is the reason the silence half exists: a proof ' +
+      'of the refusal half alone is a proof that the guard was removed. Both mutations COMPILE, ' +
+      'deliberately, because `PtyAck`/`PtyRefusal` make the obvious ones a type error and a proof ' +
+      'run after a failed build would have scored the previous dist.'
   },
   {
     script: 'verify-refuses-occupied-directory',

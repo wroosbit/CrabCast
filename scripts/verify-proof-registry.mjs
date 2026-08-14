@@ -266,7 +266,7 @@ const EXCLUSIONS = [
       'back off a real pane, which is the check that separates "malformed payloads are refused" ' +
       'from "everything is refused", and a pane is the only thing that can answer it.',
     evidence:
-      'scripts/verify-pty-payload-refusal.mjs:163 the payload refusal is unreachable without a real session, so §1 exits non-zero rather than skipping when no herdr is on PATH'
+      'scripts/verify-pty-payload-refusal.mjs:251 the payload refusal is unreachable without a real session, so §1 exits non-zero rather than skipping when no herdr is on PATH'
   },
   {
     script: 'verify-herdr-release',
