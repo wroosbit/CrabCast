@@ -113,16 +113,28 @@
 //      different name would leak it past this check entirely — §4's stray sweep
 //      is what narrows that, and it is a whole-machine diff rather than an
 //      attribution, so a sibling agent booting during the run shows up in it.
-//   4. THIS SCRIPT IS INVISIBLE TO THE STATIC SWEEP THAT WOULD OTHERWISE COVER
-//      IT, and that is worth saying plainly rather than leaving to be inferred.
-//      `verify-panes-are-reclaimed` finds pane-opening sites by three text
-//      detectors; this file matches none of them, because it opens no pane
-//      itself — it SPAWNS A PROOF THAT DOES. So the sweep does not list it, no
-//      register entry is possible for it (an entry for a script with no sites
-//      fails that check's reverse direction), and the discipline it is held to
-//      is this header plus §4. That is a fourth spelling of "opens a pane" in
-//      the terms of that file's own boundary 1, and it is filed rather than
-//      merely noted.
+//   4. THIS SCRIPT WAS INVISIBLE TO THE STATIC SWEEP THAT COVERS THE REST, and
+//      KAN-404 closed that. The history is kept because the shape recurs: this
+//      file opens THREE REAL PANES per run and matched NONE of
+//      `verify-panes-are-reclaimed`'s three original detectors, because it opens
+//      no pane itself — it SPAWNS A PROOF THAT DOES. The sweep did not list it,
+//      and no register entry was possible either, because an entry for a script
+//      with no sites fails that check's reverse direction: the escape hatch was
+//      unavailable precisely where it was needed.
+//
+//      IT IS NOW A REGISTERED SITE THERE, classified `drives-another-proof`. The
+//      detector that found it is keyed on the TARGET LITERAL — the quoted
+//      `verify-no-attach-steal.mjs` below — and NOT on the spawn, because the
+//      spawn is in `interrupt-probe.mjs` and its argv is a parameter; a detector
+//      reading spawn argv finds this case zero times. See that file's boundary 1.
+//
+//      IT DOES NOT IMMUNISE, and that is the finding rather than an oversight:
+//      this file genuinely performs both halves of the discipline — §3 reaps the
+//      mutant's leaked pane, §4 asserts the machine census either side — but it
+//      performs them THROUGH `interrupt-probe.mjs`, so its own text contains
+//      none of the six reclaim/census spellings and the whole-file predicate
+//      scores it 0 reclaim / 0 census. The register carries the reading a
+//      predicate cannot make.
 //
 // WHAT THIS SUPPLIES ITSELF, AND WHO COVERS THE REST. §3 writes the mutant it
 // then catches, so it proves this instrument reports correctly about a script

@@ -775,8 +775,12 @@ const PROOF_DEFENCES = [
       'unmutated, must still reclaim — so the red is the mutation and not the copy. Its counter is ' +
       'held to a canary whose right answer no line-counter and no key-guesser could produce, and ' +
       'required to REFUSE an unreadable census rather than report zero. WHAT IT CANNOT DECIDE: it ' +
-      'drives one target and one signal, and it is invisible to verify-panes-are-reclaimed\'s ' +
-      'static sweep because it opens no pane itself — it spawns a proof that does.'
+      'drives one target and one signal. IT IS NO LONGER INVISIBLE to verify-panes-are-reclaimed: ' +
+      'it still opens no pane itself — it spawns a proof that does — but KAN-404 gave that sweep a ' +
+      'fourth detector keyed on the TARGET LITERAL rather than on the spawn, so it is now a ' +
+      'registered site there, classified drives-another-proof. It does NOT immunise, and that was ' +
+      'measured rather than assumed: both halves of its discipline live in interrupt-probe.mjs, so ' +
+      'the whole-file predicate scores it 0 reclaim / 0 census.'
   },
   {
     script: 'verify-reconfiguration-refuses',

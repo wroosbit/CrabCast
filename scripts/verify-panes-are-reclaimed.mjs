@@ -120,14 +120,41 @@
 // has been wrong in this repository five times
 // ---------------------------------------------------------------------------
 //
-//   1. THE DETECTORS ARE THREE FORMS. A pane opened by a fourth spelling is
-//      invisible here. `activate_agent` is deliberately NOT one of them: an
-//      activation reaches `spawnSession` through the router, so every activating
-//      proof would be a site, and 60 of the 70 proofs activate. The detectors
-//      are the three calls that reach `herdr agent start` directly, which is
-//      where the pane is actually created (`startAgentInOwnTab`, herdr.ts).
-//      A PROOF THAT OPENS A PANE ONLY BY ACTIVATING THROUGH A REAL DAEMON IS
-//      OUTSIDE THIS SWEEP, and nothing here can say so.
+//   1. THE DETECTORS ARE FOUR FORMS, and a pane opened by a fifth spelling is
+//      invisible here. Three of them find a pane opened DIRECTLY:
+//      `spawnSession(`, `startAgentInOwnTab(` and the `'agent', 'start'` verb —
+//      the three calls that reach `herdr agent start`, which is where the pane
+//      is actually created (`startAgentInOwnTab`, herdr.ts). `activate_agent` is
+//      deliberately NOT one of them: an activation reaches `spawnSession`
+//      through the router, so every activating proof would be a site, and 60 of
+//      the 70 proofs activate. A PROOF THAT OPENS A PANE ONLY BY ACTIVATING
+//      THROUGH A REAL DAEMON IS OUTSIDE THIS SWEEP, and nothing here can say so.
+//
+//      THE FOURTH (KAN-404) finds a pane opened INDIRECTLY, by driving another
+//      proof that opens one. This was boundary 1's own hypothetical until
+//      `verify-pane-reclaim-when-interrupted` instantiated it — three real panes
+//      per run, matching none of the three above, and unregisterable because an
+//      entry for a script with no sites fails §3's reverse direction. The
+//      detector is keyed on the TARGET LITERAL and not on the spawn; the
+//      measurement that forced that choice is beside `driveSites` below, and the
+//      short version is that a spawn-argv detector finds this case ZERO times.
+//
+//   6. THE FOURTH DETECTOR IS NON-TRANSITIVE AND SILENT ABOUT IT. Its target set
+//      is proofs with DIRECT sites, so a proof driving a proof that drives a
+//      pane-opening proof is one hop past it. That population is currently zero;
+//      nothing here would notice it becoming one, and no register entry would be
+//      possible for the middle link — which is KAN-404's own defect, one level
+//      up. Filed rather than merely noted: KAN-410, and the population is
+//      PRINTED by §5 on every run so that "currently zero" stays re-derivable
+//      rather than becoming a sentence somebody trusts.
+//
+//   7. IT CANNOT TELL A DRIVE FROM A QUOTED DESCRIPTION OF ONE, and the tree
+//      contains the case. `verify-mutation-harness` embeds a four-line fake
+//      source reproducing a real driver's line CHARACTER FOR CHARACTER, as a
+//      fixture for its own detector. No refinement of the pattern separates
+//      them, so it carries a `text-match` entry and §1 pins the behaviour as a
+//      fixture rather than describing it. Same class as a proof that asserts a
+//      marker versus one that merely shows it inside a fence.
 //   2. IT READS ONE FILE AT A TIME. A fixture in a shared module that opens a
 //      pane on a proof's behalf is attributed to the module, and modules are not
 //      swept — only tracked `scripts/verify-*.mjs` are.
@@ -319,6 +346,63 @@ const CENSUS_DETECTORS = [
 
 const lineOf = (src, at) => src.slice(0, at).split('\n').length;
 
+/**
+ * THE FOURTH DETECTOR (KAN-404): a proof that opens a pane by DRIVING ANOTHER
+ * PROOF that opens one.
+ *
+ * WHY IT IS NOT ANCHORED ON THE SPAWN, which is where KAN-404's ticket and the
+ * epic's brief both expected it. Measured on this tree at
+ * `76788c425efc56f990a63627f7a4ea577202e307`, a detector reading
+ * `spawn`/`spawnSync` argv finds the case ZERO TIMES:
+ *
+ *   - 225 spawn-family call sites in tracked `scripts/*.mjs`
+ *   - 6 have argv that textually resolves to a tracked `verify-*.mjs`, and NONE
+ *     of the 6 is a proof driving another proof: 5 are in `kan*-red-drive.mjs`
+ *     helpers, which are not `scripts/verify-*.mjs` and so are never swept, and
+ *     the 6th is `verify-proof-verdicts` naming ITSELF
+ *   - 86 pass `process.execPath` with a VARIABLE target, which no text can follow
+ *   - and the one instance the ticket is about spawns from
+ *     `scripts/interrupt-probe.mjs:120` — `spawn(process.execPath, [target, …])`
+ *     in a SHARED MODULE, which boundary 2 says this sweep does not read at all
+ *
+ * So the spawn is in the wrong file AND its argv is a parameter: two independent
+ * reasons the sketched shape is empty rather than merely awkward.
+ *
+ * WHAT IS DECIDABLE IS THE TARGET LITERAL, because a proof that drives a sibling
+ * has to NAME it, and both real drivers do so identically — a quoted
+ * `verify-<name>.mjs` handed to `path.join`. That is text, it sits in the
+ * driving file, and it does not depend on following a value into a callee.
+ *
+ * NARROWED TO PANE-OPENING TARGETS, and that narrowing is substantive rather
+ * than cosmetic: driving a proof that opens no pane cannot open a pane, and this
+ * sweep is about panes. Naming ANY tracked proof would fire on 36 of 73 files —
+ * half the suite, nearly all of it prose cross-references — which is the
+ * instrument the epic's requirement 4 forbids. Naming a PANE-OPENING proof in
+ * non-comment text fires on 3.
+ *
+ * NOT A PURE FUNCTION OF ONE FILE, unlike the three detectors above, so the set
+ * is a PARAMETER rather than read from the tree here — which is what keeps §1
+ * able to fixture-test it in isolation, on names that need not exist.
+ *
+ * NON-TRANSITIVE, deliberately: `targets` is built from DIRECT sites only, so a
+ * proof that drives a proof that drives a pane-opening proof is one hop past
+ * this. That population is currently zero and nothing here would say if it
+ * stopped being — boundary 6.
+ */
+function driveSites(src, targets, selfName) {
+  const comment = lexComments(src);
+  const out = [];
+  const re = /['"`]([A-Za-z0-9._/-]*verify-[a-z0-9-]+)\.mjs['"`]/g;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    if (comment[m.index]) continue;
+    const base = path.basename(m[1]);
+    if (base === selfName || !targets.has(base)) continue;
+    out.push({ detector: 'drives-a-pane-opening-proof', index: m.index, line: lineOf(src, m.index), target: base });
+  }
+  return out;
+}
+
 /** Every match of `detectors` in `src` that is not inside a comment. */
 function sitesFor(src, detectors) {
   const comment = lexComments(src);
@@ -452,7 +536,13 @@ const CLASSIFICATIONS = new Set([
   'reclaims-by-pane-id',
   // Not a call at all: a `console.log` printing what a call returned, a table
   // of verb names, prose in a template literal.
-  'text-match'
+  'text-match',
+  // KAN-404: this proof opens no pane itself. It SPAWNS ANOTHER PROOF that
+  // does, so the pane is real and the discipline that reclaims it lives partly
+  // in the driven script and partly here. The reason must say which end holds
+  // which half, because no predicate can: the drive goes through a shared
+  // module and neither end's text carries both.
+  'drives-another-proof'
 ]);
 
 const PANE_OPENERS = [
@@ -521,9 +611,26 @@ const PANE_OPENERS = [
   },
 
   {
+    script: 'verify-mutation-harness',
+    classification: 'text-match',
+    sites: 1,
+    reason:
+      'THE FALSE POSITIVE, found in the tree rather than invented for the occasion, and the reason ' +
+      'the fourth detector cannot be trusted without a register. Its `privateScriptMutator` is a ' +
+      'FIXTURE: a four-line fake source, written to be caught by that file\'s own detector, which ' +
+      'reproduces `verify-proof-cleans-up-when-interrupted`\'s real drive line CHARACTER FOR ' +
+      'CHARACTER. So the text a drive detector keys on is identical in the real driver and in a ' +
+      'string describing one, and no refinement of the pattern can separate them — the difference ' +
+      'is that this one is data inside a quoted fixture. It drives nothing: its only subprocess ' +
+      'call is `git ls-files`, and it reaches its siblings with `readFileSync`. Same class as a ' +
+      'proof asserting a marker versus merely showing one inside a fence.',
+    evidence: 'const privateScriptMutator ='
+  },
+
+  {
     script: 'verify-panes-are-reclaimed',
     classification: 'text-match',
-    sites: 18,
+    sites: 20,
     reason:
       'THIS FILE, and it is here rather than immunised because the whole-file predicate gets it ' +
       'WRONG — see boundary 5 in the header. It opens no pane and needs no herdr: every one of ' +
@@ -531,8 +638,46 @@ const PANE_OPENERS = [
       'are the instrument\'s own test inputs, written as strings), the scratch proof §7 writes ' +
       'into a temporary tree, and the prose of this register. The predicate reads the same file ' +
       'as carrying the discipline, because it also mentions the reclamation verbs it detects. An ' +
-      'entry beats a predicate, which is why §3 reads the register first.',
+      'entry beats a predicate, which is why §3 reads the register first. TWO OF THE TWENTY ARE ' +
+      'KAN-404\'s: the scratch DRIVER §7 writes, whose source names a pane-opening proof and so ' +
+      'trips the fourth detector on this file exactly as it trips it on that one. The count moved ' +
+      '18 -> 20 when that arm was added, and it went red first — which is the exact-count rule ' +
+      'doing its job on the author who wrote it.',
     evidence: 'const OPEN_DETECTORS = ['
+  },
+
+  // -------------------------------------------------------------------------
+  // drives-another-proof — opens no pane itself; spawns a proof that does
+  // -------------------------------------------------------------------------
+  {
+    script: 'verify-pane-reclaim-when-interrupted',
+    classification: 'drives-another-proof',
+    sites: 1,
+    reason:
+      'THE INSTANCE KAN-404 WAS FILED ABOUT, and it opens THREE REAL PANES on the operator\'s ' +
+      'machine per run — more than any other proof here. It opens none of them itself: it names ' +
+      '`verify-no-attach-steal` as its default `--target` and drives it through ' +
+      '`driveAndInterrupt` in `interrupt-probe`, so the pane is created by the DRIVEN script. ' +
+      'It does carry both halves of the discipline, but through that same module rather than in ' +
+      'its own text — its §3 reaps the interrupted run\'s leaked pane by name and its §4 asserts ' +
+      'the machine census on either side — which is exactly why the whole-file immunisation ' +
+      'predicate scores it 0 reclaim / 0 census and cannot immunise it. Measured, not assumed: ' +
+      'see the PR and boundary 7.',
+    evidence: 'reapPaneByName'
+  },
+  {
+    script: 'verify-proof-cleans-up-when-interrupted',
+    classification: 'drives-another-proof',
+    sites: 1,
+    reason:
+      'The same shape as the entry above and a DIFFERENT verdict, which is why the population is ' +
+      'two here and one in the ticket. It names `verify-send-confirms-delivery` as its target and ' +
+      'drives it through the same `driveAndInterrupt` helper — but that target is registered ' +
+      '`herdr-is-shimmed`: it writes a stub named `herdr` onto `PATH` before its `agent start`, ' +
+      'and it does so inside its own process, so the stub still holds when it is driven as a ' +
+      'subprocess. No pane is created on any machine. This entry exists so that the day its ' +
+      'target stops being shimmed, the reason standing here is visibly wrong rather than absent.',
+    evidence: 'driveAndInterrupt, reapDaemons'
   },
 
   // -------------------------------------------------------------------------
@@ -690,6 +835,86 @@ check(
     `${FIXTURES.length - fixtureImmune} must not`
 );
 
+// --- the fourth detector, self-tested the same way (KAN-404) ----------------
+//
+// Its target set is a PARAMETER, so these fixtures name proofs that do not
+// exist. That is the point: the detector is tested as a function of (text, set)
+// rather than against whatever this repository happens to contain today, and
+// these fixture names cannot make THIS file a driver of anything real.
+
+/** `[label, source, targets, expected drive sites]` */
+const DRIVE_FIXTURES = [
+  [
+    'naming a pane-opening proof in code is a drive site',
+    `const TARGET = path.join(scriptDir, 'verify-fixture-opener.mjs');`,
+    ['verify-fixture-opener'], 1
+  ],
+  [
+    // The narrowing that keeps this off 36 of 73 files.
+    'naming a proof that opens NO pane is not a site',
+    `const TARGET = path.join(scriptDir, 'verify-fixture-quiet.mjs');`,
+    ['verify-fixture-opener'], 0
+  ],
+  [
+    'a proof named only in a COMMENT is not a site',
+    `// see verify-fixture-opener.mjs for the live half\n` +
+      `/* driven by 'verify-fixture-opener.mjs' */`,
+    ['verify-fixture-opener'], 0
+  ],
+  [
+    // The detector keys on the literal, never on the identifier holding it, so
+    // a driver that calls its target anything at all is still found.
+    'the variable the target is held in does not matter',
+    `const WHATEVER = path.join(dir, 'verify-fixture-opener.mjs');`,
+    ['verify-fixture-opener'], 1
+  ],
+  [
+    'a relative or absolute path to the target still resolves',
+    `run('./scripts/verify-fixture-opener.mjs');\n` +
+      `run("/abs/scripts/verify-fixture-opener.mjs");`,
+    ['verify-fixture-opener'], 2
+  ],
+  [
+    // THE KNOWN FALSE POSITIVE, pinned as a fixture so the limit is asserted
+    // rather than described: `verify-mutation-harness` embeds a fake source
+    // that reproduces a real drive line exactly, and this detector counts it.
+    // The register is what covers it, and §2 requires that entry to exist.
+    'a drive line quoted INSIDE a fixture string is counted — the detector cannot tell',
+    `const fake =\n` +
+      `  "const TARGET = path.join(scriptDir, 'verify-fixture-opener.mjs');\\n";`,
+    ['verify-fixture-opener'], 1
+  ]
+];
+
+for (const [label, src, targets, expected] of DRIVE_FIXTURES) {
+  // The self-name is one no fixture uses, so only the explicit self case above
+  // exercises that branch.
+  const found = driveSites(src, new Set(targets), 'verify-panes-are-reclaimed');
+  check(
+    found.length === expected,
+    `drive fixture: ${label}`,
+    `${found.length} site(s) (expected ${expected})` +
+      (found.length ? ` — targets: ${found.map((s) => s.target).join(', ')}` : '')
+  );
+}
+
+// The self-exclusion branch, which the fixtures above cannot reach without
+// pretending to BE the file under test.
+check(
+  driveSites(`const SELF = path.join(d, 'verify-fixture-opener.mjs');`,
+    new Set(['verify-fixture-opener']), 'verify-fixture-opener').length === 0,
+  'drive fixture: a file naming its OWN filename is excluded',
+  'a proof that spawns copies of itself — §7 below does — is not driving another proof'
+);
+
+const driveFixtureSites = DRIVE_FIXTURES.reduce((n, [, , , e]) => n + e, 0);
+check(
+  driveFixtureSites > 0 && DRIVE_FIXTURES.some(([, , , e]) => e === 0),
+  'the drive fixtures exercise both verdicts',
+  `${driveFixtureSites} site(s) across ${DRIVE_FIXTURES.length} fixtures, and at least one must ` +
+    `find nothing — a detector that matched everything would pass the accept cases alone`
+);
+
 // ---------------------------------------------------------------------------
 // 2. The register, held to the standard it is an escape hatch from.
 // ---------------------------------------------------------------------------
@@ -765,14 +990,30 @@ for (const e of PANE_OPENERS) {
   registeredBy.set(e.script, (registeredBy.get(e.script) ?? 0) + e.sites);
 }
 
+/**
+ * The proofs that open a pane DIRECTLY — the fourth detector's target set.
+ *
+ * Built from the three original detectors only, which is what makes the drive
+ * detector non-transitive (boundary 6) and what stops it feeding on itself: a
+ * driver never enters this set, so nothing becomes a site merely by naming one.
+ */
+const directOpeners = new Set(proofs.filter((n) => openSites(sourceOf(n)).length > 0));
+
 let totalOpens = 0;
 let totalImmunisedScripts = 0;
 let totalRegisteredSites = 0;
+let totalDriveSites = 0;
+const driverRows = [];
 const rows = [];
 
 for (const name of proofs) {
   const src = sourceOf(name);
-  const opens = openSites(src);
+  const drives = driveSites(src, directOpeners, name);
+  const opens = [...openSites(src), ...drives].sort((a, b) => a.index - b.index);
+  if (drives.length > 0) {
+    totalDriveSites += drives.length;
+    driverRows.push({ name, targets: [...new Set(drives.map((d) => d.target))] });
+  }
   if (opens.length === 0) continue;
 
   const claimed = registeredBy.get(name) ?? 0;
@@ -1009,6 +1250,70 @@ check(
       `immunisation predicate (boundary 5).`
 );
 
+// ---------------------------------------------------------------------------
+// THE POPULATION, RE-DERIVED ON EVERY RUN RATHER THAN ASSERTED HERE.
+//
+// KAN-404's closing line asked for exactly this: "the population is currently
+// one, and that is a fact somebody should be able to re-derive rather than
+// trust." So the number is PRINTED from the sweep rather than written down, and
+// the only claim this file makes about it is that it is not zero — a drive
+// detector that had stopped matching would otherwise report a clean tree in the
+// same words it uses when everything works.
+//
+// AND THE TICKET'S "ONE" IS TWO UNDER THIS DETECTOR, which is the finding
+// rather than a discrepancy: the ticket counts proofs that drive a proof
+// opening a REAL pane, and there is still exactly one of those
+// (`verify-pane-reclaim-when-interrupted`). This counts proofs that drive a
+// pane-opening proof at all, and the second — `verify-proof-cleans-up-when-
+// interrupted` — drives one whose `herdr` is shimmed, so it opens nothing. Both
+// numbers are worth having and neither is the other, so both are printed.
+// ---------------------------------------------------------------------------
+
+console.log('');
+check(
+  totalDriveSites > 0,
+  'the fourth detector (drives-another-proof) matched something',
+  `${totalDriveSites} drive site(s) across ${driverRows.length} proof(s) — a detector that ` +
+    `matched NOTHING would report this tree clean in the same words it uses when it works, ` +
+    `which is the defect KAN-404 was filed about`
+);
+// A target whose classification says its `herdr` never reaches a real one opens
+// no pane, so driving it opens none either.
+const OPENS_NOTHING = ['herdr-is-shimmed', 'private-herdr-server', 'text-match'];
+const classificationOf = (script) =>
+  PANE_OPENERS.filter((e) => e.script === script).map((e) => e.classification);
+const targetOpensRealPane = (t) => {
+  const cls = classificationOf(t);
+  return cls.length === 0 || cls.some((c) => !OPENS_NOTHING.includes(c));
+};
+
+console.log('\n  what the fourth detector matched, and what the register says each one IS:');
+let realDrivers = 0;
+let genuineDrives = 0;
+for (const d of driverRows) {
+  // The DRIVER's own entry is the verdict. A `text-match` entry here is the
+  // register saying "the detector fired on a quoted fixture, not on a call" —
+  // which is a limit of the instrument, printed rather than hidden inside a
+  // green.
+  const isGenuine = classificationOf(d.name).includes('drives-another-proof');
+  const real = isGenuine && d.targets.some(targetOpensRealPane);
+  if (isGenuine) genuineDrives += 1;
+  if (real) realDrivers += 1;
+  console.log(
+    `     ${d.name}  ->  ${d.targets.join(', ')}\n` +
+      `        ${isGenuine
+        ? real
+          ? 'DRIVES IT, and the target opens a REAL pane on this machine'
+          : 'DRIVES IT, but the target opens no pane (its herdr is shimmed or private)'
+        : 'NOT A DRIVE — a false positive the register classifies; the literal is data'}`
+  );
+}
+console.log(
+  `\n  population: ${genuineDrives} proof(s) genuinely drive a pane-opening proof, of which ` +
+    `${realDrivers} drive one that opens a REAL pane. ` +
+    `${driverRows.length - genuineDrives} further match(es) are false positives the register names.`
+);
+
 console.log('');
 const w = Math.max(...rows.map((r) => r.name.length));
 for (const r of rows) {
@@ -1200,12 +1505,97 @@ if (!IS_CHILD) {
     fs.copyFileSync(classified, path.join(tree, 'scripts', `${SELF}.mjs`));
 
     const green = runChild('green');
-    check(
+    if (!check(
       green.status === 0,
       'GREEN: with the site classified, the same tree passes',
       green.status === 0
         ? 'the register is what moved the verdict — nothing else in the tree changed'
         : `exited ${green.status}. Last lines: ${green.out.trim().split('\n').slice(-8).join(' / ')}`
+    )) break redDrive;
+
+    // --- KAN-404: the FOURTH detector, driven the same way ------------------
+    //
+    // The arm above proves the sweep notices a proof that opens a pane
+    // DIRECTLY. It says nothing about one that opens a pane by driving another
+    // proof, which is the whole of what KAN-404 is about — and the tree is
+    // green at this point, so this red is attributable to this scratch proof
+    // alone. It carries NO direct pane-opening site: its only match is the
+    // target literal, so a red here is the fourth detector or nothing.
+    const DRIVER = 'verify-kan404-scratch-driver';
+    fs.writeFileSync(
+      path.join(tree, 'scripts', `${DRIVER}.mjs`),
+      `#!/usr/bin/env node\n` +
+      `// KAN-404 SCRATCH DRIVER — written by §7 into a scratch tree, never committed.\n` +
+      `// It stands for the proof somebody adds tomorrow that opens a pane by SPAWNING a\n` +
+      `// proof that opens one. It contains no spawnSession, no startAgentInOwnTab and no\n` +
+      `// 'agent','start' — the three original detectors are blind to it by construction.\n` +
+      `//\n` +
+      `// WHAT FAILURE THIS WOULD CATCH: nothing. It is the defect, not a check.\n` +
+      `import { driveAndInterrupt } from './interrupt-probe.mjs';\n` +
+      `const TARGET = path.join(scriptDir, 'verify-no-attach-steal.mjs');\n` +
+      `await driveAndInterrupt({ target: TARGET, root, label: 'x', count: c });\n`
+    );
+    execFileSync('git', ['add', '-A'], { cwd: tree });
+
+    // Belt and braces: assert the three ORIGINAL detectors really are blind to
+    // it, or a red below would prove nothing about the fourth.
+    const driverSrc = fs.readFileSync(path.join(tree, 'scripts', `${DRIVER}.mjs`), 'utf8');
+    check(
+      openSites(driverSrc).length === 0,
+      'KAN-404 RED: the scratch driver is INVISIBLE to the three original detectors',
+      `${openSites(driverSrc).length} direct site(s) — must be 0, or the red below is the old ` +
+        `detectors catching it and the fourth is untested`
+    );
+    check(
+      driveSites(driverSrc, new Set(['verify-no-attach-steal']), DRIVER).length === 1,
+      'KAN-404 RED: and the fourth detector DOES see it',
+      'one drive site, naming a proof that opens a real pane'
+    );
+
+    const drivenRed = runChild('kan404-red');
+    check(
+      drivenRed.status !== 0,
+      'KAN-404 RED: a proof that opens a pane by DRIVING another proof fails the check',
+      drivenRed.status !== 0
+        ? `exited ${drivenRed.status}`
+        : 'exited 0 — this is exactly the invisibility KAN-404 was filed about, still present'
+    );
+    const drivenLine = drivenRed.out
+      .split('\n')
+      .find((l) => l.startsWith('FAIL') && l.includes(`${DRIVER}.mjs`));
+    check(
+      Boolean(drivenLine),
+      'KAN-404 RED: it fails BY NAME',
+      drivenLine ? drivenLine.trim().slice(0, 200) : 'no FAIL line mentioned the scratch driver'
+    );
+
+    const driverEntry =
+      `  {\n` +
+      `    script: '${DRIVER}',\n` +
+      `    classification: 'drives-another-proof',\n` +
+      `    sites: 1,\n` +
+      `    reason:\n` +
+      `      'Written by §7 into a scratch tree to demonstrate that the fourth detector can be ` +
+      `answered by the register like any other site. It is never committed and this entry never ` +
+      `reaches the repository.',\n` +
+      `    evidence: 'KAN-404 SCRATCH DRIVER'\n` +
+      `  },\n`;
+    const classifiedDriver = mutator.mutateScript(
+      'register-the-scratch-driver',
+      path.join(tree, 'scripts', `${SELF}.mjs`),
+      [{ find: ANCHOR, replace: ANCHOR + driverEntry }]
+    );
+    if (!classifiedDriver) break redDrive;
+    fs.copyFileSync(classifiedDriver, path.join(tree, 'scripts', `${SELF}.mjs`));
+
+    const drivenGreen = runChild('kan404-green');
+    check(
+      drivenGreen.status === 0,
+      'KAN-404 GREEN: with the drive site classified, the same tree passes',
+      drivenGreen.status === 0
+        ? 'the escape hatch KAN-404 reported as UNAVAILABLE is available once the site exists'
+        : `exited ${drivenGreen.status}. Last lines: ${
+          drivenGreen.out.trim().split('\n').slice(-8).join(' / ')}`
     );
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
