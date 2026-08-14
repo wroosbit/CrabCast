@@ -955,6 +955,80 @@ const PROOF_DEFENCES = [
       'a proof that neither registers correctly NOR prints the disclosure — is uncovered by both ' +
       'and named in that file\'s header rather than left to be inferred.'
   },
+  {
+    script: 'verify-panes-are-reclaimed',
+    defence: 'mutation',
+    central:
+      'every pane-opening site in this suite belongs to a proof that reclaims what it opens, or ' +
+      'is classified in that file\'s own register with a reason and an anchor a reader can act ' +
+      'on — so a proof added tomorrow that opens a herdr pane and leaves it goes red on the pull ' +
+      'request rather than sitting on somebody\'s machine for nine days, which is exactly how ' +
+      'long the three panes named in its header had been up when it was written.',
+    note:
+      'THE MUTATION IS §7 AND IT DRIVES BOTH DIRECTIONS. It copies `scripts/` into a scratch git ' +
+      'repository, runs a CHILD of itself over the unmutated copy and requires GREEN, writes one ' +
+      'scratch proof that opens a pane and reclaims nothing and requires the child to go red ' +
+      'NAMING THAT FILE and using the word UNCLASSIFIED, then adds a register entry through ' +
+      '`mutateScript` and requires the same tree to pass. ' +
+      '§1 AND §4 ARE SEPARATE DEFENCES OF DIFFERENT KINDS. §1 is twelve fixtures, five of which ' +
+      'must be REJECTED — a commented-out spawn, a block comment, a `//` inside a string, and the ' +
+      'two half-discipline cases where one of a census read and a reclamation call is present ' +
+      'without the other. §4 is the census reader\'s canary: 41 panes on ONE LINE, 23 labelled, ' +
+      '7 crabcast, every number arbitrary, so `wc -l` (1), a key-guess (0), a pane count (41) and ' +
+      'a label count (23) are all distinguishable from the right answer — plus a DOCTORED input ' +
+      'the reader must report a change on, and six shapes it must REFUSE rather than count as 0. ' +
+      '`scripts/kan173-red-drive.mjs` is the eight-arm drive for the three mechanisms §7 does not ' +
+      'reach (the reader, the comment lexer, the immunisation predicate); it reads the LOG rather ' +
+      'than the exit code and requires each arm to redden exactly the checks it was aimed at. ' +
+      'SEAM: §7 WRITES THE PROOF IT THEN CATCHES, so it establishes that the sweep and the ' +
+      'register report correctly about a tree they were handed and NOT that the register ' +
+      'committed in that file is TRUE — whether the `herdr` a script puts on PATH is a stub or a ' +
+      'wrapper around the real binary is a reading, and that file\'s header says so and says why a ' +
+      'predicate must not be trusted to make it. There is NO runtime backstop for a reading that ' +
+      'was wrong: the pane would simply be left. §6 reads the live machine and is a diagnostic ' +
+      'rather than a verdict, deliberately. ' +
+      'AND ONE OF ITS FIXTURES IS LOAD-BEARING IN A WAY THE TREE NO LONGER IS. §3 consults the ' +
+      'REGISTER BEFORE the immunisation predicate, because the whole-file predicate wrongly ' +
+      'immunises a file that merely MENTIONS both verbs — that file is the sweep itself, whose ' +
+      'detector regexes and fixtures contain them as data, and it carries an 18-site `text-match` ' +
+      'entry rather than being immunised by its own test inputs. The cost of that order is ' +
+      'measured in `kan173-red-drive`\'s `immunise-or` arm: with every wrongly-immunised script ' +
+      'already covered by an exact count, breaking the predicate reddens NO real script and only ' +
+      'the three §1 fixtures catch it. The tree is no longer its own canary for that one function; ' +
+      'the fixtures are.'
+  },
+  {
+    script: 'verify-reattach-leaves-global-config-alone',
+    defence: 'mutation',
+    central:
+      'a re-attach after a daemon restart writes nothing into the user\'s GLOBAL config — the ' +
+      'claude launcher\'s folder-trust entry in `~/.claude.json`, which is the one artifact of a ' +
+      're-provisioning that lands outside both the agent\'s directory and CrabCast\'s sidecar, and ' +
+      'therefore the one no directory-scoped assertion can see.',
+    note:
+      'THE MUTATION IS §4: `dist/herdr.js` is edited so `attachSession` calls `initPty` where it ' +
+      'called `attachPty` — ONE LINE, and it is the whole separation, because `launcher.setup` is ' +
+      'called from `initPty`. §2b must go RED under it and §2 must stay GREEN, and that PAIR is ' +
+      'the defence rather than either half: the run says which mechanism holds which claim. ' +
+      'WHAT THE RED DRIVE FOUND, and it is why §2b exists at all: the global write is defended ' +
+      'TWICE — by the attach/spawn separation AND by `trustClaudeWorkspace` reading before it ' +
+      'writes — so the first mutant tried (dropping the `getSessionByPath` conjunct, the recipe ' +
+      '`src/reconcile.ts` writes down for itself) reached §2 and PASSED. §2b deletes the trust ' +
+      'entry while the agent runs, which takes the idempotence guard out of play, and asserts the ' +
+      're-attach does not put it back. §1 is the precondition that keeps all of it from being ' +
+      'vacuous — the SPAWN must be watched writing the entry — and §3 is the canary that shows ' +
+      'the bytes-and-mtime comparison can report a difference at all. ' +
+      '§0 IS A REFUSAL RATHER THAN A DEFENCE and belongs in this note anyway: the file redirects ' +
+      '`HOME` and then asks the SHIPPED `claudeConfigPath()` where it now believes the file is, ' +
+      'refusing to run if the answer is not inside its own scratch directory. A proof of "nothing ' +
+      'was written to the user\'s global config" that writes to the user\'s global config to find ' +
+      'out is the defect wearing the words of the check. ' +
+      'SEAM: the herdr is a stub this file writes, so it says nothing about what a real herdr ' +
+      'does with an attach — `verify-fleet-switch-live` §3 is the only thing that does. And it ' +
+      'watches ONE global file. A launcher added tomorrow that writes some other global path is ' +
+      'outside this and outside everything else: nothing holds a launcher to declaring its writes ' +
+      'through `LauncherSetupContext.note`. Named in that file\'s header; covered by nobody.'
+  },
 
   // -------------------------------------------------------------------------
   // mutation — not through the helper, because what they mutate is not a build
