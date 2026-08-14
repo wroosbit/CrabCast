@@ -77,6 +77,33 @@ name: Approval
 # moves the head and voids the approval. The full argument is on `exitCodeFor` in
 # `scripts/approval-marker.mjs`.
 #
+# ⚠ THE `issue_comment` TRIGGER DOES NOT WORK UNTIL THIS FILE IS ON `main`, and
+# that is GitHub's rule rather than a defect here. An `issue_comment` event is
+# not a pull request event: GitHub resolves the workflow from the DEFAULT BRANCH,
+# so a comment on the pull request that INTRODUCES this file fires nothing at all.
+# Measured on #110, the pull request that added it: the `pull_request` run fired
+# at the head and published the status; a comment posted afterwards produced no
+# run of any kind, and `gh run list --workflow=approval.yml` showed exactly one
+# row.
+#
+# THE CONSEQUENCE IS A ONE-TIME BOOTSTRAP COST, and it is worth stating in both
+# directions so nobody reads it as larger or smaller than it is:
+#
+#   ON THAT ONE PULL REQUEST    an approval arriving by comment does NOT refresh
+#                               the status by itself. Re-run the Approval
+#                               workflow (`gh run rerun <id>`) — the script reads
+#                               the conversation live from the API, so a re-run
+#                               of the SAME run picks up comments posted since.
+#                               Editing the pull request body works too, via the
+#                               `edited` type above.
+#
+#   ON EVERY PULL REQUEST AFTER it works as designed, because the file is then on
+#                               the default branch where the event looks for it.
+#
+# Do not "fix" this by moving the trigger. There is nothing to move: the same
+# rule applies to any workflow a pull request introduces, and it resolves itself
+# on merge.
+#
 # ⚠ THIS IS ADVISORY. `approval-recorded` is NOT a required status, because
 # making one required is a branch-protection write and that is the `wroosbit`
 # admin account (KAN-307, on this epic's awaiting-human list). Until somebody
