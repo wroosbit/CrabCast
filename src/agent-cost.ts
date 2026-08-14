@@ -60,7 +60,11 @@ const PAGE_SIZE = 4096;
  * carries `p_252` here, and `pane get` happens to accept both. The phrase that
  * covers the `p_NNN` form, "legacy pane ids", appears only in the target list
  * of `herdr agent --help`. So this works on an observed behaviour rather than a
- * published one. docs/herdr-pane-handle-join.md is the whole of it: the
+ * published one — and since KAN-386 that observation is CHECKED at the one
+ * moment it can change: `scripts/verify-herdr-release.mjs` §4b reads a handle
+ * out of a real process in a pane the release under test created and requires
+ * `pane get` to resolve it. The form is still undocumented; what is pinned is
+ * the behaviour. docs/herdr-pane-handle-join.md is the whole of it: the
  * measurement with its controls, the request made of herdr's maintainer, and
  * what we decided to do if the answer is no.
  *

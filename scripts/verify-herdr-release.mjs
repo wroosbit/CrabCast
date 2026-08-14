@@ -57,18 +57,30 @@
 //   check on this script's isolation, not a guarantee: a release that damaged
 //   the live server some other way would not be seen here.
 //
-// * IT DOES NOT EXERCISE THE PANE-HANDLE JOIN, AND THAT ONE IS NAMED SEPARATELY
-//   BECAUSE IT FAILS QUIETLY (KAN-385). The cost attribution reads
-//   `HERDR_PANE_ID` — a `p_NNN` token — off a process and calls
-//   `herdr pane get` with it, and `herdr pane --help` documents that parameter
-//   as `<pane_id>`, which that token is not. A release that stopped accepting
-//   the form would PASS EVERY SECTION BELOW, green: the lifecycle never makes
-//   that call. Downstream, `paneNameForHandle` returns null for every tree, all
-//   of them are classified `foreign`, and the charged sample drops to zero —
-//   indistinguishable from a machine running none of our agents. Since we are
-//   pinned to 0.6.x, THIS script is the only place the change could ever be
-//   caught, which is why the assertion belongs here rather than in CI; KAN-386
-//   is writing it, and docs/herdr-pane-handle-join.md §4 is the reasoning.
+// * THE PANE-HANDLE JOIN IS NOW EXERCISED (§4b, KAN-386) — ON THE `supported`
+//   BRANCH ONLY, AND ONLY THE HERDR SIDE OF IT. Until 2026-08-14 this bullet
+//   said the opposite, and it was the sharpest gap in the file: the cost
+//   attribution reads `HERDR_PANE_ID` — a `p_NNN` token — off a process and
+//   calls `herdr pane get` with it, `herdr pane --help` documents that
+//   parameter as `<pane_id>`, which that token is not, and a release that
+//   stopped accepting the form passed every other section green while
+//   `paneNameForHandle` returned null for every tree, all of them were
+//   classified `foreign`, and the charged sample dropped to zero —
+//   indistinguishable from a machine running none of our agents. §4b now reads
+//   the handle out of a real process inside the pane this run created and
+//   requires `pane get` to resolve it to the name CrabCast minted, with a
+//   mutated-handle control beside it. Three things it still does not cover:
+//     - `--expect spawn-broken` runs skip it entirely (no pane exists to read),
+//       so a green on that branch is not evidence about the join;
+//     - it makes the `pane get` subprocess call itself rather than routing
+//       through `HerdrBridge.paneNameForHandle`. That the DAEMON makes this
+//       exact call is covered by `verify-agent-cost-attribution-live.mjs`,
+//       which runs the bridge for real — but against the herdr on PATH, which
+//       is 0.6.4. So neither script runs OUR code against the release under
+//       test, and that hole is between them rather than inside either;
+//     - it says nothing about the `p_NNN` form being documented. It is not
+//       (docs/herdr-pane-handle-join.md §2.7); this pins the behaviour, not
+//       the contract, which is why the ask to herdr's maintainer stands.
 //
 // ---------------------------------------------------------------------------
 // ISOLATION — the hazard this script exists inside of
@@ -237,6 +249,184 @@ function census() {
 
 const ours = (agents) => agents.filter((a) => String(a.name ?? '').startsWith('crabcast-kan181probe-'));
 
+// ---------------------------------------------------------------------------
+// Finding a process INSIDE the pane this run created — the input to §4b.
+//
+// ⚠ THE HAZARD, AND IT IS NOT HYPOTHETICAL. The machine this runs on is a live
+// fleet, and this script is itself launched from one of its panes. So the
+// obvious selector — "any process carrying THIS run's private
+// HERDR_SOCKET_PATH, that also has a HERDR_PANE_ID" — is WRONG, and it is wrong
+// in the direction that measures the other machine. Measured 2026-08-13 while
+// writing this, four processes matched it:
+//
+//     227228  herdr   HERDR_PANE_ID=p_300   <- the private SERVER we spawned
+//     227245  node    (no handle)
+//     227311  bash    HERDR_PANE_ID=p_1     <- the pane under test. The one.
+//     227316  herdr   (no handle)
+//
+// `p_300` is a LIVE pane: the server inherited it from the pane this script was
+// run in, because we spawned it and set HERDR_SOCKET_PATH in its environment
+// without clearing what it already carried. A selector that took the first
+// match would have read a handle belonging to the live fleet and asked the
+// PRIVATE server to resolve it — a red that says nothing about the release, or,
+// on some other arrangement of pids, a green measured off the wrong population.
+//
+// So the walk is DOWNWARD from the server we started, and the socket-path match
+// is kept as a second gate rather than the first. Two properties follow, and
+// both matter: only processes descended from a server THIS run spawned are
+// candidates, and `/proc/<pid>/environ` — the sensitive read — is opened for
+// those and for nothing else. The live fleet's environs are never read.
+//
+// ⚠ AND THE WALK ALONE IS STILL NOT ENOUGH, which is the second thing the red
+// drive found and the reason there are two more gates below. The server's OWN
+// CHILDREN inherit the server's environment, `p_300` and all. Caught on
+// 2026-08-14, twice in three runs:
+//
+//     244105/bash p_1     <- the pane. What we want.
+//     244174/curl p_300   <- a child the private server spawned itself
+//
+// The `curl` is a descendant, it carries the private socket path, and it
+// carries a LIVE pane's handle. Both earlier gates pass it. It is not an
+// exotic race: it reproduces, and it would have put a live handle into the
+// assertion. So two more, either of which alone would have caught it:
+//
+//   * ANYTHING CARRYING THE SERVER'S OWN HANDLE IS REJECTED. That value was
+//     inherited from the pane this script was launched in; a process inside
+//     the pane under test cannot legitimately carry it. (If the private server
+//     ever minted a handle equal to the one it inherited, this would reject the
+//     real pane too — and produce a loud "none found" red, not a quiet pass.)
+//   * AND THE PROCESS MUST BE SITTING INSIDE THIS RUN'S SCRATCH TREE. The pane
+//     was created with `--cwd` into it; nothing else on the machine is in it.
+//
+// Rejected candidates are PRINTED with the reason. The next surprise here will
+// be some third process nobody predicted, and a selector that silently drops
+// things teaches you nothing when that happens.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every process as `pid -> { comm, ppid }`, from `/proc/<pid>/stat`.
+ *
+ * `comm` is unquoted and may contain spaces and parentheses, so the fields
+ * after it are taken from the LAST `)` rather than by splitting the line.
+ */
+function processTable() {
+  const table = new Map();
+  for (const name of fs.readdirSync('/proc')) {
+    if (!/^\d+$/.test(name)) continue;
+    let stat;
+    try {
+      stat = fs.readFileSync(`/proc/${name}/stat`, 'latin1');
+    } catch {
+      continue; // exited between readdir and read; ordinary
+    }
+    const close = stat.lastIndexOf(')');
+    if (close === -1) continue;
+    const comm = stat.slice(stat.indexOf('(') + 1, close);
+    const ppid = Number(stat.slice(close + 2).split(' ')[1]);
+    if (Number.isFinite(ppid)) table.set(Number(name), { comm, ppid });
+  }
+  return table;
+}
+
+/** Every descendant of `root`, excluding `root` itself. */
+function descendantsOf(table, root) {
+  const children = new Map();
+  for (const [pid, { ppid }] of table) {
+    if (!children.has(ppid)) children.set(ppid, []);
+    children.get(ppid).push(pid);
+  }
+  const out = [];
+  const walk = (pid) => {
+    for (const child of children.get(pid) ?? []) {
+      out.push(child);
+      walk(child);
+    }
+  };
+  walk(root);
+  return out;
+}
+
+/**
+ * The pane handles carried by processes inside this run's own panes — read the
+ * same way `agent-cost.ts` reads them, out of `/proc/<pid>/environ`, because
+ * that is the leg of the join being pinned. Nothing here is supplied by this
+ * script: the release under test put the value there.
+ */
+function handlesInOurPanes() {
+  const table = processTable();
+
+  // The handle the SERVER itself carries — inherited from the pane this script
+  // was launched in, and therefore a live one. See the header.
+  let serverHandle = '';
+  try {
+    const own = fs.readFileSync(`/proc/${herdrServer.pid}/environ`, 'latin1')
+      .split('\0')
+      .find((e) => e.startsWith('HERDR_PANE_ID='));
+    if (own) serverHandle = own.slice('HERDR_PANE_ID='.length);
+  } catch {}
+
+  const kept = [];
+  const rejected = [];
+  const walked = descendantsOf(table, herdrServer.pid);
+  for (const pid of walked) {
+    let entries;
+    try {
+      entries = fs.readFileSync(`/proc/${pid}/environ`, 'latin1').split('\0');
+    } catch {
+      continue;
+    }
+    // Second gate: it must be talking to OUR server, not to a default socket
+    // inherited from somewhere else.
+    if (!entries.includes(`HERDR_SOCKET_PATH=${herdrSocket}`)) continue;
+    const entry = entries.find((e) => e.startsWith('HERDR_PANE_ID='));
+    const handle = entry ? entry.slice('HERDR_PANE_ID='.length) : '';
+    if (!handle) continue;
+
+    const comm = table.get(pid)?.comm ?? '?';
+    let cwd = '';
+    try {
+      cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+    } catch {}
+
+    if (serverHandle && handle === serverHandle) {
+      rejected.push({ pid, comm, handle, why: `carries the SERVER's own inherited handle ${serverHandle}` });
+      continue;
+    }
+    if (!cwd || !cwd.startsWith(`${scratch}/`)) {
+      rejected.push({ pid, comm, handle, why: `sits at ${cwd || '(cwd unreadable)'}, outside this run's scratch tree` });
+      continue;
+    }
+    kept.push({ pid, comm, handle, cwd });
+  }
+  return { kept, rejected, serverHandle, walked: walked.length };
+}
+
+/**
+ * `herdr pane get <target>`, as a resolved-or-not answer.
+ *
+ * BOTH STREAMS, and that is not a detail: herdr puts its error JSON on STDERR
+ * with a non-zero exit. A reader of stdout alone turns `pane_not_found` and
+ * "the command said nothing" into the same empty string, and the control below
+ * — a deliberately mutated handle — then scores as RESOLVED. Two drafts of the
+ * KAN-385 survey died on exactly that; docs/herdr-pane-handle-join.md §2.5
+ * records it.
+ *
+ * A record-or-error rather than a bare name, so "resolved to a pane with no
+ * label" cannot collapse into "did not resolve".
+ */
+function resolvePaneHandle(target) {
+  const r = herdr('pane', 'get', target);
+  const raw = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+  const start = raw.indexOf('{');
+  let parsed = null;
+  if (start !== -1) {
+    try { parsed = JSON.parse(raw.slice(start)); } catch {}
+  }
+  const pane = parsed?.result?.pane;
+  if (pane) return { ok: true, label: typeof pane.label === 'string' ? pane.label : '', pane };
+  return { ok: false, label: '', why: parsed?.error?.code ?? `no answer (exit ${r.status})` };
+}
+
 // ===========================================================================
 rule(`0. What is under test`);
 // ===========================================================================
@@ -380,6 +570,109 @@ if (expect === 'supported') {
     "and names the same pane id herdr does",
     live[0] ? live[0].pane_id : '');
 
+  // =========================================================================
+  rule(`4b. The pane-handle join, against herdr ${RELEASE} (KAN-386)`);
+  // =========================================================================
+
+  /**
+   * THE ONE CHECK IN THIS FILE THAT IS NOT ABOUT THE LIFECYCLE, and the reason
+   * it is here is that its failure is SILENT. `src/agent-cost.ts` attributes
+   * CPU to an agent by reading `HERDR_PANE_ID` off a process and calling
+   * `herdr pane get` with it (`paneNameForHandle`, src/herdr.ts). A release
+   * that stopped resolving that form breaks nothing a user can see: every tree
+   * resolves to null, every tree is classified `foreign`, the charged sample
+   * goes to zero, and the fleet reads as though none of our agents are
+   * running. Every other section of this script would still be green — the
+   * lifecycle never makes that call.
+   *
+   * THE HANDLE IS NOT SUPPLIED BY THIS SCRIPT. It is read out of the environ
+   * of a real process inside the pane the release under test just created, so
+   * this tests that the value ARRIVES as well as that it resolves. A proof
+   * that constructs its own input has not tested the input.
+   */
+  const { kept: inPanes, rejected, serverHandle, walked } = handlesInOurPanes();
+  const expectedLabel = live[0]?.name ?? '';
+  const observed = inPanes[0];
+
+  console.log(
+    `  processes inside this run's panes carrying a handle: ` +
+    (inPanes.length
+      ? inPanes.map((p) => `${p.pid}/${p.comm} ${p.handle}`).join(', ')
+      : '(none)')
+  );
+  console.log(`  the private server's own inherited handle (excluded): ${serverHandle || '(it carries none)'}`);
+  for (const r of rejected) console.log(`  rejected  ${r.pid}/${r.comm} ${r.handle} — ${r.why}`);
+  if (observed && live[0]) {
+    console.log(
+      `  the two identifiers on the same pane:  environ handle ${observed.handle}  |  ` +
+      `published pane_id ${live[0].pane_id}` +
+      (observed.handle === live[0].pane_id
+        ? '  — NOTE: they are the SAME on this release, so this run cannot distinguish\n' +
+          '        "resolves the environment form" from "resolves the published form".'
+        : '  — different forms, which is what makes this check load-bearing.')
+    );
+  }
+
+  check(Boolean(observed),
+    'a process inside the pane under test carries a handle in its environment',
+    observed
+      ? `pid ${observed.pid} (${observed.comm}) carries HERDR_PANE_ID=${observed.handle}`
+      : walked === 0
+        // Told apart deliberately. "The release stopped setting the handle" and
+        // "this script lost track of the server it started" produce the same
+        // empty answer, and only one of them is a finding about the release. A
+        // future release that daemonises differently — forking and letting the
+        // pid we hold exit — would land here, and a reader must not read it as
+        // a broken join.
+        ? `none found, AND the server pid ${herdrServer.pid} has no live descendants at all. ` +
+          'That is more likely this script having lost the server than the release having lost ' +
+          'the handle: DO NOT read it as a verdict on the join until the walk is fixed.'
+        : `none found among ${walked} descendant(s) of the server. The release put no handle ` +
+          'in the pane, or the pane has no process. EITHER WAY THE JOIN IS BROKEN: ' +
+          'agent-cost.ts reads exactly this.');
+
+  // NOT "exactly one process". A pane's shell forks — this went red once during
+  // the KAN-386 red drive with two candidates on a run that was working
+  // perfectly — and every child inherits the same handle, so a count is the
+  // wrong invariant and a flaky one. AGREEMENT is the right invariant, and it
+  // is also the stronger one: this run has exactly one pane, so two DIFFERENT
+  // handles would mean the walk had reached a process outside it — which is
+  // precisely the hazard the selector above exists to prevent, and the shape it
+  // would take if it ever failed.
+  const distinct = [...new Set(inPanes.map((p) => p.handle))];
+  check(distinct.length === 1 && Boolean(expectedLabel),
+    'every process inside our panes agrees on ONE handle, and the census names one pane',
+    distinct.length > 1
+      ? `${distinct.length} DIFFERENT handles: ${inPanes.map((p) => `${p.pid}/${p.comm}=${p.handle}`).join(', ')}` +
+        ' — the walk reached a process outside the pane under test'
+      : distinct.length === 0
+        ? 'no process inside our panes carries a handle at all — nothing to agree on'
+        : expectedLabel
+          ? `${inPanes.length} process(es), handle ${distinct[0]}, pane ${expectedLabel}`
+          : `handle ${distinct[0]}, but the census named no pane of ours`);
+
+  const resolved = observed ? resolvePaneHandle(observed.handle) : { ok: false, label: '', why: 'no handle to resolve' };
+  check(resolved.ok && Boolean(expectedLabel) && resolved.label === expectedLabel,
+    '`herdr pane get <handle>` resolves it to the pane CrabCast named',
+    resolved.ok
+      ? `${observed.handle} -> ${JSON.stringify(resolved.label)}` +
+        (resolved.label === expectedLabel ? '' : `, expected ${JSON.stringify(expectedLabel)}`)
+      : `${observed ? observed.handle : '(none)'} -> UNRESOLVED (${resolved.why}). ` +
+        'THE COST ATTRIBUTION WOULD CHARGE NOTHING ON THIS RELEASE.');
+
+  // CONTROL. Without it, the check above passes on a `pane get` that resolves
+  // ANY target to the only pane it has — which is the same shape as the
+  // finding we want, and would read as green. One digit appended is the
+  // mutation KAN-385 measured (`pane_not_found`, 7/7).
+  const mutated = observed ? `${observed.handle}1` : 'p_definitely-not-a-pane';
+  const control = resolvePaneHandle(mutated);
+  check(!control.ok,
+    'CONTROL: a mutated handle does NOT resolve, so the pass above discriminates',
+    control.ok
+      ? `${mutated} resolved to ${JSON.stringify(control.label)} — this resolver answers anything, ` +
+        'and the check above is worth nothing'
+      : `${mutated} -> UNRESOLVED (${control.why})`);
+
   const tail = crabcast('tail', probeDir, '--lines', '5');
   check(tail.code === 0, '`tail` read the pane back', `exit ${tail.code}`);
 
@@ -408,6 +701,17 @@ if (expect === 'supported') {
   check(Boolean(notice),
     'the daemon DID emit a version notice for this release',
     notice ? notice.trim().slice(0, 120) + '…' : 'it emitted none — a reader gets the raw flag error and no diagnosis');
+
+  // §4b is UNREACHABLE on this branch and is deliberately not run. The
+  // pane-handle join needs a pane, and the premise of `spawn-broken` is that
+  // nothing was spawned — so there is no process to read a handle out of. A
+  // green `--expect spawn-broken` therefore says NOTHING about whether this
+  // release still resolves `p_NNN`; only a `--expect supported` run does.
+  console.log(
+    '\n  ....  §4b (the pane-handle join) NOT RUN: it needs a pane, and this branch' +
+    '\n        asserts that none was created. A green run here is not evidence about' +
+    '\n        the join — see the header.'
+  );
 
   // `deactivate` first, and unasserted: against a genuinely spawn-broken
   // release it is a no-op that answers "was not running". It is here for the
