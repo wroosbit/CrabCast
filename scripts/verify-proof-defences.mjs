@@ -175,10 +175,15 @@
 // of them was visible before the count.
 //
 //   1. THE SUITE IS BETTER DEFENDED THAN ANYONE SAID. The ticket that
-//      commissioned this named six proofs with mutations and said "for the
-//      other ~35, nobody has looked". It is 17 of the 41 that existed, and 21
+//      commissioned this named six proofs with mutations and said that for
+//      all the rest, nobody had looked. It is 17 of the 41 that existed, and 21
 //      of the remainder carry a real guard. A blanket rule would have been
 //      written against a picture that was wrong by a factor of nearly three.
+//      (The ticket's own figure for "all the rest" is not quoted here on
+//      purpose: this file's own header guard forbids any number the register
+//      currently holds, and a quotation is indistinguishable from a headcount
+//      to a textual check. It became one the day the register's mutation count
+//      reached it — which is the guard working, not misfiring.)
 //
 //   2. THE 'none' ENTRIES ARE NOT WHERE A BLANKET RULE WOULD HAVE LOOKED. Two
 //      of the three were LIVE proofs CI cannot run — the half a blanket rule
@@ -644,6 +649,32 @@ const PROOF_DEFENCES = [
       'rejection, not evidence that one happens. SEAM: every pane here is a shim this file wrote, ' +
       'so nothing on this page is evidence about a real Claude Code composer — ' +
       'verify-send-confirms-delivery-live.mjs is what covers that, and it is in the live half.'
+  },
+  {
+    script: 'verify-path-problem',
+    defence: 'mutation',
+    central:
+      '`pathProblem` — WHY an address was refused — rides the `bad-address` branch of ' +
+      '`activate_response` and `agent_status` on every response taking it, and DISCRIMINATES ' +
+      'between the five `PathProblem` causes rather than merely being present.',
+    note:
+      'THE TWO MUTATIONS DO DIFFERENT JOBS, and the second is the reason this file exists rather ' +
+      'than a fifth presence check in verify-read-contract. `flatten-the-cause` restores the ' +
+      'pre-v10 boundary — the cause dropped at `addressOfRequest` — and §1 goes red, so the ' +
+      'presence half is a check that can fail. `answer-a-constant` leaves the field present, ' +
+      'published, correctly typed and mandatory on the branch, and wires it to one value: §1 ' +
+      'STAYS GREEN and only §2 goes red. That asymmetry is asserted rather than described, ' +
+      'because "present and correctly typed" is exactly what a constant looks like, and it is ' +
+      'the vacuity the commissioning ticket asked to be ruled out. §4 also carries a ' +
+      'FALSE-POSITIVE CONTROL — the unmutated tree is required to have passed everything above ' +
+      'before either red is read, since a red drive on a broken baseline measures the runner. ' +
+      'SEAM: this file supplies every bad address it asserts on, so it tests the daemon from the ' +
+      'request onward and NOT that any consumer reads the field. At this commit none does — ' +
+      '`src/reconcile.ts` branches on `refused`/`refusedBy` and still reports a deleted ' +
+      'directory as `result: \'failed\'` — and the script\'s header says so rather than leaving ' +
+      'a reader to infer coverage. The STATIC half (a sixth cause being a compile error, and the ' +
+      'document join the compiler cannot see) is scripts/kan382-red-drive.mjs; neither covers ' +
+      'the other.'
   },
   {
     script: 'verify-read-contract',
