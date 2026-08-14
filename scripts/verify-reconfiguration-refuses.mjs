@@ -880,10 +880,28 @@ rule('4. EVERY KNOB, ONE AT A TIME, AGAINST THE CLASSIFICATION TABLE');
     // so this knob's change is expressed the other way round: BASE has it true.
     preemptable: false,
     label: 'a different label',
+    owner: 'a-different-owner',
     launcher: 'claude',
     prompt: 'KAN-126: a wholly different bootstrap.',
     mcpServers: {}
   };
+
+  // A KNOB WITH NO NEW VALUE IS A GAP IN THIS TABLE, AND IT HAS TO SAY SO.
+  // The loop is derived from `RECONFIGURATION_COST`, so a new knob is iterated
+  // whether or not anybody added it above — but `[knob]: undefined` omits the
+  // field from the request, so the configure changes NOTHING and the section
+  // reports `outcome unchanged`. That reads as a defect in the DAEMON. It is a
+  // defect in this fixture, and KAN-193's `owner` is the knob that proved it:
+  // the red named the daemon's outcome rather than the missing entry.
+  const missingValues = Object.keys(RECONFIGURATION_COST)
+    .filter((knob) => NEW_VALUE[knob] === undefined);
+  check(missingValues.length === 0,
+    'PRECONDITION — every knob in the classification table has a distinct NEW_VALUE here, so ' +
+      '"changed" is unambiguous for each of them and an `unchanged` outcome below is the ' +
+      'daemon\'s answer rather than this fixture sending nothing',
+    missingValues.length
+      ? `no NEW_VALUE for: ${missingValues.join(', ')} — add one; the loop cannot change a knob it has no value for`
+      : `${Object.keys(NEW_VALUE).length} knob(s) covered`);
 
   for (const [knob, cost] of Object.entries(RECONFIGURATION_COST)) {
     const dir = ownedDir('s4', knob);

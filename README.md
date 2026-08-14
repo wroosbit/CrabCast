@@ -162,6 +162,7 @@ per knob:
   chargeable   applied — takes effect at the next activate
   preemptable  applied — takes effect at the next activate
   label        applied — takes effect at the next activate
+  owner        applied — takes effect at the next activate
   launcher     applied — takes effect at the next activate
   prompt       applied — takes effect at the next activate
   mcpServers   applied — takes effect at the next activate
@@ -353,6 +354,7 @@ per knob:
   chargeable   applied — takes effect at the next activate
   preemptable  applied — takes effect at the next activate
   label        applied — takes effect at the next activate
+  owner        applied — takes effect at the next activate
   launcher     applied — takes effect at the next activate
   prompt       applied — takes effect at the next activate
   mcpServers   applied — takes effect at the next activate
