@@ -77,6 +77,20 @@ const SLUG_CHARS = 24;
  * discriminator is what makes "recover from this one" expressible without
  * also meaning "recover from whatever else lands here" — including problems
  * added later, which default to refusal rather than to the fallback.
+ *
+ * IT IS ON THE WIRE SINCE READ CONTRACT v10 (KAN-382), as `pathProblem` on the
+ * `bad-address` branch of `activate_response` and `agent_status`. So "one caller
+ * needs to tell them apart" is no longer only about `addressOfRequest`: a
+ * CONSUMER needs to as well, for the same reason and with the same remedies.
+ * Two consequences for anyone editing this union:
+ *
+ *   * A SIXTH MEMBER IS A COMPILE ERROR until it is published —
+ *     `src/read-contract.ts` binds `VALUE_SETS.pathProblem` to this type with
+ *     `Exact<>`. That is the guard working rather than an obstacle: the value has
+ *     to be documented and versioned before it can reach a consumer's switch.
+ *   * RENAMING A MEMBER IS A WIRE BREAK, not a refactor. These strings are the
+ *     published vocabulary now, and the prose beside each is what a consumer was
+ *     told the value means.
  */
 export type PathProblem =
   /** Not a string, or empty. Nothing to resolve and nothing to key on. */

@@ -38,6 +38,7 @@ import {
   RUNTIME_CONFIRM_TIMEOUT_MS,
   ourPaneIn
 } from './herdr.js';
+import type { PathProblem } from './identity.js';
 import { PathError, canonicalPath, canonicalizeOrNull, paneNameFor } from './identity.js';
 import {
   BUILTIN_MCP_SERVERS,
@@ -242,6 +243,16 @@ type ActivateRefusalFields = Record<string, unknown> & {
   started?: false;
   refused?: ActivateRefusalKind;
   refusedBy?: ActivateRefusedBy;
+  /**
+   * KAN-382. Typed rather than left to `Record<string, unknown>`, for the reason
+   * the two fields above are: this is the one refusal field whose value is a
+   * closed vocabulary the compiler already owns, so a site inventing a sixth
+   * cause — the thing the contract says will never happen without a version
+   * bump — does not build. `?` here is "absent on the other ten branches", NOT
+   * "optional on `bad-address`": that branch's `always` list makes it
+   * mandatory, and the proof asserts the key set as an equality.
+   */
+  pathProblem?: PathProblem;
 };
 
 /**
@@ -2961,15 +2972,40 @@ export class MessageRouter {
    * recoverable; every other problem is refused by every verb, always. A cause
    * added to {@link PathProblem} later is refused until somebody argues it into
    * this switch, which is the direction a default should fail in.
+   *
+   * AND THE REFUSAL NOW CARRIES THE DISCRIMINATOR RATHER THAN FLATTENING IT
+   * (KAN-382, read contract v10). This used to return `{ error }` alone, so five
+   * causes with three different remedies reached the wire as one prose string —
+   * `does-not-exist`, which the paragraph above calls the normal way an agent
+   * ends, reported identically to a caller who passed a relative path. The
+   * daemon had already computed the difference and dropped it here.
+   *
+   * `problem` IS NOT OPTIONAL ON THE REFUSAL ARM, and that is the whole design
+   * rather than a detail: an optional discriminator would mean both "not a path
+   * problem" and "an older daemon", which is the `undefined`-on-`refused`
+   * ambiguity KAN-376 identified, freshly minted on a second field. It is total
+   * because the catch is NARROWED to `PathError` — the only thing
+   * `canonicalPath` throws — so there is no arm left needing an invented sixth
+   * value to fill.
+   *
+   * A NON-`PathError` THEREFORE PROPAGATES rather than being reported as a bad
+   * address, which it would not be. It is unreachable at this commit
+   * (`canonicalPath` converts every `fs` throw into a `PathError` of its own),
+   * and if it ever becomes reachable, `daemon.ts`'s dispatch catch answers the
+   * caller `{ success: false, error }` — an honest "something blew up" instead
+   * of a `bad-address` refusal naming a cause nobody established.
    */
-  private addressOfRequest(input: unknown, strict: boolean): { path: string } | { error: string } {
+  private addressOfRequest(
+    input: unknown,
+    strict: boolean
+  ): { path: string } | { error: string; problem: PathProblem } {
     try {
       return { path: canonicalPath(input) };
-    } catch (e: any) {
-      const recoverable =
-        !strict && e instanceof PathError && e.problem === 'does-not-exist' && typeof input === 'string';
+    } catch (e: unknown) {
+      if (!(e instanceof PathError)) throw e;
+      const recoverable = !strict && e.problem === 'does-not-exist' && typeof input === 'string';
       if (!recoverable) {
-        return { error: e?.message ?? String(e) };
+        return { error: e.message, problem: e.problem };
       }
       // Lexical only, and safe precisely because we got here: the path is
       // absolute (`not-absolute` is refused above), so this resolve cannot
@@ -4330,7 +4366,11 @@ export class MessageRouter {
 
     const address = this.addressOfRequest(data.path, true);
     if ('error' in address) {
-      fail(address.error);
+      // KAN-382: the cause, beside the prose rather than instead of it. `strict`
+      // here, so all five of `PathProblem` are reachable on this branch —
+      // `does-not-exist` included, which is precisely the one a correct caller
+      // meets when the directory it configured has since been deleted.
+      fail(address.error, { pathProblem: address.problem });
       return;
     }
     const agentPath = address.path;
@@ -5324,7 +5364,14 @@ export class MessageRouter {
 
     const address = this.addressOfRequest(data.path, false);
     if ('error' in address) {
-      fail(address.error);
+      // KAN-382. `strict: false`, so `does-not-exist` never reaches here — the
+      // lexical fallback takes it and this handler answers about the record. So
+      // this branch publishes exactly the four causes that ARE refusals of a
+      // read: `not-a-string`, `not-absolute`, `uninspectable`, `not-a-directory`.
+      // The vocabulary is the same five on both surfaces; which of them a
+      // surface can actually emit is a property of its `strict` flag, and §9
+      // says so rather than publishing two lists that would drift.
+      fail(address.error, { pathProblem: address.problem });
       return;
     }
     const agentPath = address.path;
