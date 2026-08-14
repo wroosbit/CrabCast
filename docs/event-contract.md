@@ -374,12 +374,25 @@ Four things that are contract rather than advice:
 `configEchoContract` built from the same `CONFIG_FIELDS` — no second list of
 knobs exists anywhere (KAN-168). Its paths are relative to the one row it
 answers about (`config.telemetry`) where `list_agents`'s name the row
-(`standbyAgents[2].config.telemetry`), and the block rides **every**
-`agent_status` response including its refusals, for the same reason it rides an
-empty `list_agents`: so "nothing was there" and "nobody looked" stay
-distinguishable. Until KAN-168 this paragraph said the opposite, and the
-asymmetry it recorded was real: the guard was on the fleet read and absent from
-the single-agent read from KAN-166 (#29, 2026-08-04) until KAN-168 closed it.
+(`standbyAgents[2].config.telemetry`).
+
+**The block rides every response on both surfaces, refusals included** — so
+"nothing was there" and "nobody looked" stay distinguishable, which is the whole
+of what it is for. Every branch of both handlers answers through one swept
+responder per handler, which is what makes that a property of the handler rather
+than of call sites that happen to agree today.
+
+Two corrections are worth carrying, because this sentence has been wrong in both
+directions. Until KAN-168 this paragraph said the opposite, and the asymmetry it
+recorded was real: the guard was on the fleet read and absent from the
+single-agent read from KAN-166 (#29, 2026-08-04) until KAN-168 closed it. Until
+KAN-279 it named only `agent_status`'s refusals, and a **refused `list_agents`**
+carried no block at all — its two refusal paths returned before the sweep. The
+justification on record was that a refusal carries no echo, so there is nothing
+for the block to be about; that was true of `agent_status`'s `no-record-no-pane`
+branch and **false of its `bad-address` branch**, which resolves nothing, carries
+no echo and carried the block anyway. The surfaces were never divided by whether
+an echo was present, and read-contract version 9 made this sentence true of both.
 
 **What is still NOT covered, said here rather than left to be found.**
 `list_agents`'s other blocks (`capacity`, `provenance`, `pages`, the `*Total`s)

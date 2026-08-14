@@ -1560,17 +1560,31 @@ function keyProblems(where, obj, declared) {
 
   console.log(`   on the wire: ${keys.join(', ')}`);
   console.log(`   declared:    ${declaredKeys.join(', ')}`);
+  // THE FIELD THIS ASSERTION EXISTS FOR SINCE KAN-279 (v9). A refused
+  // `list_agents` used to carry three fields and no block, where every
+  // `agent_status` refusal carried one — including `bad-address`, which
+  // resolves nothing and carries no echo. Both directions of that are held by
+  // the exact key-set comparison below: the router moving without the
+  // declaration reads [action,configEchoContract,error,success] against three
+  // declared, and the declaration moving without the router reads the reverse.
+  const sweptOnRefusal = 'configEchoContract' in body;
   console.log(
-    `   carries configEchoContract: ${'configEchoContract' in body} ` +
-    `(documented asymmetry with agent_status — KAN-279)`
+    `   carries configEchoContract: ${sweptOnRefusal} ` +
+    `(v9 — the sweep rides refusals on BOTH read surfaces; KAN-279)`
+  );
+  console.log(
+    `   its undeclared[]: ${JSON.stringify(body.configEchoContract?.undeclared)} ` +
+    `— always empty here, because a refusal carries no rows to sweep. That is the block\n` +
+    `     saying the sweep RAN, which is the distinction an absent block cannot make`
   );
 
   verdict(
-    body.success === false && typeof body.error === 'string' && exact,
-    'a refused `list_agents` carries EXACTLY the three fields the contract declares for it —\n' +
-    '    which is the asymmetry with `agent_status` the document states rather than smooths over,\n' +
-    '    and it is asserted here so a change to it cannot be silent',
-    `success=${body.success}, keys on the wire [${keys}] against declared [${declaredKeys}]`
+    body.success === false && typeof body.error === 'string' && exact && sweptOnRefusal,
+    'a refused `list_agents` carries EXACTLY the four fields the contract declares for it,\n' +
+    '    `configEchoContract` among them — so the block rides every response on BOTH read\n' +
+    '    surfaces rather than on one and a half, and a change to that cannot be silent',
+    `success=${body.success}, configEchoContract present=${sweptOnRefusal}, ` +
+    `keys on the wire [${keys}] against declared [${declaredKeys}]`
   );
 }
 

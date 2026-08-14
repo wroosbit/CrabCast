@@ -114,7 +114,7 @@ import type { ResumeCause } from './resume.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 8;
+export const READ_CONTRACT_VERSION = 9;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -664,21 +664,29 @@ export const LIST_AGENTS_FIELDS = {
  * A REFUSED `list_agents` — a bad page cursor, an impossible limit, a category
  * nobody publishes.
  *
- * THREE FIELDS, AND NO `configEchoContract`, WHICH IS AN ASYMMETRY WITH
- * `agent_status` AND IS DOCUMENTED RATHER THAN REPAIRED HERE (KAN-279). §2 of
- * `docs/event-contract.md` says the echo contract rides EVERY `agent_status`
- * response including its refusals, so that "nothing was there" and "nobody
- * looked" stay distinguishable. `handleListAgents` refuses before it builds any
- * row, and its two refusal paths answer through `respond` rather than the sweep
- * — so a refused fleet read carries no block at all. It also carries no echo
- * for a block to be about, which is why it has never been a defect anybody met;
- * whether the two surfaces should nonetheless agree is a decision, and this
- * ticket documents the surface rather than changing it.
+ * FOUR FIELDS, AND THE ASYMMETRY WITH `agent_status` IS GONE (KAN-279, v9).
+ * Until version 9 this was three fields with no `configEchoContract`, and the
+ * justification on record was that a refusal carries no echo, so there was
+ * nothing for the block to be about. That is true of `agent_status`'s
+ * `no-record-no-pane` refusal — which does carry an echo, all nulls — and FALSE
+ * of its `bad-address` refusal, which resolves nothing, carries no echo, and
+ * carries the block anyway (see {@link AGENT_STATUS_BRANCHES}). So the two
+ * surfaces were not divided by whether an echo was present: they answered the
+ * identical situation, an echo-less refusal, two different ways, and what
+ * actually differed was a wrapped responder against a bare `respond`.
+ *
+ * §2 of `docs/event-contract.md` states the rule the broad way — the block
+ * rides EVERY response, so `undeclared: []` and "nobody looked" stay
+ * distinguishable — and `handleListAgents` now routes every answer, refusals
+ * included, through one swept responder. `undeclared` is always `[]` here,
+ * because a refusal carries no rows to sweep; that is the block saying the
+ * sweep ran, which is exactly the distinction the rule exists for.
  */
 export const LIST_AGENTS_REFUSAL_FIELDS = {
   action: { bucket: 'derived' },
   success: { bucket: 'derived' },
-  error: { bucket: 'derived' }
+  error: { bucket: 'derived' },
+  configEchoContract: { bucket: 'derived', block: 'ConfigEchoContract' }
 } as const satisfies FieldTable;
 
 // ------------------------------------------------------ agent_status_response
