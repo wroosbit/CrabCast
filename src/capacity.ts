@@ -325,9 +325,91 @@ export interface AgentCost {
  * machine as a 4-core laptop, which matches this machine's core count — but
  * nothing in this file or in docs/ported-lineage.md certifies it was the same
  * box, so it is not claimed.
+ *
+ * ---------------------------------------------------------------------------
+ * KAN-390 RAISED IT AGAIN, 800 MB -> 1050 MB, AND THESE ARE THE FIRST READINGS
+ * OF A WORKING CRABCAST FLEET
+ * ---------------------------------------------------------------------------
+ *
+ * THE POPULATION, FIRST, BECAUSE IT IS THE HALF THE PARAGRAPH ABOVE COULD NOT
+ * CLAIM. Eight CrabCast agent trees, started by this daemon through `crabcast
+ * activate`, on 2026-08-14. They were WORKING and not idle: each was given real
+ * work at spawn — read 31 TypeScript sources (~29k lines) in full, run `npm run
+ * build` and `npx tsc --noEmit`, write an analysis of every module — so their
+ * trees carry a grown context AND the subprocesses a build spawns. They are
+ * CrabCast's own agents, verified per tree by pane label (`crabcast-*`) through
+ * the instrument's own attribution, and this is the first figure in this file
+ * that is a measurement of the population it divides.
+ *
+ * THE INSTRUMENT AND THE WINDOWS. `scripts/kan285-start-ramp.mjs`, unchanged —
+ * so a tree here is a tree by the same walker `finishMeasurement` uses, and the
+ * quantity is the same summed-across-tree RSS as `residentBytes`. Four windows
+ * at a 1s interval: 90s (3 trees starting), 180s (4), 240s (5), and a 150s
+ * replication of the first (3 fresh trees). 2,521 tree-samples of the CrabCast
+ * arm in total. The other orchestrator's six trees are present throughout and
+ * are reported as the CONTROL, never as data.
+ *
+ * WHAT A WORKING TREE DOES, AND IT IS NOT A PLATEAU. KAN-285's idle trees
+ * settled at 631-681 MB and stayed there. A working tree has TWO levels and
+ * moves between them. Reading and thinking, it holds 699-791 MB — p50 729, p95
+ * 769, p99 781 over the 1,507 samples of trees already settled into work. Then
+ * it runs a build, its process count goes from 5 to 9 or 10, and the tree rises
+ * to 1004-1044 MB for 6-13 seconds before falling back. So "the settled plateau
+ * of a working fleet" is not a quantity this population has; the ticket asked
+ * for one, and reporting one would have been tidier than the truth.
+ *
+ * WHY THAT MOVES THE SEED. 800 was set as "above every chargeable-agent reading
+ * taken here", and against a working CrabCast fleet it is not: the worst single
+ * tree read 1044 MB. The under-charge is also correlated rather than scattered,
+ * which is what makes it a divisor's problem rather than a rounding one — a
+ * divisor is multiplied by N, so what has to fit is the SUM. Summed across the
+ * co-resident CrabCast arm, per sample instant:
+ *
+ *   3 trees starting together   max 2937 MB vs 3 x 800 = 2400   over at 23/62
+ *   3 trees, replication        max 2881 MB vs 3 x 800 = 2400   over at 25/122
+ *   4 trees, settled into work  max 3214 MB vs 4 x 800 = 3200   over at  3/168
+ *   5 trees, settled into work  max 3936 MB vs 5 x 800 = 4000   over at  0/228
+ *
+ * READ THE SHAPE OF THAT TABLE RATHER THAN ITS WORST CELL. A fleet already
+ * settled into work fits inside 800 MB an agent almost always; a fleet STARTING
+ * does not, by up to 537 MB on a 2400 MB budget — 22% — because agents that
+ * start together do their opening build together, and their peaks land on the
+ * same instants. That is the one condition this seed is live for. `residentBytes`
+ * is what the gate divides by WHEN NOTHING HAS BEEN MEASURED ON THIS FLEET YET,
+ * which is the moment a fleet is being staffed and never the moment it has
+ * settled, so the seed is being asked its question in exactly the state the
+ * table's top two rows describe. It was replicated deliberately for that reason:
+ * the decision rests on those rows and one window would not have been evidence.
+ *
+ * WHAT 1050 IS AND IS NOT. It is above every chargeable CrabCast reading taken
+ * (1044 max) and 7% above the worst per-agent demand a co-resident starting
+ * fleet actually placed (2937/3 = 979 MB) — the same construction KAN-275 used,
+ * which gave itself ~9% over its own worst reading. It is NOT the peak of a
+ * compiling tree multiplied out: 3 x 1044 would price a fleet for a
+ * simultaneity that only the starting window produced. And unlike the 800 it
+ * replaces, it is no longer BELOW the largest tree observed at all — because the
+ * largest tree observed is now one of ours, which is what changed. The clause in
+ * the paragraph above that distinguishes the two has no analogue here, and its
+ * absence is the finding rather than an omission.
+ *
+ * WHAT THIS DOES NOT CHANGE, SAID PLAINLY. Memory does not bind on this machine
+ * and did not before: `crabcast capacity` here reads cap 3 bound by cpu, memory
+ * allowing 16 at the old seed and 12 at the new one. The gate refused a third
+ * agent twice during these very windows and both times the term was CPU, with
+ * memory allowing six more. So this raise moves no admission decision on this
+ * box; it makes the model honest on a machine where memory DOES bind, which is
+ * the machine nobody here has measured.
+ *
+ * AND WHAT IT IS STILL NOT. It is a seed, not a measurement of your fleet: the
+ * daemon re-measures continuously and this holds only until the sampler has a
+ * damped live figure. One machine, one launcher (`claude`), one workload shape
+ * — a build-and-read workload, which is what this fleet's agents do, and not
+ * proof that a different workload could not hold more. Re-measure it before
+ * trusting it, with `scripts/kan285-start-ramp.mjs` and agents that are doing
+ * something; that is the whole recipe.
  */
 export const MEASURED_AGENT_COST: AgentCost = {
-  residentBytes: 800 * MIB,
+  residentBytes: 1050 * MIB,
   cores: 0.75
 };
 

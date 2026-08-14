@@ -70,8 +70,11 @@
 // AND THE DEFICIT NEVER CLOSES, WHICH IS THE FINDING THAT DECIDES THIS. The
 // quantity a charge would add back is the memory the model assumed and the
 // kernel has not yet handed over — `(cost.residentBytes − resident) /
-// cost.residentBytes`, in agent-equivalents. Measured against the 800 MB
-// divisor it is 0.69–0.91 at first sighting, 0.13–0.46 at three seconds, and
+// cost.residentBytes`, in agent-equivalents. Measured against the then-current
+// 800 MB divisor — KAN-390 has since raised it to 1050, which makes every
+// figure in THIS paragraph, all of them idle trees, a larger over-charge still;
+// what a WORKING tree does to the same arithmetic is the KAN-390 note below —
+// it is 0.69–0.91 at first sighting, 0.13–0.46 at three seconds, and
 // then it stops falling: it settles on a FLOOR of 0.15–0.21 and stays there for
 // as long as the agent lives, because an idle tree plateaus BELOW the divisor.
 // So there is no instant at which "the ramp completed" and the charge should
@@ -133,19 +136,43 @@
 //     above is that the stagger exceeds the ramp; it does not survive the
 //     stagger going away.
 //   * A population whose plateau EXCEEDS the divisor. The floor above is
-//     positive — an over-charge — only because these trees settle below 800 MB.
-//     For a population that settles above it the floor is negative and the
-//     under-charge is permanent rather than transient, which is a question
+//     positive — an over-charge — only because these trees settle below the
+//     divisor. For a population that settles above it the floor is negative and
+//     the under-charge is permanent rather than transient, which is a question
 //     about the seed and belongs to KAN-275, not here. Six settled trees in
 //     these same windows held 721–919 MB, so that population demonstrably
 //     exists on this machine; it is reported on KAN-285 and deliberately not
-//     acted on here.
+//     acted on here. KAN-390 answered this one — see directly below.
 //
-// WHAT THIS MEASUREMENT DOES NOT COVER, and nobody else covers it either: a
-// tree that begins substantive work at spawn rather than sitting idle. All five
-// were idle by construction, so the plateau above is an idle plateau. Re-run
-// the script against a working fleet to close it — it needs no argument, only
-// agents that are doing something.
+// THE IDLE GAP, CLOSED (KAN-390) — and the decision above is unchanged by it.
+// The paragraph that stood here said that all five trees were idle by
+// construction, so the plateau above is an idle plateau, and asked for the
+// script to be re-run against a working fleet. That has been done, and the
+// pointer is retired rather than left dangling: eight CrabCast trees given real
+// work at spawn, over four windows on 2026-08-14, reported in full in
+// `capacity.ts`'s KAN-390 note.
+//
+// WHAT IT FOUND, AND WHY IT LANDS ON THE SEED RATHER THAN HERE. A working tree
+// has no single plateau: it sits at 699–791 MB while reading and thinking and
+// rises to 1004–1044 MB for the 6–13s it runs a build. So the reopening
+// condition named in the bullet above is NOT met — the level a working tree
+// settles at is below the divisor, as the idle one was — while the peaks are
+// above the OLD 800 MB divisor, and correlate across agents that start
+// together. That is a statement about how much an agent costs, not about
+// blindness in the memory instrument, so KAN-390 raised the seed to 1050 MB and
+// changed nothing in this file's decision.
+//
+// AND THE FLOOR STAYS POSITIVE, WHICH IS WHAT THE DECISION ACTUALLY RESTS ON.
+// Against the 1050 MB divisor the deficit is ~0.31 of an agent at a working
+// tree's thinking level (p50 729 MB) and ~0.006 at its compile peak (1044 MB).
+// That STRADDLES the 0.15–0.21 the idle trees gave against the old divisor
+// rather than sitting under it — wider at rest, and very nearly closed at a
+// peak — so the honest summary is not "the margin grew" but "it stayed positive
+// at every instant measured, and its worst case is now thin". Positive is what
+// the decision needs: a charge added here would still be adding back memory
+// that is not missing. What is NOT covered, stated rather than implied: 0.006 is
+// a margin thin enough that a workload heavier than build-and-read could close
+// it, and nobody has measured one.
 //
 // WHAT THIS FILE IS NOT. It is not a second census and it is not authoritative
 // about which agents exist — `surveyAgents` is, and it asks herdr. This is a

@@ -149,14 +149,32 @@ const before = new Map([
 // KAN-275 floor in force, only a divisor ABOVE the 0.75 seed changes capByCpu,
 // so a fixture where both averages sit under the seed would prove that the
 // floor works and nothing about attribution.
+//
+// THE MEMORY FIGURES ARE DERIVED FROM THE SEED AND NOT WRITTEN DOWN (KAN-245,
+// and KAN-390 is what made it bite). They used to be the literals 900 and 300,
+// which straddled the 800 MB seed of the day — so the fixture encoded a
+// relationship to the seed that nothing in it declared. When KAN-390 raised
+// `residentBytes` to 1050 the literal 900 fell BELOW the new seed, the
+// attributed divisor was floored where the assertion needs it believed
+// outright, and two checks went red: `flooredDimensions` gained `residentBytes`
+// on the attributed side, and both cap terms landed on 13 because both were
+// floored to the same seed. Nothing was wrong with the model — the fixture was
+// stale, and it went red in a way that reads like a defect in the code it
+// tests. Expressed as multiples of the seed, the arms keep their proportions
+// (1.125x and 0.375x, the 900/800 and 300/800 they have always been) under any
+// future move of it.
+const SEED_MB = MEASURED_AGENT_COST.residentBytes / MIB;
+const OURS_TREE_MB = 1.125 * SEED_MB; // above the seed: believed, never floored
+const THEIRS_TREE_MB = 0.375 * SEED_MB; // well below it: the cheap foreign tree
 const after = new Map([
-  // ours: 1200 ticks over a 10s window = 1.2 core, 900 MB — above the seed
-  proc(100, 'claude', 1, 800, 600), proc(101, 'node', 100, 400, 300),
-  proc(200, 'claude', 1, 1200, 900),
-  // theirs: 50 ticks = 0.05 core, 300 MB — cheap, and three of them
-  proc(300, 'claude', 1, 50, 300),
-  proc(400, 'claude', 1, 50, 300),
-  proc(500, 'claude', 1, 50, 300)
+  // ours: 1200 ticks over a 10s window = 1.2 core, and a tree above the seed
+  proc(100, 'claude', 1, 800, (2 / 3) * OURS_TREE_MB),
+  proc(101, 'node', 100, 400, (1 / 3) * OURS_TREE_MB),
+  proc(200, 'claude', 1, 1200, OURS_TREE_MB),
+  // theirs: 50 ticks = 0.05 core — cheap, and three of them
+  proc(300, 'claude', 1, 50, THEIRS_TREE_MB),
+  proc(400, 'claude', 1, 50, THEIRS_TREE_MB),
+  proc(500, 'claude', 1, 50, THEIRS_TREE_MB)
 ]);
 const HANDLE_OF = { 100: 'p_ours_a', 200: 'p_ours_b', 300: 'p_x', 400: 'p_y', 500: 'p_z' };
 const attributed = measureOver(before, after, 10, (root) => {
