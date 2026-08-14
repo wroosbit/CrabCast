@@ -1912,6 +1912,42 @@ const PROOF_DEFENCES = [
       '§0 and §6 are the parts that live in `src/` and they are pinned by exact occurrence count.'
   },
 
+  {
+    script: 'verify-pty-consumer-named',
+    defence: 'guard',
+    central:
+      '`pty_init`, `pty_input` and `pty_resize` are STILL in `UNCOVERED_SURFACES`, still rowed in ' +
+      "§10's Not-covered table, and still not in either other boundary list — and, the half KAN-394 " +
+      'was actually written for, that §10 names their live consumer and DISCLAIMS it in the same ' +
+      'section: a consumer named in a contract document with the "this promises nothing" sentence ' +
+      'deleted is a promise in everything but wording.',
+    anchor: 'This is a broken instrument, NOT a finding about the tree.',
+    note:
+      'WHY IT EXISTS BESIDE verify-read-contract RATHER THAN INSIDE IT. That proof reconciles ' +
+      "`UNCOVERED_SURFACES` against §10's table in BOTH directions, so a deletion from BOTH sides " +
+      'reconciles perfectly and stays green. Membership consistency cannot pin membership; something ' +
+      'has to name these three literally, and this file is that. It therefore hand-names three ' +
+      'strings against KAN-245 on purpose — the assertion IS those three — while deriving everything ' +
+      'else, so the other four uncovered surfaces cannot drift against a copy kept here. ' +
+      'THE ANCHOR IS THE GUARD, and it is the vacuity branch. Every parse in the file — the two ' +
+      "array/object declarations in `src/read-contract.ts`, §10's table, the section body — reports " +
+      'an empty or unfindable input in ITS OWN WORDS rather than as a missing surface, because "I ' +
+      'could not find the list" and "the list is missing pty_init" are different findings and this ' +
+      'epic has twice had a check report a tree clean on an input that silently emptied. ' +
+      'WHAT IS NOT GUARDED HERE, and it is why this is `guard` and not `mutation`: nothing in this ' +
+      'file mutates anything. The demonstration that these assertions can go red is ' +
+      'scripts/kan394-red-drive.mjs — six arms, control first, including one that renames the whole ' +
+      'declaration away and requires the vacuity wording rather than the ordinary failure — and it ' +
+      'is NOT in the CI array and nothing gates on it, so the evidence that this guard bites is a ' +
+      "hand-run pasted on KAN-394's pull request. " +
+      'AND THE SEAM NOTHING IN THIS REPOSITORY CAN CLOSE: it reads source text only, so it says ' +
+      'nothing about the built artifact or the wire — that is verify-read-contract\'s — and, more ' +
+      'importantly, NOTHING CHECKS THAT THE NAMED CONSUMER IS STILL A CONSUMER. Butchr could retire ' +
+      "its sidepanel terminal tomorrow and every assertion here stays green while the document's " +
+      'claim quietly becomes false. That is a fact about another tree, it is covered by nobody, and ' +
+      "KAN-394's \"what would reopen this\" is where it is written down."
+  },
+
   // -------------------------------------------------------------------------
   // none — and each names what that leaves undefended. This is the half the
   // ticket that commissioned this file was written for.
