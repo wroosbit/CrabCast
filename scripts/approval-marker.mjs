@@ -296,7 +296,27 @@ export const MARKER_TEMPLATE = canonicalMarker({
  * is what an approver looking at a comment they can see contains the word would
  * read as the check being broken.
  */
-const TOKEN_MENTION = /^.*BUTCHR-APPROVAL.*$/gim;
+const TOKEN_MENTION = /^[ \t]*BUTCHR-APPROVAL\b.*$/im;
+
+// WHY IT IS ANCHORED TO THE START OF THE LINE, and it was not on first
+// submission. An unanchored version matched any line MENTIONING the token
+// anywhere — including a sentence with the marker in inline code, which is how
+// everybody writes ABOUT this check. Found by running `--check` against this
+// change's own pull request: two paragraphs of ordinary review prose were
+// reported to the approver as malformed markers, one of them a sentence
+// promising to post a correct one.
+//
+// It never produced a wrong VERDICT — this reason only ever explains a refusal
+// that already exists — but a diagnostic that tells an approver they wrote a
+// broken marker when they wrote a sentence is noise in exactly the place that
+// must not have any. The whole value of a red here is that it can be acted on.
+//
+// THE DISTINCTION IS THE SAME USE/MENTION ONE, ONE LEVEL DOWN: a line that
+// BEGINS with the token is somebody ATTEMPTING a marker; a line that merely
+// contains it is somebody TALKING about one. Incident 2 — the shape this
+// function exists for — begins with the token, so nothing it was built to catch
+// is lost. A line starting with a backtick fails this anchor too, which is what
+// takes inline code out without needing a span parser.
 
 // ---------------------------------------------------------------------------
 // USE VERSUS MENTION
@@ -531,8 +551,7 @@ export function parseMalformedMentions(comments) {
     const quoted = scanQuoted(body);
     lines.forEach((line, i) => {
       if (quoted[i]) return; // a quoted line is somebody else's report
-      TOKEN_MENTION.lastIndex = 0;
-      if (!TOKEN_MENTION.test(line)) return;
+      if (!TOKEN_MENTION.test(line)) return; // prose ABOUT a marker is not an attempt at one
       if (MARKER_LINE.test(line)) return; // a well-formed marker is not a mention
       found.push({ line: line.trim(), commentId, author });
     });

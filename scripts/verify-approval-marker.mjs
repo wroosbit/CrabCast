@@ -516,6 +516,54 @@ console.log('\n§5  THE SCANNER, DRIVEN DIRECTLY');
   check(fenced.length === 0, '§5  …and a malformed line inside a fence is somebody quoting, not somebody trying');
 }
 
+// ---------------------------------------------------------------------------
+// §5b — PROSE ABOUT A MARKER IS NOT AN ATTEMPT AT ONE.
+//
+// These two fixtures are not invented. They are transcribed from comments on
+// this change's own pull request, which `--check` reported to the approver as
+// malformed markers: a sentence promising to post a correct marker, and a line
+// of review prose with the token in inline code. Neither is anybody trying to
+// approve anything, and a diagnostic that says otherwise is noise in the one
+// place that cannot afford any — the whole value of this red is that it can be
+// acted on.
+//
+// IT NEVER PRODUCED A WRONG VERDICT, and that is why it survived §1, §2 and §7:
+// this reason only ever EXPLAINS a refusal that already exists, so no acceptance
+// case could see it. It took running the thing against real data.
+{
+  const prose = [
+    comment(21, '**Next from me:** when `verify` goes green at the head that is current *then*, I ' +
+      're-confirm via REST and post `BUTCHR-APPROVAL: <full-40-char-sha> BY epic/KAN-59` on a line ' +
+      'of its own, unindented, outside any fence.'),
+    comment(22, 'complete."* It is a real improvement over `test("BUTCHR-APPROVAL")` and it closes')
+  ];
+  const found = parseMalformedMentions(prose);
+  check(
+    found.length === 0,
+    '§5b  a sentence that MENTIONS the token mid-line is prose, not a malformed marker',
+    found.length ? `still reported: ${JSON.stringify(found.map((f) => f.line.slice(0, 60)))}` : 'both real comments from #110 now read as prose'
+  );
+
+  // …and the control that stops the anchor from simply switching the detector
+  // off: incident 2 BEGINS with the token, so it is still caught.
+  check(
+    parseMalformedMentions([comment(23, MALFORMED)]).length === 1,
+    '§5b  CONTROL: incident 2 BEGINS the line with the token and is still caught',
+    'a fix that made this detector silent would pass the assertion above trivially'
+  );
+  // Leading whitespace short of a code block is still an attempt.
+  check(
+    parseMalformedMentions([comment(24, `  ${MALFORMED}`)]).length === 1,
+    '§5b  CONTROL: …including with leading whitespace short of a code block'
+  );
+  // A line that starts with a backtick is inline code, which the anchor excludes
+  // without needing a span parser.
+  check(
+    parseMalformedMentions([comment(25, `\`${MALFORMED}\``)]).length === 0,
+    '§5b  a line that STARTS with a backtick is inline code, not an attempt'
+  );
+}
+
 // ===========================================================================
 console.log('\n§6  THE EXIT-CODE POLICY');
 // ===========================================================================
@@ -727,6 +775,43 @@ await withMutant(
     );
   }
 }
+
+// M6 — the anchor removed from the malformed-mention detector, which is the
+// state this file shipped its first submission in. §5b must flip: ordinary
+// review prose gets reported to the approver as a broken marker.
+//
+// ITS PRECONDITION IS ALSO INVERTED, for the same reason M5's is. This mutation
+// changes no verdict at all — `parseMalformedMentions` only ever explains a
+// refusal that already exists — so "the mutant still accepts the canonical
+// marker" is true of it trivially and measures nothing. What is asserted instead
+// is that the mutant's verdicts are IDENTICAL and only its diagnostics differ,
+// which is the precise shape of the defect: invisible to every acceptance case.
+await withMutant(
+  'unanchored-token-mention',
+  [
+    {
+      find: 'const TOKEN_MENTION = /^[ \\t]*BUTCHR-APPROVAL\\b.*$/im;',
+      replace: 'const TOKEN_MENTION = /^.*BUTCHR-APPROVAL.*$/im;'
+    }
+  ],
+  (at) => {
+    const prose = [
+      comment(96, 'I re-confirm via REST and post `BUTCHR-APPROVAL: <full-40-char-sha> BY epic/KAN-59` on a line of its own.')
+    ];
+    const mutated = at(prose);
+    const real = pr(prose);
+    check(
+      mutated.malformed.length === 1 && real.malformed.length === 0,
+      '§7 unanchored-token-mention  §5b goes RED: review prose is reported to the approver as a malformed marker',
+      `mutant reports ${mutated.malformed.length}, the real module reports ${real.malformed.length}`
+    );
+    check(
+      mutated.ok === real.ok,
+      '§7 unanchored-token-mention  …and the VERDICT is unchanged, which is why no acceptance case could ever have seen this',
+      'the defect lived entirely in the diagnostic — found by running --check against real data, not by a fixture'
+    );
+  }
+);
 
 // ---------------------------------------------------------------------------
 // A last direct assertion on the parsers, so that a future edit which made
