@@ -160,6 +160,18 @@
 //      regex literals is the "regex shipped as a guard" this design exists to
 //      avoid. The register is where a reading goes.
 //
+//      THE ORDER IS ITSELF ASSERTED, and it was not until somebody broke it.
+//      Reviewing this PR, `epic/KAN-59` mutated `claimed === 0 &&
+//      immunised(src)` back to `immunised(src)` and the check stayed SILENT:
+//      eighteen sites left the register's accounting and the run printed
+//      `5 immunised / 13 registered`, exit 0, no red. Leak detection was never
+//      at risk — the UNCLASSIFIED branch reads `claimed` — but §5's numbers had
+//      become a fiction, which is precisely what the comment beside `isImmune`
+//      predicted and nothing checked. §5 now asserts that the census it PRINTED
+//      is the register it READ, and `kan173-red-drive`'s `precedence-order` arm
+//      drives it. A load-bearing property nobody exercises is the thing this
+//      whole suite exists to notice, and it was in this file.
+//
 // ---------------------------------------------------------------------------
 // WHAT §7 SUPPLIES ITSELF, and what that leaves uncovered
 // ---------------------------------------------------------------------------
@@ -955,6 +967,46 @@ check(
   'the register is exercised',
   `${totalRegisteredSites} site(s) need a classification — a sweep whose every script was ` +
     `immunised would never read an entry, and a stale register would pass unnoticed`
+);
+
+// ---------------------------------------------------------------------------
+// AND THE CENSUS ABOVE IS THE ONE §3 REASONED WITH.
+//
+// The vacuity guards fire at ZERO, which is a real backstop and a distant one:
+// they catch a total collapse and not an erosion. THE PRECEDENCE ORDER — the
+// register before the predicate, boundary 5 — is what keeps the two columns
+// honest, and it was load-bearing and undriven until `epic/KAN-59` mutated it
+// at this file's head and watched NOTHING happen: flipping
+// `claimed === 0 && immunised(src)` back to `immunised(src)` restored this
+// file's self-immunisation, moved eighteen sites out of the register's
+// accounting, and printed `5 immunised / 13 registered` with no red anywhere.
+//
+// Leak detection was never at risk — the UNCLASSIFIED branch reads `claimed`
+// and not `isImmune`, so a nineteenth site here would still redden. What
+// degraded is exactly what the comment beside `isImmune` says it would: §5's
+// numbers become a fiction. So the invariant is asserted rather than described.
+//
+// It holds by arithmetic when §3 is green: every registered script is
+// non-immune under the correct order, and §3 requires its site count to be
+// exact, so the sites this run counted as registered are precisely the sites
+// the register claims. Break the order and the two diverge with §3 still green,
+// which is the only way this line can fail — and `kan173-red-drive`'s
+// `precedence-order` arm is what drives it.
+// ---------------------------------------------------------------------------
+const registerSum = [...registeredBy]
+  .filter(([name]) => proofSet.has(name))
+  .reduce((n, [, claimed]) => n + claimed, 0);
+check(
+  totalRegisteredSites === registerSum,
+  'the census this run PRINTED is the register it READ',
+  totalRegisteredSites === registerSum
+    ? `${totalRegisteredSites} site(s) counted as registered, and the register claims ` +
+      `${registerSum} across ${registeredBy.size} script(s)`
+    : `${totalRegisteredSites} site(s) were counted as registered but the register claims ` +
+      `${registerSum}. A script carrying an entry was reported as immunised instead, so the ` +
+      `immunised/registered split above is a fiction — the register is being read for the ` +
+      `verdict and ignored for the count. Check that §3 consults the register BEFORE the ` +
+      `immunisation predicate (boundary 5).`
 );
 
 console.log('');

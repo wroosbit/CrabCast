@@ -24,7 +24,7 @@
 // so a mutation that hit nothing is a refusal rather than an unmutated run
 // silently reported as a successful red drive.
 //
-// SEVEN ARMS, AND THE FIRST IS THE CONTROL:
+// NINE ARMS, AND THE FIRST IS THE CONTROL:
 //
 //   control        the sweep unmutated, in a scratch copy of `scripts/`. Every
 //                  line PASSES and the run exits 0. A red drive whose baseline
@@ -51,6 +51,15 @@
 //                  counts as a pane-opening site. The false-RED direction, and
 //                  the one a reader would most likely "fix" by deleting the
 //                  fixture.
+//   precedence-order
+//                  the register stops being consulted before the immunisation
+//                  predicate. ADDED IN REVIEW, because `epic/KAN-59` made this
+//                  exact mutation at this branch's head and the sweep said
+//                  NOTHING — eighteen sites left the register's accounting and
+//                  it printed `5 immunised / 13 registered`, exit 0. The eight
+//                  other arms drive a PREDICATE or a READER; none drove the
+//                  ORDER, which is what this branch's second commit is about.
+//                  §5 gained an invariant so the silence became a red.
 //   stale-count    one register entry claims one site fewer than the file has.
 //                  The property KAN-179 asked for by name: a new site inside an
 //                  already-registered script is a red, not a silent adoption of
@@ -267,9 +276,14 @@ arm({
   // moment its header prose starts counting. That fourth red is a property the
   // precedence change bought back — a file carrying an exact count is its own
   // canary for the lexer in a way the immunisation predicate no longer has.
+  // Five, and the fifth is a genuine consequence rather than noise: when this
+  // file's own site count moves, its 18-site entry stops matching, so §5's
+  // "the census this run PRINTED is the register it READ" breaks too. A count
+  // that no longer reconciles really has made the printed split a fiction.
   expect: ['a commented-out spawn is not a site', 'a block comment does not swallow',
-    'a COMMENT promising reclamation', 'verify-panes-are-reclaimed.mjs'],
-  expectedFails: 4
+    'a COMMENT promising reclamation', 'verify-panes-are-reclaimed.mjs',
+    'the census this run PRINTED is the register it READ'],
+  expectedFails: 5
 });
 
 // ---------------------------------------------------------------------------
@@ -282,7 +296,40 @@ arm({
     find: "    script: 'verify-spawn-failure-legibility',\n    classification: 'private-herdr-server',\n    sites: 5,",
     replace: "    script: 'verify-spawn-failure-legibility',\n    classification: 'private-herdr-server',\n    sites: 4,"
   }],
-  expect: ['verify-spawn-failure-legibility.mjs — 5 pane-opening site(s), 4 registered', 'UNCLASSIFIED'],
+  // Two, for the same reason as `lexer-blind`'s fifth: an entry claiming 4
+  // where there are 5 makes the register's sum disagree with what the run
+  // counted, so §5's reconciliation breaks alongside §3's. Both reds are true
+  // of a stale entry and neither is a cascade in the misleading sense — they
+  // are two different consequences of one wrong number.
+  expect: ['verify-spawn-failure-legibility.mjs — 5 pane-opening site(s), 4 registered', 'UNCLASSIFIED',
+    'the census this run PRINTED is the register it READ'],
+  expectedFails: 2
+});
+
+// THE NINTH ARM, AND IT EXISTS BECAUSE A REVIEWER FOUND WHAT THESE EIGHT MISS.
+//
+// `epic/KAN-59` mutated the PRECEDENCE ORDER at this branch's head — the
+// register consulted before the immunisation predicate — and the sweep stayed
+// silent: eighteen sites left the register's accounting and it printed
+// `5 immunised / 13 registered` with exit 0. Every arm above drives a
+// PREDICATE or a READER; none drove the ORDER, which is the property the second
+// commit of this branch is entirely about.
+//
+// The finding was that the mutation produced no red. The response was not to
+// write an arm that observes numbers moving — that would record the silence
+// rather than end it — but to give §5 an invariant it can FAIL on, so this arm
+// is the same shape as the other eight after all: a named check, going red.
+arm({
+  name: 'precedence-order',
+  edits: [{
+    find: '  const isImmune = claimed === 0 && immunised(src);',
+    replace: '  const isImmune = immunised(src);'
+  }],
+  // The sweep itself is the script that flips: it MENTIONS both verbs in its
+  // detectors and fixtures, so the predicate immunises it, and its 18-site
+  // entry stops being counted. Leak detection is untouched — the UNCLASSIFIED
+  // branch reads `claimed` — so this is the only line that can say so.
+  expect: ['the census this run PRINTED is the register it READ'],
   expectedFails: 1
 });
 
