@@ -986,7 +986,16 @@ const PROOF_DEFENCES = [
       'wrapper around the real binary is a reading, and that file\'s header says so and says why a ' +
       'predicate must not be trusted to make it. There is NO runtime backstop for a reading that ' +
       'was wrong: the pane would simply be left. §6 reads the live machine and is a diagnostic ' +
-      'rather than a verdict, deliberately.'
+      'rather than a verdict, deliberately. ' +
+      'AND ONE OF ITS FIXTURES IS LOAD-BEARING IN A WAY THE TREE NO LONGER IS. §3 consults the ' +
+      'REGISTER BEFORE the immunisation predicate, because the whole-file predicate wrongly ' +
+      'immunises a file that merely MENTIONS both verbs — that file is the sweep itself, whose ' +
+      'detector regexes and fixtures contain them as data, and it carries an 18-site `text-match` ' +
+      'entry rather than being immunised by its own test inputs. The cost of that order is ' +
+      'measured in `kan173-red-drive`\'s `immunise-or` arm: with every wrongly-immunised script ' +
+      'already covered by an exact count, breaking the predicate reddens NO real script and only ' +
+      'the three §1 fixtures catch it. The tree is no longer its own canary for that one function; ' +
+      'the fixtures are.'
   },
   {
     script: 'verify-reattach-leaves-global-config-alone',

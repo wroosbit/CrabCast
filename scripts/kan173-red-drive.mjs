@@ -239,15 +239,21 @@ arm({
     find: '  return reclaimSites(src).length > 0 && censusSites(src).length > 0;',
     replace: '  return reclaimSites(src).length > 0 || censusSites(src).length > 0;'
   }],
-  // Three fixtures (the two half-discipline ones and the comment one, whose
-  // census read alone now immunises it), plus the three real scripts that now
-  // claim immunity while carrying a register entry — §3's "immunised, so it
-  // carries no register entry" line. Six, counted from the run rather than
-  // predicted: the first version of this arm guessed eight.
+  // THREE FIXTURES, AND NOTHING ELSE — which is the finding this arm exists to
+  // record rather than a disappointment. Since §3 consults the REGISTER FIRST
+  // (boundary 5 in the sweep's header), a broken immunisation predicate cannot
+  // redden any real script: every script the predicate would wrongly immunise
+  // is already covered by an exact-count entry. So THE FIXTURES ARE THE ONLY
+  // THING DEFENDING THE PREDICATE. That is an argument for having them, made by
+  // measurement — and it is also the honest limit of the precedence order,
+  // which buys correctness on this tree at the cost of the tree no longer being
+  // its own canary for that one function.
+  //
+  // Counted from the run rather than predicted, twice: this arm guessed eight
+  // before the precedence change and six after it.
   expect: ['reclamation WITHOUT a census read', 'a census read WITHOUT reclamation',
-    'verify-send-confirms-delivery.mjs', 'verify-spawn-failure-legibility.mjs',
-    'immunised by construction, so it carries no register entry'],
-  expectedFails: 6
+    'a COMMENT promising reclamation'],
+  expectedFails: 3
 });
 
 arm({
@@ -256,15 +262,14 @@ arm({
     find: 'function lexComments(src) {\n  const comment = new Uint8Array(src.length);',
     replace: 'function lexComments(src) {\n  return new Uint8Array(src.length);\n  // eslint-disable-next-line\n  const comment = new Uint8Array(src.length);'
   }],
-  // Comments now count as code, and exactly the three fixtures that say so go
-  // red. NOTHING IN THE TREE ITSELF MOVES, which is worth recording rather than
-  // hiding: no tracked proof happens to mention a pane-opening call in a
-  // comment today, so §3 would not have noticed this at all. The fixtures are
-  // the only thing standing between this file and a blind lexer — which is the
-  // argument for having them, made by measurement instead of by assertion.
+  // Comments now count as code: three fixtures go red, AND the sweep's own
+  // register entry for itself goes red, because its exact site count moves the
+  // moment its header prose starts counting. That fourth red is a property the
+  // precedence change bought back — a file carrying an exact count is its own
+  // canary for the lexer in a way the immunisation predicate no longer has.
   expect: ['a commented-out spawn is not a site', 'a block comment does not swallow',
-    'a COMMENT promising reclamation'],
-  expectedFails: 3
+    'a COMMENT promising reclamation', 'verify-panes-are-reclaimed.mjs'],
+  expectedFails: 4
 });
 
 // ---------------------------------------------------------------------------

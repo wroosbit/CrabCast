@@ -143,6 +143,22 @@
 //      a DIAGNOSTIC — it is not a gate, because a check whose verdict depends on
 //      what happens to be running on the operator's machine is a check that goes
 //      red about the machine.
+//   5. THE IMMUNISATION PREDICATE IS FOOLED BY A FILE THAT ONLY MENTIONS BOTH
+//      VERBS, and THIS FILE IS SUCH A FILE. Its detector regexes and its §1
+//      fixtures contain `closeAgentByPath(`, `'pane', 'close'` and
+//      `'agent', 'start'` as data, so the whole-file predicate reads it as
+//      carrying the discipline when it opens nothing at all. That is the
+//      false-green direction, and it is closed by ORDER rather than by a
+//      cleverer predicate: §3 consults the REGISTER FIRST and only asks about
+//      immunisation for a script the register does not cover. So this file
+//      carries a `text-match` entry for every one of its own sites, like
+//      `verify-scaffolding-past-the-gate` does for its nineteen.
+//
+//      A PREDICATE COULD NOT HAVE FIXED IT. Reclamation genuinely lives inside
+//      string bodies — `herdr(['pane', 'close', id])` is the real call — so a
+//      rule that skipped strings would delete the detector, and one that chased
+//      regex literals is the "regex shipped as a guard" this design exists to
+//      avoid. The register is where a reading goes.
 //
 // ---------------------------------------------------------------------------
 // WHAT §7 SUPPLIES ITSELF, and what that leaves uncovered
@@ -492,6 +508,21 @@ const PANE_OPENERS = [
     evidence: 'resumedConversation ='
   },
 
+  {
+    script: 'verify-panes-are-reclaimed',
+    classification: 'text-match',
+    sites: 18,
+    reason:
+      'THIS FILE, and it is here rather than immunised because the whole-file predicate gets it ' +
+      'WRONG — see boundary 5 in the header. It opens no pane and needs no herdr: every one of ' +
+      'its matches is data. They are the three detector regexes, the §1 fixture sources (which ' +
+      'are the instrument\'s own test inputs, written as strings), the scratch proof §7 writes ' +
+      'into a temporary tree, and the prose of this register. The predicate reads the same file ' +
+      'as carrying the discipline, because it also mentions the reclamation verbs it detects. An ' +
+      'entry beats a predicate, which is why §3 reads the register first.',
+    evidence: 'const OPEN_DETECTORS = ['
+  },
+
   // -------------------------------------------------------------------------
   // private-herdr-server — real herdr, and it dies with the run
   // -------------------------------------------------------------------------
@@ -732,8 +763,11 @@ for (const name of proofs) {
   const opens = openSites(src);
   if (opens.length === 0) continue;
 
-  const isImmune = immunised(src);
   const claimed = registeredBy.get(name) ?? 0;
+  // Same precedence as the reconciliation below, so the census this run prints
+  // is the one it actually reasoned with. A row counted as immunised while its
+  // register entry did the work would make §5's vacuity numbers a fiction.
+  const isImmune = claimed === 0 && immunised(src);
   totalOpens += opens.length;
   if (isImmune) totalImmunisedScripts += 1;
   else totalRegisteredSites += opens.length;
@@ -747,22 +781,16 @@ for (const name of proofs) {
     claimed
   });
 
-  if (isImmune) {
-    // An immunised script must NOT also be registered: two reasons for one
-    // script is how a stale entry survives a file that changed underneath it.
-    check(
-      claimed === 0,
-      `scripts/${name}.mjs — immunised by construction, so it carries no register entry`,
-      claimed === 0
-        ? ''
-        : `the register claims ${claimed} site(s) for a script that now reads a census AND ` +
-          `reclaims. Remove the entry — a reason nobody re-reads is the thing this register is ` +
-          `for making loud.`
-    );
+  // THE REGISTER IS CONSULTED FIRST, and the order is load-bearing (boundary 5).
+  // A script that merely MENTIONS both verbs — this file does, in its detector
+  // regexes and its fixtures — would otherwise immunise itself into silence
+  // while opening nothing. An explicit entry always wins over the predicate, so
+  // an author can classify rather than be classified.
+  if (claimed === 0) {
+    if (isImmune) continue;
+  } else if (opens.length === claimed) {
     continue;
   }
-
-  if (opens.length === claimed) continue;
 
   const where = opens.map((s) => `:${s.line} (${s.detector})`);
   check(
