@@ -5427,12 +5427,52 @@ export class MessageRouter {
    * reader needs to see.
    */
   private handleListAgents(data: any, respond: Respond) {
+    // THE SWEEP, WRAPPED RATHER THAN REPEATED, exactly as `handleAgentStatus`
+    // wraps its own (KAN-279). Every answer this method gives leaves through
+    // here, so a refusal path added later is swept the day it ships rather than
+    // the day somebody remembers.
+    //
+    // ON THE REFUSALS TOO, AND THAT IS THE POINT OF THIS TICKET. Until KAN-279
+    // the two refusals below answered `respond` directly and returned before
+    // the sweep, so a refused fleet read carried three fields and no block
+    // where a refused single-agent read carried one. The justification on
+    // record for that — a refusal carries no echo, so there is nothing for the
+    // block to be about — is true of `agent_status`'s `no-record-no-pane`
+    // branch and FALSE of its `bad-address` branch, which resolves nothing,
+    // carries no echo, and carries the block anyway. The two surfaces were
+    // answering the identical situation two different ways, and the thing that
+    // differed was a wrapped responder against a bare `respond` rather than any
+    // decision anybody took. §2 of `docs/event-contract.md` states the rule the
+    // broad way — the block rides EVERY response, so `undeclared: []` and
+    // "nobody looked" stay distinguishable — and this is what makes that
+    // sentence true of both surfaces instead of one and a half.
+    // `echoDrift` RATHER THAN `drift`, AND THE NAME IS LOAD-BEARING.
+    // `verify-config-echo-contract.mjs`'s `no-sweep` and `quiet` mutations
+    // address this handler's sweep and its warning by exact source text, and
+    // `handleAgentStatus` deliberately names its own accumulator differently so
+    // that each handler's sweep is addressable on its own. Rename either to
+    // match the other and both mutations become ambiguous — they then find two
+    // occurrences or none, and that proof reports MUTATION DID NOT APPLY rather
+    // than a pass.
+    //
+    // FOR THE SAME REASON THIS COMMENT DESCRIBES THOSE ANCHORS AND DOES NOT
+    // QUOTE THEM. Comments survive into `dist/router.js`, so a comment
+    // reproducing an anchor verbatim is itself a second occurrence of it — which
+    // is exactly how this paragraph earned its place: the first draft quoted
+    // both strings and took the mutation count from 1 to 2.
+    const respondSwept: Respond = (payload) => {
+      const echoDrift: ConfigEchoFinding[] = [];
+      sweepConfigEchoes(payload, '', echoDrift);
+      this.warnOnEchoDrift(echoDrift, 'list_agents');
+      respond({ ...payload, configEchoContract: configEchoContract(echoDrift) });
+    };
+
     // What the caller asked to page, before anything expensive happens. A
     // misspelled category or an impossible limit is answered as a refusal
     // rather than as a default page — see readFleetPageRequests.
     const requested = readFleetPageRequests(data?.pages);
     if ('error' in requested) {
-      respond({ action: 'list_agents_response', success: false, error: requested.error });
+      respondSwept({ action: 'list_agents_response', success: false, error: requested.error });
       return;
     }
 
@@ -5515,7 +5555,7 @@ export class MessageRouter {
     ] as Array<[PagedFleetCategory, any[], (r: any) => string, (r: any) => string]>) {
       const result = pageFleetCategory(rows, when, key, requested.pages[category], category);
       if ('error' in result) {
-        respond({ action: 'list_agents_response', success: false, error: result.error });
+        respondSwept({ action: 'list_agents_response', success: false, error: result.error });
         return;
       }
       paged[category] = result;
@@ -5675,15 +5715,14 @@ export class MessageRouter {
       } : {})
     };
 
-    // THE SWEEP, over the payload that is about to go out rather than over the
-    // categories this method knows it built. See `configEchoContract` for why
-    // the poll path reports and does not drop, and `sweepConfigEchoes` for why
-    // it walks the response.
-    const echoDrift: ConfigEchoFinding[] = [];
-    sweepConfigEchoes(payload, '', echoDrift);
-    this.warnOnEchoDrift(echoDrift, 'list_agents');
-
-    respond({ ...payload, configEchoContract: configEchoContract(echoDrift) });
+    // THROUGH THE SAME WRAPPER THE REFUSALS USE, over the payload that is about
+    // to go out rather than over the categories this method knows it built. See
+    // `configEchoContract` for why the poll path reports and does not drop, and
+    // `sweepConfigEchoes` for why it walks the response. This used to be a
+    // second, inline copy of the sweep; one copy is what makes "every answer is
+    // swept" a property of the method rather than of three call sites that
+    // happen to agree today.
+    respondSwept(payload);
   }
 
   /**

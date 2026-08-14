@@ -153,6 +153,7 @@ would be N chances for the copy that goes stale.
 | 6 | 2026-08-12 | KAN-329 — **the boundary gains a third value.** `send_to_agent` was published in a document of its own ([`docs/send-contract.md`](send-contract.md)), so it moved out of §10's Not-covered table into a new [Covered by a sibling contract](#covered-by-a-sibling-contract--described-and-reconciled-but-not-here) table, declared as `CONTRACTED_ELSEWHERE` and reconciled in both directions with the other two. **Additive on the wire: not one byte of any response changed, and no documented field changed meaning, was removed, or changed type.** Nothing this document covers grew or shrank — what changed is what it says about a surface it does not cover, which stopped being *"described by nothing"* and became *"described over there"*. Those are different answers and version 5 had no way to say the second. A consumer that ignores it reads exactly what it read at version 5 | `75d526b6f7ee` |
 | 7 | 2026-08-12 | KAN-344 — three fields added to [UnreadableRecord](#unreadablerecord), and therefore to `unreadableRecords[]` on both `list_agents` and `daemon_status`: `claimsAt` and `claimsEvent` (`durable`, the row's own bytes quoted) and `standing` (`derived`, this daemon's verdict), with a new closed vocabulary [rowStanding](#rowstanding). **Additive: no documented field changed meaning, was removed, or changed type**, and no behaviour changed — the same rows are skipped, disclosed and carried across compaction as at version 4. What changed is that the disclosure now says whether a row MATTERS as well as why it could not be read. A consumer that ignores all three reads exactly what it read at version 6 and is not wrong; it is unable to tell a nine-day-old tombstone from a row claiming an agent, which is the question a real consumer asked and could not answer from the wire | `4d9c017c196c` |
 | 8 | 2026-08-13 | KAN-338 — one field added to `capacity`: `measuredTreesSeen`, beside the `measuredAgentTrees` it reframes. **Additive: no documented field changed meaning, was removed, or changed type** — but one changed POPULATION, and that is why this row is not a formality. `measuredAgentTrees` was every agent-runtime process tree on the machine, whoever started it; the divisor is now measured only from trees joined to a chargeable agent of this daemon, so the same field now counts a subset. `measuredTreesSeen` is the population it was drawn from, and the pair is what lets a consumer tell a divisor averaged over 2 of 9 trees from one averaged over 2 of 2. A consumer that ignores the new field reads a number that is smaller than it was and means something better — which is exactly the change a version exists to announce, because it cannot be seen by comparing field sets. **The old quantity is recoverable rather than lost: `measuredTreesSeen` IS the pre-v8 population of `measuredAgentTrees`** — every agent-runtime tree on the machine, whoever started it — so a v7 consumer that wants the number it was reading before this version reads that field and gets it exactly | `80fe941b363b` |
+| 9 | 2026-08-13 | KAN-279 — one field added to the **refused** `list_agents` response: `configEchoContract`, the same block a successful read carries, taking that refusal from three fields to four. No successful response changed, and no documented field changed meaning, was removed, or changed type. **What changed is that the two read surfaces stopped answering the same situation two different ways.** §2 of the [event contract](event-contract.md) states that the block rides *every* response so `undeclared: []` and "nobody looked" stay distinguishable; `agent_status` honoured that on all four branches — including `bad-address`, which resolves nothing and carries **no echo** and carried the block anyway — while a refused `list_agents` carried no block at all. The justification on record for that gap was "a refusal carries no echo, so there is nothing for the block to be about", which was true of `agent_status`'s `no-record-no-pane` branch and false of its `bad-address` branch; the surfaces were never divided by whether an echo was present, only by a wrapped responder against a bare `respond`. **What ignoring the new field costs a consumer:** it keeps the branch this version exists to remove — special-casing `list_agents` when reading the echo contract off whatever CrabCast answered, rather than one code path across both surfaces — and a consumer probing daemon vintage by the block's presence, which `crabcast_list_agents`'s own tool description tells it to do, read a **current** daemon as an older one off any refusal before this version | `4002acfc7a49` |
 
 The digest is `sha256(readContractCanonical())`, first 12 hex characters, over
 `src/read-contract.ts`'s declarations. **What it buys:** changing a documented
@@ -301,17 +302,32 @@ object**:
 | `action` | derived | `"list_agents_response"` |
 | `success` | derived | `false` |
 | `error` | derived | what was wrong with the request, by name |
+| `configEchoContract` | derived | the [config echo contract](#configechocontract) block, exactly as on a successful read. `undeclared` is always `[]` here — a refusal carries no rows to sweep, and the block is the sweep saying so |
 
-**Three fields, and no `configEchoContract` — which is an asymmetry with
-`agent_status`, and it is documented here rather than repaired.** §2 of the
-event contract says the echo contract rides *every* `agent_status` response
-including its refusals, so that "nothing was there" and "nobody looked" stay
-distinguishable; `handleListAgents` refuses before it builds any row, so a
-refused fleet read carries no block at all. It also carries no echo for a block
-to be *about*, which is why this has never been a defect anybody met. Whether
-the two surfaces should nonetheless agree is a decision, and it is
-[KAN-279](https://wroosbit.atlassian.net/browse/KAN-279) rather than a quiet fix
-inside the ticket that documented the surface.
+**Four fields since version 9, and the asymmetry with `agent_status` is gone.**
+Versions 1 to 8 carried three, with no `configEchoContract`, and the
+justification on record was that a refusal carries no rows and therefore no
+echo, so there was nothing for the block to be *about*.
+
+**That was true of one of `agent_status`'s two refusal branches and false of the
+other.** `no-record-no-pane` does carry an echo, all nulls. `bad-address` —
+`action`, `success`, `error`, `configEchoContract` — resolves nothing, looks
+nothing up, carries no echo, and carries the block anyway. So the two surfaces
+were never divided by whether an echo was present: they answered the **identical
+situation**, an echo-less refusal, two different ways, and what actually
+differed was a wrapped responder against a bare `respond`. §2 of the event
+contract states the rule the broad way — the block rides *every* response, so
+`undeclared: []` and "nobody looked" stay distinguishable — and
+[KAN-279](https://wroosbit.atlassian.net/browse/KAN-279) made that sentence true
+of both surfaces rather than one and a half.
+
+**What a consumer that ignores the new field keeps.** The branch this was filed
+about: it must special-case `list_agents` when reading the echo contract off
+whatever CrabCast answered, and cannot write one code path across the two read
+surfaces. A consumer that probed daemon vintage by the presence of the block —
+which [`crabcast_list_agents`'s own tool description](../src/mcp.ts) tells it to
+do, saying an absent block means an older daemon that never swept — got a
+**wrong answer** off a refusal before version 9 and gets a right one after.
 
 **A cursor is refused, never answered from the beginning.** A cursor that
 silently reset would turn an enumeration into a loop over its first page.
