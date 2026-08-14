@@ -923,6 +923,60 @@ jobs:
       #                                      reviewer re-running the page is all
       #                                      there is for either.
       #
+      # And one whose subject is not this daemon at all, but the CONVERSATION on
+      # a pull request — the half of the review handoff that had no mechanism:
+      #
+      #   verify-approval-marker             the decision behind the
+      #                                      `approval-recorded` commit status
+      #                                      (KAN-402), which is published by
+      #                                      `.github/workflows/approval.yml` and
+      #                                      NOT by this file. It drives
+      #                                      `scripts/approval-marker.mjs` over
+      #                                      five acceptance cases, every one an
+      #                                      OBSERVED failure on this epic rather
+      #                                      than an imagined shape: no marker at
+      #                                      all, a marker for a superseded head,
+      #                                      the canonical marker at the current
+      #                                      head, the token in the WRONG
+      #                                      ARRANGEMENT, and a correct marker
+      #                                      shown inside a fence, a blockquote,
+      #                                      an indented block or an HTML
+      #                                      comment. Its heads are this
+      #                                      repository's own `HEAD` and `HEAD~1`
+      #                                      rather than invented SHAs, so
+      #                                      "superseded" is a real relation
+      #                                      between two real commits.
+      #                                      FOUR MUTATIONS, and each
+      #                                      re-measures its own precondition
+      #                                      first — the mutant must still ACCEPT
+      #                                      the canonical marker, because a
+      #                                      mutant that refuses everything
+      #                                      satisfies "the case flipped" for the
+      #                                      wrong reason. That precondition
+      #                                      earned its keep on the first run: the
+      #                                      substring mutation was BROKEN rather
+      #                                      than loosened and said so by name.
+      #                                      Its §2 is the false-positive half —
+      #                                      an asserted marker must survive a
+      #                                      pull request that also QUOTES one,
+      #                                      which this very change's pull request
+      #                                      does — plus a control on the control,
+      #                                      two fixtures one character apart with
+      #                                      opposite required verdicts.
+      #                                      WHAT IT CANNOT SEE: it supplies its
+      #                                      own comments, so it establishes the
+      #                                      DECISION is right about a
+      #                                      conversation it is handed and NOT
+      #                                      that any conversation arrives.
+      #                                      Reading the event, paging the
+      #                                      comments, reconciling the count and
+      #                                      POSTing the status are all in
+      #                                      `scripts/check-approval-recorded.mjs`
+      #                                      and NOTHING here executes a line of
+      #                                      it; what covers that is a run against
+      #                                      a real pull request with the output
+      #                                      pasted on it. Named in both headers.
+      #
       # verify-daemon-provenance starts daemons but needs no herdr either: it
       # drives `daemon_status`, which touches neither panes nor the herdr
       # binary. It builds its OWN fixture trees under the system temp dir — one
@@ -1009,6 +1063,7 @@ jobs:
             verify-scaffolding-past-the-gate
             verify-panes-are-reclaimed
             verify-reattach-leaves-global-config-alone
+            verify-approval-marker
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

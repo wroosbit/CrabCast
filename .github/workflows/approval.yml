@@ -1,0 +1,147 @@
+name: Approval
+
+# KAN-402: the approval handoff, made mechanical.
+#
+# WHAT THIS IS FOR, in one measurement. Three approvals on this epic in one
+# afternoon, all from the same reviewer, all correct in substance:
+#
+#   #107  `APPROVED at <sha> — merge it.`               no token   -> sat 10 minutes
+#   #108  `BUTCHR-APPROVAL: epic/KAN-59 — APPROVED …`   wrong shape -> sat 13 minutes
+#   #108  `BUTCHR-APPROVAL: <sha> BY epic/KAN-59`       spec shape  -> merged in 93 seconds
+#
+# Same reviewer, same verdict, same head, same green checks. The marker's SHAPE
+# was the only variable and it was worth thirteen minutes against ninety-three
+# seconds — because a missing approval and an approval not yet given are the
+# same observation, and nothing anywhere could tell them apart. This workflow is
+# what tells them apart.
+#
+# WHY A SEPARATE WORKFLOW FROM `ci.yml`, AND NOT A SIXTH JOB IN IT. The triggers
+# are different in kind. Everything in `ci.yml` is a function of the TREE, so it
+# runs on `pull_request` and on `push`. This is a function of the CONVERSATION on
+# the pull request: an approval arrives after the push that built it, so this has
+# to wake on `issue_comment` too. Adding a comment trigger to `ci.yml` would
+# re-run five jobs — including `verify`, which has a twenty-minute hang bound —
+# on every comment anybody ever posts.
+#
+# WHY THE GATE IS A WORKFLOW JOB AND THE DECISION IS A PROOF. KAN-402 asks
+# which, and the answer is both, split at the seam where testability changes:
+#
+#   `scripts/approval-marker.mjs`         a PURE function of (head, ref, body,
+#                                         comments). No network, no token, no
+#                                         pull request. Proven over fixtures by
+#                                         `scripts/verify-approval-marker.mjs`,
+#                                         which is in the `ci.yml` array and in
+#                                         `scripts/verify-proof-defences.mjs`.
+#
+#   this workflow + `check-approval-recorded.mjs`
+#                                         the I/O. Reads the event, fetches the
+#                                         conversation, publishes the status.
+#                                         NONE of it is reachable from a proof —
+#                                         a proof would have to supply the event
+#                                         and the comments, and a proof that
+#                                         supplies its own input has not tested
+#                                         that the input arrives. It is covered
+#                                         by running it against a real pull
+#                                         request, with the output pasted there.
+#
+# So the decision half is a proof because it can be, and the delivery half is a
+# job because it cannot be. Neither file claims the other's coverage; both say so
+# in their headers.
+#
+# THE CHECK NAME IS NOT THIS JOB'S NAME, DELIBERATELY. The published context is
+# `approval-recorded`, and it is a COMMIT STATUS the script POSTs at the pull
+# request head. A workflow triggered by `issue_comment` attaches its own check
+# run to the DEFAULT BRANCH rather than to the pull request head — so a job named
+# `approval-recorded` would report to the right place on one trigger and the
+# wrong place on the other. A posted status lands at the head every time. The job
+# is therefore named `approval-gate`, so exactly one thing in this repository is
+# called `approval-recorded`.
+#
+# AND THE TWO NAMES ANSWER TWO DIFFERENT QUESTIONS:
+#
+#   `approval-recorded`  (a commit status)  is this head approved?
+#   `approval-gate`      (this job)         did the gate manage to say?
+#
+# A GREEN JOB OVER A RED STATUS IS THEREFORE NORMAL, and it is what an
+# unapproved pull request looks like: the gate worked, and the answer is no. The
+# script prints both verdicts side by side and says which is which in words, so
+# a reader of this log never has to infer it.
+#
+# The reason the job conclusion must NOT carry the approval answer is that a run
+# conclusion cannot be RETRACTED. A status is replaced by the newest POST for its
+# context, so an approval arriving by comment overwrites the failure the opening
+# push wrote. A run's conclusion is fixed when the run ends, and the
+# comment-triggered re-evaluation attaches to the default branch and can never
+# replace it — so every pull request would carry a permanent red run, read
+# `mergeStateStatus: UNSTABLE` forever, and invite the `gh pr update-branch` that
+# moves the head and voids the approval. The full argument is on `exitCodeFor` in
+# `scripts/approval-marker.mjs`.
+#
+# ⚠ THIS IS ADVISORY. `approval-recorded` is NOT a required status, because
+# making one required is a branch-protection write and that is the `wroosbit`
+# admin account (KAN-307, on this epic's awaiting-human list). Until somebody
+# with admin makes it required it blocks no merge — it is red, and visible, and
+# that is most of the value. Do not describe it as a gate against a determined
+# author: every agent here authenticates as the same GitHub account, so the
+# author can write the marker themselves.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  issue_comment:
+    types: [created, edited, deleted]
+
+# `statuses: write` is what lets the script publish `approval-recorded`.
+# `pull-requests` and `issues` are read-only: an approval IS an issue comment on
+# a pull request, and this never writes one.
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: read
+  issues: read
+
+# One evaluation per pull request at a time. Two runs racing to POST the same
+# context at the same head can land in either order, and the loser overwrites the
+# winner — which for a status that is meant to track the CURRENT answer is the
+# one failure mode that produces a wrong colour with everything else working.
+# `cancel-in-progress` is deliberate: the newer run has strictly newer
+# information.
+concurrency:
+  group: approval-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  approval-gate:
+    name: approval-gate
+    runs-on: ubuntu-latest
+    # An `issue_comment` fires for ordinary issues as well as pull requests, and
+    # this gate has no opinion about issues. The script checks the same thing
+    # again for itself — a workflow-level `if` is an optimisation, never the
+    # guard.
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # No `npm ci` and no build: the script imports only node builtins, the
+      # global `fetch`, and one sibling `.mjs`. Keeping it dependency-free is
+      # what keeps it un-flaky, and is the same argument that earned
+      # `proof-registry` and `proof-verdicts` their install-free jobs in
+      # `ci.yml`.
+      #
+      # GITHUB_TOKEN is read from the environment at the point of use and sent
+      # in an Authorization header. It is never echoed, never passed as an
+      # argument — arguments are visible in process listings and in logs alike —
+      # and never printed.
+      #
+      # This step goes red only when the GATE is broken: it could not read the
+      # head, could not read the whole conversation, or could not publish. An
+      # unapproved pull request is a red `approval-recorded` STATUS and a GREEN
+      # step, deliberately. See the header.
+      - name: Publish the approval verdict as `approval-recorded` at this head
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/check-approval-recorded.mjs

@@ -245,6 +245,77 @@ somewhere plausible and wrong, which is worse than a broken link because a
 broken link announces itself. Annotating those citations to say whose tickets
 they are is filed as **KAN-220**, unstaffed.
 
+## A second port, at a different path and a different commit (KAN-402)
+
+Everything above is about **one** extraction: `daemon/src/` at `928743a`, into
+`src/`, over five commits in August 2026. That set is closed and this section
+does not reopen it.
+
+KAN-402 brought across a second, much smaller thing, and it is recorded here
+rather than folded into the table above because **it shares neither the path,
+the commit, nor the destination**. Filing it in the same table would make the
+"accounts for exactly, with nothing left over" claim above false.
+
+**Extraction source:** `wroosbit/butchr`, file
+`daemon/scripts/lib/approval-marker.mjs`, at commit `0858077` (2026-08-11,
+*"KAN-321: the approval gate reads a marker asserted, not one quoted"*),
+read-only. No change ever landed there.
+
+**Destination:** `scripts/approval-marker.mjs`. Not `src/` — it is CI tooling
+and is not compiled into `dist/` or shipped in the package.
+
+**Owning task:** KAN-402, under epic KAN-59.
+
+| What came across | What it is |
+|---|---|
+| the marker grammar | `BUTCHR-APPROVAL: <40-char sha> BY <type>/<KEY>`, on a line of its own |
+| `scanQuoted` / `assertedText` | the use/mention scanner — a marker a comment *shows* is not one it *asserts* |
+| `evaluate` | the verdict shape: `{ ok, reasons, accepted, markers, … }`, pure |
+| `exitCodeFor` / `EXIT_ON` | the two-carrier exit policy (a status can retract; a job conclusion cannot) |
+
+### Why ported rather than written fresh, and what that is not
+
+**Another tree is evidence, never a specification** — the rule this document
+opens with is unchanged, and this is not a deference to it. The argument is
+narrower: the use/mention scanner exists because a *cooperative* agent tripped
+the naive version by following the obvious path (pasting the line it was
+requesting, inside a fence, so the approver could copy it). Rewriting that
+subtlety from the sentence describing it is how it comes back. What was ported
+is a mechanism with a known failure behind it; the prose around it is CrabCast's
+and cites CrabCast's own incidents.
+
+### What CrabCast decided differently
+
+Each of these is marked `CRABCAST DECIDED` on the line that decides it, so the
+divergence is findable from the code rather than only from here.
+
+* **`parseMalformedMentions` is new.** It reports a line that carries the token
+  at top level and matches none of the grammar. That is CrabCast incident 2 —
+  `BUTCHR-APPROVAL: epic/KAN-59 — APPROVED at <sha> — merge it.` — which the
+  ported code refuses correctly but explains as *"no approval marker was
+  found"*. True, unhelpful, and read for thirteen minutes as the check having
+  nothing to say.
+* **`canonicalMarker` is new.** One constructor writes the line, used by every
+  reason string, by `--check`, and by the proof's accepted-case fixtures, so the
+  line the check *suggests* and the line it *accepts* cannot drift apart.
+* **`--check <PR>` is new** on the entry point: an approver's own verification,
+  from a terminal, running the same `evaluate` the gate runs. It exists because
+  the incident was not only a malformed marker — it was an approver *verifying*
+  one with a substring query, and getting a green number for a broken handoff.
+* **The token is kept as `BUTCHR-APPROVAL`** rather than given a CrabCast
+  spelling. The agents writing these markers and the agents polling for them are
+  Butchr-managed agents following `prompts/task.md`, which mandates that exact
+  line. A second incompatible spelling would reintroduce the defect this whole
+  change closes, and would do it to every agent at once.
+
+### And the divergence that is not ours to close
+
+The status is **not required** here, where it is required in the source tree.
+That is not a decision — branch protection is the `wroosbit` admin account and
+is on this epic's awaiting-human list (KAN-307). Until somebody with admin makes
+`approval-recorded` required it blocks no merge. Anything describing it as a
+gate is describing the source tree's arrangement, not this one.
+
 ## What this document is not
 
 It is **not a proof**, and nothing here is enforced. No check fails when it goes
