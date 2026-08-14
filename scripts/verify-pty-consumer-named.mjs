@@ -273,14 +273,33 @@ const cliText = fs.readFileSync(path.join(repoRoot, 'src', 'cli.ts'), 'utf8');
 if (section && section.trim().length > 0) {
   // (a) the command the section says does not exist, read OUT of the section.
   const claimed = /`crabcast ([a-z][a-z-]*)`/.exec(section);
-  // NOT anchored to the start of a line. An earlier version was, and
-  // kan394-red-drive arm 6 caught it: a command written inline as
-  // `{ name: 'attach' },` slipped straight past and the check reported the
-  // claim intact. A parse tied to one formatting is a check that holds only
-  // while nobody reformats. This over-matches instead — nested `name:` keys on
-  // argument specs are collected too — which can only make an
-  // absence assertion STRICTER, never falsely green.
-  const cliNames = [...cliText.matchAll(/\bname:\s*'([a-z][a-z-]*)'/g)].map((m) => m[1]);
+  // ANCHORED TO NEITHER LINE POSITION NOR QUOTE STYLE, and both loosenings were
+  // found by something rather than foreseen. The first version anchored to the
+  // start of a line; kan394-red-drive arm 6 caught it, because a command written
+  // inline as `{ name: 'attach' },` slipped past and the check reported the claim
+  // intact. `epic/KAN-59` then caught the same mistake one generalisation short:
+  // still anchored to SINGLE quotes, while `src/cli.ts` already holds 63
+  // double-quoted string literals and `src/mcp.ts` uses double-quoted `name:`
+  // keys eleven times, with no formatter or lint rule enforcing either. The
+  // defeating pattern's population in this file is zero TODAY — so that was a
+  // durability gap and not a live falsehood — but every enabling condition for it
+  // is present in the file being parsed.
+  //
+  // THE BOUND, written here because the next loosening will not be foreseen
+  // either. This parse assumes a command name is a `name:` key whose value is a
+  // QUOTED LITERAL. What still defeats it: a name that is not a literal at all
+  // (`name: ATTACH`, or built by concatenation), a spec that stops using the key
+  // `name`, or a command registered somewhere other than `src/cli.ts`. Any of
+  // those makes this check silently weaker rather than red — so if you are
+  // changing how commands are declared, this assertion is one of the things you
+  // are changing.
+  //
+  // It over-matches on purpose: nested `name:` keys on argument specs are
+  // collected too. For an ABSENCE assertion that can only ever be stricter,
+  // never falsely green.
+  const cliNames = [...cliText.matchAll(/\bname:\s*['"`]([a-zA-Z][a-zA-Z-]*)['"`]/g)].map((m) =>
+    m[1].toLowerCase()
+  );
 
   if (
     vacuity(

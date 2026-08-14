@@ -6,17 +6,24 @@
 // the tree says. `verify-pty-consumer-named.mjs` is a handful of substring and
 // membership tests over two text files, which is exactly the shape that passes
 // forever if a regex is subtly wrong — and its output looks identical either
-// way. Eight arms mutate the four files the proof reads and require it to go
+// way. Nine arms mutate the four files the proof reads and require it to go
 // red NAMING THE RIGHT THING; an arm that goes red by the wrong route is
 // reported as a failure of this drive rather than as a success of the guard.
 //
-// ARMS 6-8 EXIST BECAUSE THE FIRST FIVE WERE NOT ENOUGH, and that is worth
+// ARMS 6-9 EXIST BECAUSE THE FIRST FIVE WERE NOT ENOUGH, and that is worth
 // keeping rather than smoothing over. Arms 1-5 all mutate what the proof
 // asserts is TRUE. `epic/KAN-59` pointed out on review that §4 asserts only
 // that SENTENCES ARE PRESENT — and the sentences carry factual claims about
 // `src/cli.ts` and `scripts/verify-cli-parity.mjs`. They falsified two of them
 // and the proof returned `exit 0 · 17 PASS · 0 FAIL` to both. Arms 6-8 are
 // those mutations, kept as arms so the gap cannot reopen quietly.
+//
+// AND ARM 9 IS WHY ONE ROUND OF THAT WAS NOT ENOUGH EITHER. Arm 6's fix
+// unanchored the parse from line position and left it anchored to QUOTE STYLE;
+// the same reviewer caught that one generalisation short, with the counts that
+// make it a durability gap rather than a live falsehood. Each of these three
+// rounds was found by somebody rather than foreseen, which is the honest
+// summary of what a red drive is for.
 //
 // ⚠ THE WORKING TREE IS NEVER TOUCHED. Every arm runs against a COPY of the
 // files the proof reads, in a temp directory, laid out in the same shape
@@ -29,7 +36,7 @@
 //
 // THE CONTROL IS ARM 0 AND IT IS NOT A FORMALITY. A drive whose baseline is
 // not demonstrated is measuring the runner as much as the guard: if the copied
-// layout were wrong, every arm would go red and the drive would read as eight
+// layout were wrong, every arm would go red and the drive would read as nine
 // successes.
 //
 // THE VACUITY ARM IS THE ONE WORTH THE MOST. Arm 5 does not remove `pty_init`
@@ -305,6 +312,34 @@ console.log('\narm 8  QUOTATION ROTS — verify-cli-parity.mjs reworded away fro
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// ----------------------------------- arm 9: the same claim, a different style
+//
+// ARM 9 IS ARM 6 ONE GENERALISATION OUT, and it exists because arm 6's fix was
+// not enough. Unanchoring the parse from line position left it anchored to
+// QUOTE STYLE — `epic/KAN-59` measured that `src/cli.ts` already holds 63
+// double-quoted string literals and `src/mcp.ts` uses double-quoted `name:`
+// keys eleven times, with nothing enforcing either style. So this arm writes
+// the command the way neither of us happened to write it: double quotes, extra
+// spacing, its own line. A check that only sees the styles its author used is
+// a check that expires at the next reformat.
+console.log('\narm 9  SAME CLAIM, DIFFERENT STYLE — `name:   "attach",` with double quotes');
+{
+  const dir = stage();
+  if (
+    edit(dir, CLI, (t) =>
+      t.replace(/export const COMMANDS: CommandSpec\[\] = \[\n/, (m) => `${m}  { name:   "attach" },\n`)
+    )
+  ) {
+    const { code, out } = runProof(dir);
+    check(code !== 0, 'the proof goes red', `exit ${code}`);
+    check(
+      /FAIL {2}no CLI command is named 'attach'/.test(out),
+      'and names it, exactly as it does for the single-quoted spelling in arm 6'
+    );
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 // ------------------------------------------------- §6 the tree is still clean
 //
 // A BEFORE/AFTER COMPARISON, NOT `git status`. The first draft of this section
@@ -336,7 +371,7 @@ console.log('');
 if (failures > 0) {
   console.log(`FAILED — ${failures} problem(s) above.`);
 } else {
-  console.log('OK — the guard goes red on all eight mutations, and vacuity is distinguishable from a finding.');
+  console.log('OK — the guard goes red on all nine mutations, and vacuity is distinguishable from a finding.');
 }
 
 process.exit(failures ? 1 : 0);
