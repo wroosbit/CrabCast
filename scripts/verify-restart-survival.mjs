@@ -630,7 +630,23 @@ console.log(`\n${'='.repeat(76)}\n5. THE BOUNDARY — a stranger's pane is not s
 // the agent's directory and CrabCast's sidecar. A `launcher.setup` that writes
 // into the user's GLOBAL config — the claude launcher's folder-trust entry is
 // the live example — is outside both, and this section runs the `shell`
-// launcher, which has no such write. Nothing covers that one today.
+// launcher, which has no such write.
+//
+// WHO COVERS IT (KAN-173): `scripts/verify-reattach-leaves-global-config-alone.mjs`.
+// It runs the CLAUDE launcher, redirects `HOME` so the write lands in a scratch
+// config rather than a real one, and watches `~/.claude.json`'s bytes and mtime
+// across the same spawn-then-re-attach sequence this section runs. It is a
+// separate file rather than a §6b for two reasons that are both about THIS
+// file: nothing here redirects `HOME`, and every other section would then be
+// asserting about a different machine than the one it was written against.
+//
+// AND IT FOUND SOMETHING THIS SECTION'S WORDING WOULD HAVE HIDDEN. The global
+// write is defended TWICE — by the separation this section is about, and by
+// `trustClaudeWorkspace` reading before it writes — so a mutant that makes the
+// re-attach provision leaves the file untouched anyway. That file's §2b deletes
+// the trust entry first to take the second defence out of play; without it, the
+// coverage would have been a section that cannot fail. The same question is
+// worth asking of the artifacts THIS section watches.
 // ===========================================================================
 console.log(`\n${'='.repeat(76)}\n6. THE RE-ATTACH WRITES NOTHING — observed as files, not as calls\n${'='.repeat(76)}`);
 {
