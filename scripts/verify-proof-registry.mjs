@@ -177,6 +177,28 @@ const EXCLUSIONS = [
     evidence: 'scripts/verify-no-attach-steal.mjs:10 the failure it catches is a run that reports PASS while leaving a live herdr pane behind'
   },
   {
+    script: 'verify-pane-reclaim-when-interrupted',
+    reason:
+      'Needs a real herdr and opens three real panes — one per driven run — because its subject is ' +
+      'whether a signal handler that closes a pane actually FIRES, and a shimmed herdr has no pane ' +
+      'to leave behind. WHY IT IS WORTH THE HAND-RUN, and this is the load-bearing half: it is the ' +
+      'dynamic answer to a question two other proofs each state and neither owns. ' +
+      '`verify-proof-cleans-up-when-interrupted` drives a proof and interrupts it, and counts ' +
+      'DAEMONS off the process table — the word "pane" did not appear in that file before KAN-169. ' +
+      '`verify-no-attach-steal` reads the census back and asserts its pane is gone, but only on the ' +
+      'path where the run reaches its verdict, because a script cannot meaningfully interrupt ' +
+      'itself. And `verify-panes-are-reclaimed` says so itself, as its boundary 3: it cannot see ' +
+      'whether a reclamation RUNS, since the same text in a `finally` and after an early exit are ' +
+      'the same text. So the register says WHICH scripts claim reclamation and this says WHETHER it ' +
+      'fires. It carries its own red drive — the handler stripped from a copy, where the pane must ' +
+      'SURVIVE — and reaps what that mutant leaks, by a name derived from a TMPDIR it minted ' +
+      'itself, so the proof does not become the thing it catches. NOT WORTH RUNNING WHILE THE ' +
+      'MACHINE IS TIGHT: check `butchr_capacity` first, and run it before merging any change to the ' +
+      'handler block in `verify-no-attach-steal` or to `reclaimProbePane`.',
+    evidence:
+      'scripts/verify-pane-reclaim-when-interrupted.mjs:137 it needs a real herdr and opens three real panes, one per driven run'
+  },
+  {
     script: 'verify-tab-per-agent',
     reason:
       'Needs real tabs and real panes. What it measures is COLUMN WIDTH — that an agent\'s width ' +
