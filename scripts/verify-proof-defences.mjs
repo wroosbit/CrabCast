@@ -1949,7 +1949,12 @@ const PROOF_DEFENCES = [
       "§10's Not-covered table, and still not in either other boundary list — and, the half KAN-394 " +
       'was actually written for, that §10 names their live consumer and DISCLAIMS it in the same ' +
       'section: a consumer named in a contract document with the "this promises nothing" sentence ' +
-      'deleted is a promise in everything but wording.',
+      'deleted is a promise in everything but wording. ' +
+      'AND SINCE KAN-428, that §10 records the DECISION not to contract the triple — the rule, the ' +
+      'reasoning and the reopening condition — PAIRED WITH THE WORLD rather than merely present: ' +
+      'the claim is read out of the document and the membership out of `src/read-contract.ts`, and ' +
+      'the combination "the page still states the decision, the code has already overturned it" is ' +
+      'its own named failure in its own words.',
     anchor: 'This is a broken instrument, NOT a finding about the tree.',
     note:
       'WHY IT EXISTS BESIDE verify-read-contract RATHER THAN INSIDE IT. That proof reconciles ' +
@@ -1966,9 +1971,21 @@ const PROOF_DEFENCES = [
       'WHAT IS NOT GUARDED HERE, and it is why this is `guard` and not `mutation`: nothing in this ' +
       'file mutates anything. The demonstration that these assertions can go red is ' +
       'scripts/kan394-red-drive.mjs — nine arms, control first, including one that renames the whole ' +
-      'declaration away and requires the vacuity wording rather than the ordinary failure — and it ' +
-      'is NOT in the CI array and nothing gates on it, so the evidence that this guard bites is a ' +
-      "hand-run pasted on KAN-394's pull request. " +
+      'declaration away and requires the vacuity wording rather than the ordinary failure — and, for ' +
+      "§6's decision assertions, scripts/kan428-red-drive.mjs: six arms, control first, which " +
+      'require a DELETED CLAIM and an OVERTURNED DECISION to go red in DIFFERENT WORDS. ' +
+      '⚠ WHAT §6 IS FOR, STATED PRECISELY BECAUSE THE FIRST DRAFT OF THIS ENTRY GOT IT WRONG AND A ' +
+      'REGISTER WITH A FALSE ROW IS WORSE THAN NO ROW: §6 adds DIAGNOSIS, not DETECTION. Its ' +
+      'world-half is the conjunction of exactly what §1 and §2 assert, so it CANNOT redden a world ' +
+      'they do not — enumerated over all nine single-action world mutations, 0 sole detections. ' +
+      "Arm 3's promotion of `pty_init` into `COVERED_SURFACES` does leave every SENTENCE-level " +
+      'check in §4 and §6 passing while the document states a decision the repository has ' +
+      'reversed, and §2 goes red on it unaided and always did. What §6 contributes is the NAME of ' +
+      'the failure: a membership row sends a reader to fix a LIST, where the repair is to retake a ' +
+      'DECISION. That is why arm 1 — decision deleted, code still right, and NO contradiction ' +
+      'permitted in the output — is the load-bearing arm rather than arm 3. NEITHER DRIVE IS IN ' +
+      'THE CI ARRAY and nothing gates on either, so the evidence that this guard bites is a ' +
+      'hand-run pasted on the pull requests for KAN-394 and KAN-428. ' +
       'AND THE SEAM NOTHING IN THIS REPOSITORY CAN CLOSE: it reads source text only, so it says ' +
       'nothing about the built artifact or the wire — that is verify-read-contract\'s — and, more ' +
       'importantly, NOTHING CHECKS THAT THE NAMED CONSUMER IS STILL A CONSUMER. Butchr could retire ' +
