@@ -34,7 +34,7 @@
 //                    operations are run. Every event carries `durable: false`
 //                    and a `durabilityError` naming the real errno, and each
 //                    one AGREES WITH ITS OWN RESPONSE. (AC 1)
-//   4. mutation    — three mutants, each asserting its own edit count, each
+//   4. mutation    — four mutants, each asserting its own edit count, each
 //                    watched going red. (AC 2)
 //                      4A restores the unconditional claim (`durability()`
 //                         always answers true): the events say the record is on
@@ -89,7 +89,7 @@
 //     the forwarder delivers in order, and that a subscriber in THIS process
 //     cannot be behind a forwarder in another one. Both are now IRRELEVANT
 //     rather than asserted: `driveLifecycle` declares the six slots once and
-//     waits until all twelve reads have something behind them, so a read that
+//     waits until all of its reads have something behind them, so a read that
 //     nothing waits on is not expressible. A slot still empty at the deadline
 //     is named, counted, and known to have had ARRIVAL_TIMEOUT_MS to show up —
 //     so "absent" and "late" are now different reports rather than the same
@@ -177,7 +177,7 @@ const verdict = (ok, yes, no) => {
  * 3 and 4 still report.
  *
  * It still does NOT distinguish "never sent" from "not yet arrived", and that
- * is now a much smaller claim than it was: `driveLifecycle` waits on ALL TWELVE
+ * is now a much smaller claim than it was: `driveLifecycle` waits on ALL of its
  * reads before any of them is taken (KAN-445), so by the time this helper sees
  * an absence, the wait has already given up on that slot BY NAME and said so.
  * Conflating the two here would still put a claim about a race into a helper
@@ -207,22 +207,33 @@ const waitFor = async (predicate, ms, what) => {
   return false;
 };
 
-/** How long every one of the twelve reads is given to arrive (KAN-445). */
+/** How long every one of the reads is given to arrive (KAN-445). */
 const ARRIVAL_TIMEOUT_MS = 10_000;
 
 /**
- * The words raised when the wait for the twelve reads gives up.
+ * The words raised when the wait for the reads gives up.
  *
  * Kept in ONE place because section 4D prints them for a run whose timeout is
  * the result and must therefore not be counted into `failures`. Two callers,
  * one sentence: a drive that paraphrased the message would stop being evidence
  * about what a real timeout actually says, which is the only thing it is for.
+ *
+ * `total` IS PASSED IN RATHER THAN WRITTEN DOWN, and that is the point of the
+ * parameter. This function used to say "of the 12 reads" as a literal while the
+ * loop that produced `missing` derived its count from `SLOTS` — so adding a
+ * seventh slot left the mechanism correct and the SENTENCE wrong, reporting
+ * `12/14` outstanding reads as `10/12`, with nothing going red about it. That is
+ * KAN-245's hand-maintained-constant-beside-a-self-deriving-loop, and it was
+ * sitting inside the change whose whole argument is that derivation beats
+ * assertion (caught by `epic/KAN-59` on #118, by adding a seventh slot and
+ * reading what this printed). The prose about an instrument is part of the
+ * instrument.
  */
-const arrivalFailureText = (label, missing) =>
+const arrivalFailureText = (label, missing, total) =>
   `${label}: THE WAIT FOR THE LIFECYCLE EVENTS GAVE UP after ${ARRIVAL_TIMEOUT_MS}ms with ` +
-  `${missing.length} of the 12 reads\n` +
+  `${missing.length} of the ${total} reads\n` +
   `    still empty: ${missing.join(', ')}.\n` +
-  '    Every one of the twelve reads is waited on (KAN-445), so a slot named here did not arrive\n' +
+  '    Every one of those reads is waited on (KAN-445), so a slot named here did not arrive\n' +
   `    within ${ARRIVAL_TIMEOUT_MS}ms — it is not merely absent at the instant somebody looked at it.`;
 
 // ---------------------------------------------------------------- the scratch --
@@ -809,7 +820,7 @@ async function driveLifecycle(dist, label, { reportArrival = true } = {}) {
   responses.degraded.deactivate =
     await call('crabcast_deactivate_agent', { path: VICTIM });
 
-  // ---- the twelve reads, declared once ------------------------------------
+  // ---- the reads, declared once -------------------------------------------
   //
   // KAN-445. Every read this function performs is derived from this array, and
   // so is the wait above them. That is the point of the array rather than
@@ -851,7 +862,13 @@ async function driveLifecycle(dist, label, { reportArrival = true } = {}) {
     { half: 'degraded', action: 'agent.deactivated', path: VICTIM }
   ];
 
-  /** Which of the twelve reads have nothing behind them at this instant. */
+  // One socket read and one MCP read per slot. DERIVED, never written down:
+  // every count this function reports comes from here, so a slot added above
+  // moves the reported totals with it. See `arrivalFailureText` for what a
+  // literal here cost when `epic/KAN-59` drove a seventh slot through it.
+  const TOTAL_READS = SLOTS.length * 2;
+
+  /** Which of the reads have nothing behind them at this instant. */
   const outstandingReads = () => {
     const missing = [];
     for (const s of SLOTS) {
@@ -871,22 +888,22 @@ async function driveLifecycle(dist, label, { reportArrival = true } = {}) {
 
   const allArrived = await waitFor(
     () => outstandingReads().length === 0,
-    ARRIVAL_TIMEOUT_MS, `${label}: an event behind all twelve reads`
+    ARRIVAL_TIMEOUT_MS, `${label}: an event behind all ${TOTAL_READS} reads`
   );
   const stillMissing = outstandingReads();
   console.log(
-    `   arrival: ${12 - outstandingBeforeWait.length}/12 reads already satisfied before the wait, ` +
-    `${12 - stillMissing.length}/12 after it`
+    `   arrival: ${TOTAL_READS - outstandingBeforeWait.length}/${TOTAL_READS} reads already ` +
+    `satisfied before the wait, ${TOTAL_READS - stillMissing.length}/${TOTAL_READS} after it`
   );
   if (outstandingBeforeWait.length) {
     console.log(`     the wait was doing work for: ${outstandingBeforeWait.join(', ')}`);
   }
-  const arrival = { ok: allArrived, missing: stillMissing, outstandingBeforeWait };
+  const arrival = { ok: allArrived, missing: stillMissing, outstandingBeforeWait, total: TOTAL_READS };
   // Section 4D drives this timeout deliberately and asserts on the returned
   // value, so it asks not to have the failure counted twice — once as its own
   // result and once as this script's.
   if (!allArrived && reportArrival) {
-    verdict(false, '', arrivalFailureText(label, stillMissing));
+    verdict(false, '', arrivalFailureText(label, stillMissing, TOTAL_READS));
   }
 
   fs.chmodSync(registry, 0o600);
@@ -1142,7 +1159,7 @@ mutation1: {
 // KAN-445 AC2: the new wait is DRIVEN rather than asserted to work. The
 // `agent.configured` broadcast is suppressed in the compiled router — the frame
 // is still built, and simply never leaves the daemon — so two of the six slots,
-// and therefore FOUR of the twelve reads, cannot be satisfied by any amount of
+// and therefore FOUR reads, cannot be satisfied by any amount of
 // waiting. A run against this build has to give up and name exactly those four.
 //
 // THIS IS THE ONE SECTION WHOSE TIMEOUT IS THE RESULT, so `driveLifecycle` is
@@ -1152,7 +1169,7 @@ mutation1: {
 // actual wording rather than a paraphrase that could drift away from it.
 //
 // Why suppressing a broadcast and not shortening the deadline: a deadline of 0
-// would make all twelve slots outstanding and would prove only that a timeout
+// would make every slot outstanding and would prove only that a timeout
 // prints something. What has to be shown is that the report DISCRIMINATES — the
 // four reads fed by the suppressed event are named, and the other eight are
 // reported as arrived on the same run.
@@ -1179,9 +1196,10 @@ mutation4D: {
   const gotMissing = [...mutantD.arrival.missing].sort();
 
   console.log('   the verdict this run WOULD have raised, printed from the function that raises it:');
-  console.log(`     ${arrivalFailureText('no-configured', mutantD.arrival.missing)}`);
-  console.log(`\n   reads still empty after the wait: ${gotMissing.length}/12`);
-  console.log(`   the other ${12 - gotMissing.length} arrived on this same run, so the report is not wholesale`);
+  console.log(`     ${arrivalFailureText('no-configured', mutantD.arrival.missing, mutantD.arrival.total)}`);
+  console.log(`\n   reads still empty after the wait: ${gotMissing.length}/${mutantD.arrival.total}`);
+  console.log(`   the other ${mutantD.arrival.total - gotMissing.length} arrived on this same run, ` +
+    `so the report is not wholesale`);
 
   verdict(
     mutantD.arrival.ok === false &&
@@ -1206,8 +1224,8 @@ console.log(
       `  \`durable: false\` on every one of them and agrees with the response; and four\n` +
       `  mutations — the unconditional claim restored, the field removed, one site's spread\n` +
       `  deleted, one broadcast suppressed — each turn a named check red. Every one of the\n` +
-      `  twelve event reads was waited on before it was taken, so a slot reported absent had\n` +
-      `  ${ARRIVAL_TIMEOUT_MS}ms to arrive and did not (KAN-445).`
+      `  ${real.arrival.total} event reads was waited on before it was taken, so a slot reported absent\n` +
+      `  had ${ARRIVAL_TIMEOUT_MS}ms to arrive and did not (KAN-445).`
     : `  ${failures} section(s) FAILED.`
 );
 process.exit(failures ? 1 : 0);
