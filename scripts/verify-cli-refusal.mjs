@@ -527,12 +527,15 @@ if (typeof derivation === 'string') {
 //
 // ⚠ THAT BAND OVERLAPS THIS SECTION, which is why it is written down rather
 // than dismissed: §1's first attempt runs a second or two after the daemon
-// starts. What it CANNOT do is reach the classifier, and the reason is timing
-// rather than luck — the flip happens once, so it can spoil at most ONE
-// attempt, and the classifier runs only after FIVE have lost, by which time
-// the sampler has been live for several seconds. An earlier count — "never
-// within a pair, in 130 pairs" — was true and said nothing about why; this
-// says why, and admits the band exists.
+// starts. What keeps it off the CLASSIFIER is the shape of the event rather
+// than luck — the flip happens ONCE, near start-up, so it can spoil at most one
+// attempt, and the classifier runs only after all five have lost, which the
+// retry ordinarily avoids well before the fifth. ⚠ NOT INSTRUMENTED: that is
+// watched, and no figure is quoted for it on purpose. An earlier draft said
+// "attempt 5 is at t≈8-10s", and a specific number nobody measured is exactly
+// the kind that later reads as permission to stop checking (epic/KAN-59, on
+// review). An earlier count — "never within a pair, in 130 pairs" — was true
+// and said nothing about why; this says why, and admits the band exists.
 //
 // ⚠ AND A SECOND VECTOR, WHICH IS WORSE THAN THE FIRST AND HAS NO BAND.
 // `stallLine` ends with `c.stalled ? 'AT OR OVER, so no agent is admitted
