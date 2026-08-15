@@ -1996,6 +1996,42 @@ const PROOF_DEFENCES = [
       'claim quietly becomes false. That is a fact about another tree, it is covered by nobody, and ' +
       "KAN-394's \"what would reopen this\" is where it is written down."
   },
+  {
+    script: 'verify-doc-proof-ci-class',
+    defence: 'guard',
+    central:
+      'every markdown table in `docs/` that names two or more proofs marks the ones ' +
+      '`.github/workflows/ci.yml` does not run, marks none that it does, and explains the mark in ' +
+      'prose where it uses it — so a uniform-looking column cannot present a mixed CI class in ' +
+      'silence.',
+    anchor: 'but CI runs every proof it names',
+    note:
+      'THE ANCHOR IS THE GUARD, and it is the direction that makes this a JOIN rather than an ' +
+      'honesty-phrase check. KAN-391\'s AC5 refused to gate on prose containing an honesty phrase, ' +
+      'because a gate a phrase can silence is worse than no gate. The anchored branch is the one ' +
+      'that fires when the mark is PRESENT and FALSE — a proof that has since been added to the ' +
+      'verify array — so writing the phrase cannot buy a green, and which answer is right is read ' +
+      'off the workflow rather than off the sentence. Delete that branch and the file becomes ' +
+      'exactly the thing KAN-391 rejected while every remaining assertion stays green, which is why ' +
+      'it is the anchor. ' +
+      'WHAT IS NOT GUARDED HERE, and it is why this is `guard` and not `mutation`: nothing in this ' +
+      'file mutates anything. The demonstration that these assertions go red is ' +
+      'scripts/kan433-red-drive.mjs — eight arms, control first and a FALSE-POSITIVE control last, ' +
+      'each mutating a staged copy so the working tree is never written to. ARM 3 IS THE ONE THAT ' +
+      'DECIDES WHETHER THE FILE IS WORTH HAVING: it moves a proof into the CI array and touches no ' +
+      'document at all, asserts the document is byte-identical, and requires the red anyway. A ' +
+      'check that only read prose could not go red there. Arm 4 drives the same join from the other ' +
+      'side, because a join asserted in one direction only is half a join. THAT DRIVE IS NOT IN THE ' +
+      'CI ARRAY and nothing gates on it, so the evidence that this guard bites is a hand-run pasted ' +
+      'on the pull request for KAN-433. ' +
+      '⚠ THE SEAM, and it is a real hole rather than a boundary: KAN-433 also fixed two PROSE ' +
+      'sentences — in docs/send-contract.md and docs/herdr-pane-handle-join.md — that rest a claim ' +
+      'on an excluded proof. NOTHING MECHANICAL HOLDS EITHER, here or elsewhere, and a later edit ' +
+      'can undo them silently. It is not closeable by this design: the rule needs a CELL to attach ' +
+      'a mark to and a paragraph has none. scripts/kan433-doc-proof-sweep.mjs is how that hole is ' +
+      'measured — every proof named anywhere in docs/*.md joined to what CI runs — and it asserts ' +
+      'nothing and gates nothing, so running it closes no part of this.'
+  },
 
   // -------------------------------------------------------------------------
   // none — and each names what that leaves undefended. This is the half the

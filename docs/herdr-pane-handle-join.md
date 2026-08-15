@@ -309,10 +309,34 @@ as well as the value *resolving*. Its verdict feeds the script's existing
 handle out of, so a green on that branch says nothing about the join. §4b makes
 the `pane get` subprocess call itself rather than going through
 `HerdrBridge.paneNameForHandle`; that the *daemon* makes this exact call is
-covered by `verify-agent-cost-attribution-live.mjs`, which runs the bridge for
-real but against the herdr on `PATH` — so **neither script runs our code against
+covered by `verify-agent-cost-attribution-live.mjs` — **which is hand-run and not
+in CI**, registered in `scripts/verify-proof-registry.mjs`'s `EXCLUSIONS` because
+it needs a running herdr and a real pane — and which runs the bridge for
+real but against the herdr on `PATH`, so **neither script runs our code against
 the release under test, and that hole is between them rather than inside
-either.** And §4b pins the *behaviour*, not the *contract*: the form is still
+either.** ⚠ **Both halves of that sentence are limits, and the CI one is the
+easier to read past**: the covering script does not run on a pull request, so a
+change to the join is caught only when somebody runs it. Its `EXCLUSIONS` entry
+names the moment — before merging any change to `PANE_HANDLE_VAR` in
+`src/agent-cost.ts`, `paneNameForHandle` in `src/herdr.ts`, or `chargedPaneNames`
+in `src/daemon.ts`.
+
+**Why that clause is here and not left to the `-live` suffix, since it was
+arguable and was argued** ([KAN-433](https://wroosbit.atlassian.net/browse/KAN-433)).
+A suffix is a naming convention, not a statement, and the convention is
+one-directional: all five tracked `verify-*-live.mjs` are excluded, but **eleven
+of the sixteen recorded exclusions carry no suffix at all**. So a reader who
+learns to read `-live` as *"not in CI"* has learned something true, and its
+converse — no suffix, therefore in CI — is false about eleven proofs. A signal
+that only works in one direction cannot carry a disclosure, because a reader
+cannot tell which direction they are in without the register the suffix was
+standing in for. The deciding reason is local, though — **this same section
+already discloses, of `verify-herdr-release`, that "It is hand-run and not in
+CI"**. Two sentences a few paragraphs apart, one saying where its proof runs and
+one silent, do not read as a convention applied twice; they read as a difference.
+That inconsistency is what made this a finding rather than a preference.
+
+And §4b pins the *behaviour*, not the *contract*: the form is still
 undocumented for that subcommand (§2.7), which is why §3's ask stands.
 
 **What the red drive found, because it is the part worth carrying forward.**

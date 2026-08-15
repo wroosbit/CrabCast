@@ -454,7 +454,14 @@ pairwise in both directions.
 * **Whether `COMPOSER_MARKERS` matches a real Claude Code pane.** That is the
   load-bearing assumption under every verdict on this page, and no shape
   contract can reach it. `verify-send-confirms-delivery-live.mjs` is what runs
-  the same code against a real pane nobody wrote. **And it matches more than it
+  the same code against a real pane nobody wrote — and it is **excluded from CI**
+  (it needs a real herdr and a real Claude Code agent, and it must run under the
+  operator's own `$HOME`), registered in `scripts/verify-proof-registry.mjs`'s
+  `EXCLUSIONS` exactly as `verify-interrupt-at-dialog-live.mjs` is in
+  [§10](#where-this-is-enforced). **So the load-bearing assumption on this page
+  is held by a hand-run**, and its CI sibling — `verify-send-confirms-delivery.mjs`,
+  named in the bullet above for the timing half — cannot stand in for it: a shimmed
+  pane renders the marker it is then checked against. **And it matches more than it
   was meant to:** a dialog's highlight caret is `❯`, so `splitAtComposer` finds
   a "composer" at `❯ 1. Yes` and reports the selected option as the input line.
   That is measured (KAN-383) and it is why the submit precondition in
