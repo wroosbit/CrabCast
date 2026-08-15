@@ -17,11 +17,21 @@
 //                     been overturned underneath it, and every present-tense
 //                     assertion about its WORDING stays green. Arms 3 and 4.
 //
-// The second is the one KAN-428 was written for and the one nothing caught
-// before: a document asserting a live decision about code that no longer holds
-// it. So arms 3 and 4 require the red to arrive in the CONTRADICTION's own
-// words, and arm 1 requires it NOT to — a missing sentence reported as a lie
-// would send the next reader to rewrite a paragraph that was fine.
+// The second is the one KAN-428 was written for — a document asserting a live
+// decision about code that no longer holds it.
+//
+// ⚠ AND IT IS NOT ONE NOTHING CAUGHT BEFORE. The first draft of this comment
+// said it was, and `epic/KAN-59` caught that on review: §1 and §2 of the proof
+// go red on every such world unaided, and did so before this ticket existed.
+// §6's world-half is their conjunction and cannot fire alone — 0 sole
+// detections across all nine single-action world mutations. What §6 adds is the
+// NAME of the failure, and that is what arms 1 and 3 exist to separate: a
+// membership row alone sends a reader to fix a LIST, when the repair is to
+// retake a DECISION. So arms 3 and 4 require the red to arrive in the
+// CONTRADICTION's own words, and arm 1 requires it NOT to — a missing sentence
+// reported as a lie would send the next reader to rewrite a paragraph that was
+// fine. Arm 1 is the load-bearing one: a check staying quiet about the thing it
+// is not evidence for.
 //
 // ⚠ THE WORKING TREE IS NEVER TOUCHED. Every arm runs against a COPY, in a temp
 // directory laid out in the same shape so the proof's `..`-relative paths
@@ -207,10 +217,17 @@ console.log("\narm 3  WORLD MOVED — 'pty_init' promoted to COVERED_SURFACES, d
       /the document RECORDS A DECISION the repository has already overturned/.test(out),
       'and says what is wrong in a sentence about the DOCUMENT rather than about a list'
     );
-    check(LYING.test(out), 'and prints the loud explanation, because this is the silent direction');
+    check(
+      LYING.test(out),
+      'and prints the loud explanation, because a membership row alone under-describes this'
+    );
+    check(
+      /FAIL {2}'pty_init' is NOT in COVERED_SURFACES/.test(out),
+      "and §2 reports it too — §6 is NOT the sole detector here and this arm asserts that it is not"
+    );
     check(
       /PASS {2}the decision itself/.test(out),
-      'while every sentence-level check still PASSES — which is exactly why §6 had to exist'
+      'while every sentence-level check still PASSES — so the wording alone cannot tell this from a healthy tree'
     );
     fs.rmSync(dir, { recursive: true, force: true });
   }

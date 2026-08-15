@@ -1973,12 +1973,19 @@ const PROOF_DEFENCES = [
       'scripts/kan394-red-drive.mjs — nine arms, control first, including one that renames the whole ' +
       'declaration away and requires the vacuity wording rather than the ordinary failure — and, for ' +
       "§6's decision assertions, scripts/kan428-red-drive.mjs: six arms, control first, which " +
-      'require a DELETED CLAIM and an OVERTURNED DECISION to go red in DIFFERENT WORDS, and whose ' +
-      'arm 3 records the defect §6 was built for — a promotion of `pty_init` into ' +
-      '`COVERED_SURFACES` leaves every sentence-level check in §4 and §6 PASSING while the document ' +
-      'states a decision the repository has already reversed. NEITHER DRIVE IS IN THE CI ARRAY and ' +
-      'nothing gates on either, so the evidence that this guard bites is a hand-run pasted on the ' +
-      'pull requests for KAN-394 and KAN-428. ' +
+      'require a DELETED CLAIM and an OVERTURNED DECISION to go red in DIFFERENT WORDS. ' +
+      '⚠ WHAT §6 IS FOR, STATED PRECISELY BECAUSE THE FIRST DRAFT OF THIS ENTRY GOT IT WRONG AND A ' +
+      'REGISTER WITH A FALSE ROW IS WORSE THAN NO ROW: §6 adds DIAGNOSIS, not DETECTION. Its ' +
+      'world-half is the conjunction of exactly what §1 and §2 assert, so it CANNOT redden a world ' +
+      'they do not — enumerated over all nine single-action world mutations, 0 sole detections. ' +
+      "Arm 3's promotion of `pty_init` into `COVERED_SURFACES` does leave every SENTENCE-level " +
+      'check in §4 and §6 passing while the document states a decision the repository has ' +
+      'reversed, and §2 goes red on it unaided and always did. What §6 contributes is the NAME of ' +
+      'the failure: a membership row sends a reader to fix a LIST, where the repair is to retake a ' +
+      'DECISION. That is why arm 1 — decision deleted, code still right, and NO contradiction ' +
+      'permitted in the output — is the load-bearing arm rather than arm 3. NEITHER DRIVE IS IN ' +
+      'THE CI ARRAY and nothing gates on either, so the evidence that this guard bites is a ' +
+      'hand-run pasted on the pull requests for KAN-394 and KAN-428. ' +
       'AND THE SEAM NOTHING IN THIS REPOSITORY CAN CLOSE: it reads source text only, so it says ' +
       'nothing about the built artifact or the wire — that is verify-read-contract\'s — and, more ' +
       'importantly, NOTHING CHECKS THAT THE NAMED CONSUMER IS STILL A CONSUMER. Butchr could retire ' +

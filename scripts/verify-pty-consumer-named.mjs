@@ -19,8 +19,19 @@
 // somebody deleting it — it is somebody CONTRACTING THE SURFACE and never
 // returning to the paragraph. The document then states a decision the
 // repository has already overturned, and every present-tense assertion about
-// its wording stays green. §6 pairs the claim with the world so that world
-// is a named contradiction rather than a clean run.
+// its wording stays green. §6 pairs the claim with the world so that world is a
+// named CONTRADICTION rather than only a membership failure.
+//
+// ⚠ AND THE PRECISE CLAIM, because the first draft of this comment overstated
+// it and `epic/KAN-59` caught it on review: that world is NOT one nothing else
+// catches. §1 and §2 go red on it unaided, and did so before this ticket
+// existed. §6's world-half is literally their conjunction and CANNOT fire alone
+// — measured at 0 sole detections across all nine single-action world
+// mutations. So §6 adds DIAGNOSIS, not DETECTION. That is not a small thing and
+// it is the reason the section is here: a membership row going red says a LIST
+// changed, and it sends a reader to fix a list. Only §6 says the DOCUMENT is
+// now asserting a decision the repository has reversed, which is a paragraph to
+// retake. Those are different repairs, and nothing else here distinguishes them.
 //
 // WHY THIS IS A SEPARATE SCRIPT FROM verify-read-contract.mjs, WHICH ALREADY
 // HOLDS §10. That proof reconciles `UNCOVERED_SURFACES` against §10's table in
@@ -390,6 +401,11 @@ if (section && section.trim().length > 0) {
 // which is the finding a reader needs in order to know that a paragraph — not
 // only a list entry — has to be revisited. Two failures for one mutation is the
 // intent, not duplication.
+//
+// ⚠ SO DO NOT READ THIS SECTION AS CATCHING SOMETHING THEY MISS. It cannot:
+// `stillUncovered` below is the conjunction of exactly what §1 and §2 assert,
+// so there is no world it reddens alone, and the nine-mutation enumeration that
+// established that found 0. What it contributes is the NAME of the failure.
 //
 // THE FIVE SENTENCES BELOW ARE HAND-NAMED, the same deliberate exception to
 // KAN-245 as the three action names at the top of this file and for the same
