@@ -507,16 +507,32 @@ if (typeof derivation === 'string') {
 // `c.cpu` being null or not selects WORDS as well: "cpu in use: not measured
 // here …" against "cpu in use: N of M cores, measured over …", `load allows`
 // against `load would allow`, and the whole `cpu allows …` clause. Nothing in
-// this fixture pins the CPU instrument, and two of this ticket's own
-// measurement runs sat on opposite sides of that flip — across daemons, never
-// within a pair, in 130 pairs.
+// this fixture pins the CPU instrument.
 //
-// LEFT AS A VERDICT ON PURPOSE. If it ever flips between two readings a second
-// apart, the classifier calls it a renderer defect and §1 goes red with a FAIL
-// — which is exactly what it did before this ticket, for every kind of drift.
-// Noisy rather than silent is the right direction for the residue: a false
-// GATE FAULT would excuse a real defect, and that is the failure this whole
-// change is trying not to introduce.
+// IT IS REACHABLE, AND THE BAND IS NAMED RATHER THAN COUNTED. `daemon.ts`
+// opens a CPU window at boot and closes it `CPU_FIRST_WINDOW_MS` later —
+// 3 seconds — and publishes the first observation then; the steady cadence
+// (`CPU_SAMPLE_INTERVAL_MS`, 30s) follows. So every daemon spends its first
+// ~3 seconds saying "not measured here" and then flips, once. MEASURED on this
+// machine, 2026-08-15, polling one fresh daemon for 150 seconds: FALLBACK at
+// t+0.4s, MEASURED at t+4.8s over a 3s window, and no further flip to t+120s.
+// The daemon's own log names it: "CPU sampler: live measurement established".
+//
+// ⚠ THAT BAND OVERLAPS THIS SECTION, which is why it is written down rather
+// than dismissed: §1's first attempt runs a second or two after the daemon
+// starts. What it CANNOT do is reach the classifier, and the reason is timing
+// rather than luck — the flip happens once, so it can spoil at most ONE
+// attempt, and the classifier runs only after FIVE have lost, by which time
+// the sampler has been live for several seconds. An earlier count — "never
+// within a pair, in 130 pairs" — was true and said nothing about why; this
+// says why, and admits the band exists.
+//
+// LEFT AS A VERDICT ON PURPOSE. If it does ever land on the last attempt, the
+// classifier calls it a renderer defect and §1 goes red with a FAIL — which is
+// exactly what it did before this ticket, for every kind of drift. Noisy
+// rather than silent is the right direction for a residue: a false GATE FAULT
+// would excuse a real defect, and that is the failure this whole change is
+// trying not to introduce.
 
 if (typeof derivation === 'string' && agreed) {
   // THE CLAIM, PUT IN FULL. The two readings agreed, so the byte-for-byte
