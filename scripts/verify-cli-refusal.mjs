@@ -608,6 +608,38 @@ if (typeof derivation === 'string' && agreed) {
       drift
     );
   } else {
+    // BOTH SIDES OF THE COMPARISON, RETAINED. A red that says a line did not
+    // reconcile and does not say what it was compared against sends the reader
+    // back to reproduce it, and this one only fires on a machine that was busy
+    // enough to lose five attempts — the state hardest to reproduce on purpose.
+    // Asked for by `epic/KAN-59` reviewing KAN-448, whose own candidate cause
+    // for a variable arm could not be confirmed or excluded from the transcript
+    // that existed.
+    //
+    // The counterpart is matched on the derivation line's own LEADING FIELD —
+    // `machine:`, `cpu in use:`, `headroom:` — because that is what a reader
+    // pairs them by, and because a line that is simply GONE has no nearest
+    // neighbour and must say so rather than being shown beside an unrelated
+    // line that happens to share a few characters. Both texts are printed raw
+    // and normalised, so the difference that actually defeated the classifier
+    // is the one on the page.
+    const stdoutLines = human.stdout.split('\n');
+    const counterpart = (line) => {
+      const field = line.split(':')[0].trim();
+      const found = stdoutLines.find((l) => l.trim().startsWith(`${field}:`));
+      return found ?? `(no line of stdout begins with ${JSON.stringify(`${field}:`)} — it is not there at all)`;
+    };
+    const unreconciled = derivation
+      .split('\n')
+      .filter((line) => !stdoutSansFigures.includes(withoutFigures(line)));
+    for (const line of unreconciled.slice(0, 3)) {
+      show('a line that did not reconcile — the derivation, then its counterpart in stdout:',
+        `derivation raw:  ${line}\n` +
+        `stdout raw:      ${counterpart(line)}\n` +
+        `derivation norm: ${withoutFigures(line)}\n` +
+        `stdout norm:     ${withoutFigures(counterpart(line))}`);
+    }
+
     // Not the machine: normalising every figure did not reconcile them, so
     // whatever changed was not a figure. These are verdicts.
     check(
@@ -615,13 +647,10 @@ if (typeof derivation === 'string' && agreed) {
       'stdout carries that derivation VERBATIM — every line, contiguous, unaltered\n' +
         '        (and it is NOT the machine moving: the two disagree with every figure normalised)'
     );
-    const missing = derivation
-      .split('\n')
-      .filter((line) => !stdoutSansFigures.includes(withoutFigures(line)));
     check(
-      missing.length === 0,
+      unreconciled.length === 0,
       `no line of the derivation is missing from stdout, with every figure normalised` +
-        `${missing.length ? `: ${JSON.stringify(missing)}` : ''}`
+        `${unreconciled.length ? `: ${JSON.stringify(unreconciled)}` : ''}`
     );
     check(
       unindented,

@@ -116,6 +116,20 @@ const check = (ok, claim) => {
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'kan448-drive-'));
 process.on('exit', () => fs.rmSync(scratch, { recursive: true, force: true }));
 
+/**
+ * EVERY ARM'S FULL PROOF TRANSCRIPT, KEPT ON DISK AND NAMED.
+ *
+ * This drive prints a summary, and a summary is not the run. `epic/KAN-59`
+ * reviewing KAN-448 grepped one of these summaries for a line the proof prints
+ * on stdout, got zero, and nearly concluded a cause was excluded — the
+ * transcript had never contained the proof's session at all. A null result is a
+ * claim about the search, and the search could not have found it.
+ *
+ * So the transcripts survive the run and the path is printed at the end. They
+ * are the only copy of what the mutant actually said.
+ */
+const transcripts = fs.mkdtempSync(path.join(os.tmpdir(), 'kan448-transcripts-'));
+
 // A MUTANT BUILD OUTSIDE THE REPOSITORY CANNOT RESOLVE ITS DEPENDENCIES, and
 // the way it fails is the reason this line has a comment. `dist/herdr.js`
 // imports `node-pty`, so a copy of `dist/` under /tmp dies at module load with
@@ -156,8 +170,10 @@ function sectionsOf(out) {
   return map;
 }
 
+let transcriptSeq = 0;
+
 /** Run the proof against one build and hand back everything it said. */
-function runProof(against) {
+function runProof(against, label = `arm-${transcriptSeq}`) {
   const started = Date.now();
   const run = spawnSync(process.execPath, [proof, against], {
     encoding: 'utf8',
@@ -165,6 +181,8 @@ function runProof(against) {
     maxBuffer: 64 * 1024 * 1024
   });
   const out = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+  const transcript = path.join(transcripts, `${String(transcriptSeq++).padStart(2, '0')}-${label}.log`);
+  fs.writeFileSync(transcript, out);
   const map = sectionsOf(out);
   const bodyOf = (re) => (([...map].find(([t]) => re.test(t)) ?? [null, []])[1] ?? []).join('\n');
   const failLines = (text) => text.split('\n').filter((l) => /^\s*FAIL\s/.test(l));
@@ -174,6 +192,7 @@ function runProof(against) {
   return {
     code: run.status,
     out,
+    transcript,
     seconds: Math.round((Date.now() - started) / 1000),
     /** Present so an arm can say the split found the sections at all. */
     sawSection1: one !== '',
@@ -188,7 +207,7 @@ function runProof(against) {
 }
 
 const summarise = (r) => {
-  console.log(`   exit ${r.code}, ${r.seconds}s`);
+  console.log(`   exit ${r.code}, ${r.seconds}s   transcript: ${r.transcript}`);
   console.log(`   verdict:          ${r.verdict}`);
   console.log(`   §1 FAIL / GATE:   ${r.section1Failures.length} / ${r.section1GateFaults.length}`);
   console.log(`   §2 FAIL:          ${r.section2Failures.length}`);
@@ -213,6 +232,41 @@ const expectRan = (r) => {
     console.log(r.out.split('\n').slice(0, 12).map((l) => `     ${l}`).join('\n'));
   }
   return ran;
+};
+
+/**
+ * PIN THE CPU INSTRUMENT — a FIXTURE CONTROL for the two arms that expect a
+ * GATE FAULT, and the third time this ticket's own lesson has been applied to
+ * its own artefact.
+ *
+ * `freshObservedCpu()` returns null for a daemon's first ~3 seconds and a
+ * measurement afterwards, and the two produce DIFFERENT WORDS in the
+ * derivation — "cpu in use: not measured here …" against "cpu in use: N of M
+ * cores, measured over …", `load allows` against `load would allow`, the whole
+ * `cpu allows …` clause, and `startsLine`'s basis. §1's retry runs across that
+ * boundary.
+ *
+ * A word difference does not reconcile under figure-normalisation, so a flip
+ * landing on the compared pair makes §1 report a check FAILURE where these arms
+ * assert a GATE FAULT. ⚠ WHICH MEANS AN ARM ASSERTING `gate fault and no check
+ * failure` WITHOUT THIS PIN IS ITSELF AN ASSERTION OVER A LIVE MEASUREMENT —
+ * exactly the class this ticket exists to remove. `epic/KAN-59` reproduced it
+ * as 0/0/1 across three runs of arm 4 (PR #119).
+ *
+ * Pinning it to null makes the wording stable for the whole run without
+ * changing what either arm demonstrates: arm 1 still moves a figure and nothing
+ * else, arm 4 still mangles digits and nothing else. It removes a confound
+ * rather than the subject.
+ *
+ * ⚠ IT IS NOT APPLIED TO ARMS 2, 3 AND 5, and that is deliberate: those assert
+ * a check FAILURE, which a wording flip cannot manufacture — their mutations
+ * already make the texts irreconcilable. A pin there would be scaffolding
+ * nobody needs.
+ */
+const PIN_CPU_INSTRUMENT = {
+  file: 'capacity.js',
+  find: 'cpu: freshObservedCpu(),',
+  replace: 'cpu: null,'
 };
 
 /**
@@ -243,7 +297,7 @@ const ACCUSATION = 'no line of the derivation is missing from stdout:';
 
 rule('0. CONTROL — the unmutated build');
 
-const control = runProof(distDir);
+const control = runProof(distDir, 'control');
 summarise(control);
 check(control.code === 0, 'the proof passes against an unmutated build');
 check(control.gateFaults.length === 0, 'and reports no gate fault, so every arm below is measuring its mutation');
@@ -290,15 +344,18 @@ machine: {
   // Anything that changed a WORD would be arm 2's condition wearing arm 1's
   // clothes. The added quantity is under one core, so no other section's
   // arithmetic changes regime.
-  const mutant = mutate(
-    'machine-moves',
-    'capacity.js',
-    'load1: os.loadavg()[0],',
-    'load1: os.loadavg()[0] + ((globalThis.__kan448 = ((globalThis.__kan448 ?? 0) + 1) % 100) / 100),'
-  );
+  const mutant = mutate('machine-moves', [
+    PIN_CPU_INSTRUMENT,
+    {
+      file: 'capacity.js',
+      find: 'load1: os.loadavg()[0],',
+      replace:
+        'load1: os.loadavg()[0] + ((globalThis.__kan448 = ((globalThis.__kan448 ?? 0) + 1) % 100) / 100),'
+    }
+  ]);
   if (!mutant) break machine;
 
-  const r = runProof(mutant);
+  const r = runProof(mutant, 'machine-moves');
   summarise(r);
   if (!expectRan(r)) break machine;
   check(
@@ -338,7 +395,7 @@ indented: {
   );
   if (!mutant) break indented;
 
-  const r = runProof(mutant);
+  const r = runProof(mutant, 'renderer-indents');
   summarise(r);
   if (!expectRan(r)) break indented;
   check(r.section1Failures.length > 0, '§1 reports a check FAILURE — a real defect is still a verdict');
@@ -367,7 +424,7 @@ dropped: {
   );
   if (!mutant) break dropped;
 
-  const r = runProof(mutant);
+  const r = runProof(mutant, 'renderer-drops-a-line');
   summarise(r);
   if (!expectRan(r)) break dropped;
   check(r.section1Failures.length > 0, 'a missing line is a check FAILURE in §1 — the defect its own wording names');
@@ -380,16 +437,19 @@ dropped: {
 rule('4. ONLY DIGITS — the cost of classifying by normalised figures, demonstrated');
 
 digits: {
-  const mutant = mutate(
-    'renderer-mangles-digits',
-    'cli.js',
-    FAILURE_PRINTS_ERROR,
-    "error ? '\\n' + error.replace(/[0-9]/g, '9') : " +
-      '`${INDENT}(the daemon reported failure without an error message)`'
-  );
+  const mutant = mutate('renderer-mangles-digits', [
+    PIN_CPU_INSTRUMENT,
+    {
+      file: 'cli.js',
+      find: FAILURE_PRINTS_ERROR,
+      replace:
+        "error ? '\\n' + error.replace(/[0-9]/g, '9') : " +
+        '`${INDENT}(the daemon reported failure without an error message)`'
+    }
+  ]);
   if (!mutant) break digits;
 
-  const r = runProof(mutant);
+  const r = runProof(mutant, 'renderer-mangles-digits');
   summarise(r);
   if (!expectRan(r)) break digits;
   // The honest half: §1 gets this WRONG, and the header says so.
@@ -431,7 +491,7 @@ precondition: {
   );
   if (!mutant) break precondition;
 
-  const r = runProof(mutant);
+  const r = runProof(mutant, 'binding-word-goes-live');
   summarise(r);
   if (!expectRan(r)) break precondition;
   check(
@@ -450,6 +510,8 @@ const skipped = mutationsSkipped();
 if (skipped.length) {
   console.log(`\nmutations that did not apply, so their arms never ran: ${skipped.join(', ')}`);
 }
+
+console.log(`\nevery arm's full proof transcript: ${transcripts}`);
 
 rule(failures === 0 ? 'ALL ARMS BEHAVED AS CLAIMED' : `${failures} ARM CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
