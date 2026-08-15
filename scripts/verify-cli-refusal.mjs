@@ -12,7 +12,19 @@
 //                     derivation verbatim, line for line
 //   2. verbatim     — the same claim proven deterministically: the renderer,
 //                     handed a response with a known multi-line derivation,
-//                     reproduces it byte for byte and unindented
+//                     reproduces it byte for byte and unindented — and it is
+//                     required to BE the renderer §1 goes through, rather than
+//                     described as one
+//
+// §1'S BYTE-FOR-BYTE CLAIM CANNOT ALWAYS BE PUT, AND THE SCRIPT NOW SAYS SO
+// (KAN-448). It compares one invocation's rendered stdout against a SECOND
+// invocation's `--json` derivation, and that text carries live figures — the
+// load average, the available memory — which move between the two. Five
+// retries usually win the race; when they lose, the run is red and says GATE
+// FAULT, naming the machine, instead of `no line of the derivation is missing
+// from stdout`, which accuses the renderer of a defect nobody has. What tells
+// the two apart is whether the texts reconcile with every figure normalised;
+// a real renderer defect does not, and still lands as a FAIL.
 //   3. --json       — field for field what the daemon sent, compared against a
 //                     raw socket client's answer to the same request
 //   4. exit codes   — 0 / 1 / 2 / 3 / 4, each one produced on purpose
@@ -64,7 +76,7 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(process.argv[2] ?? path.join(scriptDir, '..', 'dist'));
 const cliJs = path.join(distDir, 'cli.js');
 
-const { COMMANDS, EXIT, ResponseReader, renderHelp } = await import(path.join(distDir, 'cli.js'));
+const { COMMANDS, EXIT, ResponseReader, commandNamed, renderHelp } = await import(path.join(distDir, 'cli.js'));
 const { connectToDaemon, onJsonLines, writeJsonLine } = await import(path.join(distDir, 'ipc.js'));
 
 // --------------------------------------------------------------- the harness
@@ -77,6 +89,33 @@ const check = (ok, claim) => {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${claim}`);
   if (!ok) failures += 1;
   return ok;
+};
+
+/**
+ * A FAULT IN THIS SCRIPT IS NOT A VERDICT ABOUT CRABCAST, and the two must not
+ * wear the same words. `check` says something about the code; `gateFault` says
+ * this script could not put the question it came to put.
+ *
+ * BOTH MAKE THE RUN RED. A gate that could not establish anything has not
+ * established a pass, so the verdict at the bottom fails closed on either —
+ * which is `exitCodeFor`'s rule in `scripts/approval-marker.mjs` (`if
+ * (!gateHealthy) return 1`), borrowed here rather than re-argued. What changes
+ * is only who the red sends the reader to.
+ *
+ * KAN-448 IS WHY IT EXISTS. §1 below compares two readings of a live machine,
+ * and when they disagree five times the retry used to fall through into an
+ * assertion reading `FAIL  no line of the derivation is missing from stdout`.
+ * `task/KAN-431` was handed that sentence for a run in which nothing was
+ * missing: the load average and the available memory had moved between the two
+ * readings, which is a fact about the machine and not about the renderer. The
+ * count was accurate and the words were wrong, and the words are what a reader
+ * acts on.
+ */
+let gateFaults = 0;
+const gateFault = (why, detail) => {
+  console.log(`  GATE FAULT  ${why}`);
+  if (detail) console.log(String(detail).replace(/^/gm, '              '));
+  gateFaults += 1;
 };
 
 // ----------------------------------------------------------------- the scratch
@@ -341,14 +380,48 @@ function configure(fx, agent, extra = []) {
 
 const demoDir = configure(capped, 'demo');
 
+/**
+ * Every number, replaced by `#`.
+ *
+ * USED ONLY TO CLASSIFY A FAILURE — never to make an assertion pass. The
+ * claim §1 puts is still exact byte equality, and the retry below still has to
+ * win it. This is what runs after the retry has LOST, to answer the one
+ * question the old code could not: are these two texts the same sentence with
+ * different figures in it, or a different sentence?
+ *
+ * THAT IS THE WHOLE OF THE FIX, and it is a classifier rather than a looser
+ * match for a reason. `weakening it would prove nothing` (the comment this one
+ * replaces) is right about the ASSERTION and says nothing about the
+ * DIAGNOSIS, and the diagnosis was the part that was wrong.
+ *
+ * WHAT IT CANNOT SEE, stated because it is the cost of the classification: a
+ * renderer that altered ONLY a digit — reprinting `1.44` as `1.4` — differs
+ * from the daemon's text in exactly the way a moving machine does, so it would
+ * be classified as a gate fault rather than as a defect. §2 is what covers
+ * that: it drives THIS SAME renderer (see the identity check there) over a
+ * synthetic derivation full of figures nobody's load average can move, and
+ * requires byte equality including every digit.
+ */
+const FIGURE = /\d+(?:\.\d+)?/g;
+const withoutFigures = (text) => String(text).replace(FIGURE, '#');
+
 // Two invocations, because one process prints one of the two modes. Their
 // figures come from two readings of a live machine a second apart, so load
 // average and available memory can genuinely move between them — retried
 // rather than tolerated, because the assertion being made is byte equality
 // and weakening it would prove nothing.
+//
+// MEASURED, 2026-08-15, on the machine this proof runs on (KAN-448): of 130
+// consecutive pairs of `activate --json` against one capped daemon, 21 pairs
+// differed. Every difference was a figure — `7.9 GiB available` against `8.0`,
+// one load average against the next — and across the 50 pairs compared with
+// those figures normalised, ZERO differed. So the retry is well founded and so
+// is the classifier below.
+const ATTEMPTS = 5;
 let human = null;
 let asJson = null;
-for (let attempt = 1; attempt <= 5; attempt++) {
+let agreed = false;
+for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
   human = crabcast(capped, ['activate', demoDir]);
   const jsonRun = crabcast(capped, ['activate', demoDir, '--json']);
   try {
@@ -357,10 +430,19 @@ for (let attempt = 1; attempt <= 5; attempt++) {
     asJson = { ...jsonRun, parsed: null };
     break;
   }
-  if (typeof asJson.parsed.derivation === 'string' && human.stdout.includes(asJson.parsed.derivation)) break;
-  if (attempt < 5) {
-    console.log(`  (attempt ${attempt}: the machine's figures moved between the two runs; re-reading)`);
+  if (typeof asJson.parsed.derivation === 'string' && human.stdout.includes(asJson.parsed.derivation)) {
+    agreed = true;
+    break;
   }
+  // PRINTED ON EVERY ATTEMPT INCLUDING THE LAST. It used to be `attempt < 5`,
+  // so the one run that matters — the run that gives up — said nothing about
+  // having given up, and a reader met the failure below with no sign that a
+  // retry had ever existed.
+  console.log(
+    attempt < ATTEMPTS
+      ? `  (attempt ${attempt}: the machine's figures moved between the two runs; re-reading)`
+      : `  (attempt ${attempt}: they moved again — ${ATTEMPTS} attempts exhausted, giving up)`
+  );
 }
 await trackDaemon(capped);
 
@@ -371,11 +453,122 @@ check(human.code === EXIT.REFUSED, `the code is ${EXIT.REFUSED} — "the daemon 
 
 const derivation = asJson.parsed?.derivation;
 check(typeof derivation === 'string' && derivation.includes('\n'), 'the response carries a multi-line derivation');
-check(
-  typeof derivation === 'string' && human.stdout.includes(derivation),
-  'stdout carries that derivation VERBATIM — every line, contiguous, unaltered'
-);
+
+// ---------------------------------------------------------------------------
+// THE CLASSIFIER'S PRECONDITION — CHECKED, AND CHECKED ON EVERY RUN
+// ---------------------------------------------------------------------------
+//
+// `withoutFigures` can only tell the machine from the renderer if a difference
+// between two consecutive readings is a FIGURE and never a WORD. That is NOT a
+// property of derivations. It is a property of THIS FIXTURE, and `epic/KAN-59`
+// found the gap on review: `describeCapacity` interpolates `bound by
+// ${c.headroomBoundBy}` and `bound by ${c.capBoundBy}`, both of which are words
+// SELECTED by comparing live measurements. `bound by cpu` → `bound by load` →
+// `bound by stall` would survive normalisation and be reported as a renderer
+// defect.
+//
+// WHY IT CANNOT HAPPEN HERE, traced rather than observed. §1 runs at
+// `CRABCAST_MAX_AGENTS=0`, and in `src/capacity.ts`:
+//
+//   `configuredCap !== null` → `cap = configuredCap` → cap is 0, and the
+//   `cap:` line becomes "(set by CRABCAST_MAX_AGENTS, derivation skipped)",
+//   which carries no `bound by` clause at all.
+//
+//   `headroomByCap = Math.max(0, cap - running)` is 0 — unconditionally, and
+//   NOT because `running` happens to be 0: the floor makes it 0 for any
+//   `running`.
+//
+//   `headroomByCpu`, `headroomByLoad` and `headroomByMemory` are each
+//   `Math.max(0, …)`, so all three are ≥ 0. `countingBoundBy` therefore takes
+//   its first branch — `0 <= cpuSideTerm && 0 <= headroomByMemory` — and is
+//   'cap' whatever the machine is doing.
+//
+//   `headroomBeforeStall = Math.min(0, ≥0, ≥0)` is 0, so `stalled &&
+//   headroomBeforeStall > 0` is unreachable and the stall word never appears.
+//
+// ⚠ AND WHAT IT DOES NOT PIN, SAID HERE SO THE CHECK'S OWN WORDING CANNOT BE
+// READ AS MORE THAN IT IS. It pins the two `bound by` clauses and nothing else.
+// The derivation carries other words chosen by live comparison, and they are
+// GREEN under this check while being live — see the residue immediately below.
+// A reader triaging a passing precondition would otherwise conclude every such
+// word is pinned, and the prose about an instrument is part of the instrument.
+//
+// THE POINT OF ASSERTING IT RATHER THAN WRITING IT DOWN: the classifier only
+// runs after five attempts have LOST, which is the loaded machine — precisely
+// the state in which those words flip. A fixture that moved off
+// `CRABCAST_MAX_AGENTS=0` would degrade the classifier silently and first fail
+// in the only condition that invokes it. This check runs on EVERY run, loaded
+// or quiet, so the fixture change is what goes red.
 if (typeof derivation === 'string') {
+  check(
+    derivation.includes('(set by CRABCAST_MAX_AGENTS, derivation skipped)') &&
+      derivation.includes('count allows 0 (0 cap − 0 running)') &&
+      derivation.includes('bound by cap'),
+    'PRECONDITION for the classifier below: this fixture pins the BINDING words — the cap\n' +
+    '        line skips its `bound by` entirely and headroom is bound by `cap`, which a zero cap\n' +
+    '        makes structural. It does NOT pin every live-selected word; see the residue below'
+  );
+}
+
+// ⚠ AND THE RESIDUE, WHICH IS NOT PINNED AND IS NOT THE ONE THE REVIEW NAMED.
+// `c.cpu` being null or not selects WORDS as well: "cpu in use: not measured
+// here …" against "cpu in use: N of M cores, measured over …", `load allows`
+// against `load would allow`, and the whole `cpu allows …` clause. Nothing in
+// this fixture pins the CPU instrument.
+//
+// IT IS REACHABLE, AND THE BAND IS NAMED RATHER THAN COUNTED. `daemon.ts`
+// opens a CPU window at boot and closes it `CPU_FIRST_WINDOW_MS` later —
+// 3 seconds — and publishes the first observation then; the steady cadence
+// (`CPU_SAMPLE_INTERVAL_MS`, 30s) follows. So every daemon spends its first
+// ~3 seconds saying "not measured here" and then flips, once. MEASURED on this
+// machine, 2026-08-15, polling one fresh daemon for 150 seconds: FALLBACK at
+// t+0.4s, MEASURED at t+4.8s over a 3s window, and no further flip to t+120s.
+// The daemon's own log names it: "CPU sampler: live measurement established".
+//
+// ⚠ THAT BAND OVERLAPS THIS SECTION, which is why it is written down rather
+// than dismissed: §1's first attempt runs a second or two after the daemon
+// starts. What keeps it off the CLASSIFIER is the shape of the event rather
+// than luck — the flip happens ONCE, near start-up, so it can spoil at most one
+// attempt, and the classifier runs only after all five have lost, which the
+// retry ordinarily avoids well before the fifth. ⚠ NOT INSTRUMENTED: that is
+// watched, and no figure is quoted for it on purpose. An earlier draft said
+// "attempt 5 is at t≈8-10s", and a specific number nobody measured is exactly
+// the kind that later reads as permission to stop checking (epic/KAN-59, on
+// review). An earlier count — "never within a pair, in 130 pairs" — was true
+// and said nothing about why; this says why, and admits the band exists.
+//
+// ⚠ AND A SECOND VECTOR, WHICH IS WORSE THAN THE FIRST AND HAS NO BAND.
+// `stallLine` ends with `c.stalled ? 'AT OR OVER, so no agent is admitted
+// whatever the terms below say' : 'under, so this term does not bind'`, and
+// that line is pushed into EVERY derivation this fixture produces. `stalled` is
+// `worst !== null && worst.percent >= STALL_REFUSE_PERCENT` — a live threshold
+// crossing, computed where the terms are computed and NOT downstream of
+// headroom, so the zero cap above does not reach it. The `bound by` word is
+// pinned through `headroomBeforeStall = 0`; this line's own wording is not, and
+// they are separate sites.
+//
+// WHY IT IS WORSE THAN THE CPU BAND rather than another instance of it: the CPU
+// flip happens ONCE, at a known moment, and the timing argument above disposes
+// of it. A stall crossing has no such boundary — it can happen at any moment,
+// repeatedly, and is likeliest exactly when the machine is loaded, which is the
+// only condition in which the classifier runs at all. Found by `epic/KAN-59` on
+// review of the pull request, after the CPU vector had been named and this one
+// had not.
+//
+// LEFT AS A VERDICT ON PURPOSE. If it does ever land on the last attempt, the
+// classifier calls it a renderer defect and §1 goes red with a FAIL — which is
+// exactly what it did before this ticket, for every kind of drift. Noisy
+// rather than silent is the right direction for a residue: a false GATE FAULT
+// would excuse a real defect, and that is the failure this whole change is
+// trying not to introduce.
+
+if (typeof derivation === 'string' && agreed) {
+  // THE CLAIM, PUT IN FULL. The two readings agreed, so the byte-for-byte
+  // question is answerable and this is the answer.
+  check(
+    human.stdout.includes(derivation),
+    'stdout carries that derivation VERBATIM — every line, contiguous, unaltered'
+  );
   const missing = derivation.split('\n').filter((line) => !human.stdout.includes(line));
   check(missing.length === 0, `no line of the derivation is missing from stdout${missing.length ? `: ${JSON.stringify(missing)}` : ''}`);
   // Unindented, so the arithmetic can be pasted back into an argument about
@@ -386,6 +579,87 @@ if (typeof derivation === 'string') {
     human.stdout.split('\n').some((line) => line === first),
     'the derivation is unindented — its first line stands alone on a line of stdout'
   );
+} else if (typeof derivation === 'string') {
+  // THE RETRY LOST. Two things produce this and they are not the same event:
+  //
+  //   THE MACHINE MOVED  the two texts are the same sentence with different
+  //                      figures in it. Nothing is wrong with CrabCast and this
+  //                      script cannot put its question — a GATE FAULT.
+  //   THE RENDERER WENT  a line is gone, or shifted, or reflowed. That is a
+  //                      defect and the words must say so — a FAIL.
+  //
+  // Telling them apart is the whole of what `withoutFigures` is for, and the
+  // old code could not: it reported the first in the words of the second.
+  const stdoutSansFigures = withoutFigures(human.stdout);
+  const derivationSansFigures = withoutFigures(derivation);
+  const contiguous = stdoutSansFigures.includes(derivationSansFigures);
+  const unindented = stdoutSansFigures.split('\n').includes(derivationSansFigures.split('\n')[0]);
+
+  const drift = derivation
+    .split('\n')
+    .filter((line) => !human.stdout.includes(line))
+    .map((line) => `moved:   ${line}`)
+    .join('\n');
+
+  if (contiguous && unindented) {
+    gateFault(
+      `${ATTEMPTS} paired readings of a live machine disagreed, so the byte-for-byte claim ` +
+        `could not be put. THIS IS NOT A STATEMENT ABOUT THE RENDERER: the derivation is in ` +
+        `stdout, contiguous and unindented, once every figure is normalised — only the figures ` +
+        `differ, which is the machine moving between the two invocations. §2 holds the ` +
+        `byte-for-byte claim against the same renderer with a derivation nothing can move.`,
+      drift
+    );
+  } else {
+    // BOTH SIDES OF THE COMPARISON, RETAINED. A red that says a line did not
+    // reconcile and does not say what it was compared against sends the reader
+    // back to reproduce it, and this one only fires on a machine that was busy
+    // enough to lose five attempts — the state hardest to reproduce on purpose.
+    // Asked for by `epic/KAN-59` reviewing KAN-448, whose own candidate cause
+    // for a variable arm could not be confirmed or excluded from the transcript
+    // that existed.
+    //
+    // The counterpart is matched on the derivation line's own LEADING FIELD —
+    // `machine:`, `cpu in use:`, `headroom:` — because that is what a reader
+    // pairs them by, and because a line that is simply GONE has no nearest
+    // neighbour and must say so rather than being shown beside an unrelated
+    // line that happens to share a few characters. Both texts are printed raw
+    // and normalised, so the difference that actually defeated the classifier
+    // is the one on the page.
+    const stdoutLines = human.stdout.split('\n');
+    const counterpart = (line) => {
+      const field = line.split(':')[0].trim();
+      const found = stdoutLines.find((l) => l.trim().startsWith(`${field}:`));
+      return found ?? `(no line of stdout begins with ${JSON.stringify(`${field}:`)} — it is not there at all)`;
+    };
+    const unreconciled = derivation
+      .split('\n')
+      .filter((line) => !stdoutSansFigures.includes(withoutFigures(line)));
+    for (const line of unreconciled.slice(0, 3)) {
+      show('a line that did not reconcile — the derivation, then its counterpart in stdout:',
+        `derivation raw:  ${line}\n` +
+        `stdout raw:      ${counterpart(line)}\n` +
+        `derivation norm: ${withoutFigures(line)}\n` +
+        `stdout norm:     ${withoutFigures(counterpart(line))}`);
+    }
+
+    // Not the machine: normalising every figure did not reconcile them, so
+    // whatever changed was not a figure. These are verdicts.
+    check(
+      contiguous,
+      'stdout carries that derivation VERBATIM — every line, contiguous, unaltered\n' +
+        '        (and it is NOT the machine moving: the two disagree with every figure normalised)'
+    );
+    check(
+      unreconciled.length === 0,
+      `no line of the derivation is missing from stdout, with every figure normalised` +
+        `${unreconciled.length ? `: ${JSON.stringify(unreconciled)}` : ''}`
+    );
+    check(
+      unindented,
+      'the derivation is unindented — its first line stands alone on a line of stdout'
+    );
+  }
 }
 check(
   human.stdout.includes('refused by:') && human.stdout.includes('reason:'),
@@ -400,6 +674,24 @@ rule('2. VERBATIM, DETERMINISTICALLY — the renderer reproduces a derivation by
 // Section 1 compares two readings of a live machine. This one removes the
 // machine: a synthetic response with a derivation nobody's load average can
 // move, rendered by the same code path, compared byte for byte.
+//
+// THIS SECTION SUPPLIES ITS OWN INPUT, and that is worth naming rather than
+// leaving to be inferred (KAN-448). A proof that constructs the response it
+// then asserts on has not tested that a real response ARRIVES in that shape:
+// everything below would stay green against a daemon that never sets
+// `derivation` at all. §1 is what covers that half, by refusing a live
+// activation and reading what a real daemon actually sent — which is why §1
+// still runs and still goes red, in its own words, when the live path breaks.
+// Neither section covers the other, and the seam between them is where the
+// coverage would otherwise quietly not exist.
+//
+// AND `THE SAME CODE PATH` USED TO BE THIS COMMENT'S OWN CLAIM ABOUT ITSELF,
+// which is a file describing itself and worth exactly what that is. The two
+// checks below make it mechanical instead. `commandNamed` is what the argument
+// parser resolves a command with, and dispatch renders with `spec.render(...)`
+// on whatever it returns, so requiring `commandNamed('activate')` to be THIS
+// object is requiring that the function driven here is the function the live
+// refusal in §1 called.
 const SYNTHETIC_DERIVATION = [
   'machine: 4 cores, 15.4 GiB RAM (7.7 GiB available), load average 3.00',
   'agent cost: 650 MB resident (seed), 0.75 core while active (seed)',
@@ -411,6 +703,23 @@ const SYNTHETIC_DERIVATION = [
 ].join('\n');
 
 const activateSpec = COMMANDS.find((c) => c.name === 'activate');
+
+check(
+  commandNamed('activate') === activateSpec,
+  'the renderer driven below is the one the CLI resolves for `activate` — the same object,\n' +
+  '        not merely one with the same name'
+);
+// The other half of the link, and it has to be read as text because there is
+// no handle on it: dispatch is a private function. A refactor that stopped
+// rendering through the resolved spec — printing from a switch, say — would
+// leave every check below green about a function nothing calls.
+const cliSource = fs.readFileSync(cliJs, 'utf8');
+check(
+  cliSource.split('spec.render(reader, payload)').length - 1 === 1,
+  'and the CLI renders a response by calling `spec.render(reader, payload)` on it, exactly once\n' +
+  '        in the compiled build — so §2 drives the function §1 goes through'
+);
+
 const rendered = activateSpec.render(new ResponseReader({
   action: 'activate_response',
   success: false,
@@ -427,6 +736,58 @@ check(rendered.includes(SYNTHETIC_DERIVATION), 'the rendered text contains the d
 check(
   SYNTHETIC_DERIVATION.split('\n').every((line) => rendered.split('\n').includes(line)),
   'every derivation line appears as its own line, with no indent added'
+);
+
+// -----------------------------------------------------------------------------
+// THE BRANCH §1 ACTUALLY TAKES, which is NOT the one above (KAN-448)
+// -----------------------------------------------------------------------------
+//
+// FOUND BY DRIVING, and it is the reason this block exists. `renderActivate`
+// prints the derivation TWO WAYS, and picks between them: `error` already
+// contains the derivation for a capacity refusal, so `alreadyInError` is true
+// and the `verbatim('derivation:', …)` block above is SKIPPED. A live refusal —
+// §1's — therefore never reaches the code the check above exercises. Its
+// derivation arrives inside the error text.
+//
+// HOW IT WAS FOUND, because "same renderer" was believed until something
+// measured it: `kan448-red-drive.mjs` broke `verbatim()` three different ways —
+// indent every line, drop one, mangle every digit — and §1 stayed GREEN through
+// all three while §2 went red. Same `render` function, same object, different
+// branch. A claim about the function was true and a claim about the coverage
+// was not, and nothing in either file could have said so.
+//
+// So this drives the OTHER branch, with the same synthetic derivation and the
+// same byte-for-byte demand. Without it §2 covers the path a live refusal never
+// walks, and §1's fallback — "if the figures move, §2 still holds this
+// deterministically" — names a section that was holding something else.
+const inErrorDerivation = activateSpec.render(new ResponseReader({
+  action: 'activate_response',
+  success: false,
+  type: 'task',
+  key: 'KAN-93',
+  // The daemon's own shape: prose, then the derivation, then what to do about
+  // it. `error.includes(derivation)` is what makes the renderer take this
+  // branch, and it is what `--json` shows on a real refusal.
+  error:
+    'Refusing to activate task/KAN-93: at capacity — 2 charged agents are already running ' +
+    `against a cap of 3.\n${SYNTHETIC_DERIVATION}\nDeactivate an agent to make room.`,
+  refusedBy: 'capacity',
+  reason: 'the load average is 3.00',
+  derivation: SYNTHETIC_DERIVATION,
+  id: 'cli-1-2'
+}), { path: '/home/someone/work' });
+check(
+  inErrorDerivation.includes(SYNTHETIC_DERIVATION),
+  'and on the branch a LIVE refusal takes — the derivation carried inside `error` — it is\n' +
+  '        still one contiguous verbatim block'
+);
+check(
+  SYNTHETIC_DERIVATION.split('\n').every((line) => inErrorDerivation.split('\n').includes(line)),
+  'every line of it still stands alone, unindented, on that branch too'
+);
+check(
+  inErrorDerivation.split(SYNTHETIC_DERIVATION).length - 1 === 1,
+  'and exactly once — the derivation is not printed twice when the error already carries it'
 );
 
 // The other half of "never swallow": a field no renderer knows about is
@@ -1092,5 +1453,19 @@ check(
 
 // ------------------------------------------------------------------- verdict
 
-rule(failures === 0 ? 'ALL SECTIONS PASSED' : `${failures} CHECK(S) FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+// A GATE FAULT IS RED AND IS NOT A CHECK FAILURE, and the verdict line has to
+// carry both facts or the distinction dies here. Red, because a run that could
+// not put its question has not established a pass — `exitCodeFor`'s `if
+// (!gateHealthy) return 1`, in `scripts/approval-marker.mjs`, and fail-closed
+// is the direction this repository has already chosen twice. Separate, because
+// a reader triaging a red needs to know whether to open `src/cli.ts` or to look
+// at what else the machine was doing.
+rule(
+  failures === 0 && gateFaults === 0
+    ? 'ALL SECTIONS PASSED'
+    : failures === 0
+      ? `${gateFaults} GATE FAULT(S) AND NO CHECK FAILURES — this run could not put its ` +
+        `question; it says nothing about the code`
+      : `${failures} CHECK(S) FAILED` + (gateFaults ? `, AND ${gateFaults} GATE FAULT(S)` : '')
+);
+process.exit(failures === 0 && gateFaults === 0 ? 0 : 1);
