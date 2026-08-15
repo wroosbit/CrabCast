@@ -486,6 +486,13 @@ check(typeof derivation === 'string' && derivation.includes('\n'), 'the response
 //   `headroomBeforeStall = Math.min(0, ≥0, ≥0)` is 0, so `stalled &&
 //   headroomBeforeStall > 0` is unreachable and the stall word never appears.
 //
+// ⚠ AND WHAT IT DOES NOT PIN, SAID HERE SO THE CHECK'S OWN WORDING CANNOT BE
+// READ AS MORE THAN IT IS. It pins the two `bound by` clauses and nothing else.
+// The derivation carries other words chosen by live comparison, and they are
+// GREEN under this check while being live — see the residue immediately below.
+// A reader triaging a passing precondition would otherwise conclude every such
+// word is pinned, and the prose about an instrument is part of the instrument.
+//
 // THE POINT OF ASSERTING IT RATHER THAN WRITING IT DOWN: the classifier only
 // runs after five attempts have LOST, which is the loaded machine — precisely
 // the state in which those words flip. A fixture that moved off
@@ -497,9 +504,9 @@ if (typeof derivation === 'string') {
     derivation.includes('(set by CRABCAST_MAX_AGENTS, derivation skipped)') &&
       derivation.includes('count allows 0 (0 cap − 0 running)') &&
       derivation.includes('bound by cap'),
-    'PRECONDITION for the classifier below: this fixture pins every word the derivation\n' +
-    '        selects by comparing live measurements — the cap line skips its `bound by` entirely\n' +
-    '        and headroom is bound by `cap`, which a zero cap makes structural'
+    'PRECONDITION for the classifier below: this fixture pins the BINDING words — the cap\n' +
+    '        line skips its `bound by` entirely and headroom is bound by `cap`, which a zero cap\n' +
+    '        makes structural. It does NOT pin every live-selected word; see the residue below'
   );
 }
 
@@ -526,6 +533,24 @@ if (typeof derivation === 'string') {
 // the sampler has been live for several seconds. An earlier count — "never
 // within a pair, in 130 pairs" — was true and said nothing about why; this
 // says why, and admits the band exists.
+//
+// ⚠ AND A SECOND VECTOR, WHICH IS WORSE THAN THE FIRST AND HAS NO BAND.
+// `stallLine` ends with `c.stalled ? 'AT OR OVER, so no agent is admitted
+// whatever the terms below say' : 'under, so this term does not bind'`, and
+// that line is pushed into EVERY derivation this fixture produces. `stalled` is
+// `worst !== null && worst.percent >= STALL_REFUSE_PERCENT` — a live threshold
+// crossing, computed where the terms are computed and NOT downstream of
+// headroom, so the zero cap above does not reach it. The `bound by` word is
+// pinned through `headroomBeforeStall = 0`; this line's own wording is not, and
+// they are separate sites.
+//
+// WHY IT IS WORSE THAN THE CPU BAND rather than another instance of it: the CPU
+// flip happens ONCE, at a known moment, and the timing argument above disposes
+// of it. A stall crossing has no such boundary — it can happen at any moment,
+// repeatedly, and is likeliest exactly when the machine is loaded, which is the
+// only condition in which the classifier runs at all. Found by `epic/KAN-59` on
+// review of the pull request, after the CPU vector had been named and this one
+// had not.
 //
 // LEFT AS A VERDICT ON PURPOSE. If it does ever land on the last attempt, the
 // classifier calls it a renderer defect and §1 goes red with a FAIL — which is

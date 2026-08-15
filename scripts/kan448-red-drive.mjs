@@ -24,11 +24,12 @@
 //                   was simply broken would redden all four and read as four
 //                   successes.
 //
-//   1. THE MACHINE  the derivation carries a figure that CANNOT be the same
-//                   twice — `Date.now()` in place of the load average. The
-//                   retry must lose all five times, and the run must be red
-//                   saying GATE FAULT, without a single §1 check failure and
-//                   without the sentence that accused the renderer.
+//   1. THE MACHINE  the machine SNAPSHOT carries a figure that cannot be the
+//                   same on two consecutive readings — a counter added to
+//                   `load1` in `readMachineFacts`. The retry must lose all five
+//                   times, and the run must be red saying GATE FAULT, without a
+//                   single §1 check failure and without the sentence that
+//                   accused the renderer.
 //
 //   2. THE RENDERER the refusal's error text — which is where a LIVE
 //                   derivation travels — indented two spaces. A real defect,
@@ -259,18 +260,41 @@ check(
 
 // ------------------------------------------------------------- 1. the machine
 
-rule('1. THE MACHINE MOVED — a derivation figure that cannot be the same twice');
+rule('1. THE MACHINE MOVED — a snapshot figure that cannot be the same on two readings');
 
 machine: {
-  // `Date.now()` is still a FIGURE, which is the point: it moves between the
-  // two invocations exactly as a load average does, and it reconciles under
-  // normalisation exactly as a load average does. Anything that changed a WORD
-  // would be arm 2's condition wearing arm 1's clothes.
+  // MUTATE THE MEASUREMENT, NOT ITS FORMATTING, and the difference is a defect
+  // this arm shipped with until `epic/KAN-59` reproduced it and got a different
+  // exit code (PR #119).
+  //
+  // The first version replaced `load average ${m.load1.toFixed(2)}` with
+  // `${Date.now()}` — inside `describeCapacity`, which made that function
+  // IMPURE. A capacity refusal renders it TWICE from one snapshot:
+  // `capacityRefusal` builds `error` with it, and the router separately takes
+  // `describeCapacity(capacity)` for the `derivation` field. Unmutated those
+  // are two pure renderings of one reading and are identical, which is what §3
+  // asserts. Mutated, they agreed only when both landed in the same
+  // millisecond — so §3 failed on the reviewer's machine and not on mine, and
+  // `DRIVE_EXIT` was 1 there and 0 here on the same commit.
+  //
+  // ⚠ THAT IS THIS TICKET'S OWN SENTENCE, INSIDE THE ARTEFACT BUILT TO PROVE
+  // IT: an assertion whose subject is not stable. Disclosing it was on offer
+  // and is not what it deserved.
+  //
+  // The fix moves the nonce into the SNAPSHOT — one `readMachineFacts()` per
+  // `readCapacity()`, so both renderings of one response see one value and §3
+  // is untouched — and makes it a COUNTER rather than a clock, so consecutive
+  // snapshots cannot collide at all rather than colliding rarely. It stays a
+  // FIGURE, which is the point: it moves between the two invocations exactly as
+  // a load average does and reconciles under normalisation exactly as one does.
+  // Anything that changed a WORD would be arm 2's condition wearing arm 1's
+  // clothes. The added quantity is under one core, so no other section's
+  // arithmetic changes regime.
   const mutant = mutate(
     'machine-moves',
     'capacity.js',
-    'load average ${m.load1.toFixed(2)}',
-    'load average ${Date.now()}'
+    'load1: os.loadavg()[0],',
+    'load1: os.loadavg()[0] + ((globalThis.__kan448 = ((globalThis.__kan448 ?? 0) + 1) % 100) / 100),'
   );
   if (!mutant) break machine;
 
@@ -288,9 +312,15 @@ machine: {
   );
   check(!r.out.includes(ACCUSATION), `the old accusation is absent: ${JSON.stringify(ACCUSATION)}`);
   check(r.code !== 0, 'the run is still RED — a gate that could not put its question has not passed');
+  // THE VERDICT LINE IS A WHOLE-RUN STATEMENT, so this reads the section
+  // counters beside it rather than the sentence alone. The sentence's shape
+  // depends on the mutation's blast radius, and an arm that asserted only the
+  // sentence would go red for a failure in a section it never aimed at — which
+  // is what happened when this arm's mutation reached §3.
   check(
-    /GATE FAULT\(S\) AND NO CHECK FAILURES/.test(r.out),
-    'and the verdict line says which of the two happened'
+    /GATE FAULT\(S\)/.test(r.verdict) && r.gateFaults.length === 1 && r.failures.length === 0,
+    'and the verdict line says which of the two happened — one gate fault, no check failure,\n' +
+    '        anywhere in the run'
   );
 }
 
