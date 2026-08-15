@@ -16,6 +16,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "postbuild": "node scripts/stamp-build.mjs",
+    "verify": "node scripts/run-verify.mjs",
     "prepare": "npm run build"
   },
   "engines": {
