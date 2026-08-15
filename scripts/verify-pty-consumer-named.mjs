@@ -307,6 +307,22 @@ if (section && section.trim().length > 0) {
   // durability gap and not a live falsehood — but every enabling condition for it
   // is present in the file being parsed.
   //
+  // ⚠ TWO CHARACTERS BELOW ARE LOAD-BEARING AND THE FILE GIVES YOU NO REASON TO
+  // THINK SO (KAN-431). In the character class, the BACKTICK; on the line after
+  // it, the `.toLowerCase()`. Both were added in response to review findings,
+  // and the population of BOTH shapes in `src/cli.ts` is zero today — so the
+  // obvious tidy is to narrow the class to the two quote characters that are
+  // actually used and drop a `.toLowerCase()` on names that are already
+  // lowercase. THAT TIDY IS INVISIBLE: it leaves this file exiting 0 on an
+  // unmutated tree, and it leaves kan394-red-drive's arm 9 green, while
+  // silently ceasing to see a backtick-quoted or capitalised command name.
+  //
+  // Arms 10 and 11 of `scripts/kan394-red-drive.mjs` hold each character to its
+  // own red, and the CONTROL ON ARMS 10 AND 11 in that file drives exactly the
+  // tidy described above and shows arm 9 surviving it while the other arm goes
+  // silent. So this is a measured claim rather than a warning: if you are about
+  // to narrow either one, run that drive first and read what stops firing.
+  //
   // THE BOUND, written here because the next loosening will not be foreseen
   // either. This parse assumes a command name is a `name:` key whose value is a
   // QUOTED LITERAL. What still defeats it: a name that is not a literal at all

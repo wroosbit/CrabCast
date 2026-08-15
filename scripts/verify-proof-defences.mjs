@@ -1970,8 +1970,11 @@ const PROOF_DEFENCES = [
       'epic has twice had a check report a tree clean on an input that silently emptied. ' +
       'WHAT IS NOT GUARDED HERE, and it is why this is `guard` and not `mutation`: nothing in this ' +
       'file mutates anything. The demonstration that these assertions can go red is ' +
-      'scripts/kan394-red-drive.mjs — nine arms, control first, including one that renames the whole ' +
-      'declaration away and requires the vacuity wording rather than the ordinary failure — and, for ' +
+      'scripts/kan394-red-drive.mjs — eleven arms, control first, including one that renames the whole ' +
+      'declaration away and requires the vacuity wording rather than the ordinary failure, and two ' +
+      "(KAN-431) that arm the backtick and the `.toLowerCase()` in §5's command-name parse, with a " +
+      'CONTROL ON THOSE TWO ARMS that tidies each character out of the proof and shows arm 9 surviving ' +
+      'the tidy while the armed one goes silent — and, for ' +
       "§6's decision assertions, scripts/kan428-red-drive.mjs: six arms, control first, which " +
       'require a DELETED CLAIM and an OVERTURNED DECISION to go red in DIFFERENT WORDS. ' +
       '⚠ WHAT §6 IS FOR, STATED PRECISELY BECAUSE THE FIRST DRAFT OF THIS ENTRY GOT IT WRONG AND A ' +
