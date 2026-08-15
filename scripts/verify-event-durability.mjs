@@ -34,7 +34,7 @@
 //                    operations are run. Every event carries `durable: false`
 //                    and a `durabilityError` naming the real errno, and each
 //                    one AGREES WITH ITS OWN RESPONSE. (AC 1)
-//   4. mutation    — three mutants, each asserting its own edit count, each
+//   4. mutation    — four mutants, each asserting its own edit count, each
 //                    watched going red. (AC 2)
 //                      4A restores the unconditional claim (`durability()`
 //                         always answers true): the events say the record is on
@@ -48,6 +48,11 @@
 //                         section 1's scan over the mutated text, so the static
 //                         audit is shown to be measuring something rather than
 //                         counting to six.
+//                      4D suppresses the `agent.configured` broadcast so that
+//                         event GENUINELY never arrives, and the arrival wait is
+//                         watched giving up and naming exactly the four reads it
+//                         feeds — while the other eight arrive on the same run.
+//                         (KAN-445 AC2)
 //
 // WHAT THIS SCRIPT DOES NOT COVER, because it is the script that produces the
 // state it then reads:
@@ -76,19 +81,24 @@
 //     ever revisited: its `durable: false` is the sharpest case the field has —
 //     the repair a supervisor made precisely to get an agent back into
 //     `expected()`, not reaching the disk.
-//   - IT DOES NOT ESTABLISH WHETHER THE WAITS ARE SUFFICIENT, and KAN-426 made
-//     that gap reportable rather than closing it. An event that has not arrived
-//     is now a named, counted FAIL (`expectEvent`) and a wait that gives up is
-//     another (the timeout verdict in `driveLifecycle`) — so absence and
-//     lateness are both ATTRIBUTED where they happen instead of arriving as a
-//     TypeError from a formatter. What no assertion here can tell you is which
-//     of the two you are looking at. Only ONE of the twelve reads is waited on
-//     at all: the wait is for the MCP forwarder's `agent.deactivated` on the
-//     DEGRADED half. The other five MCP payloads, and all six socket events,
-//     are read on the assumption that a subscriber in THIS process cannot be
-//     behind a forwarder in another one — which is very likely true and is not
-//     measured anywhere. Nobody covers that today; KAN-445 holds the question
-//     and is linked `Relates` to KAN-426.
+//   - THE WAITS ARE NOW SUFFICIENT FOR THE READS THIS SCRIPT MAKES, which is a
+//     bounded claim and not a general one. KAN-426 made an absent event
+//     reportable; KAN-445 closed the question it left open. Until then ONE of
+//     the twelve reads was waited on — the MCP forwarder's `agent.deactivated`
+//     on VICTIM — and the other eleven rested on two unasserted beliefs: that
+//     the forwarder delivers in order, and that a subscriber in THIS process
+//     cannot be behind a forwarder in another one. Both are now IRRELEVANT
+//     rather than asserted: `driveLifecycle` declares the six slots once and
+//     waits until all of its reads have something behind them, so a read that
+//     nothing waits on is not expressible. A slot still empty at the deadline
+//     is named, counted, and known to have had ARRIVAL_TIMEOUT_MS to show up —
+//     so "absent" and "late" are now different reports rather than the same
+//     one. Section 4D drives that by suppressing a real broadcast.
+//     WHAT IS STILL NOT COVERED: the deadline is finite, so an event slower
+//     than ARRIVAL_TIMEOUT_MS is still reported as absent. That is inherent to
+//     a timeout and is not a gap somebody could close; what changed is that the
+//     report now says how long it waited instead of leaving a reader to assume
+//     somebody had.
 //   - It says nothing about whether a SUBSCRIBER acts on `durable: false`. That
 //     is Butchr's half, filed by them as KAN-162 and linked `Relates` to
 //     KAN-165. Nobody on this side covers it and nothing here should be read as
@@ -166,10 +176,12 @@ const verdict = (ok, yes, no) => {
  * the half AND the event, it counts into `failures`, and it RETURNS, so sections
  * 3 and 4 still report.
  *
- * It deliberately does NOT distinguish "never sent" from "not yet arrived" —
- * that is what the timeout verdict at the end of `driveLifecycle` is for, and
- * conflating the two here would put a claim about a race into a helper that
- * cannot observe one.
+ * It still does NOT distinguish "never sent" from "not yet arrived", and that
+ * is now a much smaller claim than it was: `driveLifecycle` waits on ALL of its
+ * reads before any of them is taken (KAN-445), so by the time this helper sees
+ * an absence, the wait has already given up on that slot BY NAME and said so.
+ * Conflating the two here would still put a claim about a race into a helper
+ * that cannot observe one — the helper that can is the wait.
  */
 const expectEvent = (half, name, ev) => {
   show(`socket ${name}:`, ev);
@@ -180,7 +192,8 @@ const expectEvent = (half, name, ev) => {
     `${half} half: NO \`${name}\` EVENT ARRIVED on the socket. The events map has no entry\n` +
     '    for it, so every assertion below that reads it is reading an absence rather than a\n' +
     '    value. Reported as a verdict rather than as a TypeError from a display path, so the\n' +
-    '    rest of this file still reports (KAN-426)'
+    '    rest of this file still reports (KAN-426). The arrival wait above will have named this\n' +
+    '    slot already; if it did not, the event arrived and something else rejected it'
   );
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -193,6 +206,35 @@ const waitFor = async (predicate, ms, what) => {
   console.log(`   (timed out after ${ms}ms waiting for ${what})`);
   return false;
 };
+
+/** How long every one of the reads is given to arrive (KAN-445). */
+const ARRIVAL_TIMEOUT_MS = 10_000;
+
+/**
+ * The words raised when the wait for the reads gives up.
+ *
+ * Kept in ONE place because section 4D prints them for a run whose timeout is
+ * the result and must therefore not be counted into `failures`. Two callers,
+ * one sentence: a drive that paraphrased the message would stop being evidence
+ * about what a real timeout actually says, which is the only thing it is for.
+ *
+ * `total` IS PASSED IN RATHER THAN WRITTEN DOWN, and that is the point of the
+ * parameter. This function used to say "of the 12 reads" as a literal while the
+ * loop that produced `missing` derived its count from `SLOTS` — so adding a
+ * seventh slot left the mechanism correct and the SENTENCE wrong, reporting
+ * `12/14` outstanding reads as `10/12`, with nothing going red about it. That is
+ * KAN-245's hand-maintained-constant-beside-a-self-deriving-loop, and it was
+ * sitting inside the change whose whole argument is that derivation beats
+ * assertion (caught by `epic/KAN-59` on #118, by adding a seventh slot and
+ * reading what this printed). The prose about an instrument is part of the
+ * instrument.
+ */
+const arrivalFailureText = (label, missing, total) =>
+  `${label}: THE WAIT FOR THE LIFECYCLE EVENTS GAVE UP after ${ARRIVAL_TIMEOUT_MS}ms with ` +
+  `${missing.length} of the ${total} reads\n` +
+  `    still empty: ${missing.join(', ')}.\n` +
+  '    Every one of those reads is waited on (KAN-445), so a slot named here did not arrive\n' +
+  `    within ${ARRIVAL_TIMEOUT_MS}ms — it is not merely absent at the instant somebody looked at it.`;
 
 // ---------------------------------------------------------------- the scratch --
 
@@ -707,7 +749,7 @@ verdict(
  * otherwise leave the degraded half exercising the healthy path and reporting
  * green, which is precisely the shape of failure this whole epic is about.
  */
-async function driveLifecycle(dist, label) {
+async function driveLifecycle(dist, label, { reportArrival = true } = {}) {
   const cfg = makeConfig(label);
   const status = await startDaemon(cfg, dist, label);
   console.log(`   daemon ${label}: pid ${status.pid}, bootId ${status.bootId}`);
@@ -778,66 +820,109 @@ async function driveLifecycle(dist, label) {
   responses.degraded.deactivate =
     await call('crabcast_deactivate_agent', { path: VICTIM });
 
-  // The MCP notification path is asynchronous — it is a second process reading
-  // the same socket — so it is waited for rather than assumed to have arrived.
+  // ---- the reads, declared once -------------------------------------------
   //
-  // KAN-426: this answer used to be DISCARDED. `waitFor` printed a parenthetical
-  // "(timed out …)" aside and returned false to nobody, so a forwarder that had
-  // not delivered left the reads below taking what had arrived BY THE DEADLINE
-  // for what the daemon sent — and the difference surfaced further down as an
-  // absent event. A wait that gives up is a named, counted failure at the point
-  // it gives up, so that LATENESS is attributed to the wait rather than
-  // rediscovered as a silence three sections later.
-  const lastEventArrived = await waitFor(
-    () => mcp.eventPayloads().some((p) => p?.action === 'agent.deactivated' && p?.path === VICTIM),
-    10_000, `${label}: the MCP forwarder to deliver the last event`
+  // KAN-445. Every read this function performs is derived from this array, and
+  // so is the wait above them. That is the point of the array rather than
+  // tidiness: A SLOT THAT IS READ BUT WAITED ON BY NOTHING IS NO LONGER
+  // EXPRESSIBLE HERE. It was exactly the state this script was in until now —
+  // twelve reads standing behind ONE wait, and the other eleven taken on two
+  // assumptions that nothing asserted and this file admitted it could not tell
+  // you about. The two cannot drift apart again without deleting the array,
+  // which is a different and much more visible edit than adding a read.
+  //
+  // WHAT THIS REPLACES, rather than what it adds. The old single wait was for
+  // the MCP forwarder's `agent.deactivated` on VICTIM, and it stood in for the
+  // other eleven reads via two beliefs:
+  //
+  //   (a) THE FORWARDER DELIVERS IN ORDER, so the last event arriving implies
+  //       the earlier ones did. Traced and true — `src/mcp.ts` holds ONE
+  //       persistent `daemonSocket`, `onJsonLines` hands lines to
+  //       `forwardEvent` synchronously in arrival order, and the daemon's
+  //       `broadcast` writes one frame to every connection in a single
+  //       synchronous loop. Note that this is a property of THE CONNECTION and
+  //       not of the agent path, so it does carry across HEALTHY, DEGRADED and
+  //       VICTIM alike; they share one stream.
+  //   (b) A SUBSCRIBER IN THIS PROCESS CANNOT BE BEHIND A FORWARDER IN ANOTHER
+  //       ONE, because the forwarder's copy takes strictly more hops. Very
+  //       likely true and NOT traceable to a guarantee: it is a claim about two
+  //       independent file descriptors in one event loop, which is the kind of
+  //       claim this epic has been wrong about before.
+  //
+  // Neither belief is asserted below, and neither needs to be, because NEITHER
+  // IS LOAD-BEARING ANY MORE. Waiting on every read directly is cheaper than
+  // proving that waiting on one of them was enough, and it does not go stale
+  // when somebody adds a seventh event or a fourth agent path.
+  const SLOTS = [
+    { half: 'healthy', action: 'agent.configured', path: HEALTHY },
+    { half: 'healthy', action: 'agent.activated', path: HEALTHY },
+    { half: 'healthy', action: 'agent.deactivated', path: HEALTHY },
+    { half: 'degraded', action: 'agent.configured', path: DEGRADED },
+    { half: 'degraded', action: 'agent.activated', path: VICTIM },
+    { half: 'degraded', action: 'agent.deactivated', path: VICTIM }
+  ];
+
+  // One socket read and one MCP read per slot. DERIVED, never written down:
+  // every count this function reports comes from here, so a slot added above
+  // moves the reported totals with it. See `arrivalFailureText` for what a
+  // literal here cost when `epic/KAN-59` drove a seventh slot through it.
+  const TOTAL_READS = SLOTS.length * 2;
+
+  /** Which of the reads have nothing behind them at this instant. */
+  const outstandingReads = () => {
+    const missing = [];
+    for (const s of SLOTS) {
+      if (!sub.eventFor(s.action, s.path)) missing.push(`socket ${s.half}/${s.action}`);
+      if (!mcp.payloadFor(s.action, s.path)) missing.push(`MCP ${s.half}/${s.action}`);
+    }
+    return missing;
+  };
+
+  // Sampled BEFORE the wait and printed whatever it says. This is the number
+  // the old arrangement was implicitly betting on, and it is reported as a
+  // FACT rather than asserted on: if it is 0 on every run, the eleven unwaited
+  // reads were never actually racing anything and the old bet was safe in
+  // practice; if it is ever non-zero, the race was real and this wait is what
+  // makes it safe. Either answer is worth having, so neither is a verdict.
+  const outstandingBeforeWait = outstandingReads();
+
+  const allArrived = await waitFor(
+    () => outstandingReads().length === 0,
+    ARRIVAL_TIMEOUT_MS, `${label}: an event behind all ${TOTAL_READS} reads`
   );
-  if (!lastEventArrived) {
-    verdict(
-      false,
-      '',
-      `${label}: THE WAIT FOR THE LAST EVENT TIMED OUT. The MCP forwarder did not deliver\n` +
-      '    `agent.deactivated` for the degraded agent inside 10s, so everything read below is\n' +
-      '    what had arrived by that deadline. An event reported missing after this line may be\n' +
-      '    LATE rather than never sent, and this script cannot tell you which (KAN-426)'
-    );
+  const stillMissing = outstandingReads();
+  console.log(
+    `   arrival: ${TOTAL_READS - outstandingBeforeWait.length}/${TOTAL_READS} reads already ` +
+    `satisfied before the wait, ${TOTAL_READS - stillMissing.length}/${TOTAL_READS} after it`
+  );
+  if (outstandingBeforeWait.length) {
+    console.log(`     the wait was doing work for: ${outstandingBeforeWait.join(', ')}`);
+  }
+  const arrival = { ok: allArrived, missing: stillMissing, outstandingBeforeWait, total: TOTAL_READS };
+  // Section 4D drives this timeout deliberately and asserts on the returned
+  // value, so it asks not to have the failure counted twice — once as its own
+  // result and once as this script's.
+  if (!allArrived && reportArrival) {
+    verdict(false, '', arrivalFailureText(label, stillMissing, TOTAL_READS));
   }
 
   fs.chmodSync(registry, 0o600);
   sealed.delete(registry);
 
   const paths = { HEALTHY, VICTIM, DEGRADED };
-  const events = {
-    healthy: {
-      'agent.configured': sub.eventFor('agent.configured', HEALTHY),
-      'agent.activated': sub.eventFor('agent.activated', HEALTHY),
-      'agent.deactivated': sub.eventFor('agent.deactivated', HEALTHY)
-    },
-    degraded: {
-      'agent.configured': sub.eventFor('agent.configured', DEGRADED),
-      'agent.activated': sub.eventFor('agent.activated', VICTIM),
-      'agent.deactivated': sub.eventFor('agent.deactivated', VICTIM)
-    }
-  };
-  const mcpPayloads = {
-    healthy: {
-      'agent.configured': mcp.payloadFor('agent.configured', HEALTHY),
-      'agent.activated': mcp.payloadFor('agent.activated', HEALTHY),
-      'agent.deactivated': mcp.payloadFor('agent.deactivated', HEALTHY)
-    },
-    degraded: {
-      'agent.configured': mcp.payloadFor('agent.configured', DEGRADED),
-      'agent.activated': mcp.payloadFor('agent.activated', VICTIM),
-      'agent.deactivated': mcp.payloadFor('agent.deactivated', VICTIM)
-    }
-  };
+  const events = { healthy: {}, degraded: {} };
+  const mcpPayloads = { healthy: {}, degraded: {} };
+  for (const s of SLOTS) {
+    events[s.half][s.action] = sub.eventFor(s.action, s.path);
+    mcpPayloads[s.half][s.action] = mcp.payloadFor(s.action, s.path);
+  }
   const degradedEvents = sub.events.filter((e) => e.action === 'registry.degraded');
 
   mcp.kill();
   sub.close();
   stopDaemon(status.pid);
 
-  return { cfg, paths, responses, events, mcpPayloads, degradedEvents, mcpStderr: mcp.stderr };
+  return { cfg, paths, responses, events, mcpPayloads, degradedEvents, arrival, mcpStderr: mcp.stderr };
 }
 
 /**
@@ -1068,6 +1153,66 @@ mutation1: {
   );
 
 }
+
+// ---- 4D: an event that GENUINELY never arrives --------------------------------
+//
+// KAN-445 AC2: the new wait is DRIVEN rather than asserted to work. The
+// `agent.configured` broadcast is suppressed in the compiled router — the frame
+// is still built, and simply never leaves the daemon — so two of the six slots,
+// and therefore FOUR reads, cannot be satisfied by any amount of
+// waiting. A run against this build has to give up and name exactly those four.
+//
+// THIS IS THE ONE SECTION WHOSE TIMEOUT IS THE RESULT, so `driveLifecycle` is
+// asked not to count its own arrival verdict and this section asserts on the
+// returned value instead. The message a real timeout would have raised is
+// printed here FROM THE FUNCTION THAT RAISES IT, so what a reader sees is the
+// actual wording rather than a paraphrase that could drift away from it.
+//
+// Why suppressing a broadcast and not shortening the deadline: a deadline of 0
+// would make every slot outstanding and would prove only that a timeout
+// prints something. What has to be shown is that the report DISCRIMINATES — the
+// four reads fed by the suppressed event are named, and the other eight are
+// reported as arrived on the same run.
+console.log('\n  4D. the `agent.configured` broadcast suppressed — does the wait give up and NAME it?\n');
+mutation4D: {
+  const noConfigured = mutatedBuild('no-configured-broadcast', [
+    {
+      file: 'router.js',
+      find: `        this.deps.broadcast({\n            action: 'agent.configured',`,
+      replace: `        ((suppressedByKAN445) => suppressedByKAN445)({\n            action: 'agent.configured',`
+    }
+  ]);
+  // Already a counted failure. Skip the rest of this section rather
+  // than asserting about a build that was never mutated.
+  if (!noConfigured) break mutation4D;
+  const mutantD = await driveLifecycle(noConfigured, 'no-configured', { reportArrival: false });
+
+  const wantMissing = [
+    'MCP degraded/agent.configured',
+    'MCP healthy/agent.configured',
+    'socket degraded/agent.configured',
+    'socket healthy/agent.configured'
+  ];
+  const gotMissing = [...mutantD.arrival.missing].sort();
+
+  console.log('   the verdict this run WOULD have raised, printed from the function that raises it:');
+  console.log(`     ${arrivalFailureText('no-configured', mutantD.arrival.missing, mutantD.arrival.total)}`);
+  console.log(`\n   reads still empty after the wait: ${gotMissing.length}/${mutantD.arrival.total}`);
+  console.log(`   the other ${mutantD.arrival.total - gotMissing.length} arrived on this same run, ` +
+    `so the report is not wholesale`);
+
+  verdict(
+    mutantD.arrival.ok === false &&
+      JSON.stringify(gotMissing) === JSON.stringify(wantMissing),
+    'suppressing ONE broadcast makes the wait give up and name exactly the four reads that\n' +
+    '    event feeds, while the other eight are reported as arrived on the same run. So the wait\n' +
+    '    is a measurement of which slots came rather than a check that something came: the\n' +
+    '    distinction this script could not make while one read of the twelve was waited on',
+    `the drive did not produce the expected report: gaveUp=${mutantD.arrival.ok === false} ` +
+    `(expected true), missing=${JSON.stringify(gotMissing)} (expected ${JSON.stringify(wantMissing)})`
+  );
+}
+
 // ================================================================== verdict --
 
 rule('VERDICT');
@@ -1076,9 +1221,11 @@ console.log(
     ? `  All sections passed.\n` +
       `  All three lifecycle events report durability instead of asserting it; the answer is\n` +
       `  on the socket and on the MCP projection; a real unwritable registry produces\n` +
-      `  \`durable: false\` on every one of them and agrees with the response; and three\n` +
+      `  \`durable: false\` on every one of them and agrees with the response; and four\n` +
       `  mutations — the unconditional claim restored, the field removed, one site's spread\n` +
-      `  deleted — each turn a named check red.`
+      `  deleted, one broadcast suppressed — each turn a named check red. Every one of the\n` +
+      `  ${real.arrival.total} event reads was waited on before it was taken, so a slot reported absent\n` +
+      `  had ${ARRIVAL_TIMEOUT_MS}ms to arrive and did not (KAN-445).`
     : `  ${failures} section(s) FAILED.`
 );
 process.exit(failures ? 1 : 0);
