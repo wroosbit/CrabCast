@@ -60,7 +60,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { findAnywhere, findRunInvocations } from './ci-workflow.mjs';
+import { findAnywhere, findRunInvocations, readVerifyArray } from './ci-workflow.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const workflow = path.join('.github', 'workflows', 'ci.yml');
@@ -220,8 +220,17 @@ const EXCLUSIONS = [
       'be reproduced on a runner at all. It also measures Claude Code\'s real hard-wrapping of ' +
       'the echo, which is why flattening exists, and that the interrupt TERMINATES an in-flight ' +
       'tool call, which is what the tool description\'s narrowed safety sentence rests on. It ' +
-      'starts one Claude agent and closes it; its output goes on the PR (KAN-114).',
-    evidence: 'scripts/verify-send-confirms-delivery-live.mjs:12 two facts a shimmed pane cannot hold: the real marker, and a recipient that is genuinely busy'
+      'starts one Claude agent and closes it; its output goes on the PR (KAN-114). ' +
+      '⚠ IT MUST RUN UNDER THE OPERATOR\'S REAL $HOME, and unlike ' +
+      'verify-interrupt-at-dialog-live it does not say so anywhere in its own text — added here ' +
+      'by KAN-392, which measured it as the only one of six residue-producing proofs that ' +
+      'neither mentions HOME nor could survive a scratch one. The Claude agent it starts reads ' +
+      'the operator\'s credentials from there; under a scratch HOME it would draw a login screen ' +
+      'and §0 would read a composer marker off a pane that has none. So do NOT "fix" its ' +
+      'folder-trust residue by redirecting HOME, and note that scripts/run-verify.mjs cannot ' +
+      'reach it: that runner\'s population is the ci.yml array, and this entry is what keeps it ' +
+      'out of it.',
+    evidence: 'scripts/verify-send-confirms-delivery-live.mjs:12 two facts a shimmed pane cannot hold: the real marker, and a recipient that is genuinely busy; its header records that it "COSTS ONE CLAUDE AGENT for the length of the run"'
   },
   {
     script: 'verify-tail-source-boundary-live',
@@ -353,39 +362,34 @@ const EXCLUSIONS = [
 console.log(`=== 1. The proof list, read from ${workflow} ===\n`);
 
 const yaml = fs.readFileSync(workflowPath, 'utf8');
-const yamlLines = yaml.split('\n');
 
-const arrayOpens = [...yaml.matchAll(/^\s*scripts=\(\s*$/gm)];
+// The parse itself lives in ci-workflow.mjs (KAN-392), because run-verify.mjs
+// reads the same array to decide which proofs it may run under a scratch $HOME.
+// The judgements below stay here: the helper reports what it read, and what a
+// short read MEANS is this script's subject rather than the parser's.
+const array = readVerifyArray(yaml);
+
 check(
-  arrayOpens.length === 1,
+  array.opens === 1,
   `${workflow} declares exactly one \`scripts=(\` array`,
-  `found ${arrayOpens.length}` +
-    (arrayOpens.length > 1 ? ' — two lists is two places to forget; fold them into one' : '')
+  `found ${array.opens}` +
+    (array.opens > 1 ? ' — two lists is two places to forget; fold them into one' : '')
 );
 
 /** Line numbers (1-based, inclusive) spanned by the array literal. */
 let arrayRegion = null;
 let ciScripts = [];
 
-if (arrayOpens.length === 1) {
-  const openLine = yaml.slice(0, arrayOpens[0].index).split('\n').length;
-  let closeLine = -1;
-  const entries = [];
-  for (let n = openLine + 1; n <= yamlLines.length; n += 1) {
-    const raw = yamlLines[n - 1];
-    const text = raw.replace(/#.*$/, '').trim();
-    if (text === '') continue;
-    if (text === ')') { closeLine = n; break; }
-    entries.push({ name: text, line: n });
-  }
+if (array.opens === 1) {
+  const entries = array.entries;
 
   // A read that ran off the end would take the entries it never saw with it and
   // then report an all-clear over the remainder — the exact shape this script
   // exists to make impossible.
-  check(closeLine > 0, 'the array literal is closed — the whole list was read, not a prefix of it');
+  check(array.closed, 'the array literal is closed — the whole list was read, not a prefix of it');
 
-  if (closeLine > 0) {
-    arrayRegion = { start: openLine, end: closeLine };
+  if (array.closed) {
+    arrayRegion = array.region;
     ciScripts = entries;
 
     const malformed = entries.filter((e) => !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(e.name));

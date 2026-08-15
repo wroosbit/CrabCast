@@ -1062,6 +1062,35 @@ const PROOF_DEFENCES = [
       'through `LauncherSetupContext.note`. Named in that file\'s header; covered by nobody.'
   },
   {
+    script: 'verify-trust-write-follows-home',
+    defence: 'mutation',
+    central:
+      'the `claude` launcher\'s folder-trust write resolves its target from `$HOME`, from BOTH of ' +
+      'its call sites — `setup` and `preSpawnCheck` — so that redirecting `HOME` (which is what ' +
+      'ci.yml and `scripts/run-verify.mjs` both do, once per proof) actually moves the write ' +
+      'rather than merely appearing to.',
+    note:
+      'THE MUTATION IS §6: `dist/launchers.js` is edited so `claudeConfigPath()` returns a fixed ' +
+      'path instead of `path.join(os.homedir(), …)`, and §1\'s predicate — "the shipped path ' +
+      'resolves inside this run\'s scratch home" — must go RED against it. That predicate is what ' +
+      'every other section rests on, so it is the one worth breaking: if it could not be false, ' +
+      '§2 to §5 would be asserting about the operator\'s real config while reporting success. The ' +
+      'mutant answers a path inside the run\'s own scratch, never the real home, so a mutant that ' +
+      'DID write could only write where the run cleans up. ' +
+      '§4 IS THE VACUITY GUARD and is not the mutation: a third directory neither call site saw ' +
+      'must have NO entry, which is what stops §2 and §3 being satisfied by a `trustedIn` that ' +
+      'answers true for anything. §3 uses a DIFFERENT work directory from §2 for the same reason ' +
+      'in the other direction — at the same one, `trustClaudeWorkspace` returns `attempts: 0` ' +
+      'without writing, and §3 would pass having exercised nothing about `preSpawnCheck`. ' +
+      'SEAM, and it is the whole reason KAN-392 was filed rather than closed: this says the write ' +
+      'FOLLOWS `$HOME` and says nothing about anybody redirecting it. `scripts/run-verify.mjs` is ' +
+      'the local route that does, and nothing compels its use — every proof\'s own header still ' +
+      'documents `node scripts/verify-<name>.mjs`, which writes to the real config. Two proofs ' +
+      'must NOT be redirected at all (`verify-interrupt-at-dialog-live`, ' +
+      '`verify-send-confirms-delivery-live`) because the real `claude` they start reads its ' +
+      'credentials from the real home. Covered by nobody; named on KAN-392.'
+  },
+  {
     script: 'verify-approval-marker',
     defence: 'mutation',
     central:

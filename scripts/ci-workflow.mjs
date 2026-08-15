@@ -1400,3 +1400,52 @@ export function findAnywhere(text, needle) {
     .map((l, i) => (re.test(l) ? i + 1 : 0))
     .filter(Boolean);
 }
+
+/**
+ * The `scripts=(...)` array in the verify job, parsed — the one list saying
+ * which proofs CI runs.
+ *
+ * Extracted here (KAN-392) because there are now TWO readers of that array and
+ * the alternative is two parsers: `verify-proof-registry.mjs`, which audits the
+ * list against what git tracks, and `run-verify.mjs`, which runs the same list
+ * locally with a scratch `$HOME` per entry. A second parser free to drift from
+ * the first is the same defect `readme-blocks.mjs` was extracted to avoid — the
+ * runner would be isolating one population while the audit described another,
+ * and both would report success.
+ *
+ * Pure parsing, and deliberately verdict-free: it reports what it read and what
+ * it could not, and every judgement about that — one array, closed, no
+ * duplicates, names that are tracked files — stays in the caller, where the
+ * failure can be named. A parser that decided for its callers would give the
+ * runner the registry's opinions, which is not what either wants.
+ *
+ * Returns `{ opens, closed, region, entries }`:
+ *   opens    how many `scripts=(` lines the file has. Anything but 1 means the
+ *            caller's assumption about "the array" no longer holds.
+ *   closed   whether the literal's `)` was found. False means the read ran off
+ *            the end and `entries` is a PREFIX of the list, never the list.
+ *   region   { start, end } 1-based inclusive line span, or null.
+ *   entries  [{ name, line }] in file order, comments and blanks dropped.
+ */
+export function readVerifyArray(text) {
+  const lines = text.split('\n');
+  const opens = [...text.matchAll(/^\s*scripts=\(\s*$/gm)];
+  if (opens.length !== 1) return { opens: opens.length, closed: false, region: null, entries: [] };
+
+  const openLine = text.slice(0, opens[0].index).split('\n').length;
+  const entries = [];
+  let closeLine = -1;
+  for (let n = openLine + 1; n <= lines.length; n += 1) {
+    const body = lines[n - 1].replace(/#.*$/, '').trim();
+    if (body === '') continue;
+    if (body === ')') { closeLine = n; break; }
+    entries.push({ name: body, line: n });
+  }
+
+  return {
+    opens: 1,
+    closed: closeLine > 0,
+    region: closeLine > 0 ? { start: openLine, end: closeLine } : null,
+    entries
+  };
+}

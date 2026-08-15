@@ -920,6 +920,20 @@ npm run build       # tsc → dist/, then dist/build-stamp.json
 
 The verify scripts under `scripts/` are the live proofs of this daemon's behavioural invariants. The isolatable ones run in CI (the `verify` check) against a shimmed `herdr`; the rest need a real herdr and real panes and are run by hand, with their output going on the pull request. See the comments in `.github/workflows/ci.yml` for which are which and why.
 
+### Running the proofs locally
+
+```bash
+npm run verify                                  # the whole CI array, as CI runs it
+npm run verify -- verify-restart-survival       # one of them
+npm run verify -- --list                        # what the array holds
+```
+
+`npm run verify` is `node scripts/run-verify.mjs`, and **it is how these proofs should be run by hand.** Running one directly still works and still writes into your own `~/.claude.json`: the `claude` launcher records folder trust at `path.join(os.homedir(), '.claude.json')`, so every proof that activates a `claude` agent leaves one `hasTrustDialogAccepted` key per scratch directory behind — for a directory that is deleted moments later. CI never had this problem because `.github/workflows/ci.yml` gives each proof its own `$HOME`; the runner is the same three lines off the runner. It reads the proof list out of `ci.yml` rather than keeping a second copy, refuses to start unless it has watched the *shipped* `claudeConfigPath()` answer from inside a scratch directory, and counts your real config's keys on both sides of the run.
+
+`node scripts/claude-config-residue.mjs` reports how many such keys are in a config already, by producing script. It is read-only and prints counts and never keys — the file is yours and most of it has nothing to do with this repository.
+
+Two proofs are deliberately outside all of this and must keep running under your real `$HOME`: `verify-interrupt-at-dialog-live` and `verify-send-confirms-delivery-live` start a real Claude Code, which reads your credentials from there. Both are in the exclusion register in `scripts/verify-proof-registry.mjs`, so the runner cannot reach them and refuses them by name.
+
 ### Where this code came from
 
 Nineteen modules under `src/` were extracted from another codebase over five commits in August 2026, and several still carry decisions made before CrabCast existed. [`docs/ported-lineage.md`](docs/ported-lineage.md) is the record: the extraction source and the commit it was read at, the exact file list and what was deliberately left behind, how each module has diverged since and whether that was on purpose, and — the part a list of stated purposes would miss — **what some of those mechanisms were incidentally doing beyond their stated job**. It also names the modules nobody has examined, rather than omitting them.
