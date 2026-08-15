@@ -76,6 +76,25 @@ function check(ok, label, detail = '') {
 }
 
 /**
+ * Find a literal quote in a repo file: how many times it occurs, and the line
+ * the first occurrence sits on TODAY.
+ *
+ * The line number is computed here and stored nowhere, which is the whole point
+ * of KAN-389: a reader still gets somewhere to jump to, and there is no number
+ * in the register that can quietly go stale between edits.
+ */
+function locate(relPath, needle) {
+  const source = fs.readFileSync(path.join(repoRoot, relPath), 'utf8');
+  let count = 0;
+  let line = 0;
+  for (let i = source.indexOf(needle); i >= 0; i = source.indexOf(needle, i + 1)) {
+    if (count === 0) line = source.slice(0, i).split('\n').length;
+    count += 1;
+  }
+  return { count, line };
+}
+
+/**
  * The live half of this suite: proofs that are absent from CI on purpose.
  *
  * Each needs a real herdr server and real terminal panes, which no GitHub
@@ -85,8 +104,51 @@ function check(ok, label, detail = '') {
  *
  * `reason` is what a future reader actually arrives wanting — not "is this
  * known?", which a bare name answers, but "why doesn't CI run this?".
- * `evidence` points at the line in the script itself that the reason rests on,
- * so the claim is checkable rather than asserted.
+ *
+ * `evidence` is `{ quote, note }`. `quote` is text copied VERBATIM out of the
+ * script named by `script`, and section 2 reads that file and requires the text
+ * to be there, exactly once. `note` says what the quoted text shows. The file
+ * is not named in the entry — it comes from `script` — so an entry cannot cite
+ * a file it is not about.
+ *
+ * WHY A QUOTE RATHER THAN A LINE NUMBER (KAN-389). This field used to be
+ * `'scripts/<name>.mjs:<line> <prose>'`, and section 2 checked only that the
+ * number was between 1 and the file's length. It never read the line, so a
+ * citation stayed green for as long as the file was long enough — which a
+ * citation of a real file always is. Measured when that was replaced: FIVE of
+ * these sixteen entries were pointing at a line that supported no part of their
+ * claim. One pointed at a `#!/usr/bin/env node` shebang, one at a blank comment
+ * line, and one 719 lines from its claim, at a passage about a different
+ * script. The check was green for all five, and had been for months.
+ *
+ * A line number rots on every insertion above it, so it is the most rot-prone
+ * form evidence can take. A quote rots only when the text it names is itself
+ * edited — which is the moment somebody should be re-reading the reason anyway.
+ *
+ * WHAT THIS STILL DOES NOT CATCH, said plainly because the sentence above is
+ * the kind that grows past its mechanism:
+ *
+ *   1. THAT THE QUOTE SUPPORTS THE REASON. The check proves the quote
+ *      RESOLVES, and nothing more. An entry could quote a real line that is
+ *      irrelevant to its claim and pass. That is a reviewer's job and no
+ *      mechanism here does it. What changed is only that a citation can no
+ *      longer point at NOTHING — which is what all five stale ones did.
+ *   2. A QUOTE SO SHORT IT MATCHES BY ACCIDENT. Uniqueness bounds this and does
+ *      not close it: a three-character string that happens to occur once is
+ *      legal here, and it names a place without describing one. A line number
+ *      was unambiguous by construction, and this is the one axis on which it
+ *      was the stronger form. Nothing here requires a quote to be
+ *      DISTINCTIVE — only present, and present once.
+ *   3. A QUOTE WHOSE SURROUNDINGS CHANGED UNDER IT. The text can survive an
+ *      edit that inverts the passage containing it, and the citation still
+ *      resolves. Line numbers were worse here, not better, so this is not a
+ *      regression — but it is not fixed either.
+ *
+ * The cost, named rather than discovered later: when quoted text IS edited the
+ * gate goes red and somebody has to re-read the entry. That is the intended
+ * trade — it converts silent rot into a loud stop at the moment the reason
+ * needs re-reading — but it is a real cost and it lands on whoever edits the
+ * proof, not on whoever wrote the entry.
  *
  * Adding a name here is the escape hatch from the rule above, so it is meant
  * to cost something: the reason is reviewed like code, and an entry naming a
@@ -112,8 +174,10 @@ const EXCLUSIONS = [
       '`paneNameForHandle` in src/herdr.ts, or `chargedPaneNames` in src/daemon.ts. It carries ' +
       'its own red drive — the pane-handle variable renamed, where the live agent must fall out ' +
       'of the sample — so a green run is evidence the gate can still go red.',
-    evidence:
-      'scripts/verify-agent-cost-attribution-live.mjs:23 spawns a real pane via HerdrBridge; §2 resolves HERDR_PANE_ID through `herdr pane get`'
+    evidence: {
+      quote: 'It spawns ONE scratch `shell` agent through `HerdrBridge`',
+      note: 'a real pane through the real bridge; §2 then resolves HERDR_PANE_ID through `herdr pane get`, and a GitHub runner can do neither'
+    }
   },
   {
     script: 'verify-agy-reads-what-we-write',
@@ -140,8 +204,10 @@ const EXCLUSIONS = [
       'literal is RIGHT. A wrong path edited in both places at once passes the guard. So this ' +
       'exclusion is the reason that hand-run remains obligatory before merging any change to the ' +
       'path, and deleting this script would leave the literal an unverified assumption.',
-    evidence:
-      'scripts/verify-agy-reads-what-we-write.mjs:1 runs a real agy under a scratch $HOME; §1 exits non-zero when no agy is on PATH'
+    evidence: {
+      quote: 'a real `agy` binary is on PATH. THIS PROOF IS MEANINGLESS WITHOUT ONE',
+      note: 'the assertion itself: it fails rather than skipping when agy is absent, so it can never go green on a machine that could not run it'
+    }
   },
   {
     script: 'verify-proof-verdicts',
@@ -163,7 +229,10 @@ const EXCLUSIONS = [
       'diff, no review and no artefact in the tree, which is a quieter edit than the array hunk ' +
       'this exclusion exists to survive. KAN-210 tracks that gap. Do not \'fix\' this by adding ' +
       'it to the array.',
-    evidence: 'scripts/verify-proof-verdicts.mjs:7 asserts its own wiring — not in the array, own named job, job invokes it'
+    evidence: {
+      quote: 'this script is NOT an entry in the `scripts=(` array it audits',
+      note: 'its own wiring assertion — the script checks that it is absent from the array, has its own named job, and that the job invokes it'
+    }
   },
   {
     script: 'verify-no-attach-steal',
@@ -174,7 +243,10 @@ const EXCLUSIONS = [
       'either side of itself, asserting that the herdr pane it spawned is gone at exit and that ' +
       'no butchr-* pane moved; that census is a real herdr\'s, which is a machine state and not ' +
       'a fixture.',
-    evidence: 'scripts/verify-no-attach-steal.mjs:10 the failure it catches is a run that reports PASS while leaving a live herdr pane behind'
+    evidence: {
+      quote: 'a run of this proof that reports PASS while',
+      note: 'its WHAT FAILURE THIS WOULD CATCH line — a run reporting PASS while leaving a live herdr pane behind on the machine, which it once did'
+    }
   },
   {
     script: 'verify-pane-reclaim-when-interrupted',
@@ -195,8 +267,10 @@ const EXCLUSIONS = [
       'itself, so the proof does not become the thing it catches. NOT WORTH RUNNING WHILE THE ' +
       'MACHINE IS TIGHT: check `butchr_capacity` first, and run it before merging any change to the ' +
       'handler block in `verify-no-attach-steal` or to `reclaimProbePane`.',
-    evidence:
-      'scripts/verify-pane-reclaim-when-interrupted.mjs:137 it needs a real herdr and opens three real panes, one per driven run'
+    evidence: {
+      quote: 'It needs a real herdr and it opens three real panes, one per driven run',
+      note: 'the machine requirement stated in its own header — three real panes is not something a runner with no herdr can supply'
+    }
   },
   {
     script: 'verify-tab-per-agent',
@@ -205,7 +279,10 @@ const EXCLUSIONS = [
       'does not shrink as the fleet grows — and width is produced by a terminal app laying out a ' +
       'rendered tab. A shimmed herdr has no layout to measure, so the one assertion that fails on ' +
       'the old code could not fail here.',
-    evidence: 'scripts/verify-tab-per-agent.mjs:1 live check against a real herdr, at the HerdrBridge level'
+    evidence: {
+      quote: "Live check of the extraction source's KAN-32 fix against a real herdr",
+      note: 'its opening sentence: a live check against a real herdr, at the HerdrBridge level the bug actually lived at'
+    }
   },
   {
     script: 'verify-send-confirms-delivery-live',
@@ -230,7 +307,10 @@ const EXCLUSIONS = [
       'folder-trust residue by redirecting HOME, and note that scripts/run-verify.mjs cannot ' +
       'reach it: that runner\'s population is the ci.yml array, and this entry is what keeps it ' +
       'out of it.',
-    evidence: 'scripts/verify-send-confirms-delivery-live.mjs:12 two facts a shimmed pane cannot hold: the real marker, and a recipient that is genuinely busy; its header records that it "COSTS ONE CLAUDE AGENT for the length of the run"'
+    evidence: {
+      quote: 'COSTS ONE CLAUDE AGENT for the length of the run',
+      note: 'what the hand-run costs, in its own header — it needs two facts a shimmed pane cannot hold: the real marker, and a recipient that is genuinely busy'
+    }
   },
   {
     script: 'verify-tail-source-boundary-live',
@@ -248,7 +328,10 @@ const EXCLUSIONS = [
       'docblock\'s claim that `recent-unwrapped` shows a dead agent\'s frozen last frame was ' +
       'refuted rather than argued with. Costs one shell pane and no tokens; output goes on the ' +
       'PR (KAN-98).',
-    evidence: 'scripts/verify-tail-source-boundary-live.mjs:7 the premise its shimmed sibling cannot establish; §4 kills a pane process and reads all three sources'
+    evidence: {
+      quote: "Kill the pane's process and ask all three sources for 15 seconds.",
+      note: '§4 doing the thing a shim cannot: killing a real pane process and reading all three sources afterwards, which is the premise its shimmed sibling cannot establish'
+    }
   },
   {
     script: 'verify-fleet-switch-live',
@@ -257,7 +340,10 @@ const EXCLUSIONS = [
       'SIGKILL and restart. The whole point is that the census comes from something other than the ' +
       'daemon under test; against a stub the daemon would be checking its own homework, which is ' +
       'the failure mode these restart sequences exist to rule out.',
-    evidence: 'scripts/verify-fleet-switch-live.mjs:2 takes `herdr agent list` as ground truth'
+    evidence: {
+      quote: '`herdr agent list` as the ground truth',
+      note: 'what it measures against — a real herdr\'s own census, which a runner without herdr cannot produce'
+    }
   },
   {
     script: 'verify-activate-verified-existence',
@@ -265,7 +351,10 @@ const EXCLUSIONS = [
       'Real herdr 0.6.x and real panes. It proves `activate` reports success only for an agent that ' +
       'verifiably exists, and separates that from herdr-said-no and herdr-did-not-answer. The ' +
       'version-specific behaviour of a real 0.6.x server is the subject, not the scaffolding.',
-    evidence: 'scripts/verify-activate-verified-existence.mjs:22 runs against a real herdr 0.6.x with real panes'
+    evidence: {
+      quote: 'a real herdr 0.6.x, real panes',
+      note: 'its inventory of what is real here — only the `herdr` shim intercepting one subcommand is injected, so the absent agent it reports is a real one'
+    }
   },
   {
     script: 'verify-pretrust-survives-concurrency',
@@ -274,7 +363,10 @@ const EXCLUSIONS = [
       '~/.claude.json survives concurrent activations against a competing writer, and concurrency ' +
       'between real spawned processes is what it has to survive — serialised stub calls would pass ' +
       'it trivially and prove nothing.',
-    evidence: 'scripts/verify-pretrust-survives-concurrency.mjs:8 runs against a private herdr server and real panes'
+    evidence: {
+      quote: 'private herdr server, real panes',
+      note: 'the real processes it needs — isolated by $HOME, a scratch dataDir and HERDR_SOCKET_PATH so the live fleet is never touched'
+    }
   },
   {
     script: 'verify-pty-init-rejects-unknown-session',
@@ -283,7 +375,10 @@ const EXCLUSIONS = [
       'session it does not have, rather than substituting one or spawning a default shell — a ' +
       'refusal about PTY plumbing, which needs the plumbing. It also has a load-dependent ' +
       'keystroke-delivery stage that was the source of a CI flake (KAN-88 item 11).',
-    evidence: 'scripts/verify-pty-init-rejects-unknown-session.mjs:7 isolates a real daemon by HERDR_SOCKET_PATH'
+    evidence: {
+      quote: 'and HERDR_SOCKET_PATH: the daemon',
+      note: 'how it isolates the real daemon it needs — its own socket, log and workspaces root, none of which a runner has a daemon to give'
+    }
   },
   {
     script: 'verify-pty-payload-refusal',
@@ -296,8 +391,10 @@ const EXCLUSIONS = [
       'checked the subject not at all; it exits non-zero instead. Its §6 also reads keystrokes ' +
       'back off a real pane, which is the check that separates "malformed payloads are refused" ' +
       'from "everything is refused", and a pane is the only thing that can answer it.',
-    evidence:
-      'scripts/verify-pty-payload-refusal.mjs:251 the payload refusal is unreachable without a real session, so §1 exits non-zero rather than skipping when no herdr is on PATH'
+    evidence: {
+      quote: 'herdr is not on PATH. This proof needs a real PTY session',
+      note: '§1 refusing to run rather than skipping — the payload refusal is unreachable without a real session, so a skip here would be a proof that quietly did nothing'
+    }
   },
   {
     script: 'verify-herdr-release',
@@ -310,7 +407,10 @@ const EXCLUSIONS = [
       'pick a release and an answer, and the answer is exactly what a human is running it to find ' +
       'out. Its output goes on the pull request that changes README.md\'s version table, because ' +
       'that table is the thing it is evidence for.',
-    evidence: 'scripts/verify-herdr-release.mjs:63 the herdr on this machine\'s PATH is running a live fleet, so the release under test is downloaded and run out-of-place'
+    evidence: {
+      quote: "The herdr on this machine's PATH is running a live fleet",
+      note: 'why the release under test is downloaded and run out-of-place — overwriting the machine\'s own herdr is not available to this proof'
+    }
   },
   {
     script: 'verify-spawn-failure-legibility',
@@ -321,7 +421,10 @@ const EXCLUSIONS = [
       'bridge. Since KAN-197 its §2 also runs the same refusal through a build with the fix taken ' +
       'out, which needs the refusal to be real for the same reason twice over — a mutant that ' +
       'reports nothing because nothing was refused looks exactly like one that swallowed a refusal.',
-    evidence: 'scripts/verify-spawn-failure-legibility.mjs:68 runs against a private herdr server on its own socket'
+    evidence: {
+      quote: 'Everything runs against a private herdr server on its own socket',
+      note: 'the real server it needs, isolated so it cannot disturb a live session — a runner has no herdr to start one from'
+    }
   },
   {
     script: 'verify-interrupt-at-dialog-live',
@@ -350,8 +453,10 @@ const EXCLUSIONS = [
       'sendToAgent emits them. §0 covers that half statically by exact occurrence count. Nobody ' +
       'drives the composition end to end against a real dialog, and that is deliberate — doing so ' +
       'means answering a real consent dialog on a real agent.',
-    evidence:
-      'scripts/verify-interrupt-at-dialog-live.mjs:210 launches a real `claude` in a real pane and waits for its startup dialog, which no runner can authenticate or draw'
+    evidence: {
+      quote: "waitFor(paneId, hasDialog, 60_000, 'the startup dialog')",
+      note: 'it launches a real `claude` in a real pane and waits for the startup dialog — a dialog no runner can authenticate or draw'
+    }
   }
 ];
 
@@ -445,26 +550,52 @@ for (const e of EXCLUSIONS) {
     typeof e.reason === 'string' && e.reason.trim().length >= 40,
     `excluded '${e.script}' carries a reason, not just a name`
   );
-  // The citation names the script's own source and a line that is really in
-  // it, so an entry cannot cite evidence from a file it is not about.
-  const m = /^scripts\/([A-Za-z0-9._-]+\.mjs):(\d+)\b/.exec(e.evidence ?? '');
-  const cited = m && m[1] === `${e.script}.mjs`;
-  const inRange =
-    cited && exists &&
-    Number(m[2]) >= 1 &&
-    Number(m[2]) <= fs.readFileSync(path.join(repoRoot, file), 'utf8').split('\n').length;
+  // The citation is a LITERAL QUOTE from the script's own source, and this
+  // check reads the file to find it. The file is not named in the entry: it is
+  // derived from `e.script`, so "cites evidence from a file it is not about"
+  // is a state this register cannot EXPRESS rather than one a check has to
+  // catch.
+  const quote = e.evidence && typeof e.evidence === 'object' ? e.evidence.quote : undefined;
+  const wellFormed = typeof quote === 'string' && quote.trim().length > 0;
   check(
-    Boolean(inRange),
-    `excluded '${e.script}' cites a line of its own source`,
-    inRange ? '' : `bad citation: ${JSON.stringify(e.evidence ?? null)}`
+    wellFormed,
+    `excluded '${e.script}' carries a quoted citation`,
+    wellFormed
+      ? ''
+      : `evidence must be { quote, note } with a non-empty quote — got ${JSON.stringify(e.evidence ?? null)}`
+  );
+  const { count } = wellFormed && exists ? locate(file, quote) : { count: 0 };
+  check(
+    count === 1,
+    `excluded '${e.script}' quotes text found exactly once in its own source`,
+    count === 1
+      ? ''
+      : count === 0
+        ? `not in ${file} — the quote must be that file's text verbatim: ${JSON.stringify(quote ?? null)}`
+        : `${count} matches in ${file} — lengthen it so it names ONE place: ${JSON.stringify(quote)}`
   );
 }
 
 console.log('');
 for (const e of EXCLUSIONS) {
+  const relPath = path.join('scripts', `${e.script}.mjs`);
+  const quote = e.evidence?.quote;
+  // Same non-empty guard the check uses: `indexOf('')` matches everywhere, so a
+  // malformed entry would otherwise walk the whole file to print a meaningless
+  // number. It has already failed above; this only keeps the printout sane.
+  const where =
+    typeof quote === 'string' && quote.length > 0 && fs.existsSync(path.join(repoRoot, relPath))
+      ? locate(relPath, quote)
+      : { count: 0, line: 0 };
   console.log(`  ${e.script}`);
   console.log(`    why:      ${e.reason.replace(/\s+/g, ' ')}`);
-  console.log(`    evidence: ${e.evidence.replace(/\s+/g, ' ')}`);
+  console.log(`    quoting:  "${String(quote ?? '').replace(/\s+/g, ' ')}"`);
+  // Printed for navigation and deliberately NOT stored anywhere: this line is
+  // recomputed on every run, so it cannot be the thing that goes stale.
+  console.log(
+    `    found at: ${relPath}:${where.line} as this tree stands — computed on this run, not recorded`
+  );
+  console.log(`    shows:    ${String(e.evidence?.note ?? '').replace(/\s+/g, ' ')}`);
   console.log('');
 }
 
