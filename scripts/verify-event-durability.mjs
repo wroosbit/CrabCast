@@ -76,6 +76,19 @@
 //     ever revisited: its `durable: false` is the sharpest case the field has —
 //     the repair a supervisor made precisely to get an agent back into
 //     `expected()`, not reaching the disk.
+//   - IT DOES NOT ESTABLISH WHETHER THE WAITS ARE SUFFICIENT, and KAN-426 made
+//     that gap reportable rather than closing it. An event that has not arrived
+//     is now a named, counted FAIL (`expectEvent`) and a wait that gives up is
+//     another (the timeout verdict in `driveLifecycle`) — so absence and
+//     lateness are both ATTRIBUTED where they happen instead of arriving as a
+//     TypeError from a formatter. What no assertion here can tell you is which
+//     of the two you are looking at. Only ONE of the twelve reads is waited on
+//     at all: the wait is for the MCP forwarder's `agent.deactivated` on the
+//     DEGRADED half. The other five MCP payloads, and all six socket events,
+//     are read on the assumption that a subscriber in THIS process cannot be
+//     behind a forwarder in another one — which is very likely true and is not
+//     measured anywhere. Nobody covers that today; KAN-445 holds the question
+//     and is linked `Relates` to KAN-426.
 //   - It says nothing about whether a SUBSCRIBER acts on `durable: false`. That
 //     is Butchr's half, filed by them as KAN-162 and linked `Relates` to
 //     KAN-165. Nobody on this side covers it and nothing here should be read as
@@ -117,12 +130,58 @@ const LIFECYCLE = ['agent.configured', 'agent.activated', 'agent.deactivated'];
 // --------------------------------------------------------------- the harness --
 
 const rule = (title) => console.log(`\n${'='.repeat(78)}\n${title}\n${'='.repeat(78)}`);
-const show = (label, value) =>
-  console.log(`   ${label}\n${JSON.stringify(value, null, 2).replace(/^/gm, '     ')}`);
+/**
+ * Print a labelled value, for ANY value.
+ *
+ * KAN-426: `JSON.stringify` answers `undefined` — the value, not a string — for
+ * `undefined` itself and for a bare function or symbol, so calling `.replace` on
+ * its result threw a TypeError from inside a FORMATTER. An event that had not
+ * arrived therefore ended this script with a stack trace naming a display
+ * helper, which is true of every absent event and tells the reader nothing about
+ * WHICH one, or whether the assertions above it stood. This helper now has no
+ * input it can throw on. Saying that a required event is missing is a verdict
+ * and belongs to `expectEvent` below, not to a printer.
+ */
+const show = (label, value) => {
+  const json = JSON.stringify(value, null, 2);
+  const body =
+    json === undefined
+      ? `     (no value — this is \`${String(value)}\`, which JSON.stringify does not render)`
+      : json.replace(/^/gm, '     ');
+  console.log(`   ${label}\n${body}`);
+};
 let failures = 0;
 const verdict = (ok, yes, no) => {
   console.log(`\n  ${ok ? '→ ' + yes : '→ FAILED — ' + no}`);
   if (!ok) failures++;
+};
+/**
+ * Show a lifecycle event that was REQUIRED to arrive, and make its absence a
+ * named, counted failure.
+ *
+ * KAN-426: the two display loops in sections 2 and 3 handed `real.events.<half>[name]`
+ * straight to `show`, so an event that never arrived died in the formatter and
+ * took every section below it with it — the property `verify-panes-are-reclaimed`
+ * §3 was praised for on #108, lost here. Absence is a verdict instead: it names
+ * the half AND the event, it counts into `failures`, and it RETURNS, so sections
+ * 3 and 4 still report.
+ *
+ * It deliberately does NOT distinguish "never sent" from "not yet arrived" —
+ * that is what the timeout verdict at the end of `driveLifecycle` is for, and
+ * conflating the two here would put a claim about a race into a helper that
+ * cannot observe one.
+ */
+const expectEvent = (half, name, ev) => {
+  show(`socket ${name}:`, ev);
+  if (ev !== undefined) return;
+  verdict(
+    false,
+    '',
+    `${half} half: NO \`${name}\` EVENT ARRIVED on the socket. The events map has no entry\n` +
+    '    for it, so every assertion below that reads it is reading an absence rather than a\n' +
+    '    value. Reported as a verdict rather than as a TypeError from a display path, so the\n' +
+    '    rest of this file still reports (KAN-426)'
+  );
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (predicate, ms, what) => {
@@ -721,10 +780,28 @@ async function driveLifecycle(dist, label) {
 
   // The MCP notification path is asynchronous — it is a second process reading
   // the same socket — so it is waited for rather than assumed to have arrived.
-  await waitFor(
+  //
+  // KAN-426: this answer used to be DISCARDED. `waitFor` printed a parenthetical
+  // "(timed out …)" aside and returned false to nobody, so a forwarder that had
+  // not delivered left the reads below taking what had arrived BY THE DEADLINE
+  // for what the daemon sent — and the difference surfaced further down as an
+  // absent event. A wait that gives up is a named, counted failure at the point
+  // it gives up, so that LATENESS is attributed to the wait rather than
+  // rediscovered as a silence three sections later.
+  const lastEventArrived = await waitFor(
     () => mcp.eventPayloads().some((p) => p?.action === 'agent.deactivated' && p?.path === VICTIM),
     10_000, `${label}: the MCP forwarder to deliver the last event`
   );
+  if (!lastEventArrived) {
+    verdict(
+      false,
+      '',
+      `${label}: THE WAIT FOR THE LAST EVENT TIMED OUT. The MCP forwarder did not deliver\n` +
+      '    `agent.deactivated` for the degraded agent inside 10s, so everything read below is\n' +
+      '    what had arrived by that deadline. An event reported missing after this line may be\n' +
+      '    LATE rather than never sent, and this script cannot tell you which (KAN-426)'
+    );
+  }
 
   fs.chmodSync(registry, 0o600);
   sealed.delete(registry);
@@ -798,7 +875,7 @@ const real = await driveLifecycle(distDir, 'real');
 rule('2. HEALTHY — the three events against a registry that works');
 
 for (const name of LIFECYCLE) {
-  show(`socket ${name}:`, real.events.healthy[name]);
+  expectEvent('healthy', name, real.events.healthy[name]);
 }
 console.log();
 for (const name of LIFECYCLE) {
@@ -829,7 +906,7 @@ verdict(
 rule('3. DEGRADED — the registry made genuinely unwritable, and what the events say');
 
 for (const name of LIFECYCLE) {
-  show(`socket ${name}:`, real.events.degraded[name]);
+  expectEvent('degraded', name, real.events.degraded[name]);
 }
 
 const held = degradedHolds(real);
