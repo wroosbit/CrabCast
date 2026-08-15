@@ -1617,8 +1617,15 @@ const PROOF_DEFENCES = [
     note:
       'PRECONDITION on §9: the daemon\'s inherited cwd is measured before the relative-path ' +
       'refusals are asserted, because every check below it would otherwise pass for the wrong ' +
-      'reason. §2 also reproduces §1\'s derivation deterministically through the renderer, so the ' +
-      'byte-for-byte claim is not resting on one live run.'
+      'reason. §2 also reproduces §1\'s derivation deterministically through the renderer, and ' +
+      'since KAN-448 it REQUIRES that renderer to be the object `commandNamed(\'activate\')` ' +
+      'returns rather than describing it as the same one — so the byte-for-byte claim is not ' +
+      'resting on one live run, and the link between the two sections is checked rather than ' +
+      'asserted in a comment. §1\'s live comparison spans two readings of a live machine and ' +
+      'cannot always be put; an exhausted retry is now a GATE FAULT rather than a verdict about ' +
+      'the renderer, and `scripts/kan448-red-drive.mjs` drives all four conditions — machine ' +
+      'moved, renderer indented, line dropped, digits mangled — and requires the first to be a ' +
+      'gate fault and the next two to be check failures.'
   },
   {
     script: 'verify-config-and-socket',
