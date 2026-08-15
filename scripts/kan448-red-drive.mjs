@@ -349,8 +349,28 @@ machine: {
     {
       file: 'capacity.js',
       find: 'load1: os.loadavg()[0],',
+      // ⚠ THE LIVE TERM IS REPLACED, NOT ADDED TO, AND THE DIFFERENCE IS A
+      // CLAIM THIS DRIVE PUBLISHED AND `epic/KAN-59` MEASURED FALSE.
+      //
+      // The previous version was `os.loadavg()[0] + counter/100`, described as
+      // "a counter rather than a clock, so consecutive readings cannot collide
+      // at all". They can: the counter contributes a fixed +0.01 and
+      // `os.loadavg()[0]` contributes a live movement, so a real load average
+      // falling by 0.01 between the two invocations cancels it and
+      // `toFixed(2)` renders both reads identically. Observed at `f4d97e7a`:
+      // the retry logged two re-reads and then AGREED on attempt 3, so no gate
+      // fault fired and the arm went red. Clock → counter removed the
+      // granularity problem and left the LIVENESS — a nonce ADDED to a live
+      // value is still live.
+      //
+      // A constant base plus the counter has no live term at all, and the
+      // impossibility claim is now a real one: each snapshot increments by
+      // exactly one, so two CONSECUTIVE snapshots cannot be equal, and the
+      // `% 100` wrap needs a hundred snapshots between them to bite. The base
+      // is 2 rather than 0 so the fixture stays in roughly the load regime the
+      // real machine puts it in.
       replace:
-        'load1: os.loadavg()[0] + ((globalThis.__kan448 = ((globalThis.__kan448 ?? 0) + 1) % 100) / 100),'
+        'load1: 2 + ((globalThis.__kan448 = ((globalThis.__kan448 ?? 0) + 1) % 100) / 100),'
     }
   ]);
   if (!mutant) break machine;
