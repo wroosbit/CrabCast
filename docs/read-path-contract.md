@@ -1810,10 +1810,36 @@ boundary rather than as a habit.
 | `deactivate_response` | reads `wasRunning` and `state` to tell a stand-down from a no-op | `verify-idempotent-lifecycle.mjs` — behaviour, not shape |
 | `configure_response` | reads the echo back and `configVersion` for compare-and-set | `verify-config-echo-contract.mjs`, `verify-reconfiguration-refuses.mjs` |
 | `forget_response` | reads the refusal when a live pane blocks the forget | `verify-refuses-occupied-directory.mjs` |
-| `pty_init` | an *external* terminal client opens a session — no `crabcast` command does; see below | `verify-pty-init-rejects-unknown-session.mjs` |
-| `pty_input` | writes to it | `verify-pty-payload-refusal.mjs` |
-| `pty_resize` | resizes it | `verify-pty-payload-refusal.mjs` |
+| `pty_init` | an *external* terminal client opens a session — no `crabcast` command does; see below | `verify-pty-init-rejects-unknown-session.mjs` — **hand-run, not in CI** |
+| `pty_input` | writes to it | `verify-pty-payload-refusal.mjs` — **hand-run, not in CI** |
+| `pty_resize` | resizes it | `verify-pty-payload-refusal.mjs` — **hand-run, not in CI** |
 | `tail_agent` | reads the tail and which source answered | `verify-tail-asks-every-source.mjs` |
+
+**Read the third column knowing that two of its proofs do not run on a pull
+request.** Every unmarked proof above is an entry in `.github/workflows/ci.yml`'s
+verify array, so it runs on every PR and a regression in what it holds is a red
+check. The three rows marked **hand-run, not in CI** are held by two proofs that
+are in `scripts/verify-proof-registry.mjs`'s `EXCLUSIONS` register instead: both
+need a private herdr server and real PTYs, which no GitHub runner has, so they
+are run by hand and their output goes on the pull request that changes what they
+cover. **The difference is when the check fires, not whether it exists** — but a
+column that reads uniformly says nothing about that difference, and a reader who
+has got as far as this table is entitled to know that two of these seven guards
+only fire when somebody remembers.
+
+⚠ **This paragraph is the first time this document says "CI" at all**, and that
+was the finding rather than an aside: before [KAN-433](https://wroosbit.atlassian.net/browse/KAN-433)
+these 2000-odd lines named seven proofs in one uniform format and never once
+mentioned where any of them ran, so the column could not have been disclosing a
+CI class for any row. It was not that two rows were missing a clause the others
+had; there was no clause anywhere to be missing.
+
+**The marking is checked against the world, not merely present.**
+`scripts/verify-doc-proof-ci-class.mjs` reads this table, reads the workflow, and
+requires the two to agree in **both** directions: a marked row whose proof CI
+does run is as red as an unmarked row whose proof it does not. So the mark cannot
+be satisfied by writing it — if one of these two proofs is added to the verify
+array and the mark stays, that is a failing check rather than a stale sentence.
 
 **The rest of `daemon_status` is uncovered too** — `pid`, `build`, `freshness` and the agent counts — and it is not a row above because three of its fields *are* covered, which no single row can say. `verify-daemon-provenance.mjs` and `verify-daemon-status-over-mcp.mjs` hold it.
 
