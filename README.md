@@ -166,6 +166,7 @@ per knob:
   launcher     applied — takes effect at the next activate
   prompt       applied — takes effect at the next activate
   mcpServers   applied — takes effect at the next activate
+  args         applied — takes effect at the next activate
 
 $ crabcast activate /tmp/ac1-demo/notes
 activated /tmp/ac1-demo/notes
@@ -227,7 +228,7 @@ where these fields came from — read at 2026-08-05T13:01:36.686Z
   derived  (computed from the two):                 paneName, state, occupies, reason, line, problem, rawTruncated, promptRedacted, standing
   remembered (this daemon's memory, not durable):   statusSince
 
-config echo: every knob echoed on this response is declared (priority, refusable, chargeable, preemptable, launcher, prompt, mcpServers, label, owner)
+config echo: every knob echoed on this response is declared (priority, refusable, chargeable, preemptable, launcher, args, prompt, mcpServers, label, owner)
 
 capacity:
   1/3 charged agents, room for 2 more (4 cores, load 1.47, 9.5 GiB available; bound by cap)
@@ -271,7 +272,7 @@ where these fields came from — read at 2026-08-05T13:01:42.798Z
   derived  (computed from the two):                 paneName, state, occupies, reason, line, problem, rawTruncated, promptRedacted, standing
   remembered (this daemon's memory, not durable):   statusSince
 
-config echo: every knob echoed on this response is declared (priority, refusable, chargeable, preemptable, launcher, prompt, mcpServers, label, owner)
+config echo: every knob echoed on this response is declared (priority, refusable, chargeable, preemptable, launcher, args, prompt, mcpServers, label, owner)
 
 other fields in the daemon's response:
   channelEnabled: false
@@ -358,6 +359,7 @@ per knob:
   launcher     applied — takes effect at the next activate
   prompt       applied — takes effect at the next activate
   mcpServers   applied — takes effect at the next activate
+  args         applied — takes effect at the next activate
 
 Something is already running in /home/brooswit/.local/share/butchr/workspaces/task/kan-39. The record is written, but activate will REFUSE until that pane is gone — stand it down, then activate.
 
@@ -733,7 +735,9 @@ crabcast daemon-status           # pid, uptime, config, registry — and WHICH B
 
 Every agent-addressing command takes exactly one operand: the directory. There is nothing to disambiguate — two agents cannot share a directory the way they could share a key — so there is no `--type` flag and no ambiguity to resolve.
 
-`configure`'s flags are `--priority` and `--launcher` (both required, neither defaulted), plus `--prompt <text>` or `--prompt-file <path>`, `--mcp a,b` and `--mcp-config <file>`, `--label`, `--owner`, and the gate triple `--refusable`/`--chargeable`/`--preemptable` (all default true, `--gate-exempt` is shorthand for all three false). It is also how an agent that already exists is **changed** — per attribute, refusing rather than respawning; see [above](#changing-an-agents-knobs-never-costs-it-its-conversation).
+`configure`'s flags are `--priority` and `--launcher` (both required, neither defaulted), plus `--prompt <text>` or `--prompt-file <path>`, `--args-json <json>`, `--mcp a,b` and `--mcp-config <file>`, `--label`, `--owner`, and the gate triple `--refusable`/`--chargeable`/`--preemptable` (all default true, `--gate-exempt` is shorthand for all three false). It is also how an agent that already exists is **changed** — per attribute, refusing rather than respawning; see [above](#changing-an-agents-knobs-never-costs-it-its-conversation).
+
+`--args-json` carries **extra command-line arguments for the launcher's own process**, as a JSON array of strings — `--args-json '["--verbose"]'`. Each element becomes exactly one argument, shell-quoted, whatever it contains; there is no splitting and no expansion, which is also why it is JSON rather than a comma-separated list — any separator would be a quoting rule CrabCast invented and you had to escape around. They go on **every** invocation the launcher builds, which matters because a launcher that can resume builds two: `claude` runs `--continue` and falls back to a cold start, and the resumed one is the path every already-existing agent takes. A launcher that cannot carry arguments **refuses** rather than dropping them silently — `shell` is bash itself, so there is nothing underneath to pass a switch to — and because argv is fixed at process start, changing them under a running agent is refused like `launcher` and `prompt`. What you sent is readable afterwards in `list`, in `status`, and in a capacity refusal, so somebody denied a slot can still see what would have been spawned.
 
 MCP servers arrive as **definitions rather than names** — the command, args and env that spawn each one — and are written into the agent's `.mcp.json` verbatim: `--mcp-config` reads them from a JSON file here and puts its *bytes* on the wire, the same hand-off `--prompt-file` makes. `--mcp` is for the one server CrabCast builds itself (`crabcast`), whose definition depends on facts about this daemon rather than about you. Supplying either **is** the consent to a `.mcp.json` appearing in your directory; there is no second flag, `configure`'s response names the file and keys it will write before anything is written, and `forget` takes them back out. Every server you asked for must be writable or the activation is refused — a `.mcp.json` holding only half of what you asked for is a file whose presence looks like success. [`docs/callers-directory.md`](docs/callers-directory.md) is the whole of what CrabCast writes into a directory you own, and how each of it comes back out.
 

@@ -1067,6 +1067,7 @@ jobs:
             verify-approval-marker
             verify-pty-consumer-named
             verify-doc-proof-ci-class
+            verify-launcher-args
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

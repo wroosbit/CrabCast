@@ -1148,7 +1148,7 @@ section('9. The checks above can actually fail (mutation)');
 {
   // 5's predicate: "the started command contains no --continue". Fed the
   // command the old unconditional launcher built, it must go red.
-  const oldStyle = AGENT_LAUNCHERS.claude.command({ promptCommand: 'go', mayResume: true });
+  const oldStyle = AGENT_LAUNCHERS.claude.command({ args: [], promptCommand: 'go', mayResume: true });
   check(
     'the resume check goes RED against the command the pre-fix launcher built',
     oldStyle.includes('--continue') === true,

@@ -45,6 +45,8 @@ import {
   agyMcpConfigPath,
   builtinMcpServer,
   knownLaunchers,
+  launcherAcceptsArgs,
+  launchersAcceptingArgs,
   resolveLauncher
 } from './launchers.js';
 import { readFdUsage, isFdPressureHigh, PTMX_FDS_PER_PANE } from './herdr-health.js';
@@ -2027,6 +2029,18 @@ interface GateRequest {
   /** Whether the gate is permitted to refuse this activation at all. */
   refusable: boolean;
   /**
+   * The extra command-line arguments this activation would have spawned with,
+   * so a refusal can say what did not start. Empty for an agent configured
+   * without any.
+   *
+   * ON THE REFUSAL DELIBERATELY, and it is the disclosure surface that is easy
+   * to leave out — `list` and `status` both describe agents that EXIST, and an
+   * activation the gate refused never becomes one. So without this, the one
+   * configuration a caller most wants to check is the only one no read can show
+   * them: they were denied capacity, and cannot see what they were denied.
+   */
+  args: readonly string[];
+  /**
    * Start it past the cap without freeing anything. Booleans only — the
    * handler validates before it gets here (see invalidFlag), so the gate is
    * reading a decision rather than guessing at one.
@@ -2215,6 +2229,65 @@ function parseAgentConfig(data: any): ConfigParse {
         `newcomer over the cap on the false premise that room had been made. Either charge ` +
         `it (chargeable: true) or take it out of preemption too (preemptable: false).`
     );
+  }
+
+  // EXTRA ARGV FOR THE LAUNCHER, and the refusal below is the substance of it.
+  //
+  // Validated AFTER `launcher`, deliberately: the capability question is asked
+  // of a launcher that resolves, so a misspelled launcher is answered by
+  // `resolveLauncher`'s message above rather than by a complaint about `args`.
+  let args: string[] | undefined;
+  if (data.args !== undefined) {
+    if (!Array.isArray(data.args)) {
+      return refuse(
+        `Invalid args: expected an array of strings — one element per command-line argument, ` +
+          `e.g. ["--flag", "value"]. Got ${JSON.stringify(data.args)}. IT IS AN ARRAY RATHER ` +
+          `THAN A STRING because a string would have to be split by something, and whatever did ` +
+          `the splitting would be a quoting rule CrabCast invented and you had to guess at. Each ` +
+          `element is shell-quoted and arrives as exactly one argument, whatever it contains.`
+      );
+    }
+    const badIndex = data.args.findIndex((a: unknown) => typeof a !== 'string');
+    if (badIndex !== -1) {
+      return refuse(
+        `Invalid args[${badIndex}]: expected a string, got ` +
+          `${JSON.stringify(data.args[badIndex])}. Every element becomes one command-line ` +
+          `argument verbatim, and there is no rendering step here that could turn a number, an ` +
+          `object or a null into the text you meant — send the text.`
+      );
+    }
+    // THE REFUSAL, AND IT IS A REFUSAL RATHER THAN A NO-OP ON PURPOSE.
+    //
+    // A launcher that cannot put these on a command line has exactly one other
+    // option, which is to drop them — and a caller whose arguments never arrive
+    // and are never mentioned is left with an agent that looks configured and
+    // is not. That is the same shape as the `mcpServers` chain KAN-121 closed
+    // (names dropped silently, agent up with no tools, `success: true`) and as
+    // the agy config write that landed in a file nothing read: every step
+    // defensible, the composition a guard that reads as a check and is not one.
+    //
+    // ASKED OF THE LAUNCHER'S OWN DECLARATION, never of its name. See
+    // `AgentLauncher.acceptsArgs`.
+    //
+    // An EMPTY array is not refused: it asks for nothing, so there is nothing
+    // that could fail to arrive, and refusing it would break a reconciler that
+    // sends `args: []` uniformly for agents whose launcher happens to be
+    // `shell`. Absent and empty mean the same thing here and at `knobValue`.
+    if (data.args.length && !launcherAcceptsArgs(launcher.trim())) {
+      return refuse(
+        `Launcher '${launcher.trim()}' does not take command-line arguments, and ` +
+          `${data.args.length === 1 ? 'the one you sent' : `the ${data.args.length} you sent`} ` +
+          `would have gone nowhere. ` +
+          `${launchersAcceptingArgs().length
+            ? `Launchers that do: ${launchersAcceptingArgs().join(', ')}.`
+            : `No launcher currently does.`} ` +
+          `NOTHING WAS CONFIGURED. This is refused rather than ignored because the alternative ` +
+          `is an agent that starts, reports success, and is missing what you asked for — you ` +
+          `would find out from the work it silently could not do. Configure it without \`args\`, ` +
+          `or with a launcher that carries them.`
+      );
+    }
+    args = data.args as string[];
   }
 
   let prompt: string | undefined;
@@ -2420,6 +2493,7 @@ function parseAgentConfig(data: any): ConfigParse {
       chargeable: flags.chargeable,
       preemptable: flags.preemptable,
       launcher: launcher.trim(),
+      ...(args ? { args } : {}),
       ...(prompt ? { prompt } : {}),
       ...(mcpServers ? { mcpServers } : {}),
       ...(label !== undefined ? { label } : {}),
@@ -2479,7 +2553,14 @@ export const RECONFIGURATION_COST: { [K in keyof Required<AgentConfig>]: Reconfi
   // there has already read it.
   prompt: 'restart-required',
   // Written into `.mcp.json`, which the runtime reads once, at boot.
-  mcpServers: 'restart-required'
+  mcpServers: 'restart-required',
+  // ARGV IS FIXED AT PROCESS START. This is the one entry in the table whose
+  // classification is a fact about operating systems rather than a decision
+  // about this daemon: the process in the pane was executed with an argument
+  // vector, and nothing can hand it another one. Accepting a change here would
+  // not be a policy choice with a trade-off — it would be a record that says
+  // something untrue about a running process.
+  args: 'restart-required'
 };
 
 /** Every knob's name, in a stable order, derived from the table above. */
@@ -2504,7 +2585,12 @@ const RESTART_REASON: Record<string, string> = {
     'without changing the agent',
   mcpServers:
     'the servers are written into .mcp.json, which the runtime reads once when it boots. ' +
-    'Rewriting it under a live agent changes a file it will not read again'
+    'Rewriting it under a live agent changes a file it will not read again',
+  args:
+    'they are the command line the process in the pane was EXECUTED with. An argument vector ' +
+    'is fixed at process start — there is no mechanism, here or in the operating system, that ' +
+    'hands a running process a different one — so accepting this would record arguments that ' +
+    'process was never given'
 };
 
 /**
@@ -2542,10 +2628,21 @@ function canonicalKnob(value: unknown): string {
  * without the field would otherwise be told "restart required" forever, on a
  * difference with no consequence, and no number of deactivate/activate cycles
  * would clear it.
+ *
+ * `args` IS THE SAME CASE AND IS NORMALIZED FOR THE SAME REASON. An empty array
+ * puts nothing on the command line — `quotedArgs` returns the empty string, so
+ * the spawn is byte-for-byte the one an agent with no `args` at all gets — and
+ * the deadlock is worse here than at `mcpServers`, because this knob is
+ * restart-required: a reconciler sending `args: []` uniformly would be told to
+ * respawn a live agent, forever, to apply a difference that changes nothing.
+ * That is a rule offering to spend an agent's conversation on nothing.
  */
 function knobValue(config: AgentConfig, name: keyof AgentConfig): unknown {
   const value = config[name];
   if (name === 'mcpServers' && value && Object.keys(value as object).length === 0) {
+    return undefined;
+  }
+  if (name === 'args' && Array.isArray(value) && value.length === 0) {
     return undefined;
   }
   return value;
@@ -4041,7 +4138,20 @@ export class MessageRouter {
    * never start without a manual override.
    */
   private capacityGate(request: GateRequest): CapacityGateResult {
-    const { path: agentPath, paneName, priority, refusable, override, preempt } = request;
+    const { path: agentPath, paneName, priority, refusable, override, preempt, args } = request;
+
+    /**
+     * What this activation would have been spawned with, for the refusals
+     * below. Empty string when there is nothing to say, so an agent with no
+     * `args` reads exactly as it did before this field existed.
+     *
+     * Quoted the way the command line quotes it, so a reader can compare this
+     * against `ps` output for the agent once it does start.
+     */
+    const argvNote = args.length
+      ? `\nIt would have been started with ${args.map((a) => `'${a}'`).join(' ')} on its ` +
+        `command line; nothing was started, so nothing was given them.`
+      : '';
     const pass = (capacity: Capacity): CapacityGateResult => ({
       capacity,
       refusal: null,
@@ -4136,7 +4246,7 @@ export class MessageRouter {
         const error =
           `Refusing to activate ${agentPath}: standing down ${addressOf(victim)} to make room ` +
           `failed (${standDown?.error ?? 'no reason given'}), so no capacity was freed.\n` +
-          derivation;
+          derivation + argvNote;
         console.error(`[capacity] preemption aborted: ${error}`);
         return { capacity, refusal: error, overrode: null, preemptable: offer(victim), preempted: null };
       }
@@ -4190,7 +4300,8 @@ export class MessageRouter {
             `the stall to clear, or start it anyway with override.`
           : victim
             ? preemptionOffer(victim, priority)
-            : noVictimReason(candidates, priority));
+            : noVictimReason(candidates, priority)) +
+        argvNote;
       return {
         capacity,
         refusal,
@@ -4933,6 +5044,10 @@ export class MessageRouter {
         paneName,
         priority: config.priority,
         refusable: config.refusable,
+        // Read off the record, like every other knob the gate judges — this is
+        // what the spawn below would have used, so the refusal describes the
+        // activation that did not happen rather than a guess at one.
+        args: config.args ?? [],
         override: data.override === true,
         preempt: data.preempt === true
       });

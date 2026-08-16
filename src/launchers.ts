@@ -781,6 +781,25 @@ function shellQuote(value: string): string {
 }
 
 /**
+ * A caller's `args` as command-line text: each element shell-quoted, joined by
+ * single spaces, with ONE leading space so it can be interpolated straight after
+ * a flag. Empty string for no args, so nothing is added and no stray space
+ * appears — an agent configured without `args` gets byte-for-byte the command
+ * line it got before this field existed.
+ *
+ * `shellQuote` PER ELEMENT is the whole of the contract. One element in, one
+ * argument out, whatever it contains: spaces, quotes, newlines and shell
+ * metacharacters all arrive verbatim because single quotes disable every form of
+ * bash expansion. So there is no way for a caller — or for anything upstream of
+ * one — to inject an extra argument, a second command, or a redirection through
+ * this field. Quoting each element separately rather than the joined string is
+ * what makes that true: the joined form would be one argument containing spaces.
+ */
+function quotedArgs(args: readonly string[]): string {
+  return args.length ? ' ' + args.map(shellQuote).join(' ') : '';
+}
+
+/**
  * What a launcher needs to know to build its command line.
  *
  * AN OBJECT RATHER THAN POSITIONAL ARGUMENTS, and `mayResume` is why: it
@@ -799,6 +818,29 @@ export interface LauncherCommandContext {
    * daemon inventing an instruction nobody wrote.
    */
   promptCommand?: string;
+  /**
+   * The caller's own arguments for this launcher's command line, in order.
+   * Empty when the agent was configured without any — see
+   * {@link AgentConfig.args}.
+   *
+   * REQUIRED RATHER THAN OPTIONAL, and for `mayResume`'s reason exactly: a
+   * field that can be omitted at the CALL SITE is one that will be omitted, and
+   * the call site here is the single place in the daemon that builds a spawn
+   * (`initPty` in herdr.ts). Typed `string[]` with no `?`, a caller that forgets
+   * to pass the agent's configured args does not compile — which is the half a
+   * launcher's own code cannot check for itself.
+   *
+   * ⚠ WHAT NO TYPE HERE CAN ENFORCE, said plainly so nobody reads the required
+   * field as more than it is: that a launcher which RECEIVES this actually puts
+   * it on every invocation it builds. A launcher that destructures `args` and
+   * uses it on one branch of a `||` compiles exactly as well as one that uses it
+   * on both, and the resumed branch is the common path — so a flag reaching only
+   * cold starts would leave every already-existing agent without it while
+   * looking correct on any newly created one. That is a proof's job rather than
+   * a type's: `verify-launcher-args.mjs` §2 asserts the resumed invocation
+   * carries them, and its red drive removes them from that side specifically.
+   */
+  args: string[];
   /**
    * WHETHER THIS LAUNCHER MAY RESUME A CONVERSATION AT THIS PATH. The resume
    * rule (see resume.ts) in the one place it has to be obeyed.
@@ -921,6 +963,33 @@ export interface AgentLauncher {
    */
   command: (context: LauncherCommandContext) => string;
   /**
+   * WHETHER THIS LAUNCHER PUTS {@link LauncherCommandContext.args} ON ITS
+   * COMMAND LINE. Declared per launcher, and `configure` refuses `args` for any
+   * launcher that answers `false`.
+   *
+   * REQUIRED RATHER THAN OPTIONAL, WHICH IS THE WHOLE MECHANISM. A launcher
+   * added later cannot inherit this by saying nothing: with no `?` it does not
+   * compile until its author decides, exactly as `mayResume` forces the resume
+   * question to be answered rather than defaulted. An optional flag would mean a
+   * new launcher that DOES honour args gets silent refusals, and — far worse in
+   * the other direction — an author could not tell "we decided no" from "nobody
+   * looked".
+   *
+   * WHY A DECLARED CAPABILITY AND NOT A NAME LIST. A `name !== 'shell'` test
+   * somewhere in the router would be a second copy of the launcher table, in a
+   * file that does not change when the table does; the next launcher would
+   * inherit whichever answer that expression happened to give it. Declared here,
+   * beside the `command` that either uses `args` or does not, the fact and its
+   * consequence sit in one place.
+   *
+   * `false` for `shell`, whose delivered product is `bash` itself: there is no
+   * program under it to pass a switch to. That refusal is the point rather than
+   * a gap — see the refusal in `parseAgentConfig`, and note that accepting args
+   * there and silently dropping them is the failure mode this field exists to
+   * make impossible.
+   */
+  acceptsArgs: boolean;
+  /**
    * Optional pre-launch setup, e.g. CLI-specific MCP config. Throwing refuses
    * the activation: initPty answers with session.spawnError + terminated, the
    * same channel as an unknown launcher, so setup that did not stick is never
@@ -1010,7 +1079,14 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
     // `mayResume` is not read here and nothing is missing: a bare shell has no
     // conversation to restore, so there is no resume to suppress.
     command: ({ promptCommand }) =>
-      promptCommand ? `printf '%s\\n' ${shellQuote(promptCommand)}; exec bash` : 'bash'
+      promptCommand ? `printf '%s\\n' ${shellQuote(promptCommand)}; exec bash` : 'bash',
+    // `bash` IS the product here, so there is no program underneath to pass a
+    // switch to and nothing this launcher could do with an argument but drop it.
+    // `configure` therefore refuses `args` for this launcher rather than
+    // accepting them — see `parseAgentConfig`. Stating `false` rather than
+    // omitting the field is what this being required buys: the answer is on the
+    // record instead of being the shape of a gap.
+    acceptsArgs: false
   },
   claude: {
     // Interactive session: resume if a conversation exists AND resuming is
@@ -1035,14 +1111,34 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
     // there. Suppressing the flag is the only place this can be stopped, and it
     // is stopped here rather than upstream so a launcher cannot resume by
     // accident.
-    command: ({ promptCommand, mayResume }) => {
-      const fresh =
-        `claude --permission-mode bypassPermissions` +
-        (promptCommand ? ' ' + shellQuote(promptCommand) : '');
-      return mayResume
-        ? `claude --permission-mode bypassPermissions --continue || ${fresh}`
-        : fresh;
+    //
+    // THE CALLER'S `args` GO ON BOTH INVOCATIONS, AND ONE VARIABLE IS WHY.
+    //
+    // This used to interpolate `--permission-mode bypassPermissions` twice, and
+    // adding a second thing to carry would have meant remembering it twice.
+    // `flags` is built once and used on both sides of the `||`, so the resumed
+    // invocation and the cold-start fallback cannot disagree about what they
+    // were given without somebody deliberately splitting them apart.
+    //
+    // ⚠ THE RESUMED BRANCH IS THE COMMON PATH, and it is the one that would
+    // have been got wrong. Every agent that already exists resumes; only a brand
+    // new one reaches the fallback. So args on the fresh side alone would leave
+    // an entire standing fleet without them WHILE APPEARING TO WORK on every
+    // agent anybody created to test it — a green that cannot fail. That is the
+    // shape `verify-launcher-args.mjs` §2 asserts against and its red drive
+    // reproduces.
+    //
+    // ORDER: CrabCast's own flags, then the caller's args, then `--continue` or
+    // the prompt. The prompt STAYS LAST, and `shellQuote` keeping it to exactly
+    // one argument is a property consumers depend on — args are quoted the same
+    // way and cannot break out into additional ones, so no number of them can
+    // push the prompt out of final position or split it in two.
+    command: ({ promptCommand, mayResume, args }) => {
+      const flags = `--permission-mode bypassPermissions${quotedArgs(args)}`;
+      const fresh = `claude ${flags}` + (promptCommand ? ' ' + shellQuote(promptCommand) : '');
+      return mayResume ? `claude ${flags} --continue || ${fresh}` : fresh;
     },
+    acceptsArgs: true,
     setup: ({ workDir, note }) => {
       const trust = trustClaudeWorkspace(workDir);
       if (!trust.ok) {
@@ -1086,10 +1182,17 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
     // The rule is about whose conversation lives at a path, which is a fact
     // about the directory rather than about any particular runtime — so it
     // binds every launcher that can continue anything.
-    command: ({ promptCommand, mayResume }) => {
-      const fresh = `agy${promptCommand ? ' -i ' + shellQuote(promptCommand) : ''}`;
-      return mayResume ? `agy --continue || ${fresh}` : fresh;
+    //
+    // BOTH INVOCATIONS, for the claude launcher's reason rather than for
+    // symmetry with it: this command has the identical `||` shape, so the
+    // resumed side is the common path here too. One `flags` variable, used on
+    // both sides, for the same reason.
+    command: ({ promptCommand, mayResume, args }) => {
+      const flags = quotedArgs(args);
+      const fresh = `agy${flags}${promptCommand ? ' -i ' + shellQuote(promptCommand) : ''}`;
+      return mayResume ? `agy${flags} --continue || ${fresh}` : fresh;
     },
+    acceptsArgs: true,
     // REPORTED THROUGH `note` NOW, like the claude launcher's trust entry, and
     // for the same reason: the bridge cannot see what this wrote, so anything
     // it says about the global agy config without being told is a guess. It
@@ -1161,6 +1264,36 @@ export const DEFAULT_AGENT = 'claude';
 /** Every launcher name a caller may `configure`. */
 export function knownLaunchers(): string[] {
   return Object.keys(AGENT_LAUNCHERS);
+}
+
+/**
+ * Which launchers put a caller's `args` on their command line, derived from the
+ * table rather than listed a second time.
+ *
+ * DERIVED, so it cannot drift. A hand-written list here would be the name list
+ * {@link AgentLauncher.acceptsArgs} exists to avoid, one file further on — and
+ * it would be the copy that goes stale, because a launcher is added to the table
+ * and nowhere else. Used only to NAME the alternatives in the refusal below;
+ * the decision itself always reads the launcher's own declaration.
+ */
+export function launchersAcceptingArgs(): string[] {
+  return Object.entries(AGENT_LAUNCHERS)
+    .filter(([, launcher]) => launcher.acceptsArgs)
+    .map(([name]) => name);
+}
+
+/**
+ * Whether `configure` may accept `args` for this launcher name.
+ *
+ * THROWS for an unknown name rather than answering `false`, and the difference
+ * matters at the call site: "this launcher does not take args" and "there is no
+ * such launcher" are different refusals with different remedies, and collapsing
+ * them would answer a misspelled launcher with a complaint about `args`.
+ * `resolveLauncher`'s own message is the right one for that case, and
+ * `parseAgentConfig` reaches it first.
+ */
+export function launcherAcceptsArgs(name?: string): boolean {
+  return resolveLauncher(name).launcher.acceptsArgs;
 }
 
 /**

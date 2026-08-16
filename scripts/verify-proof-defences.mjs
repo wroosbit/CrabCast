@@ -1155,6 +1155,36 @@ const PROOF_DEFENCES = [
       'their server — and requires the same predicates the sections above used to go red on it.'
   },
   {
+    script: 'verify-launcher-args',
+    defence: 'mutation',
+    central:
+      "a caller's `args` reach the argv of the process CrabCast actually started — on the " +
+      'RESUMED `--continue` invocation as well as the cold-start one — with each element arriving ' +
+      'as exactly one argument, and a launcher that cannot carry them refusing rather than ' +
+      'dropping them.',
+    // THE COUPLING BETWEEN THE PROOF AND ITS DRIVE, chosen over the header
+    // sentence that names the drive by filename. This is real assertion text
+    // rather than a comment: `kan504-red-drive.mjs` arm 1 requires this exact
+    // label among the failures, so renaming or deleting the check breaks the
+    // drive by name rather than quietly leaving it asserting nothing.
+    anchor: '⚠ THE ARGS ARE ON THE --continue INVOCATION',
+    note:
+      'THE MUTATION LIVES IN A SIBLING SCRIPT, `scripts/kan504-red-drive.mjs`, rather than inside ' +
+      'the proof — so this entry is the place that says so. Five arms, and every one asserts what ' +
+      'went RED **and** what stayed GREEN, because an arm requiring only its own section to fail ' +
+      'would pass against a mutant that broke everything: args removed from the `--continue` side ' +
+      'only (§2 red, §1 green), the mirror on the cold-start side (§1 red, §2 green), `shell` made ' +
+      'to declare acceptsArgs, and the capacity refusal made to hide the argv. Arm 5 applies arm ' +
+      "1's edit to a copy of `src/` and requires `tsc` to ACCEPT it, which is what stops the red " +
+      'in arm 1 being credited to the compiler instead of to this proof. ' +
+      'SEAM, stated because it is the boundary a reader will otherwise assume away: nothing here ' +
+      'runs a real `claude`, and nothing could — whether that binary DOES anything with the ' +
+      'arguments is the runtime\'s behaviour, not CrabCast\'s. What is bounded is CrabCast\'s ' +
+      'half, and it is measured off `/proc/<pid>/cmdline` rather than off any string the fixture ' +
+      'composed: the fake `claude` reports only WHICH pid to look at, and the kernel says what its ' +
+      'argv is.'
+  },
+  {
     script: 'verify-ci-wiring-guards',
     defence: 'mutation',
     central:
@@ -2112,6 +2142,17 @@ const MUTATES_WITHOUT_THE_HELPER = [
       'different hazard from copying a build — it needs a marker, a refusal to start over residue, ' +
       'and a byte-identical restore assertion, none of which the helper offers. Its own proof of ' +
       'those three is verify-ci-proof-residue-is-legible, which DOES use the helper.'
+  },
+  {
+    script: 'verify-launcher-args',
+    reason:
+      'The mutations are not in it at all — they are in the sibling `scripts/kan504-red-drive.mjs`, ' +
+      'which DOES use the helper, copies the compiled build through it, and runs this proof against ' +
+      'each mutant as a real process. The split is the same one `verify-cli-refusal` and ' +
+      '`kan448-red-drive` make: the proof asserts about a live spawn and takes minutes, and folding ' +
+      'five mutant runs of itself into itself would multiply that by five inside the CI array for ' +
+      'evidence a reviewer re-runs once. So the drive stays a hand-run beside it, and this entry is ' +
+      'what stops that arrangement being read as "nobody wrote one".'
   },
   {
     script: 'verify-readme-is-current',
