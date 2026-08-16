@@ -78,6 +78,60 @@ export interface AgentConfig {
   /** Which launcher runs in the pane — `claude`, `shell`, … . */
   launcher: string;
   /**
+   * EXTRA ARGUMENTS FOR THE LAUNCHER'S OWN COMMAND LINE, in order, each one
+   * delivered as exactly one argument.
+   *
+   * WHY THIS EXISTS AT ALL, because "let the caller put anything in an argv" is
+   * a real capability increase and deserves its reason written down rather than
+   * assumed. CrabCast is a general-purpose spawner, and a spawner that cannot
+   * pass arguments to the thing it spawns is incomplete: every runtime worth
+   * launching has switches, and with no route for them the ONLY vocabulary
+   * available is whatever CrabCast happens to hard-code. That is the situation
+   * this field ends. `--permission-mode bypassPermissions` sits on the claude
+   * launcher's command line today, chosen by this daemon, unopt-outable and
+   * invisible to the caller — so argv was already a place consumer vocabulary
+   * lived, with CrabCast as the only party allowed to write there. This is what
+   * lets it live ABOVE the socket instead, in the hands of whoever is actually
+   * running the agent.
+   *
+   * WHAT IT IS NOT: an increase in WHO IS TRUSTED. A caller that can reach
+   * `configure` already chooses the launcher, the working directory and the
+   * prompt, and CrabCast spawns a process on their behalf — the boundary is
+   * already "whoever can configure an agent controls a process". This widens
+   * what they can SAY, not who may say it. The premise that makes that
+   * acceptable is worth naming because it is the thing that would go wrong:
+   * it holds while `configure` is reached by a party that already chose the
+   * launcher and cwd, and it stops holding the moment something proxies
+   * `configure` on behalf of a less-trusted caller. Nothing does today. The
+   * defence if anything ever does is DISCLOSURE — argv is reported in the
+   * `config` echo that `list` and `status` carry, and in the capacity refusal,
+   * so what a spawn was given is readable rather than inferred.
+   *
+   * EACH ELEMENT IS ONE ARGUMENT AND CANNOT BECOME TWO. The command is handed
+   * to `bash -c`, and every element is shell-quoted on its way onto it, so an
+   * element containing spaces, quotes or a newline arrives as the single
+   * argument it was sent as. There is no splitting, no globbing and no
+   * expansion — which is also why this is an ARRAY rather than a string: a
+   * string would have to be split by something, and whatever did the splitting
+   * would be a shell-quoting rule CrabCast invented and a caller had to guess.
+   *
+   * REFUSED ON A LAUNCHER THAT CANNOT TAKE THEM, rather than accepted and
+   * dropped. See {@link AgentLauncher.acceptsArgs} in `src/launchers.ts`: a
+   * caller shipping args that never arrive and are never mentioned is exactly
+   * the silent-nothing failure this daemon refuses everywhere else.
+   *
+   * RESTART-REQUIRED, and not by policy — argv is fixed at process start, so
+   * accepting a change under a running agent would rewrite the record without
+   * changing the process. It is refused the way `launcher` and `prompt` are.
+   *
+   * Optional, and absent means no extra arguments — never "the defaults",
+   * because there are none. An empty array means the same thing as absent, and
+   * `knobValue` normalizes the two so a reconciler that always sends `args: []`
+   * is not told "restart required" forever over a difference with no
+   * consequence.
+   */
+  args?: string[];
+  /**
    * The agent's bootstrap prompt: FINISHED TEXT, not a path and not a
    * template. CrabCast writes these bytes into the agent's sidecar verbatim
    * and never inspects them.

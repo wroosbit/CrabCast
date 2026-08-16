@@ -1316,7 +1316,16 @@ export class HerdrBridge {
           // enforced: with it false, the command carries no `--continue` and
           // the pane starts a new session rather than restoring whatever
           // transcript this directory happens to hold. See resume.ts.
-          'bash', '-c', launcher.command({ promptCommand, mayResume: session.mayResume === true })
+          // `config.args` verbatim, and `?? []` is the agent that was
+          // configured without any — not a default, because there is no such
+          // thing as a default argument here. The launcher shell-quotes each
+          // element, so what the caller froze onto the record is what appears
+          // on the command line, one element to one argument.
+          'bash', '-c', launcher.command({
+            promptCommand,
+            mayResume: session.mayResume === true,
+            args: config.args ?? []
+          })
         ]);
       } catch (e: any) {
         if ((e as HerdrCliError)?.herdrCode === AGENT_NAME_TAKEN) {

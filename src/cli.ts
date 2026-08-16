@@ -635,7 +635,7 @@ function gateFlags(a: any): string {
  */
 const CONFIG_FIELDS = [
   'priority', 'refusable', 'chargeable', 'preemptable', 'launcher',
-  'prompt', 'mcpServers', 'label', 'owner'
+  'args', 'prompt', 'mcpServers', 'label', 'owner'
 ] as const;
 
 /**
@@ -704,6 +704,21 @@ function configBlock(row: any, pad = INDENT + INDENT): string | null {
       `: priority ${config.priority}, launcher ${config.launcher}, ` +
       `refusable ${config.refusable}, chargeable ${config.chargeable}, ` +
       `preemptable ${config.preemptable}`,
+    // THE TEXT, NOT THE COUNT, and the contrast with `prompt` directly below is
+    // the decision rather than an inconsistency. A prompt is bytes of arbitrary
+    // length that no operator reads off a status line; argv is short, and it is
+    // the one thing this block exists to disclose — what the process in the pane
+    // was actually given. A count would say "3 arguments" and answer nothing.
+    //
+    // Rendered with the same single quotes the command line carries, so what
+    // prints here can be compared against `ps` output character for character.
+    // Printed ONLY where there are some: an agent with no args is the ordinary
+    // case, and a line reading `args: (none)` on every row of a fleet is noise
+    // saying what is true of nearly all of it. Absence is legible in this
+    // block by there being no line, exactly as for `label` and `owner`.
+    Array.isArray(config.args) && config.args.length
+      ? `${pad}args: ${config.args.map((a: unknown) => `'${String(a)}'`).join(' ')}`
+      : null,
     // The size, not the text: a prompt is finished bytes of arbitrary length
     // and reprinting it here would bury every other field.
     typeof config.prompt === 'string'
@@ -1987,6 +2002,7 @@ const CONFIGURE_FLAGS: FlagSpec[] = [
   { name: 'prompt-file', kind: 'string', value: '<file>', help: 'read the prompt from this file; its BYTES cross the wire, not the path (RESTART)' },
   { name: 'mcp', kind: 'string', value: '<a,b>', help: 'comma-separated MCP servers CrabCast builds itself (crabcast) (RESTART: .mcp.json is read at boot)' },
   { name: 'mcp-config', kind: 'string', value: '<file>', help: 'JSON file of your own server DEFINITIONS, {"name":{"command":…}}; its bytes cross the wire and are written verbatim (RESTART)' },
+  { name: 'args-json', kind: 'string', value: '<json>', help: 'extra command-line arguments for the launcher, as a JSON array of strings, e.g. \'["--flag","value"]\'; each element becomes exactly one argument (RESTART: argv is fixed at process start)' },
   { name: 'label', kind: 'string', value: '<text>', help: 'display text; never parsed, never an address, duplicates fine (changes in place)' },
   { name: 'owner', kind: 'string', value: '<name>', help: 'whose agent this is; matched EXACTLY by `list --owner`. NOT a permission boundary — an unfiltered list shows every owner\'s agents. Omit to leave it unowned, which no filter matches (changes in place)' },
   { name: 'refusable', kind: 'boolean', help: 'may the capacity gate refuse it (default true; --refusable=false to exempt; changes in place)' },
@@ -2014,6 +2030,55 @@ const CONFIGURE_FLAGS: FlagSpec[] = [
  * A name in both is a usage error rather than a precedence rule — which one won
  * would be a silent choice about what an agent's tooling actually is.
  */
+/**
+ * The `args` array this invocation is sending, from `--args-json`.
+ *
+ * JSON RATHER THAN A REPEATABLE FLAG OR A COMMA-SEPARATED LIST, and the reason
+ * is this field's own: an argument may contain a space, a comma, a quote or a
+ * newline, and any separator this CLI chose would be a quoting rule it invented
+ * and the caller had to escape around. The daemon's contract is one element to
+ * one argument, verbatim; JSON is the shortest notation that carries that
+ * without a rule of ours in the middle. Same argument `--mcp-config` makes one
+ * function down, and `--prompt-file`'s: where the value is arbitrary text, it
+ * crosses as data rather than as something this layer parses.
+ *
+ * A repeatable `--arg` would read better and does not exist here: this parser
+ * has three flag kinds and none of them accumulates, so adding one would be a
+ * parser change made for a flag. That is a fair thing to want later; it is not
+ * this ticket.
+ *
+ * A USAGE ERROR RATHER THAN A SILENT DROP on anything that is not an array of
+ * strings — nothing is sent. The daemon refuses the same shapes, so this is the
+ * caller getting the answer one round trip sooner rather than a second
+ * validation with an opinion of its own.
+ */
+function launcherArgs(
+  flags: Record<string, string | number | boolean>
+): string[] | undefined {
+  const raw = flags['args-json'];
+  if (typeof raw !== 'string') return undefined;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e: any) {
+    throw new UsageError(
+      `--args-json is not valid JSON (${e?.message ?? String(e)}). It is a JSON ARRAY OF ` +
+        `STRINGS, e.g. --args-json '["--flag","value"]' — mind the shell quoting, since the ` +
+        `array's own double quotes have to survive it. Nothing was sent.`
+    );
+  }
+  if (!Array.isArray(parsed) || parsed.some((a) => typeof a !== 'string')) {
+    throw new UsageError(
+      `--args-json must be a JSON array of strings, e.g. '["--flag","value"]'. Got ` +
+        `${JSON.stringify(parsed)}. Each element becomes exactly one command-line argument, ` +
+        `verbatim — there is no rendering step that could turn a number, an object or a null ` +
+        `into the text you meant. Nothing was sent.`
+    );
+  }
+  return parsed as string[];
+}
+
 function mcpServers(
   flags: Record<string, string | number | boolean>
 ): Record<string, unknown> | undefined {
@@ -2179,6 +2244,7 @@ export const COMMANDS: CommandSpec[] = [
       priority: flags.priority,
       launcher: flags.launcher,
       prompt: promptText(flags),
+      args: launcherArgs(flags),
       mcpServers: mcpServers(flags),
       label: flags.label,
       owner: flags.owner,

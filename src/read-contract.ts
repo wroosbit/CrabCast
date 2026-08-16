@@ -115,7 +115,7 @@ import type { ResumeCause } from './resume.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 11;
+export const READ_CONTRACT_VERSION = 12;
 
 // ------------------------------------------------------------ the four buckets
 

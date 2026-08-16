@@ -883,7 +883,11 @@ rule('4. EVERY KNOB, ONE AT A TIME, AGAINST THE CLASSIFICATION TABLE');
     owner: 'a-different-owner',
     launcher: 'claude',
     prompt: 'KAN-126: a wholly different bootstrap.',
-    mcpServers: {}
+    mcpServers: {},
+    // KAN-504. BASE carries no args, so any non-empty array is unambiguously a
+    // change. The element with a space in it is not decoration: it is the one
+    // that would show up if anything on the round trip ever split an argument.
+    args: ['--a-new-argument', 'with a space']
   };
 
   // A KNOB WITH NO NEW VALUE IS A GAP IN THIS TABLE, AND IT HAS TO SAY SO.
@@ -911,7 +915,31 @@ rule('4. EVERY KNOB, ONE AT A TIME, AGAINST THE CLASSIFICATION TABLE');
     // filtered by directory, so accumulating panes costs nothing — and wiping
     // them would silently un-run the agent the later sections are about.
     resetArgvLog();
-    await h.invoke({ action: 'configure_agent', path: dir, ...BASE });
+
+    // THE SEED THIS KNOB NEEDS, decided before the agent is created rather
+    // than after it, because two knobs cannot be tested against BASE as it
+    // stands:
+    //
+    //   chargeable  `chargeable: false` with `preemptable: true` is refused by
+    //               the cross-field rule, for a reason that has nothing to do
+    //               with this task.
+    //   args        BASE's launcher is `shell`, which REFUSES args (KAN-504) —
+    //               so seeding this agent from BASE would have the loop assert
+    //               "restart-required" against a document the daemon rejects
+    //               one refusal earlier, for the wrong reason entirely. It is
+    //               seeded on `claude` instead, which is a launcher that
+    //               carries args, so the only thing this iteration changes is
+    //               the knob under test.
+    //
+    // NOT for `launcher` itself, which must stay on BASE's `shell` or
+    // NEW_VALUE's `claude` would not be a change at all.
+    const extra = knob === 'chargeable' ? { preemptable: false } : {};
+    const seed =
+      knob === 'chargeable' ? { ...BASE, preemptable: false }
+      : knob === 'args' ? { ...BASE, launcher: 'claude' }
+      : BASE;
+
+    await h.invoke({ action: 'configure_agent', path: dir, ...seed });
     const up = await h.invoke({ action: 'activate_agent', path: dir, ...PAST_THE_GATE });
     const pane = paneIdIn(dir);
     // WITHOUT THIS, `paneIdIn(dir) === pane` BELOW DEGRADES TO `null === null`.
@@ -922,13 +950,6 @@ rule('4. EVERY KNOB, ONE AT A TIME, AGAINST THE CLASSIFICATION TABLE');
     check(up.success === true && up.started === true && pane !== null,
       `${knob.padEnd(11)} (setup) the agent really is running, in a pane this loop can name`,
       `success ${up.success}, started ${up.started}, pane ${pane}`);
-
-    // `chargeable: false` needs `preemptable: false` alongside it or the
-    // cross-field rule refuses the document for a reason that has nothing to
-    // do with this task. Sent together, the diff is still the one knob.
-    const extra = knob === 'chargeable' ? { preemptable: false } : {};
-    const seed = knob === 'chargeable' ? { ...BASE, preemptable: false } : BASE;
-    if (knob === 'chargeable') await h.invoke({ action: 'configure_agent', path: dir, ...seed });
 
     const res = await h.invoke({
       action: 'configure_agent', path: dir, ...seed, ...extra, [knob]: NEW_VALUE[knob]

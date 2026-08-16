@@ -331,7 +331,7 @@ and the response says which you are reading:**
 
 ```json
 "configEchoContract": {
-  "declared": ["priority", "refusable", "chargeable", "preemptable", "launcher", "prompt", "mcpServers", "label"],
+  "declared": ["priority", "refusable", "chargeable", "preemptable", "launcher", "args", "prompt", "mcpServers", "label", "owner"],
   "verbatim": ["mcpServers"],
   "drops": false,
   "undeclared": ["standbyAgents[2].config.telemetry"],

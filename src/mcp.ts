@@ -352,6 +352,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description:
                 "Required. The runtime to run in the pane (e.g. 'claude'). Must name a launcher the daemon knows; there is no fallback, because an omitted launcher used to mean 'shell' and staffed work with a bare prompt that answered success and executed messages as shell commands.",
             },
+            args: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "Optional. EXTRA COMMAND-LINE ARGUMENTS for the launcher's own process, in order, e.g. [\"--verbose\", \"--flag\", \"value\"]. Each element is shell-quoted and arrives as EXACTLY ONE argument whatever it contains — spaces, quotes and newlines included — so there is no splitting, globbing or expansion, and no way for an element to become two arguments or a second command. It is an array rather than a string because a string would have to be split by something, and whatever did the splitting would be a quoting rule CrabCast invented and you had to guess at. THEY GO ON EVERY INVOCATION THE LAUNCHER BUILDS, which matters because launchers that can resume build two: `claude` runs `--continue` and falls back to a cold start, and the resumed one is the common path — every agent that already exists takes it. Ordering is CrabCast's own flags, then yours, then `--continue` or the prompt; the prompt stays the final argument. REFUSED, NOT IGNORED, for a launcher that cannot carry them (`shell` is bash itself, so there is no program underneath to pass a switch to): the refusal names the launcher and the ones that can, and nothing is configured — because a caller whose arguments never arrive and are never mentioned gets an agent that looks configured and is not. RESTART-REQUIRED like `launcher` and `prompt`, and this one is a fact about processes rather than a policy: an argument vector is fixed at process start, so changing it under a running agent is refused. An empty array means the same as omitting it. What you send is visible afterwards in the `config` echo on crabcast_list_agents and crabcast_agent_status, and in a capacity refusal — so somebody denied a slot can still read what would have been spawned.",
+            },
             prompt: {
               type: "string",
               description:

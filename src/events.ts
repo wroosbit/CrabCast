@@ -166,6 +166,15 @@ export const CONFIG_FIELDS: { [K in keyof Required<AgentConfig>]: FieldShape } =
   chargeable: SCALAR,
   preemptable: SCALAR,
   launcher: SCALAR,
+  // AN ARRAY OF LEAVES, and the declaration is doing work rather than
+  // describing: `args` is command-line text, one string per argument, and
+  // declaring it `SCALARS` says a consumer may read every element as a value
+  // with no interior. An author who later gave an element structure — an
+  // object, a nested array — would be sending a shape this declaration does not
+  // permit, and §4's rule reports that as drift and drops the field rather than
+  // letting it travel unexamined. The ORDER is the command line and is
+  // preserved: an array projection walks elements in place.
+  args: SCALARS,
   prompt: SCALAR,
   /**
    * THE ONE DELIBERATE HOLE IN THE RECURSION, and §4 names it rather than
@@ -202,7 +211,7 @@ export const CONFIG_FIELDS: { [K in keyof Required<AgentConfig>]: FieldShape } =
 };
 
 /** Which knobs `configure` may leave out. Absent ones are not `missing`. */
-const OPTIONAL_CONFIG_KEYS = ['prompt', 'mcpServers', 'label', 'owner'] as const;
+const OPTIONAL_CONFIG_KEYS = ['args', 'prompt', 'mcpServers', 'label', 'owner'] as const;
 
 /** The optional keys of {@link AgentConfig}, derived rather than restated. */
 type OptionalConfigKeys = {
