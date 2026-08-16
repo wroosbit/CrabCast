@@ -231,7 +231,24 @@ const env = {
   CRABCAST_KAN504_PIDFILE: pidFile,
   CRABCAST_KAN504_CONVERSATION: conversationMarker,
   CRABCAST_CONFIG: undefined,
-  CRABCAST_MAX_AGENTS: undefined
+  // ⚠ THE CAP IS SET HERE, ON THE ENVIRONMENT THE DAEMON INHERITS, AND THAT IS
+  // THE WHOLE OF WHY §5's CAPACITY ARM IS DETERMINISTIC.
+  //
+  // It was set on the one CLI invocation instead until CI said otherwise, and
+  // that was simply wrong: capacity is computed in the DAEMON (`optionsFromEnv`
+  // in capacity.ts), which is auto-spawned by the FIRST CLI call and never sees
+  // an environment handed to a later one.
+  //
+  // ⚠ AND IT PASSED LOCALLY ANYWAY, WHICH IS THE PART WORTH KEEPING. The machine
+  // this was written on runs a large agent fleet, so the real derived cap was
+  // already exceeded and the activation was refused for a reason that had
+  // nothing to do with this proof. A clean GitHub runner has headroom, so the
+  // same code activated successfully and the section went red there. A green
+  // that came from the author's machine being busy is not a green.
+  //
+  // Every activation this proof WANTS to succeed passes `--override`, so a cap
+  // of 1 constrains only the one activation §5 needs refused.
+  CRABCAST_MAX_AGENTS: '1'
 };
 
 const cliJs = path.join(distDir, 'cli.js');
@@ -580,24 +597,73 @@ rule('5. DISCLOSURE — argv is readable in list, in status, and in a capacity r
     'configure', denied, '--priority', '1', '--launcher', 'claude',
     '--args-json', JSON.stringify(['--would-have-had-this']), '--prompt', 'go'
   ]);
-  const refusal = spawnSync(process.execPath, [cliJs, '--config', configPath, 'activate', denied], {
-    env: { ...env, CRABCAST_MAX_AGENTS: '1' }, encoding: 'utf8', timeout: 120_000
-  });
+  // No `--override`: this is the one activation in the proof that must meet the
+  // gate. The cap comes from the daemon's own environment — see CRABCAST_MAX_AGENTS
+  // above — rather than from this call, which cannot reach the daemon.
+  const refusal = crabcast(['activate', denied]);
   const refusalText = (refusal.stderr || '') + (refusal.stdout || '');
   const refusalLine = refusalText.split('\n').find((l) => /would have been started with/.test(l)) ?? '';
-  console.log(`   the capacity refusal:\n     ${refusalLine.trim()}\n`);
+  console.log(`   the capacity refusal:\n     ${refusalLine.trim() || '(no such line)'}\n`);
 
-  check(refusal.status !== 0, 'the activation is refused at capacity', `exit ${refusal.status}`);
+  const wasRefused = refusal.status !== 0 && /capacity/i.test(refusalText);
+  check(wasRefused, 'the activation is refused at capacity',
+    `exit ${refusal.status}${wasRefused ? '' : ` — output: ${refusalText.trim().split('\n').slice(0, 2).join(' / ')}`}`);
+
+  // ⚠ MATCHED ON THE REFUSAL'S OWN SENTENCE, NOT ON THE ARGUMENT STRING, AND CI
+  // IS WHY. This check read `/--would-have-had-this/` against the whole output
+  // and PASSED on a run where the activation had SUCCEEDED — because a
+  // successful `activate` echoes the config, and the config contains the args.
+  // So the one check that was supposed to establish "the refusal discloses the
+  // argv" was equally satisfied by there being no refusal at all: a check that
+  // could not fail in the direction that mattered, sitting green beside two that
+  // had gone red.
+  //
+  // `would have been started with` is emitted only by the refusal path, so this
+  // now distinguishes them — and §5b below is what shows that claim is true
+  // rather than asserted.
   check(
-    /--would-have-had-this/.test(refusalText),
-    'and the refusal still says what WOULD have been spawned',
-    refusalLine.trim()
+    /would have been started with '--would-have-had-this'/.test(refusalText),
+    'and the refusal names what WOULD have been spawned — matched on the refusal\'s own ' +
+      'sentence, which a successful activation does not print',
+    refusalLine.trim() || refusalText.trim().split('\n').slice(0, 2).join(' / ')
   );
   check(
     /nothing was started/i.test(refusalText),
     'while being clear that nothing was',
     refusalLine.trim()
   );
+
+  // ------------------------------------------------------------------ §5b
+  // THE POSITIVE CONTROL FOR THE CHECK ABOVE.
+  //
+  // "This sentence appears only on a refusal" is a claim about the code, and a
+  // check resting on it is only as good as the claim. So the SAME agent is now
+  // activated successfully with `--override`, and the sentence must be ABSENT
+  // while the args are still disclosed by `status`. Without this, the matcher
+  // above could be tightened to something that never appears anywhere and the
+  // section would go green forever.
+  const allowed = crabcast(['activate', denied, '--override']);
+  const allowedText = (allowed.stderr || '') + (allowed.stdout || '');
+  check(allowed.status === 0, '(control) the same agent activates when the gate is overridden',
+    `exit ${allowed.status}`);
+  check(
+    !/would have been started with/.test(allowedText),
+    '⚠ and the refusal sentence is ABSENT from that success — so the check above is reading ' +
+      'the refusal, not merely finding the argument text somewhere in the output',
+    allowedText.trim().split('\n').slice(0, 2).join(' / ')
+  );
+  const allowedStatus = crabcast(['status', denied]);
+  check(
+    /--would-have-had-this/.test((allowedStatus.stdout || '') + (allowedStatus.stderr || '')),
+    'while the argv itself is still disclosed for the now-running agent'
+  );
+  // §5b really started a process, so §6's "every process this proof started is
+  // gone" has to know about it. A control that quietly leaks a `sleep` would
+  // make the very next section's claim false.
+  {
+    const pid = await awaitClaudePid(5_000);
+    if (pid !== null) spawnedPids.add(pid);
+  }
 }
 
 // ===========================================================================
