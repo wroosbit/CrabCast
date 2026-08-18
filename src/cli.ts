@@ -2002,7 +2002,7 @@ const CONFIGURE_FLAGS: FlagSpec[] = [
   { name: 'prompt-file', kind: 'string', value: '<file>', help: 'read the prompt from this file; its BYTES cross the wire, not the path (RESTART)' },
   { name: 'mcp', kind: 'string', value: '<a,b>', help: 'comma-separated MCP servers CrabCast builds itself (crabcast) (RESTART: .mcp.json is read at boot)' },
   { name: 'mcp-config', kind: 'string', value: '<file>', help: 'JSON file of your own server DEFINITIONS, {"name":{"command":…}}; its bytes cross the wire and are written verbatim (RESTART)' },
-  { name: 'args-json', kind: 'string', value: '<json>', help: 'extra command-line arguments for the launcher, as a JSON array of strings, e.g. \'["--flag","value"]\'; each element becomes exactly one argument (RESTART: argv is fixed at process start)' },
+  { name: 'args-json', kind: 'string', value: '<json>', help: 'extra command-line arguments for the launcher, as a JSON array of strings; each element becomes exactly one argument. WRITE A VALUE WITH `=`, AS ONE ELEMENT: \'["--flag=value"]\', not \'["--flag","value"]\'. The prompt is the LAST argument and it is a bare operand, so a VARIADIC flag written the two-element way keeps reading and SWALLOWS THE PROMPT — and the error you get back blames the prompt\'s content, never the argument order. `=` binds the value and makes that unwritable. See docs/launcher-args.md (RESTART: argv is fixed at process start)' },
   { name: 'label', kind: 'string', value: '<text>', help: 'display text; never parsed, never an address, duplicates fine (changes in place)' },
   { name: 'owner', kind: 'string', value: '<name>', help: 'whose agent this is; matched EXACTLY by `list --owner`. NOT a permission boundary — an unfiltered list shows every owner\'s agents. Omit to leave it unowned, which no filter matches (changes in place)' },
   { name: 'refusable', kind: 'boolean', help: 'may the capacity gate refuse it (default true; --refusable=false to exempt; changes in place)' },
@@ -2051,6 +2051,17 @@ const CONFIGURE_FLAGS: FlagSpec[] = [
  * strings — nothing is sent. The daemon refuses the same shapes, so this is the
  * caller getting the answer one round trip sooner rather than a second
  * validation with an opinion of its own.
+ *
+ * ⚠ EVERY EXAMPLE IN THIS FUNCTION AND IN ITS FLAG'S HELP USES `--flag=value`
+ * AS ONE ELEMENT, AND THAT IS NOT HOUSE STYLE (KAN-514). They read
+ * `["--flag","value"]` until this ticket, which is the form that wedges every
+ * spawn for an agent whose flag happens to be VARIADIC: the prompt is the last
+ * argument and a bare operand, so a flag still counting values takes it. The
+ * example a caller copies is the whole of what most callers will ever read
+ * about this, so it is the safe form rather than the neutral one. What is NOT
+ * done here is refusing the two-element shape — arity is the consumer's fact
+ * and CrabCast does not hold it, so the only available detector would refuse
+ * correct configurations. The reasoning is docs/launcher-args.md.
  */
 function launcherArgs(
   flags: Record<string, string | number | boolean>
@@ -2064,13 +2075,13 @@ function launcherArgs(
   } catch (e: any) {
     throw new UsageError(
       `--args-json is not valid JSON (${e?.message ?? String(e)}). It is a JSON ARRAY OF ` +
-        `STRINGS, e.g. --args-json '["--flag","value"]' — mind the shell quoting, since the ` +
+        `STRINGS, e.g. --args-json '["--flag=value"]' — mind the shell quoting, since the ` +
         `array's own double quotes have to survive it. Nothing was sent.`
     );
   }
   if (!Array.isArray(parsed) || parsed.some((a) => typeof a !== 'string')) {
     throw new UsageError(
-      `--args-json must be a JSON array of strings, e.g. '["--flag","value"]'. Got ` +
+      `--args-json must be a JSON array of strings, e.g. '["--flag=value"]'. Got ` +
         `${JSON.stringify(parsed)}. Each element becomes exactly one command-line argument, ` +
         `verbatim — there is no rendering step that could turn a number, an object or a null ` +
         `into the text you meant. Nothing was sent.`
