@@ -346,9 +346,14 @@ if (preFix) {
 
       check(res.status !== 0, '⚠ `list` FAILS on the pre-fix build — the defect reproduces',
         `exit=${res.status}`);
-      check((res.stdout ?? '').trim() === '',
+      // ⚠ `typeof` FIRST, AND NOT `(res.stdout ?? '')`. This check asserts an
+      // ABSENCE, and a `?? ''` fallback supplies exactly the emptiness being
+      // asserted — so a spawn that never ran would pass it, reporting "the
+      // defect reproduced" about a command that produced no output because it
+      // did not execute. The string has to have been produced to be empty.
+      check(typeof res.stdout === 'string' && res.stdout.trim() === '',
         'and NO response arrives: this is not a truncated answer, it is no answer',
-        `stdout=${(res.stdout ?? '').length} bytes`);
+        `stdout=${typeof res.stdout === 'string' ? `${res.stdout.length} bytes` : `NOT A STRING (${typeof res.stdout}) — the CLI did not run`}`);
       check(/Line exceeded 1048576 characters/.test(res.stderr ?? ''),
         'and the failure is the framing bound, named',
         (res.stderr ?? '').slice(0, 120));
@@ -462,13 +467,20 @@ if (answer) {
   // durable record VERBATIM" unconditionally; on a response that summarises
   // something that sentence is false, and a claim its own response refutes is
   // the defect this ticket is about.
-  check(!/durable record VERBATIM/.test(answer.configEchoContract?.note ?? ''),
-    'the contract note no longer claims VERBATIM on a response that summarised a knob');
+  // Same shape as above: the note must be PRESENT and must not make the claim.
+  // `?? ''` would let a response with no note at all satisfy this.
+  const note = answer.configEchoContract?.note;
+  check(typeof note === 'string' && !/durable record VERBATIM/.test(note),
+    'the contract note no longer claims VERBATIM on a response that summarised a knob',
+    typeof note === 'string' ? note.slice(0, 90) : `no note on the response (${typeof note})`);
 
-  const sizeBytes = Buffer.byteLength(greenRes?.stdout ?? '');
-  check(sizeBytes < 1048576,
+  // A response that was never produced is 0 bytes and would sail under the
+  // bound, so presence is asserted before size.
+  const produced = typeof greenRes?.stdout === 'string' && greenRes.stdout.length > 0;
+  const sizeBytes = produced ? Buffer.byteLength(greenRes.stdout) : -1;
+  check(produced && sizeBytes < 1048576,
     'and the whole response fits the framing bound with room to spare',
-    `${sizeBytes} bytes against a 1048576 bound`);
+    produced ? `${sizeBytes} bytes against a 1048576 bound` : 'NO response was produced to measure');
 }
 
 // ---------------------------------------------------------------------------
@@ -564,8 +576,15 @@ check(ipcJs.includes('Line exceeded'),
 check(/SIZE failure, not a transport one/.test(redSaw?.stderr ?? ''),
   'and the message a caller actually meets names it a size failure',
   (redSaw?.stderr ?? '').slice(0, 100));
-check(!(redSaw?.stderr ?? '').includes(RETIRED),
-  '⚠ and does NOT tell the reader that what just happened cannot happen');
+// ⚠ THE STDERR MUST HAVE BEEN CAPTURED FOR ITS CONTENT TO MEAN ANYTHING. With
+// `?? ''` a skipped §1 — a mutation that did not apply, a daemon that never came
+// up — would satisfy this check about a message nobody ever read.
+check(typeof redSaw?.stderr === 'string' && redSaw.stderr.length > 0
+  && !redSaw.stderr.includes(RETIRED),
+  '⚠ and does NOT tell the reader that what just happened cannot happen',
+  typeof redSaw?.stderr === 'string' && redSaw.stderr.length > 0
+    ? 'checked against the stderr §1 actually captured'
+    : 'NO stderr was captured in §1 — this check measured nothing');
 
 // ---------------------------------------------------------------------------
 // §6 ⚠ THE CENSUS CHECK CAN FAIL — a build that drops rows must be caught
