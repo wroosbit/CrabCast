@@ -1196,7 +1196,11 @@ mutation3: {
         '            const drift = [];\n' +
         "            sweepConfigEchoes(payload, '', drift);\n" +
         "            this.warnOnEchoDrift(drift, 'agent_status');\n" +
-        '            respond({ ...payload, configEchoContract: configEchoContract(drift) });',
+        '            // `[]` BECAUSE THIS RESPONSE SUMMARISES NOTHING, and it says so rather\n' +
+        '            // than staying silent: a single agent\'s config travels whole here,\n' +
+        '            // prompt included, and this is the surface a consumer is sent to when\n' +
+        '            // the fleet read tells them the text is elsewhere.\n' +
+        '            respond({ ...payload, configEchoContract: configEchoContract(drift, []) });',
       replace:
         '            /* KAN-168 §3b: agent_status unswept — main from #29 to KAN-168 */\n' +
         '            respond(payload);'

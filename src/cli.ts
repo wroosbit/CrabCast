@@ -36,6 +36,7 @@ import {
 } from './config.js';
 import { hostDaemonConfigPath } from './daemon-invocation.js';
 import {
+  LineOverflowError,
   SPAWN_ERR_FILENAME,
   connectToDaemon,
   onJsonLines,
@@ -69,13 +70,43 @@ export const EXIT = {
   /** Could not reach or spawn the daemon; nothing was asked of it. */
   TRANSPORT: 3,
   /** A config that was named would not load. Nothing was attempted. */
-  CONFIG: 4
+  CONFIG: 4,
+  /**
+   * The daemon answered and the answer would not fit the socket's framing —
+   * more than `MAX_LINE_CHARS` on one line, so the connection was closed
+   * before the reply could be read.
+   *
+   * SPLIT OUT FROM 3 FOR THE REASON 4 WAS, one step in the other direction
+   * (KAN-528). 3 promises BOTH halves of "could not reach or spawn the daemon;
+   * nothing was asked of it", and this failure falsifies both: the daemon was
+   * reached, the request was asked, and it was answered. Reporting it as 3
+   * sent a reader looking for a dead daemon — measured, on the live fleet, by
+   * the agent that filed this ticket, who was only talked out of it by
+   * `daemon-status` answering on the same socket.
+   *
+   * NOT RETRYABLE, and that is the operational difference a script needs. A 3
+   * is worth retrying — a daemon may be starting. This one produces the same
+   * answer and the same overflow every time, because the size is a property of
+   * the fleet rather than of the moment.
+   */
+  OVERSIZE: 5
 } as const;
 
 export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
 
 class UsageError extends Error {}
 class TransportError extends Error {}
+
+/**
+ * The connection closed because the answer would not fit the framing.
+ *
+ * A SUBCLASS RATHER THAN A FLAG, so every existing `catch` that handles a
+ * transport failure keeps handling this one — it IS a closed connection, and
+ * the paths that clean up after one must still run. What the subclass adds is
+ * the one thing the exit-code mapping needs and could not otherwise get
+ * without matching on message text: which of the two this was.
+ */
+class OversizeError extends TransportError {}
 
 // --------------------------------------------------------- the command table
 
@@ -687,6 +718,35 @@ function mcpServerNames(servers: unknown): string {
  * something, and a renderer that prints nothing for it looks identical to one
  * that has not been taught about the field.
  */
+/**
+ * The `prompt:` line of a config block — its SIZE, from whichever of the two
+ * fields the response carries.
+ *
+ * TWO SOURCES BECAUSE THERE ARE TWO SHAPES (KAN-528), and the order is the
+ * whole of the correctness here. A fleet row has no `config.prompt`: the text
+ * is summarised off so the response fits the socket's framing, and the row
+ * carries `promptChars` instead. Measuring `config.prompt` first would find
+ * nothing on such a row and fall through to "(none)" — reporting every agent on
+ * the machine as having no prompt, which is the silent under-report this ticket
+ * exists to prevent. So `promptChars` is read first: it is on BOTH shapes and
+ * means the same on each.
+ *
+ * The `config.prompt` branch is not dead code and is not a fallback for a
+ * missing field — it is what renders a response from a daemon older than this
+ * change, which carries the text and no count.
+ */
+function promptLine(row: any, config: any, pad: string): string {
+  const chars =
+    typeof row?.promptChars === 'number'
+      ? row.promptChars
+      : typeof config?.prompt === 'string'
+        ? config.prompt.length
+        : null;
+  return chars === null
+    ? `${pad}prompt: (none — it starts at its runtime's own prompt)`
+    : `${pad}prompt: ${chars} characters`;
+}
+
 function configBlock(row: any, pad = INDENT + INDENT): string | null {
   const config = row?.config;
   if (config === undefined) return null;
@@ -721,9 +781,15 @@ function configBlock(row: any, pad = INDENT + INDENT): string | null {
       : null,
     // The size, not the text: a prompt is finished bytes of arbitrary length
     // and reprinting it here would bury every other field.
-    typeof config.prompt === 'string'
-      ? `${pad}prompt: ${config.prompt.length} characters`
-      : `${pad}prompt: (none — it starts at its runtime's own prompt)`,
+    //
+    // READ OFF THE ROW'S `promptChars` FIRST, and only fall back to measuring
+    // `config.prompt` (KAN-528). A FLEET row has no `config.prompt` at all —
+    // the text is summarised away so the response fits the socket's framing —
+    // and the fallback's `else` branch prints "(none)", which on such a row
+    // would report every agent on the machine as having no prompt. That is the
+    // silent under-report this ticket exists to prevent, so the count is taken
+    // from the field that is present on BOTH shapes and means the same on each.
+    promptLine(row, config, pad),
     // A MAP of definitions keyed by name, not the array of names it used to
     // be (KAN-111). Rendered as the names plus which of them CrabCast builds
     // itself, because the definitions are the caller's own JSON and printing
@@ -2655,6 +2721,9 @@ export function renderHelp(): string {
     `${INDENT}${EXIT.USAGE}  usage   — unknown command, missing argument, malformed flag`,
     `${INDENT}${EXIT.TRANSPORT}  transport — could not reach or spawn the daemon; nothing was asked of it`,
     `${INDENT}${EXIT.CONFIG}  config  — a config that was named would not load; nothing was attempted`,
+    `${INDENT}${EXIT.OVERSIZE}  oversize  — the daemon answered and the answer would not fit the socket's`,
+    `${INDENT}   framing, so the connection closed before it could be read. The daemon WAS`,
+    `${INDENT}   reached and the request WAS asked — this is not a 3, and retrying is futile.`,
     '\nwhich commands start a daemon:',
     `${INDENT}start one if none is running:  ${COMMANDS.filter((c) => c.spawnsDaemon).map((c) => c.name).join(', ')}`,
     `${INDENT}refuse instead (exit 3):       ${COMMANDS.filter((c) => !c.spawnsDaemon).map((c) => c.name).join(', ')}`,
@@ -2919,16 +2988,22 @@ class DaemonClient {
       this.closeReason = err;
     });
     socket.on('close', () => {
-      const cause = this.closeReason ?? this.framingError;
+      // AN OVERFLOW OUTRANKS A SOCKET ERROR AS THE CAUSE, and the order matters
+      // rather than being a preference (KAN-528). Tearing the connection down
+      // over an oversized line can also surface as an ECONNRESET, so both
+      // fields can be set for ONE event — and the reset is the CONSEQUENCE.
+      // Reporting it as the cause would name the symptom, print a message with
+      // no bearing on what went wrong, and lose the one classification that
+      // decides the exit code. `closeReason` still wins everywhere else,
+      // exactly as before, because there the framing had nothing to say.
+      const overflow = this.framingError instanceof LineOverflowError ? this.framingError : null;
+      const cause = overflow ?? this.closeReason ?? this.framingError;
       for (const entry of this.pending.values()) {
         clearTimeout(entry.timer);
-        entry.reject(
-          new TransportError(
-            cause
-              ? `The daemon connection closed: ${cause.message}`
-              : 'The daemon connection closed before it answered.'
-          )
-        );
+        const message = cause
+          ? `The daemon connection closed: ${cause.message}`
+          : 'The daemon connection closed before it answered.';
+        entry.reject(overflow ? new OversizeError(message) : new TransportError(message));
       }
       this.pending.clear();
     });
@@ -3201,7 +3276,11 @@ export async function main(argv: string[]): Promise<ExitCode> {
     response = await client.request(spec.action, payload, timeout);
   } catch (err: any) {
     process.stderr.write(`crabcast: ${err?.message ?? String(err)}\n`);
-    return EXIT.TRANSPORT;
+    // A SIZE FAILURE IS NOT A TRANSPORT FAILURE, and until KAN-528 this line
+    // said it was. `OversizeError` is a `TransportError`, so it arrives here
+    // by the same route and the cleanup above it is unchanged — what it must
+    // not do is leave with 3, which claims the daemon was never reached.
+    return err instanceof OversizeError ? EXIT.OVERSIZE : EXIT.TRANSPORT;
   } finally {
     client?.close();
   }

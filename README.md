@@ -184,6 +184,7 @@ activated /tmp/ac1-demo/notes
   conversation:  started a NEW one — CrabCast has not run an agent in this directory before, so nothing on disk here was continued
 
 other fields in the daemon's response:
+  promptChars: 250
   channelEnabled: false
 
 $ crabcast list
@@ -223,7 +224,7 @@ unstarted agents (0)
   (none)
 
 where these fields came from — read at 2026-08-05T13:01:36.686Z
-  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, identity, raw, claimsPath, claimsAt, claimsEvent
+  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, promptChars, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, identity, raw, claimsPath, claimsAt, claimsEvent
   observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir
   derived  (computed from the two):                 paneName, state, occupies, reason, line, problem, rawTruncated, promptRedacted, standing
   remembered (this daemon's memory, not durable):   statusSince
@@ -267,7 +268,7 @@ $ crabcast status /tmp/ac1-demo/notes
   created:       2026-08-05T13:01:31.515Z
 
 where these fields came from — read at 2026-08-05T13:01:42.798Z
-  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, identity, raw, claimsPath, claimsAt, claimsEvent
+  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, promptChars, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, identity, raw, claimsPath, claimsAt, claimsEvent
   observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir
   derived  (computed from the two):                 paneName, state, occupies, reason, line, problem, rawTruncated, promptRedacted, standing
   remembered (this daemon's memory, not durable):   statusSince
@@ -275,6 +276,7 @@ where these fields came from — read at 2026-08-05T13:01:42.798Z
 config echo: every knob echoed on this response is declared (priority, refusable, chargeable, preemptable, launcher, args, prompt, mcpServers, label, owner)
 
 other fields in the daemon's response:
+  promptChars: 250
   channelEnabled: false
 
 $ crabcast send /tmp/ac1-demo/notes cat /tmp/ac1-demo/.crabcast/agents/31e31d1b7540dabf/prompt.md
@@ -537,6 +539,7 @@ running: 0 charged agent(s)
 headroom: 0 more — count allows 0 (0 cap − 0 running), cpu allows 2 ((4 cores − 1 reserved − 1.33 in use) ÷ 0.75), load would allow 2 ((4 cores − 1 reserved − 1.32 load) ÷ 0.75; reported, does not bind), memory allows 8 ((9.0 GiB available − 2.3 GiB reserved) ÷ 800 MB); bound by cap
 
 other fields in the daemon's response:
+  promptChars: null
   channelEnabled: false
 
 $ crabcast activate /tmp/kan174/idem/probe-a                 # call #2, no --override
@@ -552,6 +555,7 @@ other fields in the daemon's response:
   sessionId: crabcast-probe-a-9eec866d8e3e12c7-1785941446744
   status: active
   createdAt: 2026-08-05T14:50:46.744Z
+  promptChars: null
   channelEnabled: false
 
 $ crabcast activate /tmp/kan174/idem/probe-a                 # call #3, no --override
@@ -567,6 +571,7 @@ other fields in the daemon's response:
   sessionId: crabcast-probe-a-9eec866d8e3e12c7-1785941446744
   status: active
   createdAt: 2026-08-05T14:50:46.744Z
+  promptChars: null
   channelEnabled: false
 
 $ crabcast activate /tmp/kan174/idem/probe-a --json
@@ -589,6 +594,7 @@ $ crabcast activate /tmp/kan174/idem/probe-a --json
     "preemptable": true,
     "launcher": "shell"
   },
+  "promptChars": null,
   "configVersion": 1,
   "configuredAt": "2026-08-05T14:50:46.533Z",
   "everActivated": true,
