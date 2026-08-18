@@ -76,6 +76,7 @@ import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
 import { makeMutator, FIX_THE_MUTATION } from './mutation.mjs';
+import { killScratchRootSync } from './scratch-processes.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
@@ -107,6 +108,43 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'crabcast-kan514-red-'));
 // time, and that failure reads as "the proof caught the mutation" on every arm
 // at once. Learned on `kan504-red-drive.mjs` by running it, not by reading it.
 fs.symlinkSync(path.join(repoRoot, 'node_modules'), path.join(scratch, 'node_modules'), 'dir');
+
+/**
+ * TEARDOWN THAT RUNS ON EVERY EXIT PATH (KAN-529).
+ *
+ * Until KAN-529 this file removed `scratch` on exactly ONE path — the last
+ * line — and had no signal handlers at all. Two consequences, both observed:
+ *
+ *   * THE ARM-0 GUARD BELOW `process.exit(1)`s before that line, so every run
+ *     whose control came back red left its whole scratch tree behind. That is
+ *     the path taken precisely when something is already wrong, which is when
+ *     somebody is most likely to run it repeatedly.
+ *   * A Ctrl+C left the same tree, and the proof this drive runs six times
+ *     leaks into it. `epic/KAN-59` found the leftover directories during
+ *     review of KAN-514 and correctly called them untidiness; they were the
+ *     visible half of the process leak KAN-529 is about.
+ *
+ * ⚠ IT SWEEPS PROCESSES AS WELL AS DIRECTORIES, which is not belt-and-braces:
+ * every arm runs the proof against a MUTANT BUILD under `scratch`, so the
+ * daemon that run auto-spawns carries this directory in its own argv. Removing
+ * the tree without killing them leaves daemons executing a build that no
+ * longer exists on disk.
+ */
+function cleanUp() {
+  let swept = 0;
+  try { swept = killScratchRootSync(scratch); } catch {}
+  try { fs.rmSync(scratch, { recursive: true, force: true }); } catch {}
+  return swept;
+}
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, () => {
+    const swept = cleanUp();
+    console.log(`\n[kan514-red-drive] ${signal} — killed ${swept} process(es) carrying ` +
+      `${scratch} and removed it`);
+    process.exit(130);
+  });
+}
+
 const { mutate, mutationsSkipped } = makeMutator({ distDir, scratch, report });
 
 /**
@@ -253,6 +291,9 @@ if (control.exit !== 0) {
   console.log('\n  ⚠ the control is red, so every arm below would measure the harness rather ' +
     'than the proof. Stopping.\n');
   console.log(control.out.split('\n').slice(-40).join('\n'));
+  // KAN-529: this exit used to precede the only `rmSync` in the file, so the
+  // path taken when something is ALREADY wrong was the one path that leaked.
+  cleanUp();
   process.exit(1);
 }
 
@@ -462,6 +503,6 @@ console.log(`\n${'='.repeat(78)}`);
 console.log(`${checks - failures}/${checks} checks passed`);
 console.log('='.repeat(78));
 
-try { fs.rmSync(scratch, { recursive: true, force: true }); } catch {}
+cleanUp();
 
 process.exit(failures ? 1 : 0);
