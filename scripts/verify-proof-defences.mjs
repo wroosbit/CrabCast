@@ -159,8 +159,14 @@
 // the better instrument" than the smaller suite was.
 //
 // (The register's history, each figure dated by the ticket that moved it, as
-// mutation / guard / none. The pre-KAN-355 header pinned 21 / 23 / 1 over a
-// suite of 45, measured when it was written and never again. Before that:
+// mutation / guard / none. The pre-KAN-355 header pinned 21 / 23 / 1 — their
+// sum was the whole suite then — measured when it was written and never again.
+// THE SUITE TOTAL IS DELIBERATELY NOT SPELLED OUT HERE, and the reason is this
+// file's own rule catching this paragraph (KAN-528): the figure it used to
+// carry came back round as a LIVE register count, at which point a dated
+// historical value and a stale census read identically. It is the sum of the
+// three figures beside it, so nothing is lost by leaving it uncomputed. Before
+// that:
 // 18 / 21 / 3 when this register was first counted.
 // KAN-197 closed the worst of the three — see finding 3 below — and KAN-198
 // closed `verify-tab-per-agent`, which was the expensive one: the count moved
@@ -742,6 +748,20 @@ const PROOF_DEFENCES = [
     central:
       'a consumer can enumerate a fleet category COMPLETELY — the cursor reaches every row, ' +
       'refuses rather than resets, and survives ties and a moving fleet.'
+  },
+  {
+    script: 'verify-fleet-read-fits-the-wire',
+    defence: 'mutation',
+    central:
+      'a FLEET read still answers when the fleet\'s prompts do not fit the wire — every agent ' +
+      'present, the count exact, the reduction named on the response — and a response too large ' +
+      'to frame is reported as a SIZE failure rather than as a daemon nobody could reach. ' +
+      'Defended by three mutants of the COMPILED build: the pre-fix echo (prompt text back on ' +
+      'the row) must stop `list` answering at all, the pre-fix exit mapping must collapse ' +
+      'oversize back onto the unreachable code, and a build that silently drops rows must be ' +
+      'rejected by the completeness check\'s own predicates — which is what stops that check ' +
+      'being a formality, since a clipped census is a well-formed exit-0 response that looks ' +
+      'exactly like a smaller fleet.'
   },
   {
     script: 'verify-owner-filter',
