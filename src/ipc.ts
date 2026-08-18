@@ -34,12 +34,61 @@ export function ensureDataDir(dataDir: string): void {
  * memory exhaustion into a refused connection.
  *
  * 1 MiB because it has to be larger than any legitimate message by a margin
- * nobody has to think about. The biggest thing that crosses this socket is a
- * `tail_agent` response — 200 lines of pane text — and a `list_agents` reply
- * for a large fleet; both are kilobytes. Anything past a megabyte on a line is
- * not a message this daemon has a handler for.
+ * nobody has to think about.
+ *
+ * ⚠ THAT MARGIN WAS NOT THERE, AND THIS PARAGRAPH USED TO SAY IT WAS. It read:
+ * "The biggest thing that crosses this socket is a `tail_agent` response — 200
+ * lines of pane text — and a `list_agents` reply for a large fleet; both are
+ * kilobytes. Anything past a megabyte on a line is not a message this daemon
+ * has a handler for." Every clause was true when it was written and the second
+ * one stopped being true: `list_agents` echoes each agent's frozen `config`,
+ * an agent's `prompt` is finished text accepted up to `MAX_PROMPT_CHARS`
+ * (128 KiB), and the reply carries one per row. **Ten agents with supervisor-
+ * sized prompts exceed this bound on their own** — measured on a live fleet at
+ * KAN-528, where `crabcast list` stopped answering entirely and the error
+ * printed the sentence above while being the counter-example to it.
+ *
+ * WHAT KEEPS THE MARGIN NOW IS A MECHANISM AND NOT A SENTENCE. A fleet read
+ * echoes {@link SummarisedAgentConfig} — the prompt's character count in place
+ * of its text — so the term that grew with the fleet is gone from the response
+ * rather than merely believed to be small. The prompt still travels whole on
+ * `agent_status`, which is ONE record and bounded by `MAX_PROMPT_CHARS`.
+ *
+ * ⚠ THIS BOUND IS STILL REACHABLE AND NOTHING HERE PROMISES OTHERWISE. What
+ * changed is which fleet reaches it: the remaining fleet row is ~1.9 KB
+ * measured, so the cliff moved from ten agents to several hundred rather than
+ * being removed. A message that crosses it is answered by
+ * {@link LineOverflowError} and a distinct exit code, so the next agent to meet
+ * it is told what happened instead of being told it cannot have happened.
  */
 export const MAX_LINE_CHARS = 1024 * 1024;
+
+/**
+ * A peer sent more than {@link MAX_LINE_CHARS} on one line, so the connection
+ * was closed.
+ *
+ * A TYPE RATHER THAN A RECOGNISABLE STRING (KAN-528), because the CLI has to
+ * tell this apart from every other reason a socket closes in order to exit
+ * with the right code — and the alternative on offer was matching the message
+ * text, which is a coupling that breaks silently the first time somebody
+ * improves the wording. The overflow is the one close whose cause is known
+ * exactly at the moment it happens; carrying that in the type is what stops it
+ * being re-derived, badly, downstream.
+ *
+ * WHAT IT MEANS, and it is the opposite of what the exit code used to say: the
+ * daemon WAS reached, the request WAS asked, and an answer WAS produced. What
+ * failed is that the answer would not fit the framing. A caller that retries
+ * this as a transport fault retries a request that will fail identically.
+ */
+export class LineOverflowError extends Error {
+  /** The bound that was exceeded, so a caller need not import the constant. */
+  readonly limit: number;
+  constructor(message: string, limit: number) {
+    super(message);
+    this.name = 'LineOverflowError';
+    this.limit = limit;
+  }
+}
 
 // Newline-delimited JSON framing over a stream. Uses a StringDecoder so a
 // multi-byte character split across chunks (pty output) doesn't corrupt.
@@ -75,12 +124,29 @@ export function onJsonLines(
     // against the bound: the bound is on one message, not on throughput.
     if (buffer.length > MAX_LINE_CHARS) {
       overflowed = true;
+      // ⚠ THE SECOND SENTENCE HERE USED TO BE A REASSURANCE, AND IT WAS
+      // EMITTED BY THE ONE EVENT THAT REFUTES IT (KAN-528). It read: "Messages
+      // are newline-delimited JSON and no message this daemon serves
+      // approaches that size." True when written; false by the time anything
+      // could print it, because the only way to read that line is for a
+      // message this daemon serves to have exceeded the size. It sent the
+      // agent that met it looking for a dead daemon.
+      //
+      // What replaces it says what happened, what it is NOT, and what to do —
+      // and it deliberately makes no claim about which messages can or cannot
+      // reach this bound, because that is the class of claim that failed here.
       const error =
         `Line exceeded ${MAX_LINE_CHARS} characters with no newline; ` +
-        `closing the connection. Messages are newline-delimited JSON and no ` +
-        `message this daemon serves approaches that size.`;
+        `closing the connection. This is a SIZE failure, not a transport one: ` +
+        `the peer was reached and a message was produced, and what failed is ` +
+        `that it did not fit the framing. Retrying it unchanged will fail ` +
+        `identically. If this was a fleet read, the fleet has outgrown what ` +
+        `one message can carry — ask for less of it (a narrower \`owner\`, or ` +
+        `a smaller \`pages.<category>.limit\`) and report it, because a read ` +
+        `this size is a defect in what the response carries rather than in ` +
+        `your call.`;
       buffer = '';
-      if (onError) onError(new Error(error));
+      if (onError) onError(new LineOverflowError(error, MAX_LINE_CHARS));
       const duplex = stream as unknown as net.Socket;
       // Say so on the wire before hanging up, when there is a wire to say it
       // on. Best-effort by construction: the peer may already be gone, and a

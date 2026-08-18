@@ -233,14 +233,32 @@ const UNBACKED_CONFIG = { ...KNOBS, launcher: 'claude' };
  * Extracted so section 8 can run it against a deliberately broken daemon and
  * watch it go red. A check that cannot fail is not a check.
  */
-function echoProblems(row, where, expected = EXPECTED_CONFIG) {
+function echoProblems(row, where, promptPolicy, expected = EXPECTED_CONFIG) {
   const problems = [];
+  // ⚠ NO DEFAULT, AND AN UNRECOGNISED VALUE IS A FAILURE RATHER THAN A GUESS
+  // (KAN-528). Whether this surface carries the prompt TEXT is the thing being
+  // asserted, so a call site that does not say which surface it is has not
+  // asked this function anything. Defaulting either way would make the missing
+  // argument silently agree with whatever the daemon happened to do.
+  if (promptPolicy !== 'whole' && promptPolicy !== 'summarised') {
+    return [`${where}: echoProblems needs 'whole' or 'summarised', got ${JSON.stringify(promptPolicy)}`];
+  }
   if (!row) return [`${where}: the row itself is missing`];
   if (!row.config) {
     problems.push(`${where}: no \`config\` block at all`);
     return problems;
   }
-  for (const [key, want] of Object.entries(expected)) {
+
+  // WHAT THIS SURFACE IS EXPECTED TO CARRY. A fleet read has no `config.prompt`
+  // — the text is summarised off so the response fits the socket's framing —
+  // and the row's `promptChars` carries its size instead. Both directions are
+  // asserted below, so a build that puts the text back on the fleet read goes
+  // red here, and so does one that strips it from the single read.
+  const summarises = promptPolicy === 'summarised';
+  const wantConfig = { ...expected };
+  if (summarises) delete wantConfig.prompt;
+
+  for (const [key, want] of Object.entries(wantConfig)) {
     const got = row.config[key];
     // Structural for anything that is not a primitive: `mcpServers` is a map
     // of the caller's own JSON now, and `===` on two equal objects is false.
@@ -251,7 +269,26 @@ function echoProblems(row, where, expected = EXPECTED_CONFIG) {
     if (!same) problems.push(`${where}: config.${key} is ${JSON.stringify(got)}, configured ${JSON.stringify(want)}`);
   }
   for (const extra of Object.keys(row.config)) {
-    if (!(extra in expected)) problems.push(`${where}: config.${extra} was never configured`);
+    if (!(extra in wantConfig)) problems.push(`${where}: config.${extra} was never configured`);
+  }
+
+  // THE PROMPT, ON WHICHEVER SIDE OF THE SUMMARY THIS SURFACE SITS.
+  if (summarises && 'prompt' in row.config) {
+    problems.push(
+      `${where}: config.prompt is present on a FLEET read — the text is what pushes this ` +
+      `response past the socket's framing bound, and carrying it is the defect KAN-528 fixed`
+    );
+  }
+  // `promptChars` is on EVERY surface, including the ones that carry the text,
+  // where it must agree with the text sitting beside it. Asserting it on both
+  // is what makes the fleet read's number checkable against a surface that
+  // still has the string to measure.
+  const wantChars = typeof expected.prompt === 'string' ? expected.prompt.length : null;
+  if (row.promptChars !== wantChars) {
+    problems.push(
+      `${where}: promptChars is ${JSON.stringify(row.promptChars)}, ` +
+      `and the configured prompt is ${wantChars === null ? 'absent' : `${wantChars} characters`}`
+    );
   }
   if (typeof row.configVersion !== 'number') {
     problems.push(`${where}: configVersion is ${JSON.stringify(row.configVersion)}, not a number`);
@@ -298,14 +335,14 @@ const runningDir = ownedDir('s1', 'running');
   check(activated.success === true && activated.alreadyRunning === true,
     'the agent is running (census-confirmed, by the pane name its path derives)');
   check(
-    echoProblems(activated, 'activate_response').length === 0,
+    echoProblems(activated, 'activate_response', 'whole').length === 0,
     'and the activation response itself echoes the record',
-    echoProblems(activated, 'activate_response').join('; ')
+    echoProblems(activated, 'activate_response', 'whole').join('; ')
   );
 
   const status = await h.invoke({ action: 'agent_status', path: runningDir });
   show('agent_status:', status);
-  const statusProblems = echoProblems(status, 'agent_status');
+  const statusProblems = echoProblems(status, 'agent_status', 'whole');
   check(statusProblems.length === 0,
     'STATUS reads back every knob, field for field, exactly as configured',
     statusProblems.join('; '));
@@ -314,7 +351,7 @@ const runningDir = ownedDir('s1', 'running');
   const listed = await h.invoke({ action: 'list_agents' });
   const row = listed.agents.find((a) => a.path === runningDir);
   show('list_agents → agents[0]:', row);
-  const listProblems = echoProblems(row, 'list_agents.agents[]');
+  const listProblems = echoProblems(row, 'list_agents.agents[]', 'summarised');
   check(listProblems.length === 0,
     'LIST reads back every knob on the running row, field for field',
     listProblems.join('; '));
@@ -429,7 +466,7 @@ const cat = {
 
   for (const [name, row, expected] of categories) {
     if (!check(Boolean(row), `${name} is NON-EMPTY — the state was produced, not assumed`)) continue;
-    const problems = echoProblems(row, name, expected ?? EXPECTED_CONFIG);
+    const problems = echoProblems(row, name, 'summarised', expected ?? EXPECTED_CONFIG);
     check(problems.length === 0, `${name} carries the whole echo with the configured values`,
       problems.join('; '));
   }
@@ -930,7 +967,7 @@ let beforeRestart;
       'append-only registry rather than from anything the old process held',
     same.length ? `differed: ${same.join(', ')}` : undefined);
   check(
-    echoProblems(after, 'agent_status after restart').length === 0,
+    echoProblems(after, 'agent_status after restart', 'whole').length === 0,
     'and it is still the whole record, not a remembered fragment of one'
   );
 }
@@ -1259,9 +1296,9 @@ rule('7. `provenance` classifies every key on every row');
     `state: ${blindUnstarted.state}`
   );
   check(
-    echoProblems(blindMissing, 'agent_status with herdr down').length === 0,
+    echoProblems(blindMissing, 'agent_status with herdr down', 'whole').length === 0,
     'and the echo is unaffected either way — it never needed herdr to answer',
-    echoProblems(blindMissing, 'agent_status with herdr down').join('; ')
+    echoProblems(blindMissing, 'agent_status with herdr down', 'whole').join('; ')
   );
   setCensus([]);
 }
@@ -1309,7 +1346,11 @@ const { mutate: mutantDist, mutationsSkipped } = makeMutator({
 mutation1: {
   // MUTATION 1: the echo itself. `configEcho` stops reading the record.
   const dir = mutantDist(
-    'no-echo', 'router.js', 'config: intent.record.config,', 'config: null,'
+    'no-echo', 'router.js',
+    "config: promptPolicy === 'whole'\n" +
+      '            ? intent.record.config\n' +
+      '            : summariseConfig(intent.record.config),',
+    'config: null,'
   );
   // Already a counted failure. Skip the section rather than
   // asserting about a build that was never mutated.
@@ -1320,9 +1361,9 @@ mutation1: {
   setCensus([ourPane(cat.running, '%20'), emptyOurPane(cat.unbacked, '%22')]);
   const listed = await h.invoke({ action: 'list_agents' });
   const problems = [
-    ...echoProblems(listed.agents.find((a) => a.path === cat.running), 'agents'),
-    ...echoProblems(listed.standbyAgents.find((a) => a.path === cat.standby), 'standbyAgents'),
-    ...echoProblems(listed.unstartedAgents.find((a) => a.path === cat.unstarted), 'unstartedAgents')
+    ...echoProblems(listed.agents.find((a) => a.path === cat.running), 'agents', 'summarised'),
+    ...echoProblems(listed.standbyAgents.find((a) => a.path === cat.standby), 'standbyAgents', 'summarised'),
+    ...echoProblems(listed.unstartedAgents.find((a) => a.path === cat.unstarted), 'unstartedAgents', 'summarised')
   ];
   console.log(`   the mutant's rows produce ${problems.length} problem(s):`);
   for (const p of problems.slice(0, 4)) console.log(`     ${p}`);
@@ -1705,15 +1746,15 @@ const CONFIGURE_ARGV = [
     state: socketStatus.state, config: socketStatus.config,
     configVersion: socketStatus.configVersion, everActivated: socketStatus.everActivated
   });
-  check(echoProblems(socketStatus, 'socket agent_status').length === 0,
+  check(echoProblems(socketStatus, 'socket agent_status', 'whole').length === 0,
     'SURFACE 1/4 — the socket `agent_status` reads every knob back',
-    echoProblems(socketStatus, 'socket agent_status').join('; '));
+    echoProblems(socketStatus, 'socket agent_status', 'whole').join('; '));
 
   const socketList = await raw('list_agents');
   const socketRow = socketList.agents.find((a) => a.path === livePath);
-  check(echoProblems(socketRow, 'socket list_agents').length === 0,
+  check(echoProblems(socketRow, 'socket list_agents', 'summarised').length === 0,
     'SURFACE 2/4 — the socket `list_agents` row reads every knob back',
-    echoProblems(socketRow, 'socket list_agents').join('; '));
+    echoProblems(socketRow, 'socket list_agents', 'summarised').join('; '));
 
   // --- surface 3: the CLI --------------------------------------------------
   const cliStatus = crabcast(['status', livePath]);
@@ -1798,25 +1839,47 @@ const CONFIGURE_ARGV = [
     state: mcpParsed.state, config: mcpParsed.config,
     configVersion: mcpParsed.configVersion, everActivated: mcpParsed.everActivated
   });
-  check(echoProblems(mcpParsed, 'MCP crabcast_agent_status').length === 0,
+  check(echoProblems(mcpParsed, 'MCP crabcast_agent_status', 'whole').length === 0,
     'SURFACE 4/4 — the MCP tool reads every knob back',
-    echoProblems(mcpParsed, 'MCP crabcast_agent_status').join('; '));
+    echoProblems(mcpParsed, 'MCP crabcast_agent_status', 'whole').join('; '));
 
   const mcpList = JSON.parse(
     (await mcpRequest('tools/call', { name: 'crabcast_list_agents', arguments: {} }))
       .result.content[0].text
   );
   const mcpRow = mcpList.agents.find((a) => a.path === livePath);
-  check(echoProblems(mcpRow, 'MCP crabcast_list_agents').length === 0,
+  check(echoProblems(mcpRow, 'MCP crabcast_list_agents', 'summarised').length === 0,
     'and so does the MCP fleet list',
-    echoProblems(mcpRow, 'MCP crabcast_list_agents').join('; '));
+    echoProblems(mcpRow, 'MCP crabcast_list_agents', 'summarised').join('; '));
 
-  // All four surfaces answered the SAME thing, which is the criterion.
-  const four = [socketStatus, socketRow, mcpParsed, mcpRow].map((r) =>
-    JSON.stringify({ config: r.config, configVersion: r.configVersion }));
+  // All four surfaces answered the SAME thing, which is the criterion — with
+  // `prompt` taken out of the comparison, because the two FLEET rows do not
+  // carry it and are not supposed to (KAN-528). Removing it here would weaken
+  // the check to nothing on its own, so the two halves it used to cover are
+  // asserted separately below: that the surfaces agree on everything else, and
+  // that each carries the prompt exactly as its own contract says.
+  const withoutPrompt = (r) => {
+    const { prompt: _prompt, ...rest } = r.config ?? {};
+    return JSON.stringify({ config: rest, configVersion: r.configVersion, promptChars: r.promptChars });
+  };
+  const four = [socketStatus, socketRow, mcpParsed, mcpRow].map(withoutPrompt);
   check(new Set(four).size === 1,
-    'and all four surfaces answer byte-for-byte the same configuration and version',
+    'and all four surfaces answer byte-for-byte the same configuration, version and prompt size',
     new Set(four).size === 1 ? undefined : four.join('\n          '));
+
+  // ⚠ AND THE PROMPT ITSELF, WHICH THE COMPARISON ABOVE NO LONGER COVERS. Both
+  // directions, so this cannot pass on a build that has stopped summarising OR
+  // on one that has started summarising the single read as well.
+  check(
+    socketStatus.config?.prompt === KNOBS.prompt && mcpParsed.config?.prompt === KNOBS.prompt,
+    'both SINGLE reads carry the prompt text whole — the surface a consumer is sent to for it',
+    `socket ${JSON.stringify(socketStatus.config?.prompt)}, mcp ${JSON.stringify(mcpParsed.config?.prompt)}`
+  );
+  check(
+    !('prompt' in (socketRow.config ?? {})) && !('prompt' in (mcpRow.config ?? {})),
+    'and neither FLEET row carries it — which is what keeps the response inside the framing bound',
+    `socket ${'prompt' in (socketRow.config ?? {})}, mcp ${'prompt' in (mcpRow.config ?? {})}`
+  );
 
   mcp.kill('SIGTERM');
 

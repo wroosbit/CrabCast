@@ -34,7 +34,7 @@ payload below.
 | `agent.deactivated` | `agent_deactivated_event` **(breaking)**, with `agent_preempted_event` **merged in** | a stand-down confirmed | `path`, `reason` (`requested` \| `preempted`), `durable`; `paneName`, `sessionId`, `preemption` when they exist; `durabilityError` when `durable` is false |
 | `agent.forgotten` | `agent_forgotten_event` **(breaking)** | `forget` accepted | `path`, `removed[]` |
 | `agent.status_changed` | — **(new)** | the fleet sweep observed a different herdr status than it last observed | `path`, `paneName`, `paneId`, `from`, `to` |
-| `agent.lost` | `agent_lost_event` **(breaking)** | an agent the registry records as active has no live agent in its directory | `path`, `paneName`, `label`, `config`, `configVersion`, `configuredAt`, `everActivated`, `activatedBy`, `since`, `reason` |
+| `agent.lost` | `agent_lost_event` **(breaking)** | an agent the registry records as active has no live agent in its directory | `path`, `paneName`, `label`, `config`, `configVersion`, `configuredAt`, `everActivated`, `activatedBy`, `promptChars`, `since`, `reason` |
 | `agent.detached` | `agent_detached_event` **(breaking)** | a PTY this daemon held died | `path`, `paneName`, `sessionId`, `reason`, `exitCode` |
 | `capacity.overridden` | `capacity_override_event` **(breaking)** | an activation started past the capacity gate on an explicit override | `what`, `capacity` — **no `path`** |
 | `registry.degraded` | `registry_degraded_event` **(breaking)** | a durable registry write failed | `what`, `error`, `consequence` — **no `path`** |
@@ -335,6 +335,14 @@ and the response says which you are reading:**
   "verbatim": ["mcpServers"],
   "drops": false,
   "undeclared": ["standbyAgents[2].config.telemetry"],
+  "summarised": [
+    {
+      "knob": "config.prompt",
+      "replacedBy": "promptChars",
+      "wholeAt": "agent_status (one agent, by path) carries config.prompt whole",
+      "why": "…"
+    }
+  ],
   "note": "…"
 }
 ```
@@ -347,6 +355,21 @@ keeps filing:
    make the echo a *projection* of the record while still calling itself the
    record — the drift detector becoming the drift, which is the exact failure
    the echo was built to remove.
+
+   **`summarised` is the one deliberate departure from that, and it is a
+   different axis from `drops` (KAN-528).** `drops` is about a field nobody
+   declared. `summarised` is about a **declared** knob a response carries as a
+   measurement because carrying it whole broke the response: on `list_agents`,
+   `config.prompt` travels as the row's `promptChars` — its exact character
+   count — because a prompt is accepted up to 131,072 characters and the fleet
+   read echoes one per row, so ten supervisor-sized prompts exceed the socket's
+   1 MiB framing bound and the call stops answering altogether. It is on the
+   response rather than in this page precisely so that the echo is not a
+   projection *silently*: the block names the knob, what stands in for it and
+   where the whole value is still readable. `agent_status` summarises nothing
+   and answers `summarised: []`, which is a different sentence from a missing
+   block. **No row is dropped and no total is reduced** — the summary is
+   per-field, never per-agent.
 2. **A response can be asked again; an event cannot.** An event is at-most-once
    with no second copy, so what is not on that wire is gone — which is why the
    projection there is safe. This is the same asymmetry §1 draws for `durable`.

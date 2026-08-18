@@ -255,6 +255,48 @@ export interface AgentConfig {
   owner?: string;
 }
 
+/**
+ * {@link AgentConfig} with the prompt REPLACED BY ITS SIZE — what a FLEET read
+ * echoes on every row, in place of the text.
+ *
+ * WHY THIS TYPE EXISTS RATHER THAN A DELETED FIELD (KAN-528). A prompt is
+ * finished text of arbitrary length, it is by far the largest thing on an agent
+ * record — measured on this fleet's registry, **97.0% of its bytes** — and the
+ * fleet read echoes one per row. Ten supervisor-sized prompts exceed the
+ * framing bound `MAX_LINE_CHARS` (src/ipc.ts) on their own, and the connection is
+ * destroyed rather than the response truncated: `crabcast list` stopped
+ * answering at all.
+ *
+ * SO THE TEXT COMES OFF THE FLEET READ, AND THE ABSENCE IS NOT SPELLED AS AN
+ * ABSENT `prompt`. That spelling was available and it is the wrong one: an
+ * omitted `prompt` ALREADY MEANS "this agent has none, it starts at its
+ * runtime's own prompt" — the CLI prints exactly that sentence for it — so
+ * dropping the field would make an agent carrying a 103 KB prompt
+ * indistinguishable from an agent carrying none. That is the silent
+ * under-report this ticket forbids, one field wide.
+ *
+ * `prompt` is therefore made UNREPRESENTABLE here rather than merely unset, and
+ * the row's own `promptChars` answers the question in its place. A consumer
+ * reading `config.prompt` off a fleet row gets a COMPILE ERROR rather than
+ * `undefined`, which is the difference between being told and guessing; a
+ * consumer reading `promptChars` is told the exact size, including `0` — and
+ * `null`, which is the state an absent `prompt` used to mean and now says so.
+ *
+ * THE COUNT IS ON THE ROW AND NOT IN HERE, deliberately, and it is the one
+ * design note worth keeping: putting it inside `config` would make it a knob
+ * `CONFIG_FIELDS` does not declare — reported as `undeclared` drift on every
+ * row of every response — and would put a SECOND copy of the number beside the
+ * `promptChars` the single read already carries. One number, one place, on the
+ * block that every category spreads. See `ConfigEcho.promptChars`.
+ *
+ * THE TEXT IS NOT LOST AND THIS TYPE IS NOT THE ONLY ECHO. `agent_status`
+ * — one agent, asked for by path — still carries {@link AgentConfig} whole,
+ * prompt included, because one prompt is bounded by `MAX_PROMPT_CHARS` (src/router.ts) and
+ * cannot approach the framing bound. The fleet read is the surface where the
+ * count multiplies; the single read is where the bytes stay reachable.
+ */
+export type SummarisedAgentConfig = Omit<AgentConfig, 'prompt'>;
+
 /** Every daemon reply carries `success`; failures carry `error`; both echo `id`. */
 export interface DaemonResponse {
   success: boolean;
