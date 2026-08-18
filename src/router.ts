@@ -2236,12 +2236,28 @@ function parseAgentConfig(data: any): ConfigParse {
   // Validated AFTER `launcher`, deliberately: the capability question is asked
   // of a launcher that resolves, so a misspelled launcher is answered by
   // `resolveLauncher`'s message above rather than by a complaint about `args`.
+  //
+  // ⚠ WHAT IS DELIBERATELY NOT VALIDATED HERE, because its absence reads as an
+  // oversight (KAN-514): the SHAPE of an element carrying a value. Write
+  // `["--flag","value"]` for a VARIADIC consumer flag and the flag keeps
+  // reading past its own value and takes the prompt — which is the final
+  // argument and a bare operand — so every spawn for that agent wedges, and the
+  // runtime's complaint is about the prompt's content rather than about the
+  // argument order. `["--flag=value"]` binds the value and makes it
+  // unwritable, which is why every example on this path now uses that form.
+  // CrabCast does not REFUSE the two-element shape: whether a flag is variadic
+  // is a fact about the consumer's program, this field is generic argv
+  // precisely so no table of anyone's flags lives here, and the only detector
+  // available without arity — a `--`-looking element followed by a plain one —
+  // is a false positive on every fixed-arity flag anybody writes. See
+  // docs/launcher-args.md, which is where that decision is argued rather than
+  // asserted.
   let args: string[] | undefined;
   if (data.args !== undefined) {
     if (!Array.isArray(data.args)) {
       return refuse(
         `Invalid args: expected an array of strings — one element per command-line argument, ` +
-          `e.g. ["--flag", "value"]. Got ${JSON.stringify(data.args)}. IT IS AN ARRAY RATHER ` +
+          `e.g. ["--flag=value"]. Got ${JSON.stringify(data.args)}. IT IS AN ARRAY RATHER ` +
           `THAN A STRING because a string would have to be split by something, and whatever did ` +
           `the splitting would be a quoting rule CrabCast invented and you had to guess at. Each ` +
           `element is shell-quoted and arrives as exactly one argument, whatever it contains.`

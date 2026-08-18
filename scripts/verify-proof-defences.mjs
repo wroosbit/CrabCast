@@ -1185,6 +1185,41 @@ const PROOF_DEFENCES = [
       'argv is.'
   },
   {
+    script: 'verify-variadic-args-swallow-prompt',
+    defence: 'mutation',
+    central:
+      "a caller's VARIADIC `args` element written as two elements is swallowed into the flag " +
+      'together with the PROMPT — measured off the argv of a process CrabCast started — the `=` ' +
+      'form is not, and all four surfaces that document `args` warn about it.',
+    // THE COUPLING BETWEEN THE PROOF AND ITS DRIVE, in real assertion text
+    // rather than in a comment: `kan514-red-drive.mjs` arm 5 requires this
+    // exact label among §1's failures, so renaming or deleting the check
+    // breaks the drive by name rather than quietly leaving it asserting
+    // nothing.
+    anchor: '⚠ THE PROMPT WAS TAKEN AS A VALUE OF THE FLAG',
+    note:
+      'THE MUTATION LIVES IN A SIBLING SCRIPT, `scripts/kan514-red-drive.mjs`, rather than inside ' +
+      'the proof — so this entry is the place that says so. Six arms, every one asserting what ' +
+      'went RED **and** what stayed GREEN: the warning removed from the CLI help, from the MCP ' +
+      "`args` description, from the README paragraph, and `docs/launcher-args.md` deleted (§4 red " +
+      'each time, naming the surface, §1-§3 green each time). ⚠ ARM 5 IS THE ONE WORTH READING: ' +
+      'it changes the LAYOUT so the swallow becomes impossible and requires §0/§1 to go red WHILE ' +
+      '§4 STAYS GREEN — every page still warning about a hazard that has just stopped existing, ' +
+      'which is the direction a documentation gate rots in and the one no phrase check could ' +
+      "ever see. Arm 6 compiles arm 5's edit in a copy of `src/` and requires `tsc` to ACCEPT " +
+      'it, on top of a precondition that the UNMUTATED copy compiles clean — without that ' +
+      'precondition a copy missing `package.json` reports four `import.meta` errors and the arm ' +
+      "reads them as the compiler catching a mutation it never saw. That happened on this arm's " +
+      "first run. SEAM, stated because a reader will otherwise assume it away: the `claude` on " +
+      "the proof's PATH is a FIXTURE, and its variadic parsing is a stand-in for a real " +
+      "runtime's. What is measured is CrabCast's half — the argv, read from `/proc/<pid>/cmdline` " +
+      'by the process itself — and §3 runs three controls through the same fixture (no args; a ' +
+      'FIXED-ARITY flag written two-element; the variadic flag with no operand after it) so that ' +
+      'the fixture cannot be the explanation of the difference between §1 and §2. The real ' +
+      'binary was measured by hand on Claude Code 2.1.234 and by `task/KAN-496`; that transcript ' +
+      'is on the pull request and is not runnable in CI.'
+  },
+  {
     script: 'verify-ci-wiring-guards',
     defence: 'mutation',
     central:
@@ -2153,6 +2188,19 @@ const MUTATES_WITHOUT_THE_HELPER = [
       'five mutant runs of itself into itself would multiply that by five inside the CI array for ' +
       'evidence a reviewer re-runs once. So the drive stays a hand-run beside it, and this entry is ' +
       'what stops that arrangement being read as "nobody wrote one".'
+  },
+  {
+    script: 'verify-variadic-args-swallow-prompt',
+    reason:
+      'Same split and the same reason as `verify-launcher-args` directly above: the mutations are ' +
+      'in the sibling `scripts/kan514-red-drive.mjs`, which DOES use the helper for the three ' +
+      'arms that edit the compiled build. Two of its arms cannot use the helper at all and do ' +
+      'not pretend to — they mutate PAGES (`README.md`, `docs/launcher-args.md`), which are ' +
+      "neither a build nor a script, through a local `mutatePages` that keeps the helper's " +
+      'discipline: exactly one matching paragraph or the arm is a counted FAILURE carrying ' +
+      'FIX_THE_MUTATION. The proof drives a scratch daemon and takes about twenty seconds, so ' +
+      'folding six mutant runs of itself into itself would multiply that by six inside the CI ' +
+      'array for evidence a reviewer re-runs once.'
   },
   {
     script: 'verify-readme-is-current',
