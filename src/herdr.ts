@@ -476,6 +476,14 @@ const DEV_CHANNELS_DIALOG_MARKERS = [
   'Enter to confirm'
 ] as const;
 
+/**
+ * How long a freshly-present pane is watched for a startup dialog before its
+ * presence is believed. Measured: the development-channels dialog draws at
+ * ~4.4s after spawn while the census reads present at ~1.8s. 8s covers that
+ * with margin on a loaded machine, and it is paid once per activation.
+ */
+const STARTUP_DIALOG_SETTLE_MS = 8_000;
+
 /** How many times one activation may answer this dialog before giving up. */
 const MAX_TRUST_DIALOG_ANSWERS = 3;
 
@@ -1962,13 +1970,16 @@ export class HerdrBridge {
    * decision about whether to run code from a directory. Auto-answering that
    * would be a machine making a security choice on a human's behalf.
    */
-  private answerStartupTrustDialog(paneId: string, paneName: string): boolean {
+  private async answerStartupTrustDialog(paneId: string, paneName: string): Promise<boolean> {
     const frame = this.readPaneFrame(paneId);
     if (!frame) return false;
     const lower = frame.toLowerCase();
     if (!DEV_CHANNELS_DIALOG_MARKERS.every((m) => lower.includes(m.toLowerCase()))) return false;
 
     try {
+      // `send-text` answers with an EMPTY body on success — no JSON, no ack —
+      // so a clean return here proves only that herdr took the bytes, not that
+      // the dialog went. The read-back below is the actual evidence.
       this.runHerdr(['pane', 'send-text', paneId, '1']);
     } catch (e: any) {
       console.error(
@@ -1978,13 +1989,32 @@ export class HerdrBridge {
       return false;
     }
 
+    // Verify, rather than assume: re-read the frame and require the dialog to
+    // be GONE. A keystroke that herdr accepted but the pane never applied — a
+    // dialog that re-drew, a pane that was not focused on the prompt — would
+    // otherwise be logged as answered, and the next poll would find the agent
+    // present-by-declaration and stop looking. That is exactly the silent
+    // wedge this exists to prevent, so the claim is not made until the
+    // screen backs it.
+    await delay(600); // the frame needs a redraw before it can show the dialog gone
+    const after = this.readPaneFrame(paneId);
+    const stillThere = after !== null &&
+      DEV_CHANNELS_DIALOG_MARKERS.every((m) => after.toLowerCase().includes(m.toLowerCase()));
+    if (stillThere) {
+      console.error(
+        `[HerdrBridge] ${paneName}: sent '1' to the development-channels dialog in ${paneId} ` +
+        `but the dialog is still on screen; not counting it as answered`
+      );
+      return false;
+    }
+
     // Said out loud on purpose. An automatic answer to a prompt that names
     // itself "dangerously" must be visible in the log, not silent — somebody
     // reading back should see that a machine pressed this, and which pane.
     console.error(
       `[HerdrBridge] ${paneName}: answered the development-channels trust dialog in ${paneId} ` +
-      `(sent '1' = "I am using this for local development"). This dialog blocks every spawn ` +
-      `and its acceptance is not persisted anywhere.`
+      `(sent '1' = "I am using this for local development", and the dialog is gone on re-read). ` +
+      `This dialog blocks every spawn and its acceptance is not persisted anywhere.`
     );
     return true;
   }
@@ -2000,6 +2030,7 @@ export class HerdrBridge {
     let reachable = false;
     let registered = false;
     let dialogsAnswered = 0;
+    let settleStartedAt: number | null = null;
 
     for (;;) {
       const census = this.listHerdrAgentsChecked();
@@ -2010,20 +2041,52 @@ export class HerdrBridge {
         const record = census.agents.find(agent => agent.name === paneName);
         registered = record !== undefined;
 
-        // Registered, but no runtime behind it — the exact shape of an agent
-        // stopped at a startup dialog. Clear the one dialog we know how to
-        // clear and let the next poll see the runtime it was hiding. Bounded,
-        // because a pane that keeps showing a dialog after three answers is
-        // telling us something this does not understand.
+        // Clear the one startup dialog we know how to clear, on EVERY poll
+        // that has a pane to look at — not only when the runtime reads absent.
+        //
+        // ⚠ That narrower gate was the first version of this, and it could
+        // never fire: the 0.7+ spawn path DECLARES the agent via
+        // `pane report-agent`, so `agentRuntime` is non-null from the first
+        // census read and "registered but no runtime" is a state the new path
+        // cannot produce. A fresh spawn with the flag sat on the dialog with
+        // this code in place and nothing happened — caught only because the
+        // test was built to go red. The dialog check is cheap (one pane read)
+        // and harmless when there is no dialog, so it gates on nothing but
+        // having a pane and not having exhausted its attempts.
         if (
-          record && requireRuntime && record.agentRuntime === null &&
-          record.paneId && dialogsAnswered < MAX_TRUST_DIALOG_ANSWERS &&
-          this.answerStartupTrustDialog(record.paneId, paneName)
+          record?.paneId && dialogsAnswered < MAX_TRUST_DIALOG_ANSWERS &&
+          await this.answerStartupTrustDialog(record.paneId, paneName)
         ) {
           dialogsAnswered++;
+          // A dialog was just answered: the runtime behind it is only now
+          // starting, so the settle window begins again from here.
+          settleStartedAt = null;
+          await delay(AGENT_CONFIRM_POLL_MS);
+          continue;
         }
 
         if (record && (!requireRuntime || record.agentRuntime !== null)) {
+          // ── Do not trust the FIRST `present` on a pane that may still be
+          // drawing its startup dialog. ──────────────────────────────────
+          // Measured 2026-08-20: the pane exists and the census reads
+          // `present` at +1.8s, but the development-channels dialog is not
+          // drawn until +4.4s. Returning on the first present meant the
+          // dialog check above ran exactly once, against a frame the dialog
+          // had not reached yet, and then never again — the agent wedged
+          // with a verified activation on record. So presence is held for a
+          // settle window, re-reading the pane each poll; the dialog check
+          // above keeps running for every one of those polls, and a dialog
+          // that appears inside the window is answered and the window
+          // restarted. The window is the ONLY cost of this change: an
+          // agent that starts clean is reported present a few seconds later
+          // than before.
+          if (record.paneId && requireRuntime && dialogsAnswered < MAX_TRUST_DIALOG_ANSWERS) {
+            if (settleStartedAt === null) settleStartedAt = Date.now();
+            if (Date.now() - settleStartedAt < STARTUP_DIALOG_SETTLE_MS) {
+              await delay(AGENT_CONFIRM_POLL_MS);
+              continue;
+            }
+          }
           return {
             present: true,
             paneId: record.paneId,
