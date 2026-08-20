@@ -70,6 +70,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { spawn, spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import { sweepScratchRoot, killScratchRootSync, describe } from './scratch-processes.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
@@ -124,23 +125,44 @@ const bin = path.join(tmp, 'bin');
 for (const d of [home, shimState, records, bin]) fs.mkdirSync(d, { recursive: true });
 fs.writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
 
-/** Every process this script caused, so §5 can prove none outlived it. */
+/**
+ * The fake `claude` spawns this script makes by hand.
+ *
+ * ⚠ THIS IS NO LONGER WHAT §5 ASSERTS ON, and the distinction is the whole of
+ * KAN-529. The sections above genuinely want it — "this arm produced a live
+ * process" is a claim about a pid — but as a TEARDOWN population it was wrong
+ * in two directions at once: it missed the scratch daemon and its `herdr agent
+ * attach` children entirely, and it did not even hold every fake `claude`,
+ * because the pid a fixture reports is not the pid of the `bash` wrapper that
+ * `exec`s toward it. §5 asks the machine instead. See `scratch-processes.mjs`.
+ */
 const spawnedPids = new Set();
 
+/**
+ * ⚠ SYNCHRONOUS, and `killScratchRootSync` says why: a signal handler that
+ * awaited would reach `process.exit` before the sweep it started had finished,
+ * so the polite wave would be the only one that ever ran.
+ */
 function cleanUp() {
+  let swept = 0;
+  try { swept = killScratchRootSync(tmp); } catch {}
   for (const pid of spawnedPids) {
     try { process.kill(pid, 'SIGKILL'); } catch {}
   }
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  return swept;
 }
 // Handlers as well as the ordinary path: a Ctrl+C or a CI timeout skips §5
 // entirely, and a proof whose failure mode is `sleep` processes left on a
 // shared machine is a proof that gets switched off.
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
-    console.log(`\n[verify-variadic-args-swallow-prompt] ${signal} — killing ` +
-      `${spawnedPids.size} spawned process(es) and removing ${tmp}`);
-    cleanUp();
+    // The count comes from the sweep rather than from `spawnedPids.size`,
+    // which is what this line used to print and which named a population that
+    // was never the one being cleaned up.
+    const swept = cleanUp();
+    console.log(`\n[verify-variadic-args-swallow-prompt] ${signal} — killed ${swept} ` +
+      `process(es) carrying ${tmp} and removed it`);
     process.exit(130);
   });
 }
@@ -840,18 +862,43 @@ rule('5. the RUNNING FLEET was never touched');
           'MOVED during this run — the live fleet writing its own registry, which is why mtime is not the gate here'}`
   );
 
-  for (const pid of spawnedPids) {
-    try { process.kill(pid, 'SIGKILL'); } catch {}
-  }
-  crabcast(['daemon', 'stop']);
-  await sleep(500);
-  const survivors = [...spawnedPids].filter((pid) => {
-    try { fs.readFileSync(`/proc/${pid}/cmdline`); return true; } catch { return false; }
-  });
+  // -------------------------------------------------------------------------
+  // EVERY PROCESS CARRYING THIS RUN'S SCRATCH ROOT, ENDED (KAN-529)
+  // -------------------------------------------------------------------------
+  //
+  // This block used to kill `spawnedPids`, call `crabcast(['daemon', 'stop'])`
+  // and assert that the pids it remembered were gone. All three parts were
+  // wrong together, which is why it went green while leaking:
+  //
+  //   * `crabcast daemon stop` IS NOT A COMMAND. It exits 2 with a usage error
+  //     ("`crabcast daemon` takes no arguments, and got \"stop\"") and stops
+  //     nothing. The status was never read.
+  //   * `spawnedPids` never held the scratch daemon — nothing here spawns it;
+  //     the first CLI call does, detached — nor any `herdr agent attach` the
+  //     daemon then spawns. Measured on this machine before the fix: 202
+  //     orphaned processes across 38 already-deleted scratch roots, holding
+  //     the live fleet at zero headroom.
+  //   * and it did not hold every fake `claude` either: the pid the fixture
+  //     reports is the process that writes the record, not the `bash` wrapper
+  //     that `exec`s toward it.
+  //
+  // ⚠ THE POPULATION IS NOW READ OFF THE MACHINE rather than remembered, keyed
+  // on this run's scratch root — six random characters from `mkdtempSync` that
+  // exist nowhere else — so a process this run caused carries it and nothing
+  // else can. It is the same attributable key the registry check directly
+  // above uses, for the same reason.
+  //
+  // `found` is reported beside the verdict because a sweep that matched
+  // nothing and a sweep that cleaned up correctly are the same verdict with
+  // different evidence, and only one of them means the instrument is working.
+  const { found, survivors } = await sweepScratchRoot(tmp);
   check(
     survivors.length === 0,
-    'every process this proof started is gone',
-    survivors.length ? `still alive: ${survivors.join(', ')}` : `${spawnedPids.size} ended`
+    'every process carrying this run\'s scratch root is gone — the daemon and its ' +
+      'attaches included, not merely the pids this script remembered',
+    survivors.length
+      ? `still alive:\n          ${describe(survivors)}`
+      : `${found.length} swept (${found.length - spawnedPids.size} of them never in spawnedPids)`
   );
 }
 
