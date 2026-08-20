@@ -538,6 +538,19 @@ export const EVENT_CONTRACT: Record<CrabcastEventName, EventSpec> = {
       // one place the echo is deliberately partial, which is precisely the
       // silent-omission failure KAN-113 exists to prevent.
       'activatedBy',
+      // THE PROMPT'S SIZE (KAN-528), declared here for the reason the paragraph
+      // above gives in advance: this payload is the `MissingAgent` row spread
+      // whole, so a field added to `ConfigEcho` arrives on this event by
+      // construction, and the contract describes the wire rather than lagging
+      // it. Undeclared, it was DROPPED from every forwarded event while sitting
+      // on the socket — the two surfaces disagreeing about one row.
+      //
+      // AND IT IS NOT REDUNDANT HERE. `config` on this event is the fleet
+      // echo's, so it has no `prompt` either: `MissingAgent` rows are built by
+      // the same `configEcho(intent, 'summarised')` the fleet read uses. This
+      // field is the only thing on the event that says how large the prompt of
+      // the agent that just went missing is.
+      'promptChars',
       'since',
       'reason'
     ],

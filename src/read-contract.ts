@@ -115,7 +115,7 @@ import type { ResumeCause } from './resume.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 12;
+export const READ_CONTRACT_VERSION = 13;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -203,6 +203,7 @@ export const ROW_SHAPES = {
     configuredAt: { bucket: 'durable' },
     everActivated: { bucket: 'durable' },
     activatedBy: { bucket: 'durable' },
+    promptChars: { bucket: 'durable' },
     path: { bucket: 'durable' },
     paneName: { bucket: 'derived' },
     paneId: { bucket: 'observed' },
@@ -229,6 +230,7 @@ export const ROW_SHAPES = {
     configuredAt: { bucket: 'durable' },
     everActivated: { bucket: 'durable' },
     activatedBy: { bucket: 'durable' },
+    promptChars: { bucket: 'durable' },
     reason: { bucket: 'derived' }
   } satisfies FieldTable,
 
@@ -242,6 +244,7 @@ export const ROW_SHAPES = {
     configuredAt: { bucket: 'durable' },
     everActivated: { bucket: 'durable' },
     activatedBy: { bucket: 'durable' },
+    promptChars: { bucket: 'durable' },
     since: { bucket: 'durable' },
     reason: { bucket: 'derived' }
   } satisfies FieldTable,
@@ -256,6 +259,7 @@ export const ROW_SHAPES = {
     configuredAt: { bucket: 'durable' },
     everActivated: { bucket: 'durable' },
     activatedBy: { bucket: 'durable' },
+    promptChars: { bucket: 'durable' },
     at: { bucket: 'durable' },
     priority: { bucket: 'durable' },
     herdrStatusWhenPreempted: { bucket: 'durable' },
@@ -275,6 +279,7 @@ export const ROW_SHAPES = {
     configuredAt: { bucket: 'durable' },
     everActivated: { bucket: 'durable' },
     activatedBy: { bucket: 'durable' },
+    promptChars: { bucket: 'durable' },
     since: { bucket: 'durable' },
     /** Only on a row that reached standby through preemption-annotation compaction. */
     wasPreempted: { bucket: 'durable', optional: true },
@@ -292,6 +297,7 @@ export const ROW_SHAPES = {
     configuredAt: { bucket: 'durable' },
     everActivated: { bucket: 'durable' },
     activatedBy: { bucket: 'durable' },
+    promptChars: { bucket: 'durable' },
     since: { bucket: 'durable' },
     reason: { bucket: 'derived' }
   } satisfies FieldTable,
@@ -507,6 +513,10 @@ export const BLOCK_SHAPES = {
     verbatim: { bucket: 'derived' },
     drops: { bucket: 'derived' },
     undeclared: { bucket: 'derived' },
+    // Which declared knobs THIS response measured instead of carrying
+    // (KAN-528). `derived` like the rest of this block: it describes what this
+    // call did, and nothing read it off a record.
+    summarised: { bucket: 'derived' },
     note: { bucket: 'derived' }
   } satisfies FieldTable,
 
@@ -557,7 +567,8 @@ export const BLOCK_SHAPES = {
     configVersion: { bucket: 'durable' },
     configuredAt: { bucket: 'durable' },
     everActivated: { bucket: 'durable' },
-    activatedBy: { bucket: 'durable' }
+    activatedBy: { bucket: 'durable' },
+    promptChars: { bucket: 'durable' }
   } satisfies FieldTable,
 
   /**
@@ -615,7 +626,8 @@ export const BLOCK_SHAPES = {
     configVersion: { bucket: 'durable' },
     configuredAt: { bucket: 'durable' },
     everActivated: { bucket: 'durable' },
-    activatedBy: { bucket: 'durable' }
+    activatedBy: { bucket: 'durable' },
+    promptChars: { bucket: 'durable' }
   } satisfies FieldTable
 } as const;
 
@@ -769,6 +781,14 @@ export const AGENT_STATUS_FIELDS = {
   everActivated: { bucket: 'durable', optional: true },
   activatedBy: { bucket: 'durable', optional: true },
   /**
+   * The prompt on the record, measured (KAN-528). Rides with the rest of the
+   * echo, on every surface that spreads it — including the ones that carry
+   * `config.prompt` whole, where it is simply that string's length. One key,
+   * one meaning, so a consumer never has to know which surface it is reading
+   * before it knows whether the field is there.
+   */
+  promptChars: { bucket: 'durable', optional: true },
+  /**
    * Whether the spawn this agent is running from was channel-enabled (KAN-281).
    * `durable` — written by the activation that made the decision, so it survives
    * a restart unchanged and this response answers the same value after one.
@@ -800,7 +820,7 @@ export const AGENT_STATUS_BRANCHES = {
   'live-session': [
     'action', 'success', 'sessionless', 'path', 'paneName', 'paneId', 'sessionId',
     'createdAt', 'status', 'herdrStatus', 'label', 'configured', 'state',
-    'config', 'configVersion', 'configuredAt', 'everActivated', 'activatedBy',
+    'config', 'configVersion', 'configuredAt', 'everActivated', 'activatedBy', 'promptChars',
     'channelEnabled', 'provenance', 'configEchoContract'
   ],
   /**
@@ -811,13 +831,13 @@ export const AGENT_STATUS_BRANCHES = {
   sessionless: [
     'action', 'success', 'sessionless', 'path', 'paneName', 'paneId', 'sessionId',
     'createdAt', 'status', 'workDir', 'herdrStatus', 'label', 'configured', 'state',
-    'config', 'configVersion', 'configuredAt', 'everActivated', 'activatedBy',
+    'config', 'configVersion', 'configuredAt', 'everActivated', 'activatedBy', 'promptChars',
     'channelEnabled', 'provenance', 'configEchoContract'
   ],
   /** `success: false` — neither a record nor a pane. `state` is `unconfigured`. */
   'no-record-no-pane': [
     'action', 'success', 'error', 'path', 'paneName', 'configured', 'state',
-    'config', 'configVersion', 'configuredAt', 'everActivated', 'activatedBy',
+    'config', 'configVersion', 'configuredAt', 'everActivated', 'activatedBy', 'promptChars',
     'channelEnabled', 'provenance', 'configEchoContract'
   ],
   /**
@@ -957,6 +977,14 @@ export const ACTIVATE_RESPONSE_FIELDS = {
   configuredAt: { bucket: 'durable', optional: true },
   everActivated: { bucket: 'durable', optional: true },
   activatedBy: { bucket: 'durable', optional: true },
+  /**
+   * The prompt on the record, measured (KAN-528). Rides with the rest of the
+   * echo, on every surface that spreads it — including the ones that carry
+   * `config.prompt` whole, where it is simply that string's length. One key,
+   * one meaning, so a consumer never has to know which surface it is reading
+   * before it knows whether the field is there.
+   */
+  promptChars: { bucket: 'durable', optional: true },
   /**
    * KAN-281. `durable`, and answered from the record rather than from the
    * session that produced it, which is what makes this surface and
@@ -1126,7 +1154,7 @@ export const ACTIVATE_RESPONSE_BRANCHES = {
     always: [
       'action', 'success', 'path', 'paneName', 'alreadyRunning', 'started', 'paneId',
       'sessionId', 'status', 'createdAt', 'priority', 'launcher', 'config', 'configVersion',
-      'configuredAt', 'everActivated', 'activatedBy', 'channelEnabled', 'verified',
+      'configuredAt', 'everActivated', 'activatedBy', 'promptChars', 'channelEnabled', 'verified',
       'resumedExistingConversation', 'provisioned'
     ],
     sometimes: [
@@ -1143,7 +1171,7 @@ export const ACTIVATE_RESPONSE_BRANCHES = {
     always: [
       'action', 'success', 'path', 'paneName', 'alreadyRunning', 'started', 'paneId',
       'sessionId', 'status', 'createdAt', 'verified', 'config', 'configVersion',
-      'configuredAt', 'everActivated', 'activatedBy', 'channelEnabled'
+      'configuredAt', 'everActivated', 'activatedBy', 'promptChars', 'channelEnabled'
     ],
     sometimes: [
       'reattached', 'recordReconciled', 'durable', 'durabilityError', 'occupiedBy', 'note'

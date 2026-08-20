@@ -184,6 +184,7 @@ activated /tmp/ac1-demo/notes
   conversation:  started a NEW one — CrabCast has not run an agent in this directory before, so nothing on disk here was continued
 
 other fields in the daemon's response:
+  promptChars: 250
   channelEnabled: false
 
 $ crabcast list
@@ -223,7 +224,7 @@ unstarted agents (0)
   (none)
 
 where these fields came from — read at 2026-08-05T13:01:36.686Z
-  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, identity, raw, claimsPath, claimsAt, claimsEvent
+  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, promptChars, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, identity, raw, claimsPath, claimsAt, claimsEvent
   observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir
   derived  (computed from the two):                 paneName, state, occupies, reason, line, problem, rawTruncated, promptRedacted, standing
   remembered (this daemon's memory, not durable):   statusSince
@@ -267,7 +268,7 @@ $ crabcast status /tmp/ac1-demo/notes
   created:       2026-08-05T13:01:31.515Z
 
 where these fields came from — read at 2026-08-05T13:01:42.798Z
-  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, identity, raw, claimsPath, claimsAt, claimsEvent
+  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, promptChars, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, identity, raw, claimsPath, claimsAt, claimsEvent
   observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir
   derived  (computed from the two):                 paneName, state, occupies, reason, line, problem, rawTruncated, promptRedacted, standing
   remembered (this daemon's memory, not durable):   statusSince
@@ -275,6 +276,7 @@ where these fields came from — read at 2026-08-05T13:01:42.798Z
 config echo: every knob echoed on this response is declared (priority, refusable, chargeable, preemptable, launcher, args, prompt, mcpServers, label, owner)
 
 other fields in the daemon's response:
+  promptChars: 250
   channelEnabled: false
 
 $ crabcast send /tmp/ac1-demo/notes cat /tmp/ac1-demo/.crabcast/agents/31e31d1b7540dabf/prompt.md
@@ -537,6 +539,7 @@ running: 0 charged agent(s)
 headroom: 0 more — count allows 0 (0 cap − 0 running), cpu allows 2 ((4 cores − 1 reserved − 1.33 in use) ÷ 0.75), load would allow 2 ((4 cores − 1 reserved − 1.32 load) ÷ 0.75; reported, does not bind), memory allows 8 ((9.0 GiB available − 2.3 GiB reserved) ÷ 800 MB); bound by cap
 
 other fields in the daemon's response:
+  promptChars: null
   channelEnabled: false
 
 $ crabcast activate /tmp/kan174/idem/probe-a                 # call #2, no --override
@@ -552,6 +555,7 @@ other fields in the daemon's response:
   sessionId: crabcast-probe-a-9eec866d8e3e12c7-1785941446744
   status: active
   createdAt: 2026-08-05T14:50:46.744Z
+  promptChars: null
   channelEnabled: false
 
 $ crabcast activate /tmp/kan174/idem/probe-a                 # call #3, no --override
@@ -567,6 +571,7 @@ other fields in the daemon's response:
   sessionId: crabcast-probe-a-9eec866d8e3e12c7-1785941446744
   status: active
   createdAt: 2026-08-05T14:50:46.744Z
+  promptChars: null
   channelEnabled: false
 
 $ crabcast activate /tmp/kan174/idem/probe-a --json
@@ -589,6 +594,7 @@ $ crabcast activate /tmp/kan174/idem/probe-a --json
     "preemptable": true,
     "launcher": "shell"
   },
+  "promptChars": null,
   "configVersion": 1,
   "configuredAt": "2026-08-05T14:50:46.533Z",
   "everActivated": true,
@@ -738,6 +744,8 @@ Every agent-addressing command takes exactly one operand: the directory. There i
 `configure`'s flags are `--priority` and `--launcher` (both required, neither defaulted), plus `--prompt <text>` or `--prompt-file <path>`, `--args-json <json>`, `--mcp a,b` and `--mcp-config <file>`, `--label`, `--owner`, and the gate triple `--refusable`/`--chargeable`/`--preemptable` (all default true, `--gate-exempt` is shorthand for all three false). It is also how an agent that already exists is **changed** — per attribute, refusing rather than respawning; see [above](#changing-an-agents-knobs-never-costs-it-its-conversation).
 
 `--args-json` carries **extra command-line arguments for the launcher's own process**, as a JSON array of strings — `--args-json '["--verbose"]'`. Each element becomes exactly one argument, shell-quoted, whatever it contains; there is no splitting and no expansion, which is also why it is JSON rather than a comma-separated list — any separator would be a quoting rule CrabCast invented and you had to escape around. They go on **every** invocation the launcher builds, which matters because a launcher that can resume builds two: `claude` runs `--continue` and falls back to a cold start, and the resumed one is the path every already-existing agent takes. A launcher that cannot carry arguments **refuses** rather than dropping them silently — `shell` is bash itself, so there is nothing underneath to pass a switch to — and because argv is fixed at process start, changing them under a running agent is refused like `launcher` and `prompt`. What you sent is readable afterwards in `list`, in `status`, and in a capacity refusal, so somebody denied a slot can still see what would have been spawned.
+
+⚠ **Write an argument that carries a value as one element joined with `=`** — `'["--flag=value"]'`, never `'["--flag","value"]'`. The prompt is the last argument on the command line and it is a **bare operand**, carrying no flag of its own, so a **variadic** consumer flag written the two-element way does not stop at its own value: it keeps reading, and the next bare word is your prompt — it swallows it. That wedges every spawn for that agent, and the failure names nothing about arguments — the runtime reports your *prompt text* as a malformed value for the flag, which sends a reader off editing the prompt. `=` binds the value and there is no bare word left to take. CrabCast does not refuse the two-element form, because whether a flag is variadic is a fact about *your* program and the only detector available without it would refuse correct configurations; [`docs/launcher-args.md`](docs/launcher-args.md) argues that decision, shows both forms with what each produces, and is where to look when a spawn fails complaining about your prompt.
 
 MCP servers arrive as **definitions rather than names** — the command, args and env that spawn each one — and are written into the agent's `.mcp.json` verbatim: `--mcp-config` reads them from a JSON file here and puts its *bytes* on the wire, the same hand-off `--prompt-file` makes. `--mcp` is for the one server CrabCast builds itself (`crabcast`), whose definition depends on facts about this daemon rather than about you. Supplying either **is** the consent to a `.mcp.json` appearing in your directory; there is no second flag, `configure`'s response names the file and keys it will write before anything is written, and `forget` takes them back out. Every server you asked for must be writable or the activation is refused — a `.mcp.json` holding only half of what you asked for is a file whose presence looks like success. [`docs/callers-directory.md`](docs/callers-directory.md) is the whole of what CrabCast writes into a directory you own, and how each of it comes back out.
 

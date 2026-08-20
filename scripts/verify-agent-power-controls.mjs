@@ -2216,10 +2216,10 @@ rule('15. THE missingAgents ORDER RANKS ACTIVATION, NOT NEGLECT (KAN-96 AC 2)');
     const mutantDir = mutate(
       'durable-missing-since',
       'router.js',
-      '                ...configEcho(intent),\n' +
+      "                ...configEcho(intent, 'summarised'),\n" +
       '                since: intent.at,\n' +
       '                // Both cases are',
-      '                ...configEcho(intent),\n' +
+      "                ...configEcho(intent, 'summarised'),\n" +
       '                since: intent.at,\n' +
       '                missingSince: (() => {\n' +
       "                    const store = this.deps.agentRegistry.path + '.missing-observations.json';\n" +

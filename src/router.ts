@@ -25,7 +25,7 @@ import {
   ROW_SHAPES,
   VALUE_SETS
 } from './read-contract.js';
-import { AgentConfig, DaemonResponse, McpServerSpec } from './types.js';
+import { AgentConfig, DaemonResponse, McpServerSpec, SummarisedAgentConfig } from './types.js';
 import { type ArtifactDisclosure, removeProvisionedArtifacts } from './provisioning.js';
 import {
   HerdrBridge,
@@ -291,8 +291,38 @@ interface ConfigEcho {
    * there is nothing to echo. It is the one honest way to say "not configured"
    * without inventing a configuration, and it is why every consumer of this
    * block has to handle null rather than assuming a shape.
+   *
+   * TWO SHAPES SINCE KAN-528, and which one you are holding is decided by the
+   * RESPONSE rather than by the row. A single read (`agent_status`) echoes
+   * {@link AgentConfig} whole. A FLEET read (`list_agents`) echoes
+   * {@link SummarisedAgentConfig}, which has no `prompt` at all and carries
+   * {@link ConfigEcho.promptChars} in its place — because one prompt per row,
+   * across a fleet, is what pushed this response past the framing bound and
+   * stopped `crabcast list` answering. `configEchoContract.summarised` on the
+   * response says which of the two you got, in the response's own words rather
+   * than by inference from a missing key.
    */
-  config: AgentConfig | null;
+  config: AgentConfig | SummarisedAgentConfig | null;
+  /**
+   * How many characters the prompt on the durable record has — `null` when the
+   * record carries none, and `null` when no record backs this row at all.
+   *
+   * ON EVERY ROW OF EVERY RESPONSE, INCLUDING THE ONES THAT CARRY THE PROMPT
+   * WHOLE. It would have been shorter to put it only where the text is missing,
+   * and that is the version that rots: a consumer would then have to know which
+   * surface it was reading before it knew whether the field it wanted existed,
+   * which is the inference this field exists to remove. Here it is one key with
+   * one meaning on both, and on the single read it is simply the length of the
+   * `prompt` sitting beside it — redundant, checkable, and the thing that makes
+   * the fleet read's number verifiable against a surface that still has the
+   * text.
+   *
+   * THE TWO NULLS ARE DISTINGUISHABLE AND NOT BY THIS FIELD: `config: null`
+   * says no record backs the row, and a `config` present beside
+   * `promptChars: null` says the record is there and has no prompt. Read them
+   * together, exactly as the rest of this block is read.
+   */
+  promptChars: number | null;
   /** {@link AgentIntent.configVersion} — the compare-and-set token. Null with `config`. */
   configVersion: number | null;
   /** When that version was frozen. Null on a pre-field row, and with `config`. */
@@ -489,25 +519,105 @@ interface ConfigEchoContract {
    * every response rather than only on a response with something to report.
    */
   undeclared: string[];
+  /**
+   * DECLARED KNOBS THIS RESPONSE CARRIES AS A MEASUREMENT RATHER THAN WHOLE,
+   * each naming what stands in for it (KAN-528).
+   *
+   * A SEPARATE AXIS FROM {@link ConfigEchoContract.drops}, and collapsing them
+   * would lose the distinction that matters. `drops` is about an UNDECLARED
+   * field — something nobody designed for, which this surface reports and still
+   * delivers. This is about a DECLARED one that was designed for, is known to
+   * be here, and is deliberately not carried on this surface because carrying
+   * it broke the response. `drops: false` stays literally true: nothing is
+   * removed for being undeclared.
+   *
+   * EMPTY IS THE ANSWER FOR A RESPONSE THAT SUMMARISED NOTHING — `agent_status`
+   * carries every knob whole and says so with `[]`, which is a different
+   * sentence from a missing block. Present on every response for the same
+   * reason `undeclared` is: a consumer must be able to tell "the sweep ran and
+   * there was nothing to report" from "this daemon predates the field".
+   */
+  summarised: SummarisedKnob[];
   note: string;
+}
+
+/**
+ * One declared knob a response measured instead of carrying.
+ *
+ * THE `why` IS PART OF THE CONTRACT AND NOT DECORATION. A consumer meeting a
+ * field it expected and did not get has exactly one question, and a block that
+ * names the substitute without saying why sends them to the source to find out.
+ */
+interface SummarisedKnob {
+  /** The knob's path in the echo, e.g. `config.prompt`. */
+  knob: string;
+  /** The key carrying the measurement instead, e.g. `promptChars`. */
+  replacedBy: string;
+  /** Where the whole value can still be read. */
+  wholeAt: string;
+  /** Why this surface does not carry it. */
+  why: string;
 }
 
 /**
  * Describe the contract, given what {@link sweepConfigEchoes} found on the
  * payload that is about to go out.
  */
-function configEchoContract(found: readonly ConfigEchoFinding[]): ConfigEchoContract {
+/**
+ * What a FLEET read summarises. The one entry, named once.
+ *
+ * A CONSTANT RATHER THAN A LITERAL AT THE CALL SITE, because this block is the
+ * only thing on the wire that says the prompt is not there, and a second copy
+ * of it is the thing that would be edited out of step with the code that does
+ * the summarising.
+ */
+const FLEET_SUMMARISED_KNOBS: readonly SummarisedKnob[] = [
+  {
+    knob: 'config.prompt',
+    replacedBy: 'promptChars',
+    wholeAt: 'agent_status (one agent, by path) carries config.prompt whole',
+    why:
+      'A prompt is finished text of arbitrary length and this response echoes one per row. ' +
+      'Measured on a real fleet, prompts were 97% of the registry\'s bytes, and ten ' +
+      'supervisor-sized prompts exceed the socket\'s 1 MiB framing bound on their own — at ' +
+      'which point this response is not truncated, it is not delivered at all and the ' +
+      'connection is closed. promptChars is the exact character count of the prompt on the ' +
+      'record: 0 means an empty prompt was frozen, null means the record carries none. No row ' +
+      'is dropped, no count is approximate, and no text is shortened and passed off as whole.'
+  }
+];
+
+function configEchoContract(
+  found: readonly ConfigEchoFinding[],
+  summarised: readonly SummarisedKnob[]
+): ConfigEchoContract {
   return {
     declared: Object.keys(CONFIG_FIELDS),
     verbatim: VERBATIM_CONFIG_KNOBS,
+    summarised: [...summarised],
     // A LITERAL rather than a computed value, and it has to stay one: this
     // field is a claim about the code above it, and a `drops` derived from
     // anything would be able to say `false` while a projection had been added.
     // If this path ever does drop, this line changes in the same edit.
     drops: false,
     undeclared: found.map((f) => f.path),
+    // DERIVED FROM `summarised` RATHER THAN WRITTEN OUT, and that is the point
+    // of it (KAN-528). This sentence used to open "config on every row is the
+    // durable record VERBATIM" unconditionally — true when it was written, and
+    // refuted by the first response that summarised anything. A note that
+    // states a property the code beside it no longer has is the defect this
+    // ticket was filed about, so the note is now computed from the same value
+    // the response carries: a surface that summarises nothing still says
+    // VERBATIM, and one that summarises something cannot.
     note:
-      'config on every row is the durable record VERBATIM, swept against the same declaration ' +
+      (summarised.length
+        ? `config on every row is the durable record with ${summarised.length} declared knob(s) ` +
+          `carried as a measurement rather than whole — see \`summarised\`, which names each one, ` +
+          `what stands in for it and where the whole value is still readable. Every OTHER knob is ` +
+          `verbatim. NO ROW IS OMITTED and no count on this response is reduced: the summary is ` +
+          `per-field, never per-row. `
+        : 'config on every row is the durable record VERBATIM. ') +
+      'Swept against the same declaration ' +
       '(CONFIG_FIELDS in src/events.ts) the MCP event projection enforces. Undeclared fields are ' +
       'REPORTED here and still delivered — this response drops nothing; the MCP event path drops ' +
       'what it names. Do not key behaviour off an undeclared field: it has not been designed for ' +
@@ -580,6 +690,14 @@ const STATE_READ_PROVENANCE = {
    */
   durable: [
     'path', 'config', 'configVersion', 'configuredAt', 'everActivated', 'activatedBy', 'configured',
+    // DURABLE RATHER THAN DERIVED, though it is a length this daemon computed
+    // (KAN-528). The bucket is about WHERE THE VALUE CAME FROM, and this one
+    // came from the registry and nothing else: it survives a restart unchanged
+    // and no census was consulted for it. `derived` is for fields computed from
+    // durable AND observed state — `state` is the example — and calling a pure
+    // function of one record `derived` would tell a reader that a census could
+    // move it, which is the one thing this legend exists to answer.
+    'promptChars',
     'label', 'refusable', 'chargeable', 'preemptable', 'launcher', 'priority',
     'since', 'at', 'wasPreempted', 'by', 'derivation', 'herdrStatusWhenPreempted',
     'occupiedAgent',
@@ -2236,12 +2354,28 @@ function parseAgentConfig(data: any): ConfigParse {
   // Validated AFTER `launcher`, deliberately: the capability question is asked
   // of a launcher that resolves, so a misspelled launcher is answered by
   // `resolveLauncher`'s message above rather than by a complaint about `args`.
+  //
+  // ⚠ WHAT IS DELIBERATELY NOT VALIDATED HERE, because its absence reads as an
+  // oversight (KAN-514): the SHAPE of an element carrying a value. Write
+  // `["--flag","value"]` for a VARIADIC consumer flag and the flag keeps
+  // reading past its own value and takes the prompt — which is the final
+  // argument and a bare operand — so every spawn for that agent wedges, and the
+  // runtime's complaint is about the prompt's content rather than about the
+  // argument order. `["--flag=value"]` binds the value and makes it
+  // unwritable, which is why every example on this path now uses that form.
+  // CrabCast does not REFUSE the two-element shape: whether a flag is variadic
+  // is a fact about the consumer's program, this field is generic argv
+  // precisely so no table of anyone's flags lives here, and the only detector
+  // available without arity — a `--`-looking element followed by a plain one —
+  // is a false positive on every fixed-arity flag anybody writes. See
+  // docs/launcher-args.md, which is where that decision is argued rather than
+  // asserted.
   let args: string[] | undefined;
   if (data.args !== undefined) {
     if (!Array.isArray(data.args)) {
       return refuse(
         `Invalid args: expected an array of strings — one element per command-line argument, ` +
-          `e.g. ["--flag", "value"]. Got ${JSON.stringify(data.args)}. IT IS AN ARRAY RATHER ` +
+          `e.g. ["--flag=value"]. Got ${JSON.stringify(data.args)}. IT IS AN ARRAY RATHER ` +
           `THAN A STRING because a string would have to be split by something, and whatever did ` +
           `the splitting would be a quoting rule CrabCast invented and you had to guess at. Each ` +
           `element is shell-quoted and arrives as exactly one argument, whatever it contains.`
@@ -2792,7 +2926,51 @@ function parentFor(options: {
  * `undefined` in, "there is no record" out, as explicit nulls: see
  * {@link ConfigEcho.config}.
  */
-function configEcho(intent: AgentIntent | undefined): ConfigEcho {
+/**
+ * Whether this response carries the prompt TEXT or only its size.
+ *
+ * A REQUIRED PARAMETER OF {@link configEcho} AND DELIBERATELY NOT A DEFAULT
+ * (KAN-528). Either default is a trap in one direction: defaulting to `'whole'`
+ * puts the fleet read back over the framing bound the moment somebody adds a
+ * category and forgets, and defaulting to `'summarised'` silently takes the
+ * prompt off the single read that is the only place left to read it. With no
+ * default, a new echo site does not COMPILE until its author has answered the
+ * question — which is the whole of what this type is for.
+ */
+type PromptEchoPolicy =
+  /** The prompt travels as text. For a read of ONE agent, asked for by path. */
+  | 'whole'
+  /** The prompt travels as a character count. For any read of MANY agents. */
+  | 'summarised';
+
+/**
+ * The prompt on a record, measured. `null` for a record carrying none.
+ *
+ * A FUNCTION RATHER THAN AN INLINE `?.length ?? null` AT EACH SITE, because the
+ * distinction it draws is the one this ticket turns on: `''` is a prompt of
+ * length 0 that somebody froze, and no prompt at all is `null`. `||` collapses
+ * those two and `?.length ?? null` does not; putting the correct spelling in
+ * one named place is what stops the wrong one being re-derived at the next site.
+ */
+function promptSize(config: AgentConfig): number | null {
+  return typeof config.prompt === 'string' ? config.prompt.length : null;
+}
+
+/**
+ * {@link AgentConfig} with the prompt taken off, for a fleet row.
+ *
+ * DESTRUCTURED RATHER THAN DELETED FROM A COPY, so the omission is one
+ * expression a reader can check at a glance, and the compiler — not a comment —
+ * is what guarantees the result has no `prompt` on it.
+ */
+function summariseConfig(config: AgentConfig): SummarisedAgentConfig {
+  // `prompt` is bound only to be excluded from `rest`; the count it is replaced
+  // by lives on the row (see ConfigEcho.promptChars), not in here.
+  const { prompt: _prompt, ...rest } = config;
+  return rest;
+}
+
+function configEcho(intent: AgentIntent | undefined, promptPolicy: PromptEchoPolicy): ConfigEcho {
   // EVERY FIELD HERE COMES FROM THE RECORD AND NOTHING ELSE. That is what the
   // provenance legend promises about this block, and it has to be true field by
   // field rather than mostly.
@@ -2826,15 +3004,28 @@ function configEcho(intent: AgentIntent | undefined): ConfigEcho {
     // record is not an agent at all.
     return {
       config: null, configVersion: null, configuredAt: null, everActivated: false,
-      activatedBy: null
+      activatedBy: null,
+      // No record, so no prompt to measure — the same sentence `config: null`
+      // says, and NOT the "this agent has no prompt" that the same null means
+      // beside a config that is present. See ConfigEcho.promptChars.
+      promptChars: null
     };
   }
   return {
-    // The frozen object itself, not a rebuild of it. A field-by-field copy here
-    // would be a second place that has to learn about every attribute
-    // `configure` grows, and the day it did not is the day the echo starts
-    // lying by omission.
-    config: intent.record.config,
+    // The frozen object itself where the policy is `whole`, not a rebuild of
+    // it. A field-by-field copy here would be a second place that has to learn
+    // about every attribute `configure` grows, and the day it did not is the
+    // day the echo starts lying by omission. `summariseConfig` keeps that
+    // property under the summary: it SPREADS the frozen object and removes one
+    // named key, so an attribute added to `configure` tomorrow travels on both
+    // paths without this function being touched.
+    config: promptPolicy === 'whole'
+      ? intent.record.config
+      : summariseConfig(intent.record.config),
+    // Measured off the record on BOTH paths, from the same expression, so the
+    // count beside a whole prompt and the count standing in for a summarised
+    // one cannot disagree about the same agent.
+    promptChars: promptSize(intent.record.config),
     configVersion: intent.configVersion,
     configuredAt: intent.configuredAt,
     everActivated: intent.everActivated,
@@ -4956,7 +5147,7 @@ export class MessageRouter {
         // durable fact. Inferring it from liveness instead was the defect this
         // replaces: it made a field the legend calls durable change with the
         // census and revert on restart.
-        ...configEcho(this.deps.agentRegistry.intents().get(agentPath)),
+        ...configEcho(this.deps.agentRegistry.intents().get(agentPath), 'whole'),
         // ON THIS BRANCH TOO (KAN-281), and it is the branch that decides
         // whether the field is worth having. An idempotent `activate` is the
         // read a reconciling caller makes most often, and it is what a consumer
@@ -5203,7 +5394,7 @@ export class MessageRouter {
       // the durable record as it stands once this call's write has landed. If
       // that write failed, this correctly still reads `false` — and `durable:
       // false` below says why, which is better than a `true` nothing backs.
-      ...configEcho(this.deps.agentRegistry.intents().get(agentPath)),
+      ...configEcho(this.deps.agentRegistry.intents().get(agentPath), 'whole'),
       // THE CONSTRAINT THE REQUESTING CONSUMER CALLED LOAD-BEARING (KAN-281):
       // the channel verdict at the MOMENT OF THE SPAWN, not only on a later
       // poll — "by the time we polled we could be looking at a different spawn."
@@ -5713,7 +5904,11 @@ export class MessageRouter {
       const drift: ConfigEchoFinding[] = [];
       sweepConfigEchoes(payload, '', drift);
       this.warnOnEchoDrift(drift, 'agent_status');
-      respond({ ...payload, configEchoContract: configEchoContract(drift) });
+      // `[]` BECAUSE THIS RESPONSE SUMMARISES NOTHING, and it says so rather
+      // than staying silent: a single agent's config travels whole here,
+      // prompt included, and this is the surface a consumer is sent to when
+      // the fleet read tells them the text is elsewhere.
+      respond({ ...payload, configEchoContract: configEchoContract(drift, []) });
     };
 
     const fail = (error: string, extra: Record<string, unknown> = {}) =>
@@ -5749,7 +5944,7 @@ export class MessageRouter {
     // The record, and only the record. `ours` decides `state` — an observed
     // field — and must not reach the echo: that mixing is what made a durable
     // field change with the census.
-    const echo = configEcho(intent);
+    const echo = configEcho(intent, 'whole');
 
     if (session) {
       // From the census this handler already took, rather than a second read.
@@ -5953,7 +6148,14 @@ export class MessageRouter {
       const echoDrift: ConfigEchoFinding[] = [];
       sweepConfigEchoes(payload, '', echoDrift);
       this.warnOnEchoDrift(echoDrift, 'list_agents');
-      respond({ ...payload, configEchoContract: configEchoContract(echoDrift) });
+      // THE FLEET READ DECLARES WHAT IT SUMMARISED. Every row above carries a
+      // `promptChars` instead of a `config.prompt`, and this is the only field
+      // on the wire that says so — without it a consumer would have to infer
+      // the omission from a missing key that already meant something else.
+      respond({
+        ...payload,
+        configEchoContract: configEchoContract(echoDrift, FLEET_SUMMARISED_KNOBS)
+      });
     };
 
     // What the caller asked to page, before anything expensive happens. A
@@ -6389,7 +6591,7 @@ export class MessageRouter {
         // The frozen configuration, on the category a caller is most likely to
         // act on: deciding whether to re-staff preempted work means knowing
         // what it would come back as, and what it would have to outrank.
-        ...configEcho(intents.get(entry.path)),
+        ...configEcho(intents.get(entry.path), 'summarised'),
         at: entry.at,
         priority: entry.preemption.priority,
         herdrStatusWhenPreempted: entry.preemption.herdrStatus,
@@ -6437,7 +6639,7 @@ export class MessageRouter {
         // A loss is the row a supervisor most needs the configuration on: the
         // decision it prompts is "re-activate this or stand it down", and both
         // halves of that need to know what would come back.
-        ...configEcho(intent),
+        ...configEcho(intent, 'summarised'),
         since: intent.at,
         // Both cases are "not running", but they are not the same event and a
         // reader acting on this deserves the difference: an agent that never
@@ -6498,7 +6700,7 @@ export class MessageRouter {
         paneName: paneNameFor(agentPath),
         label: intent.record.config.label ?? null,
         launcher: intent.record.config.launcher,
-        ...configEcho(intent),
+        ...configEcho(intent, 'summarised'),
         since: intent.at,
         // Set on a row that reached this list through compaction dropping a
         // preemption annotation, so a client can tell the two apart and the
@@ -6564,7 +6766,7 @@ export class MessageRouter {
         paneName: paneNameFor(agentPath),
         label: intent.record.config.label ?? null,
         launcher: intent.record.config.launcher,
-        ...configEcho(intent),
+        ...configEcho(intent, 'summarised'),
         since: intent.at,
         reason:
           'Configured and never activated. It has no conversation, so activating it starts ' +
@@ -6719,7 +6921,7 @@ export class MessageRouter {
       // row showing both is a record that has fallen behind a live agent. T5's
       // converging `activate` is the repair, and hiding the disagreement behind
       // a liveness fallback removed the only signal that it existed.
-      ...configEcho(intent),
+      ...configEcho(intent, 'summarised'),
       path: agentPath,
       paneName,
       paneId: census?.paneId ?? null,
@@ -6893,7 +7095,7 @@ export class MessageRouter {
                     ourPaneIn(census, occupies!, occupied.record.config.launcher) !== null,
                     census.reachable
                   ),
-                  ...configEcho(occupied)
+                  ...configEcho(occupied, 'summarised')
                 }
               : null
           });
@@ -6925,7 +7127,7 @@ export class MessageRouter {
         // it — so it carries the echo like every other category. A reader
         // deciding what to do about an empty pane needs to know what was
         // supposed to be in it.
-        ...configEcho(intents.get(agentPath)),
+        ...configEcho(intents.get(agentPath), 'summarised'),
         reason:
           'herdr reports no agent running in this pane and this daemon holds no session for it'
       });

@@ -1041,6 +1041,7 @@ jobs:
             verify-proof-cleans-up-when-interrupted
             verify-event-durability
             verify-fleet-enumeration
+            verify-fleet-read-fits-the-wire
             verify-config-echo-contract
             verify-ci-wiring-guards
             verify-ci-proof-residue-is-legible
@@ -1068,6 +1069,7 @@ jobs:
             verify-pty-consumer-named
             verify-doc-proof-ci-class
             verify-launcher-args
+            verify-variadic-args-swallow-prompt
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

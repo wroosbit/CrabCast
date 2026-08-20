@@ -1133,6 +1133,24 @@ export const AGENT_LAUNCHERS: Record<string, AgentLauncher> = {
     // one argument is a property consumers depend on — args are quoted the same
     // way and cannot break out into additional ones, so no number of them can
     // push the prompt out of final position or split it in two.
+    //
+    // ⚠ AND THE ORDERING HAS A CONSEQUENCE THE PARAGRAPH ABOVE DOES NOT STATE,
+    // which is the whole of KAN-514: the prompt is last AND IT IS A BARE
+    // OPERAND, carrying no flag of its own. A caller's VARIADIC argument
+    // written as two elements — `["--flag", "value"]` — therefore does not stop
+    // at its own value. It keeps reading, the prompt is the next bare word, and
+    // the flag takes it. Every spawn for that agent then fails, and the
+    // runtime's complaint is about the PROMPT'S CONTENT rather than about the
+    // argument order, so the reader goes and edits the prompt.
+    //
+    // NOTHING IS FIXED HERE AND THAT IS THE DECISION. The ordering is correct —
+    // args must be able to precede the prompt, and the prompt must stay final
+    // and stay exactly one argument. What a caller writes is what closes it:
+    // `["--flag=value"]` binds the value, leaving no bare word for the flag to
+    // read. See docs/launcher-args.md, and note the contrast with
+    // `anti-gravity` directly below, whose prompt rides on `-i` and is
+    // therefore bound already — the same binding, on the side of the boundary
+    // where that runtime happens to offer a flag to do it with.
     command: ({ promptCommand, mayResume, args }) => {
       const flags = `--permission-mode bypassPermissions${quotedArgs(args)}`;
       const fresh = `claude ${flags}` + (promptCommand ? ' ' + shellQuote(promptCommand) : '');
