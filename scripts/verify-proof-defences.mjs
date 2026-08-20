@@ -1202,7 +1202,27 @@ const PROOF_DEFENCES = [
       'arguments is the runtime\'s behaviour, not CrabCast\'s. What is bounded is CrabCast\'s ' +
       'half, and it is measured off `/proc/<pid>/cmdline` rather than off any string the fixture ' +
       'composed: the fake `claude` reports only WHICH pid to look at, and the kernel says what its ' +
-      'argv is.'
+      'argv is. ' +
+      '§6 HAS A DRIVE OF ITS OWN SINCE KAN-524, `scripts/kan524-red-drive.mjs`, and it is listed ' +
+      'here rather than folded into the sentence above because it defends a different assertion: ' +
+      'not that args reach the argv, but that the SAFETY section can report anything at all. §6 ' +
+      "compared the live registry's MTIME until KAN-524 — vacuous on a CI runner, which hands " +
+      'every proof a scratch $HOME so no registry exists under it, and a FALSE RED on a machine ' +
+      'serving a fleet, where the live daemon writes that file for its own reasons. Four arms, ' +
+      'control first: a row naming the run\'s OWN scratch root appended mid-flight (the gate goes ' +
+      'red, every other §6 check stays green); the retired predicate and the current one run in ' +
+      'the SAME touched-registry world, requiring the old to go red and the new to stay green, ' +
+      'which is the only place the fix is stated as a difference rather than as one run; and the ' +
+      "detector forced never-to-fire and always-to-fire, which is what makes §6's two controls " +
+      'gates instead of decoration. ⚠ THE ARM 1 SEAM, named in the drive\'s header too: the ' +
+      'contaminating row is written by the harness, so what is shown is that the detector fires ' +
+      'on a registry carrying this run\'s footprint — never that CrabCast could produce one. ' +
+      'WHO COVERS THAT: nobody, and nobody can, since a proof of it would be the accident. ' +
+      '§6 also now labels each of its five checks [disclosure] or [measurement]: (a), (b) and (c) ' +
+      "read values the script itself composed and cannot fail once written right, and (c) alone is " +
+      'corroborated elsewhere — §1/§2 read a real process\'s argv out of /proc, and that process ' +
+      'is the shim PATH put first. Nothing here observes a child\'s own view of HOME or of the ' +
+      'data dir it opened; that gap is stated in §6 rather than left to be inferred.'
   },
   {
     script: 'verify-variadic-args-swallow-prompt',
