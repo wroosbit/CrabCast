@@ -413,11 +413,71 @@ export type SessionEndReason = 'taken-over' | 'exited';
  * and pane ids are positions in lists that compact whenever anything earlier
  * closes, while a terminal id belongs to the terminal for as long as it runs.
  */
+/**
+ * Quote one argv element for a shell command line.
+ *
+ * `pane run` takes a COMMAND LINE, not an argv array, so every element has to
+ * survive the shell's own parsing. Single quotes with the `'"'"'` escape are
+ * the only form that is literal for every byte including spaces, $, backticks
+ * and newlines — which matters because one of these elements is an entire
+ * `bash -c` script built by a launcher.
+ */
+/**
+ * Did this herdr drop `--cwd` from `agent start`?
+ *
+ * 0.7 redesigned the call; 0.6.x still creates the pane itself. An UNREADABLE
+ * version answers FALSE — the 0.6.x path, which is the line CrabCast is
+ * verified against. Guessing the newer shape on no evidence would turn a
+ * missing measurement into a broken activation.
+ */
+export function herdrDroppedCwdFromAgentStart(version: string): boolean {
+  const m = /^([0-9]+)\.([0-9]+)\./.exec(String(version ?? ''));
+  if (!m) return false;
+  const major = Number(m[1]), minor = Number(m[2]);
+  if (major > 0) return true;
+  return minor >= 7;
+}
+
+/**
+ * The agent's name, however this herdr reports it.
+ *
+ * ⚠ 0.8.x REMOVED `name` FROM `agent list` ENTIRELY (KAN-552 incident,
+ * 2026-08-20). Rows now carry `agent` — the KIND for a herdr-started agent
+ * ("claude"), or whatever a supervisor declared via `pane report-agent`, which
+ * is where CrabCast puts its own pane name. The old code FILTERED OUT every
+ * row without a string `name`, so on 0.8.x the census came back EMPTY and each
+ * activation "failed" verification while its agent was in fact running — the
+ * daemon then retried, and every retry started ANOTHER agent. Duplicate agents
+ * in one workspace were the symptom; an empty census was the cause.
+ *
+ * Preferring `name` keeps 0.6.x byte-identical. Falling back to `agent` is
+ * what makes a 0.8.x row addressable at all. Neither present -> dropped, as
+ * before: an unnameable agent is one no caller can ask for.
+ */
+function deriveAgentName(agent: any): string | null {
+  if (!agent) return null;
+  if (typeof agent.name === 'string' && agent.name) return agent.name;
+  if (typeof agent.agent === 'string' && agent.agent) return agent.agent;
+  return null;
+}
+
+function shellQuoteArg(arg: string): string {
+  return `'${String(arg).replace(/'/g, `'"'"'`)}'`;
+}
+
 interface AgentTab {
   tabId: string;
   workspaceId: string;
   /** The shell `herdr tab create` opens the tab on, which the agent replaces. */
   placeholderTerminalId: string;
+  /**
+   * The pane `tab create` opened the tab on.
+   *
+   * ⚠ Under 0.6.4 this was a placeholder to dispose of. Under 0.7+ it IS the
+   * agent's pane: `agent start` no longer creates one, it attaches to an
+   * existing pane at a shell prompt, which is exactly what this is.
+   */
+  rootPaneId: string;
 }
 
 /** Told to clients when a PTY dies, so a dead terminal never renders as a live one. */
@@ -829,14 +889,17 @@ export class HerdrBridge {
    * twice the file descriptors; {@link closeTabPlaceholder} takes the
    * placeholder back out again.
    */
-  private startAgentInOwnTab(paneName: string, workDir: string, argv: string[]): void {
+  /**
+   * The 0.6.x call: `agent start` CREATES the pane and takes `--cwd`.
+   *
+   * Kept, not deleted, because the installed herdr decides which shape is
+   * correct and 0.6.4 is still the only line CrabCast is verified against.
+   */
+  private startAgentInOwnTabLegacy(paneName: string, workDir: string, argv: string[]): void {
     const start = (placement: string[]) => this.runHerdr([
       'agent', 'start', paneName,
       '--cwd', workDir,
       ...placement,
-      // Spawning is a background event; the human is usually reading something
-      // else. herdr already defaults this way, but a default that flipped
-      // would yank the screen away on every activation, so it is stated.
       '--no-focus',
       '--',
       ...argv
@@ -844,8 +907,6 @@ export class HerdrBridge {
 
     const tab = this.createAgentTab(paneName, workDir);
     if (!tab) {
-      // No tab is a cosmetic loss; no agent is a broken activation. Spawn the
-      // agent the old way rather than fail over where it gets drawn.
       start([]);
       return;
     }
@@ -854,16 +915,7 @@ export class HerdrBridge {
       try {
         start(['--tab', tab.tabId]);
       } catch (e: any) {
-        // The name being taken means the agent exists already — the caller
-        // handles that, and retrying would start a second one.
         if ((e as HerdrCliError)?.herdrCode === AGENT_NAME_TAKEN) throw e;
-
-        // Tab ids are positional and renumber whenever an earlier tab closes,
-        // so the id we were just handed can go stale between the two calls.
-        // Ours is always the newest and therefore the highest-numbered, so a
-        // renumber can only leave it dangling — herdr answers
-        // `agent_placement_not_found` and never resolves it to somebody else's
-        // tab. Falling back keeps the spawn working through that race.
         console.error(
           `[HerdrBridge] Could not place ${paneName} in tab ${tab.tabId} ` +
           `(${e?.message ?? String(e)}); starting it in herdr's default placement instead`
@@ -871,9 +923,121 @@ export class HerdrBridge {
         start([]);
       }
     } finally {
-      // Also on the failure paths: an abandoned tab would otherwise sit there
-      // holding a shell nobody asked for.
       this.closeTabPlaceholder(tab);
+    }
+  }
+
+  /** Installed herdr version, read once and cached for the process's life. */
+  private cachedHerdrVersion: string | undefined;
+  private herdrVersion(): string {
+    if (this.cachedHerdrVersion === undefined) {
+      try {
+        const out = spawnSync('herdr', ['--version'], { encoding: 'utf8' })?.stdout ?? '';
+        this.cachedHerdrVersion = (out.match(/[0-9]+\.[0-9]+\.[0-9]+/) ?? [''])[0];
+      } catch {
+        this.cachedHerdrVersion = '';
+      }
+    }
+    return this.cachedHerdrVersion;
+  }
+
+  private startAgentInOwnTab(paneName: string, workDir: string, argv: string[]): void {
+    // ── herdr 0.7+ inverted this call (KAN-552 incident, 2026-08-20) ─────
+    // Until 0.7, `agent start` CREATED the pane and took `--cwd`, `--tab`,
+    // `--no-focus` and a trailing `-- <argv>` run under `bash -c`. 0.7 removed
+    // all four: `agent start <NAME> --kind <KIND> --pane <ID>` attaches a
+    // *named agent kind* to a pane that already exists at a shell prompt.
+    // Passing `--cwd` to 0.7+ dies with `unknown option: --cwd`, which is what
+    // took the whole fleet down — every activation failed while every daemon
+    // reported healthy.
+    //
+    // WHY THIS TAKES THE PANE-RUN ROUTE AND NOT `--kind`. `--kind` names an
+    // executable from herdr's closed list and passes only its ARGUMENTS after
+    // `--`. Our launchers do not expose that split: `launcher.command()`
+    // returns a shell command STRING, and argv here is an `env … bash -c …`
+    // invocation. Restructuring every launcher into (executable, args) is a
+    // real refactor and not one to attempt while the fleet is down. The pane
+    // `tab create` hands back is already a shell in the right cwd, so running
+    // the exact command we always ran is a smaller, more faithful change: the
+    // bytes on the command line are unchanged from 0.6.4.
+    //
+    // ⚠ WHAT THIS ROUTE DOES NOT BUY. `agent start` under 0.7 returns only
+    // once the agent is DETECTED AND READY FOR INPUT — it turns a wedged
+    // startup dialog into a spawn failure. `pane run` cannot: it asserts the
+    // agent is up rather than observing it. That is a real loss and it is
+    // recorded here rather than hidden. Closing it means giving launchers a
+    // kind/args split so `--kind` becomes usable.
+    //
+    // ⚠ NO FALLBACK PLACEMENT. Under 0.6.4 a failed `tab create` fell back to
+    // herdr's default placement — a cosmetic loss beat a broken activation.
+    // That trade no longer exists: without a pane there is nothing to attach
+    // to, so a fallback could only fail later and less clearly.
+    // ── Which call shape does the INSTALLED herdr take? ────────────────
+    // Not a preference and not a config: 0.6.x REQUIRES --cwd and 0.7+ REFUSES
+    // it, so a build that only speaks one of them is broken on the other. The
+    // version is read from the binary rather than assumed, because the binary
+    // is what will parse the arguments.
+    if (!herdrDroppedCwdFromAgentStart(this.herdrVersion())) {
+      this.startAgentInOwnTabLegacy(paneName, workDir, argv);
+      return;
+    }
+
+    const tab = this.createAgentTab(paneName, workDir);
+    if (!tab) {
+      throw new Error(
+        `Could not create a tab for ${paneName}, and herdr 0.7+ has no way to ` +
+        `start an agent without a pane to put it in`
+      );
+    }
+
+    // `agent start` used to refuse a name already in use, and callers depend on
+    // that refusal — retrying past it starts a SECOND agent under one name.
+    // This route has no such check built in, so it is made explicitly.
+    if (this.agentNameIsTaken(paneName)) {
+      this.closeTabPlaceholder(tab);
+      const err: any = new Error(`An agent named ${paneName} is already running`);
+      err.herdrCode = AGENT_NAME_TAKEN;
+      throw err;
+    }
+
+    try {
+      // One command line, quoted exactly as a shell would need it. `pane run`
+      // appends the Enter that `pane send-text` deliberately does not.
+      this.runHerdr(['pane', 'run', tab.rootPaneId, argv.map(shellQuoteArg).join(' ')]);
+
+      // Declare what we put in the pane. Without this the pane is a shell as
+      // far as herdr is concerned, and `agent list`/`get`/`attach` cannot
+      // resolve the name — which is how an agent becomes invisible to its own
+      // supervisor.
+      this.runHerdr([
+        'pane', 'report-agent', tab.rootPaneId,
+        '--source', 'crabcast',
+        '--agent', paneName,
+        '--state', 'working'
+      ]);
+    } catch (e: any) {
+      // A half-started agent is worse than none: the pane would sit there
+      // holding a shell that nobody can address by name.
+      this.closeTabPlaceholder(tab);
+      throw e;
+    }
+  }
+
+  /**
+   * Is an agent already running under this name?
+   *
+   * Answers FALSE only when herdr answered and did not know the name. A failed
+   * query is not a free name — treating "I could not ask" as "nobody is there"
+   * is how a second agent gets started under one name, so an unreadable answer
+   * is reported as taken and the activation refuses instead.
+   */
+  private agentNameIsTaken(paneName: string): boolean {
+    try {
+      const agents = this.runHerdr(['agent', 'list'])?.result?.agents;
+      if (!Array.isArray(agents)) return true;
+      return agents.some((a: any) => a?.name === paneName);
+    } catch {
+      return true;
     }
   }
 
@@ -891,11 +1055,15 @@ export class HerdrBridge {
       const tabId = result?.tab?.tab_id;
       const workspaceId = result?.root_pane?.workspace_id;
       const placeholderTerminalId = result?.root_pane?.terminal_id;
-      if (typeof tabId !== 'string' || typeof workspaceId !== 'string' || typeof placeholderTerminalId !== 'string') {
+      const rootPaneId = result?.root_pane?.pane_id;
+      if (
+        typeof tabId !== 'string' || typeof workspaceId !== 'string' ||
+        typeof placeholderTerminalId !== 'string' || typeof rootPaneId !== 'string'
+      ) {
         throw new Error('herdr tab create returned no usable tab');
       }
 
-      return { tabId, workspaceId, placeholderTerminalId };
+      return { tabId, workspaceId, placeholderTerminalId, rootPaneId };
     } catch (e: any) {
       console.error(
         `[HerdrBridge] Could not create a tab for ${paneName} (${e?.message ?? String(e)}); ` +
@@ -1599,11 +1767,11 @@ export class HerdrBridge {
       return {
         reachable: true,
         agents: agents
-          .filter((agent: any) => agent && typeof agent.name === 'string')
+          .filter((agent: any) => agent && typeof deriveAgentName(agent) === 'string')
           .map((agent: any) => {
             const workDir = typeof agent.cwd === 'string' ? agent.cwd : null;
             return {
-              name: agent.name as string,
+              name: deriveAgentName(agent) as string,
               paneId: typeof agent.pane_id === 'string' && agent.pane_id ? agent.pane_id : null,
               agentRuntime: typeof agent.agent === 'string' && agent.agent ? agent.agent : null,
               workDir,
