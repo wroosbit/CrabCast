@@ -461,6 +461,24 @@ function deriveAgentName(agent: any): string | null {
   return null;
 }
 
+/**
+ * The development-channels trust dialog, by the lines that identify it.
+ *
+ * ⚠ ALL THREE must be present. The prompt text alone appears in an agent's own
+ * SCROLLBACK long after the dialog is gone — on 2026-08-20 a dead pane whose
+ * process had taken SIGTERM still showed this text, and a keystroke sent on
+ * that evidence went into a bare shell instead. Requiring the option lines and
+ * the confirm hint together is what separates a live dialog from its ghost.
+ */
+const DEV_CHANNELS_DIALOG_MARKERS = [
+  'development channels',
+  '1. I am using this for local development',
+  'Enter to confirm'
+] as const;
+
+/** How many times one activation may answer this dialog before giving up. */
+const MAX_TRUST_DIALOG_ANSWERS = 3;
+
 function shellQuoteArg(arg: string): string {
   return `'${String(arg).replace(/'/g, `'"'"'`)}'`;
 }
@@ -1904,6 +1922,73 @@ export class HerdrBridge {
    * what becomes the record's durable binding — taking it from a second call
    * would bind to a different moment than the one that proved the agent there.
    */
+  /**
+   * Read one pane's visible frame BY PANE ID.
+   *
+   * Deliberately not {@link tailAgent}, which resolves by agent NAME —
+   * herdr 0.8.x dropped name resolution from `agent read` (`agent_not_found`),
+   * while `pane read <id>` still answers. The confirm loop already holds the id
+   * from the census it just read, so this asks the question the id can answer.
+   */
+  private readPaneFrame(paneId: string): string | null {
+    try {
+      const out = this.runHerdrRaw(['pane', 'read', paneId, '--source', 'visible', '--lines', '40']);
+      return typeof out === 'string' && out.length ? out : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Clear the development-channels trust dialog if the pane is sitting on it.
+   *
+   * WHY THIS EXISTS. `--dangerously-load-development-channels` opens a
+   * confirmation on EVERY spawn and its acceptance is persisted nowhere, so a
+   * respawned agent stops dead at a prompt nobody is watching. It is invisible
+   * to every status: the dialog draws a `❯`, readiness detection reads that as
+   * a prompt, and the agent reports `working` while doing nothing. On
+   * 2026-08-20 all 16 panes in the fleet were wedged on it simultaneously and
+   * every one of them reported healthy.
+   *
+   * WHY `1` AND NOT Enter. Enter SUBMITS whatever the pane holds — at a
+   * composer that is somebody's unsent text posted as if a human typed it. The
+   * literal `1` selects option 1 at this dialog and, if the frame turns out not
+   * to be a dialog after all, types one harmless character instead. It fails
+   * toward doing nothing.
+   *
+   * ⚠ SCOPE, DELIBERATELY NARROW. This answers ONE dialog, matched on three
+   * lines together. It is not a general dialog-dismisser and must not become
+   * one: the next dialog may be a folder-trust prompt, whose answer is a real
+   * decision about whether to run code from a directory. Auto-answering that
+   * would be a machine making a security choice on a human's behalf.
+   */
+  private answerStartupTrustDialog(paneId: string, paneName: string): boolean {
+    const frame = this.readPaneFrame(paneId);
+    if (!frame) return false;
+    const lower = frame.toLowerCase();
+    if (!DEV_CHANNELS_DIALOG_MARKERS.every((m) => lower.includes(m.toLowerCase()))) return false;
+
+    try {
+      this.runHerdr(['pane', 'send-text', paneId, '1']);
+    } catch (e: any) {
+      console.error(
+        `[HerdrBridge] ${paneName}: could not answer the development-channels dialog ` +
+        `(${e?.message ?? String(e)}); it will stay wedged until somebody answers it`
+      );
+      return false;
+    }
+
+    // Said out loud on purpose. An automatic answer to a prompt that names
+    // itself "dangerously" must be visible in the log, not silent — somebody
+    // reading back should see that a machine pressed this, and which pane.
+    console.error(
+      `[HerdrBridge] ${paneName}: answered the development-channels trust dialog in ${paneId} ` +
+      `(sent '1' = "I am using this for local development"). This dialog blocks every spawn ` +
+      `and its acceptance is not persisted anywhere.`
+    );
+    return true;
+  }
+
   public async confirmAgentPresent(
     paneName: string,
     requireRuntime: boolean,
@@ -1914,6 +1999,7 @@ export class HerdrBridge {
     let checks = 0;
     let reachable = false;
     let registered = false;
+    let dialogsAnswered = 0;
 
     for (;;) {
       const census = this.listHerdrAgentsChecked();
@@ -1923,6 +2009,20 @@ export class HerdrBridge {
       if (reachable) {
         const record = census.agents.find(agent => agent.name === paneName);
         registered = record !== undefined;
+
+        // Registered, but no runtime behind it — the exact shape of an agent
+        // stopped at a startup dialog. Clear the one dialog we know how to
+        // clear and let the next poll see the runtime it was hiding. Bounded,
+        // because a pane that keeps showing a dialog after three answers is
+        // telling us something this does not understand.
+        if (
+          record && requireRuntime && record.agentRuntime === null &&
+          record.paneId && dialogsAnswered < MAX_TRUST_DIALOG_ANSWERS &&
+          this.answerStartupTrustDialog(record.paneId, paneName)
+        ) {
+          dialogsAnswered++;
+        }
+
         if (record && (!requireRuntime || record.agentRuntime !== null)) {
           return {
             present: true,
@@ -2043,6 +2143,37 @@ export class HerdrBridge {
    * on stderr for others, so both streams are worth reading before we fall
    * back to quoting a raw payload at the caller.
    */
+  /**
+   * Run a herdr command that answers with TEXT rather than JSON.
+   *
+   * `pane read` is the case that needs this: it returns the frame itself, so
+   * {@link runHerdr}'s `parseJson` yields null and the caller sees nothing —
+   * which on 2026-08-20 read as "supervision is blind" when the bytes were
+   * there the whole time. An error is still surfaced the same way, because
+   * herdr reports those as JSON on either stream even when success is text.
+   */
+  private runHerdrRaw(args: string[]): string {
+    const result = spawnSync('herdr', args, {
+      encoding: 'utf8',
+      timeout: HERDR_CLI_TIMEOUT_MS
+    });
+
+    if (result.error) {
+      throw new Error(`herdr ${args.join(' ')} failed: ${result.error.message}`);
+    }
+
+    const stdout = (result.stdout ?? '').trim();
+    const reported = parseJson(stdout)?.error ?? parseJson((result.stderr ?? '').trim())?.error;
+    if (reported) {
+      const error: HerdrCliError =
+        new Error(reported.message ?? `herdr reported ${reported.code ?? 'an error'}`);
+      if (typeof reported.code === 'string') error.herdrCode = reported.code;
+      throw error;
+    }
+
+    return stdout;
+  }
+
   private runHerdr(args: string[]): any {
     const result = spawnSync('herdr', args, {
       encoding: 'utf8',
