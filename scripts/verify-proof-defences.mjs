@@ -1260,6 +1260,34 @@ const PROOF_DEFENCES = [
       'is on the pull request and is not runnable in CI.'
   },
   {
+    script: 'verify-proof-teardown-sweeps',
+    defence: 'guard',
+    central:
+      'a proof that CLAIMS no process outlived it derives that answer from the machine, keyed ' +
+      'on its own scratch root — never from a pid set maintained by hand; and the dead call ' +
+      '`crabcast([\'daemon\', \'stop\'])`, on which the leaking teardown rested, appears nowhere.',
+    anchor: 'the same checks over a broken fixture',
+    note:
+      'A NEGATIVE CASE rather than a mutation, and §5 is where it lives: every predicate is run ' +
+      'over fixture text BUILT TO VIOLATE IT and must say so, then over text built to satisfy ' +
+      'it and must clear that. Both directions, because a predicate that flags everything and ' +
+      'one that flags nothing both produce a section full of passes. ' +
+      '⚠ §6 IS THE ONE WORTH READING, and it exists because this file accused the wrong files ' +
+      'TWICE while it was being written — both times reporting a proof as CALLING the dead ' +
+      'command when what it held was a quoted SPECIMEN of it. Once because a regex after ' +
+      '`return` was read as division, so the `[\'"]` inside it opened a string and every ' +
+      'offset after it parsed in the wrong mode; once because a template nested in a `${}` ' +
+      "interpolation — this file's own `check` helper — closed the outer template early. §6 " +
+      'pins both, AND pins the opposite direction: a real call sitting after that same regex ' +
+      'must still be FOUND, because both fixes blank more text and a masker that blanked too ' +
+      'much would clear the whole repository while printing the same reassuring "none". ' +
+      'WHAT THIS FILE DOES NOT ESTABLISH, said plainly because §2 reads like it does: importing ' +
+      'the sweeper is not sweeping. This is a gate on the SHAPE. That the sweep actually works ' +
+      'is `kan529-red-drive.mjs`, which disarms it and watches the check go red, and ' +
+      '`kan529-suite-leak-survey.mjs`, which runs the suite and counts what each proof leaves ' +
+      'alive. Three artifacts, and this is the cheap one that runs on every PR.'
+  },
+  {
     script: 'verify-ci-wiring-guards',
     defence: 'mutation',
     central:

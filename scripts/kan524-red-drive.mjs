@@ -94,6 +94,17 @@
 // one carries no row this drive put there, by the same attributable question
 // §6 itself now asks.
 //
+// ⚠ AND IT ASSERTS THE PROCESS QUESTION TOO, WHICH IS A DIFFERENT QUESTION
+// (KAN-529). Until 2026-08-20 §4 asked only about the registry, and it was
+// right about the registry while being read as a clean bill of health: this
+// drive printed `43/43 checks passed` and exited 0 with **24 processes still
+// alive** — 6 scratch daemons, 6 fake `claude` wrappers and 12 `herdr agent
+// attach` children, across 6 `crabcast-kan504-*` roots. Six roots from one
+// invocation, because arms 2 and 3 run the proof again per mutant, which makes
+// a drive MORE exposed to this than the proof it drives. §4 now sweeps and
+// asserts on what it found, and `cleanUp` kills before it removes so an
+// interrupted run cannot leave daemons executing out of a deleted tree.
+//
 // Usage:
 //   npm run build
 //   node scripts/kan524-red-drive.mjs
@@ -103,6 +114,12 @@ import * as os from 'os';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import {
+  sweepScratchRoot,
+  killScratchRootSync,
+  processesUnder,
+  describe
+} from './scratch-processes.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
@@ -133,6 +150,38 @@ if (!fs.existsSync(path.join(distDir, 'daemon.js'))) {
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crabcast-kan524-drive-'));
 
 /**
+ * A SECOND ROOT, and it is the whole of this drive's teardown (KAN-529).
+ *
+ * ⚠ THE LEAK THIS FIXES, measured on this machine 2026-08-20, and it is worse
+ * here than in the proofs `scratch-processes.mjs` was written for. This drive
+ * printed `43/43 checks passed`, exit 0, with §4 reporting the running fleet
+ * untouched — while **24 processes were still alive**: 6 scratch daemons, 6
+ * fake `claude` wrappers and 12 `herdr agent attach` children, across 6
+ * separate `crabcast-kan504-*` roots. Six roots from ONE invocation, because
+ * arms 2 and 3 run the proof again per mutant. A drive is more exposed to this
+ * than the proof it drives, not less.
+ *
+ * ⚠ AND `sweepScratchRoot(tmp)` WOULD HAVE FOUND NONE OF THEM. The processes
+ * carry the PROOF's roots, which `mkdtemp` puts in `os.tmpdir()` as SIBLINGS of
+ * this drive's root rather than under it. A sweep keyed on `tmp` would have
+ * matched nothing, reported `0 swept`, and been indistinguishable from a clean
+ * run — the exact shape of check this whole ticket is about.
+ *
+ * So the children are given a `TMPDIR` of their own that IS under a root this
+ * drive owns. `os.tmpdir()` reads `TMPDIR`, the proof roots itself with
+ * `mkdtempSync(path.join(os.tmpdir(), …))`, and the daemon it spawns inherits
+ * the environment — so every process any arm causes now carries this path in
+ * its own argv, and one sweep reaches all of them.
+ *
+ * Short on purpose. The daemon opens a unix socket under its data dir, and
+ * `sun_path` is 108 bytes; nesting the proof's root inside this drive's long
+ * `crabcast-kan524-drive-XXXXXX` one spends that budget for no reason.
+ * `assertSweepableRoot` still holds — absolute, strictly under the system temp
+ * directory, and a 12-character leaf carrying `mkdtemp`'s randomness.
+ */
+const sweepRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'k524d-'));
+
+/**
  * The live fleet's registry, read BEFORE this drive does anything.
  *
  * Not a gate and not an mtime — this drive is the file that argues mtime is the
@@ -141,11 +190,31 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crabcast-kan524-drive-'));
  */
 const realAgentsLog = path.join(os.homedir(), '.local', 'share', 'crabcast', 'agents.jsonl');
 
+/**
+ * ⚠ KILL BEFORE REMOVING, and the order is not cosmetic.
+ *
+ * Removing the tree first is what produces the KAN-529 state: daemons still
+ * executing out of a scratch root that no longer exists on disk, holding cores
+ * on a machine running the live fleet. That is exactly what was measured here
+ * on 2026-08-20 — this drive's own `rmSync` ran while 24 of its processes were
+ * alive.
+ */
 function cleanUp() {
-  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  try { killScratchRootSync(sweepRoot); } catch {}
+  for (const root of [tmp, sweepRoot]) {
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch {}
+  }
 }
-process.on('SIGINT', () => { cleanUp(); process.exit(130); });
-process.on('SIGTERM', () => { cleanUp(); process.exit(143); });
+
+// SIGHUP as well as the other two: a terminal going away is the ordinary way an
+// interactive run of this file ends, and it left the same 24 processes behind.
+//
+// ⚠ SYNCHRONOUS, for the reason `killScratchRootSync` is a separate export from
+// `sweepScratchRoot`: a handler cannot await, so `process.exit` would run before
+// a promise settled and only the polite wave would ever fire.
+for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]]) {
+  process.on(signal, () => { cleanUp(); process.exit(code); });
+}
 
 /**
  * A staged $HOME with a registry in it that looks like a fleet's.
@@ -183,7 +252,9 @@ function stageHome(name) {
 function runProof(scriptFile, home, onTick) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [scriptFile, distDir], {
-      env: { ...process.env, HOME: home },
+      // TMPDIR is what puts the child's own scratch root — and therefore every
+      // process it causes — under a root this drive can sweep. See `sweepRoot`.
+      env: { ...process.env, HOME: home, TMPDIR: sweepRoot },
       stdio: ['ignore', 'pipe', 'pipe']
     });
     let out = '';
@@ -242,8 +313,36 @@ function mutateProof(name, from, to) {
     cleanUp();
     process.exit(1);
   }
+  // ⚠ THE COPY LIVES IN SCRATCH, SO ITS RELATIVE IMPORTS DO NOT RESOLVE.
+  // `verify-launcher-args.mjs` imports `./scratch-processes.mjs` (KAN-529), and
+  // that specifier is resolved relative to the IMPORTING FILE — so a copy under
+  // this drive's root looks for the module beside itself, does not find it, and
+  // dies with ERR_MODULE_NOT_FOUND before printing a single check.
+  //
+  // Measured here on 2026-08-20, the first time this drive was run against a
+  // tree carrying #125: arms 2, 3a and 3b all reported `verdict ABSENT` for
+  // every label they assert on. ⚠ NOTE WHICH WAY THAT FAILED — `verdictOf`
+  // returns `null` for a label that never printed, and every assertion compares
+  // against the string 'PASS' or 'FAIL', so a crashed copy went RED by name
+  // rather than satisfying the arms vacuously. Had those comparisons been
+  // truthiness tests, three arms would have gone green against a script that
+  // never ran. The rule is worth restating because it nearly cost nothing here
+  // and could have cost everything.
+  //
+  // Rewriting the specifier to an absolute path is what fixes it, and it is
+  // preferred over copying the module beside the mutant or writing the mutant
+  // into `scripts/`: both of those put files where the repository can see them,
+  // and this drive's header promises the working tree is never touched.
+  const sweeperImport = /(from\s+['"])\.\/scratch-processes\.mjs(['"])/;
+  let mutated = src.replace(from, to);
+  if (sweeperImport.test(mutated)) {
+    mutated = mutated.replace(
+      sweeperImport,
+      `$1${path.join(scriptDir, 'scratch-processes.mjs')}$2`
+    );
+  }
   const file = path.join(tmp, `${name}.mjs`);
-  fs.writeFileSync(file, src.replace(from, to));
+  fs.writeFileSync(file, mutated);
   return file;
 }
 
@@ -299,23 +398,27 @@ arm('1. CONTAMINATION — a row naming THIS RUN\'s scratch root, written mid-fli
 // ===========================================================================
 //
 // The writer discovers the proof's scratch root the same way anything else on
-// the machine could: by watching `os.tmpdir()` for roots that were not there
-// when this arm started. Every new one is written, not just the first — another
-// agent on this machine may be running the same proof concurrently, and an arm
-// that guessed which root was ours would be a flake wearing a measurement's
-// clothes. Ours is certainly among them, and the precondition below is what
-// establishes that rather than assuming it.
+// the machine could: by watching for roots that were not there when this arm
+// started. Every new one is written, not just the first, and the precondition
+// below establishes that ours was among them rather than assuming it.
+//
+// ⚠ IT WATCHES `sweepRoot` RATHER THAN `os.tmpdir()`, since KAN-529 gave the
+// children a TMPDIR of their own. That is narrower in exactly the way that
+// matters: this arm used to have to reason about ANOTHER AGENT on this machine
+// running the same proof concurrently and leaving a `crabcast-kan504-*` root
+// this loop could not tell from its own. Under a private TMPDIR no such root
+// can appear, so what was a hedge is now a property.
 {
   const { home, registry } = stageHome('arm1-home');
   const before = new Set(
-    fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('crabcast-kan504-'))
+    fs.readdirSync(sweepRoot).filter((n) => n.startsWith('crabcast-kan504-'))
   );
   const injected = new Set();
   const contaminate = () => {
-    for (const n of fs.readdirSync(os.tmpdir())) {
+    for (const n of fs.readdirSync(sweepRoot)) {
       if (!n.startsWith('crabcast-kan504-') || before.has(n) || injected.has(n)) continue;
       injected.add(n);
-      const root = path.join(os.tmpdir(), n);
+      const root = path.join(sweepRoot, n);
       fs.appendFileSync(
         registry,
         JSON.stringify({
@@ -510,6 +613,77 @@ arm('4. the RUNNING FLEET was never touched by THIS DRIVE either');
     carriesOurRows(`{"dataDir":${JSON.stringify(path.join(tmp, 'probe'))}}\n`),
     '(control +) and the same detector fires on a row carrying this drive\'s scratch root',
     `probe row names ${path.join(tmp, 'probe')}`
+  );
+
+  // ------------------------------------------------------------------------
+  // ⚠ AND THE PROCESS QUESTION, WHICH THE REGISTRY QUESTION DOES NOT ANSWER
+  // ------------------------------------------------------------------------
+  //
+  // This section was headed *the running fleet was never touched* and asserted
+  // only the two checks above — both true, both verified. But they are claims
+  // about the REGISTRY, and the leak measured here on 2026-08-20 was a claim
+  // about PROCESSES: 24 of them still alive, 6 scratch daemons among them, at
+  // the moment this drive printed 43/43 and exited 0. The section read as a
+  // clean bill of health with the orphans sitting on the box.
+  //
+  // That is this ticket's own defect in this ticket's own file — a sentence
+  // claiming more than its mechanism covers, degrading toward looking
+  // finished — which is the reason it is fixed here rather than filed.
+  // ⚠ A POSITIVE CONTROL FIRST, AND IT IS NOT OPTIONAL HERE.
+  //
+  // `survivors.length === 0` is true of a machine this drive cleaned up, and it
+  // is equally true of a sweep keyed on a root nothing ever carried — which is
+  // exactly what a sweep of `tmp` would have been, since the proofs' roots are
+  // siblings of it rather than children. Those two worlds print the identical
+  // verdict, and only one of them means the instrument works.
+  //
+  // ⚠ AND THE OBVIOUS CONTROL — "assert `found` is non-zero" — IS WRONG ON A
+  // FIXED TREE, which was measured here rather than reasoned about. Before #125
+  // the proof leaked and `found` was reliably 24; after it, the proof sweeps its
+  // own root in its own §6(e), so by the time this arm runs there is legitimately
+  // nothing left and `found` is 0. A precondition asserting otherwise would go
+  // red for the best possible reason, which is a check that punishes the fix.
+  //
+  // So the control starts a process of its own carrying `sweepRoot` in its argv
+  // and requires the sweeper to SEE it. That can go red on any machine, it does
+  // not depend on whether anything leaked, and it is a claim about the
+  // instrument rather than about the world.
+  // The sweeper reads `/proc/<pid>/cmdline`, so the root has to be in the
+  // fixture's own ARGV — not its environment, not its working directory.
+  //
+  // ⚠ THIS CONTROL EARNED ITS KEEP ON THE FIRST RUN, against the author. The
+  // fixture here was `sh -c 'exec sleep 600 # <root>'`, on the reasoning that
+  // the shell's argv carries the path. It does — right up until `exec`
+  // REPLACES that argv with `sleep 600`, comment and all. The control went red,
+  // correctly, on a probe that was not there to be found. Had this arm shipped
+  // with only `survivors.length === 0`, the same broken fixture would have
+  // printed a clean green, and so would a sweep keyed on the wrong root.
+  //
+  // `node -e` holds the process open without exec'ing away, and the trailing
+  // argument is carried on the command line where /proc can see it.
+  const marker = spawn(
+    process.execPath,
+    ['-e', 'setInterval(() => {}, 60000)', path.join(sweepRoot, 'marker')],
+    { stdio: 'ignore' }
+  );
+  await new Promise((r) => setTimeout(r, 200));
+  const seen = processesUnder(sweepRoot).some((p) => p.pid === marker.pid);
+  check(
+    seen,
+    '(control +) the sweeper SEES a process carrying this drive\'s scratch root — so the verdict ' +
+      'below is a reading of the machine rather than of a sweep keyed on a root nothing bears',
+    `probe pid ${marker.pid} carries ${sweepRoot}`
+  );
+
+  const { found, survivors } = await sweepScratchRoot(sweepRoot);
+  check(
+    survivors.length === 0,
+    '[measurement] every process carrying this drive\'s scratch root is gone — the scratch ' +
+      'daemons and their attaches included, not merely the proofs\' own pid sets',
+    survivors.length
+      ? `still alive:\n          ${describe(survivors)}`
+      : `${found.length} swept (the control probe among them; the proof sweeps its own root in ` +
+        '§6(e) since KAN-529, so a low count here is that fix working rather than this one failing)'
   );
 }
 
