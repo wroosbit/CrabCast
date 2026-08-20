@@ -314,7 +314,21 @@ rule('2. ⚠ THE PRE-FIX TEARDOWN — the merged check goes GREEN while leaking'
     survivors.length ? \`still alive: \${survivors.join(', ')}\` : \`\${spawnedPids.size} ended\`
   );`;
 
+  // ⚠ THIS MUST TRACK THE PROOFS' ACTUAL TEXT. `mutate` requires exactly one
+  // occurrence, so if the boundary block is edited and this constant is not,
+  // the arm reports a COUNTED FAILURE ("expected exactly 1 occurrence … found
+  // 0") rather than silently running an unmutated copy and calling it a pass.
+  // The precondition check below joined the block when KAN-529's review found
+  // that the boundary check passed vacuously on a run whose daemon never
+  // started.
   const CURRENT = `  const { found, survivors } = await sweepScratchRoot(tmp);
+
+  check(
+    found.length > 0,
+    '(precondition) the sweep had something to sweep — so the verdict below is about a ' +
+      'teardown rather than about a run that never started',
+    \`\${found.length} process(es) carried \${tmp}\`
+  );
   check(
     survivors.length === 0,
     'every process carrying this run\\'s scratch root is gone — the daemon and its ' +

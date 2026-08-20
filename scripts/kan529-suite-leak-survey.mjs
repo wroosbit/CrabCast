@@ -43,6 +43,15 @@ import { fileURLToPath } from 'url';
 import { readVerifyArray } from './ci-workflow.mjs';
 import { processesUnder, killScratchRootSync, describe } from './scratch-processes.mjs';
 
+/**
+ * How long to let signalled processes actually leave the table before calling
+ * what remains a leak, and how often to look. See the poll below for why this
+ * is a wait-for-zero rather than a fixed sleep.
+ */
+const LEAK_SETTLE_MS = 5_000;
+const LEAK_POLL_MS = 250;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
 
@@ -116,12 +125,36 @@ for (const name of targets) {
 
   // The measurement, taken AFTER the process has exited: anything still
   // carrying this run's TMPDIR outlived the run that made it.
-  const survivors = processesUnder(tmpdir);
+  //
+  // ⚠ POLLED TO A TIMEOUT RATHER THAN SAMPLED ONCE, and the reason is a false
+  // positive this survey actually produced. `epic/KAN-59` ran it on 2026-08-20
+  // and got `verify-activated-by — LEAKED 10`, then could not reproduce it
+  // standalone: one run had 2 attaches present immediately after exit and gone
+  // seconds later, another had 0 at t+0.1s. A process that has been signalled
+  // is still on the process table while it winds down, so a single sample taken
+  // at t+0 counts processes that are LEAVING as processes that STAYED — and it
+  // counts more of them the more contended the machine is, which is exactly
+  // when this survey runs.
+  //
+  // ⚠ THE POLL IS ONE-SIDED ON PURPOSE: it waits for the count to reach ZERO
+  // and reports whatever is left when it gives up. A real leak never reaches
+  // zero, so waiting costs a clean run nothing but a few hundred milliseconds
+  // and costs a leaking run the full timeout ONCE. Anything that survives this
+  // long is not winding down.
+  const settleDeadline = Date.now() + LEAK_SETTLE_MS;
+  let survivors = processesUnder(tmpdir);
+  let settleWaited = 0;
+  while (survivors.length > 0 && Date.now() < settleDeadline) {
+    await sleep(LEAK_POLL_MS);
+    settleWaited += LEAK_POLL_MS;
+    survivors = processesUnder(tmpdir);
+  }
   rows.push({
     name,
     exit: res.status,
     leaked: survivors.length,
     secs,
+    settleWaited,
     detail: survivors.length ? describe(survivors) : ''
   });
 
@@ -137,7 +170,11 @@ for (const name of targets) {
     : res.status === 0
       ? { tag: 'ok  ', text: 'clean' }
       : { tag: '????', text: 'INCONCLUSIVE — exited non-zero, so nothing may have started' };
-  console.log(`  ${verdict.tag}  ${name} — exit ${res.status}, ${secs}s, ${verdict.text}`);
+  // `settled after Nms` is printed on every row that had to wait, so a reader
+  // can see the difference between "nothing was ever there" and "it went away
+  // while I watched" — the distinction the single sample could not make.
+  const settleNote = settleWaited ? `, settled after ${settleWaited}ms` : '';
+  console.log(`  ${verdict.tag}  ${name} — exit ${res.status}, ${secs}s${settleNote}, ${verdict.text}`);
   if (survivors.length) console.log(`          ${describe(survivors)}`);
 
   // Reap before the next script, so no row is measured against another's mess.
