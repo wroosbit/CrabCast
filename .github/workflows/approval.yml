@@ -20,7 +20,8 @@ name: Approval
 # runs on `pull_request` and on `push`. This is a function of the CONVERSATION on
 # the pull request: an approval arrives after the push that built it, so this has
 # to wake on `issue_comment` too. Adding a comment trigger to `ci.yml` would
-# re-run five jobs — including `verify`, which has a twenty-minute hang bound —
+# re-run five jobs — including `verify`, which carries a hang bound measured in
+# tens of minutes (30 as of KAN-585; `ci.yml` is the one place it is stated) —
 # on every comment anybody ever posts.
 #
 # WHY THE GATE IS A WORKFLOW JOB AND THE DECISION IS A PROOF. KAN-402 asks
