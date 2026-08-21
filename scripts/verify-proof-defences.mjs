@@ -743,6 +743,24 @@ const PROOF_DEFENCES = [
       'covers "a failed append is reported truthfully" and not "a full disk reaches this path".'
   },
   {
+    script: 'verify-missing-agent-occupancy',
+    defence: 'mutation',
+    central:
+      'one response cannot name a live pane under `foreignPanes` and assert that the same ' +
+      'directory has no live agent under `missingAgents` — the row carries `occupiedBy`, the ' +
+      'reason and the CLI heading stop saying work has stopped about a directory the same ' +
+      'output shows occupied, and `agent.lost` carries the qualification too.',
+    note:
+      'TWO MUTANTS OF THE COMPILED BUILD, one per surface: the router blinded to occupancy ' +
+      '(`occupant = null`) must bring the pre-fix contradiction back verbatim, and a CLI ' +
+      'heading that ignores its own rows must go back to asserting "their work has stopped". ' +
+      'SEAM: the fixture is a herdr STUB, so what is defended is the daemon\'s reconciliation ' +
+      'over a census and not a real second `claude` in a configured directory — that is what ' +
+      'epic/KAN-203 observed live and nothing on a runner reproduces it. It also asserts the ' +
+      'row SAYS an activation would be refused, and never that the refusal works; ' +
+      'verify-refuses-occupied-directory is what establishes that.'
+  },
+  {
     script: 'verify-fleet-enumeration',
     defence: 'mutation',
     central:

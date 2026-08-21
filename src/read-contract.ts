@@ -115,7 +115,7 @@ import type { ResumeCause } from './resume.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 13;
+export const READ_CONTRACT_VERSION = 14;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -246,6 +246,7 @@ export const ROW_SHAPES = {
     activatedBy: { bucket: 'durable' },
     promptChars: { bucket: 'durable' },
     since: { bucket: 'durable' },
+    occupiedBy: { bucket: 'observed', block: 'MissingAgentOccupant' },
     reason: { bucket: 'derived' }
   } satisfies FieldTable,
 
@@ -560,6 +561,28 @@ export const BLOCK_SHAPES = {
    * pane is sitting in, or null. Nested rather than spread precisely so a
    * `config` on a foreign row cannot be read as the stranger's.
    */
+  /**
+   * `missingAgents[].occupiedBy` — a live pane THIS DAEMON DID NOT START, in
+   * the directory of an agent this response is reporting as missing (KAN-572).
+   *
+   * THE MIRROR OF `OccupiedAgent` ABOVE, and the pair is worth reading together
+   * because they describe the same collision from the two sides. That block
+   * hangs off a `foreignPanes` row and names OUR agent — the one whose
+   * activation the stranger's pane will refuse. This one hangs off a
+   * `missingAgents` row and names THE STRANGER'S PANE — the thing that makes
+   * *"their work has stopped"* false about that row. Until this field existed,
+   * one response carried both facts and reconciled neither.
+   *
+   * ALL FOUR ARE `observed`: one census read, quoted, about a pane on no record
+   * of ours. There is nothing durable to be had — that is what makes it foreign.
+   */
+  MissingAgentOccupant: {
+    paneName: { bucket: 'observed' },
+    paneId: { bucket: 'observed' },
+    herdrStatus: { bucket: 'observed' },
+    agentRuntime: { bucket: 'observed' }
+  } satisfies FieldTable,
+
   OccupiedAgent: {
     path: { bucket: 'durable' },
     state: { bucket: 'derived' },
