@@ -1354,10 +1354,21 @@ jobs:
           # measured a misleading "EXIT=0 All assertions passed" from scripts
           # that were talking to the machine's live peer. The scratch $HOME is
           # what makes each measurement be about the daemon its own run started.
+          #
+          # ⚠ AND THE DIRECTORY NAME IS SHORT ON PURPOSE — `bp-` plus the
+          # proof's stem, not the whole proof name. A unix socket address holds
+          # at most 104 bytes, and this $HOME has
+          # `/.local/share/crabcast/crabcast.sock` (36 chars) appended to it by
+          # `defaultCrabCastSocket()`. Named `butchr-proof-home-$p` under
+          # $RUNNER_TEMP the socket path came to 112-114 characters and CrabCast
+          # REFUSED TO START — correctly, and with the arithmetic in the message.
+          # Measured on the runner, all three proofs, run 32504895294. Do not
+          # lengthen this stem; there are about twenty characters of headroom.
           failed=()
           for p in "${proofs[@]}"; do
             echo "::group::$p"
-            home="$RUNNER_TEMP/butchr-proof-home-$p"
+            home="$RUNNER_TEMP/bp-${p#verify-crabcast-}"
+            rm -rf "$home"
             mkdir -p "$home"
             if HOME="$home" node scripts/butchr-proof-harness.mjs "$p"; then
               verdict=PASSED
