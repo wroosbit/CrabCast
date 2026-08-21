@@ -43,15 +43,49 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+
+import { killScratchRootSync } from './scratch-processes.mjs';
 
 import { WIRED, EXCLUDED, ABSENT_AT_THESE_REFS } from './butchr-proof-import-registry.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const checkout = process.env.BUTCHR_PROOF_CHECKOUT ?? path.join(repoRoot, '.butchr-proofs');
 const proofDir = path.join(checkout, 'daemon', 'scripts');
+
+// Every scratch $HOME §3 hands to a harness run, so an interrupted run can take
+// its daemons with it. See the teardown note below.
+const scratchHomes = [];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIGNAL-PATH TEARDOWN. §3 runs the harness four times, and each of those may
+// start a CrabCast daemon; on SIGINT the ordinary cleanup at the foot of this
+// script is never reached. These roots ARE under the system temp directory and
+// each is a mkdtemp leaf, so the real sweeper applies here — it SIGKILLs any
+// process whose argv carries the root, which is what catches a daemon that
+// outlived the harness that started it.
+//
+// ⚠ The same spawnSync caveat as the harness: while a child is running this
+// process is blocked and a JS handler cannot run. A terminal ^C reaches the
+// whole group and this runs on the way out; a signal aimed at this pid alone
+// lands after the current child returns.
+const sweepScratchHomes = (why) => {
+  let killed = 0;
+  for (const root of scratchHomes) {
+    try { killed += killScratchRootSync(root); } catch { /* not sweepable / already gone */ }
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+  if (why) console.log(`\n[butchr-proof-reconcile] ${why} — killed ${killed} process(es) and removed ${scratchHomes.length} scratch home(s)`);
+};
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, () => {
+    sweepScratchHomes(signal);
+    process.exit(130);
+  });
+}
 
 let failures = 0;
 const check = (ok, what, detail = '') => {
@@ -185,11 +219,17 @@ const harness = path.join(repoRoot, 'scripts', 'butchr-proof-harness.mjs');
  * wrong process is how a check reports the world when it measured a pipeline.
  */
 const exitWithNoPeer = (name) => {
+  // Under the system temp dir rather than inside the repo: a scratch $HOME in
+  // the working tree is residue a failed run leaves behind in somebody's
+  // checkout, and it would need a .gitignore entry to stay invisible.
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'butchr-proof-disposition-'));
+  scratchHomes.push(scratch);
   const r = spawnSync(process.execPath, [harness, name, '--no-peer'], {
     encoding: 'utf8',
     timeout: 10 * 60 * 1000,
-    env: { ...process.env, HOME: fs.mkdtempSync(path.join(repoRoot, '.disposition-home-')) },
+    env: { ...process.env, HOME: scratch },
   });
+  try { fs.rmSync(scratch, { recursive: true, force: true }); } catch { /* swept below */ }
   return { status: r.status, signal: r.signal, tail: (r.stdout ?? '').split('\n').slice(-6).join('\n') };
 };
 
@@ -232,9 +272,9 @@ if (fs.existsSync(path.join(proofDir, `${CONTROL}.mjs`))) {
   check(false, `the negative control ${CONTROL} is present at the pin`, 'it is not — §3 is unproven without it');
 }
 
-for (const d of fs.readdirSync(repoRoot).filter((f) => f.startsWith('.disposition-home-'))) {
-  fs.rmSync(path.join(repoRoot, d), { recursive: true, force: true });
-}
+// The ordinary path. The signal path above does the same thing when this is
+// never reached.
+sweepScratchHomes(null);
 
 // ───────────────────────────────────────────────────────────────────────────
 console.log('');

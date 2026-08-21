@@ -213,6 +213,43 @@ const waitForSocket = async (deadlineMs) => {
 let daemon = null;
 const daemonLog = [];
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SIGNAL-PATH TEARDOWN — because an interrupted run must not leave a daemon
+// holding a socket. `verify-proof-teardown-sweeps` §4 requires this of any
+// script that spawns a scratch daemon, and it is right to: the ordinary exit
+// path below is not reached on SIGINT, so without this an interrupted CI job or
+// a hand-run cancelled with ^C leaves a live CrabCast behind.
+//
+// THE DAEMON IS KILLED BY ITS OWN HANDLE rather than by sweeping the scratch
+// root. `scratch-processes.mjs`'s sweeper refuses any root not strictly under
+// the system temp directory — correctly, since it SIGKILLs what it matches and
+// this machine runs the live fleet — and in CI this $HOME is under $RUNNER_TEMP,
+// which is not guaranteed to be that. The child handle needs no such check and
+// names exactly the one process this script started.
+//
+// ⚠ WHAT THIS DOES NOT COVER, so nobody reads it as more than it is: while the
+// proof itself is running, this script is blocked inside a synchronous
+// `spawnSync`, and a JS handler cannot run during it. A SIGINT in that window is
+// delivered to the whole process group by the terminal, so the proof and this
+// script die together and the handler runs on the way out — but a bare
+// `kill -TERM <pid>` aimed at this process alone lands after the wait, not
+// during it. The window is the proof's own runtime.
+const teardown = (why) => {
+  if (daemon && daemon.exitCode === null) {
+    try { daemon.kill('SIGKILL'); } catch { /* already gone */ }
+  }
+  if (!usingCallerHome) {
+    try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+  console.log(`\n[butchr-proof-harness] ${why} — killed the scratch daemon and cleaned up`);
+};
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, () => {
+    teardown(signal);
+    process.exit(130);
+  });
+}
+
 if (!noPeer) {
   daemon = spawn(process.execPath, [distDaemon, configPath], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   daemon.stdout.on('data', (c) => daemonLog.push(String(c)));
