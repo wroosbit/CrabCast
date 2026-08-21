@@ -594,8 +594,39 @@ console.log('\n=== 5. The document and the workflow agree about the number ===\n
   const yaml = fs.readFileSync(WORKFLOW, 'utf8');
   const doc = fs.readFileSync(COST_DOC, 'utf8');
 
-  const inYaml = [...yaml.matchAll(/^\s*timeout-minutes:\s*(\d+)\s*$/gm)].map((m) => m[1]);
-  check(inYaml.length === 1, 'ci.yml declares exactly one `timeout-minutes:`', `found ${inYaml.length}`);
+  // SCOPED TO THE `verify:` JOB, exactly as scripts/ci-timing-report.mjs scopes
+  // its own read of this number (see its `no \`verify:\` job found` branch).
+  //
+  // This was a file-wide scan requiring the whole workflow to carry exactly one
+  // `timeout-minutes:`, and that held only while `verify` was the sole job with
+  // a hang bound. KAN-519 added `butchr-proofs`, which has one for the same
+  // reason — it starts daemons and waits on sockets. A file-wide count then
+  // reads 2 and this section fails, having asked a question nobody meant: the
+  // subject here is the bound docs/verify-cost.md quotes, which is the VERIFY
+  // job's, and a second job's timeout is not a second copy of it.
+  //
+  // The reporter and this check now derive the number the same way, so the
+  // thing this section exists to catch — the document quoting a bound the
+  // workflow no longer carries — is unchanged, and the MUTANT drive below still
+  // demonstrates it going red.
+  const verifyJob = (() => {
+    const lines = yaml.split('\n');
+    const start = lines.findIndex((l) => /^ {2}verify:\s*$/.test(l));
+    if (start < 0) return null;
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i += 1) {
+      if (/^ {2}\S/.test(lines[i])) { end = i; break; }
+    }
+    return lines.slice(start, end).join('\n');
+  })();
+  check(verifyJob !== null, 'ci.yml still has a `verify:` job to read the bound from');
+
+  const inYaml = [...(verifyJob ?? '').matchAll(/^\s*timeout-minutes:\s*(\d+)\s*$/gm)].map((m) => m[1]);
+  check(
+    inYaml.length === 1,
+    'the verify job declares exactly one `timeout-minutes:`',
+    `found ${inYaml.length} in the verify job`
+  );
 
   const inDoc = [...doc.matchAll(/`timeout-minutes:\s*(\d+)`/g)].map((m) => m[1]);
   check(inDoc.length >= 1, 'docs/verify-cost.md states the bound', `found ${inDoc.length} mention(s)`);

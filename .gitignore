@@ -1,3 +1,9 @@
 node_modules/
 dist/
 *.log
+
+# KAN-519: the CI-time checkout of Butchr at .butchr-proof-pin.json's ref.
+# Untracked BY DESIGN — KAN-518 measured that vendoring these proofs cannot work
+# (10/10 fail on a resolved repoRoot) and that no placement puts them inside
+# CrabCast's guard perimeter. See docs/butchr-proof-import.md.
+.butchr-proofs/
