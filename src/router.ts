@@ -2216,10 +2216,19 @@ function readOwnerFilter(raw: unknown): { owner: string | null } | { error: stri
  * is a value `configure` refuses to store, so neither can be a caller's
  * intention. Reading either as "did not say" would answer a caller that meant
  * to identify itself with `unasked`, which is the softer of the two wrong
- * answers but is still an answer it did not ask for.
+ * answers it did not ask for.
+ *
+ * ⚠ IT RETURNS `askedAs` AND NOT `owner`, WHICH IS NOT A STYLE CHOICE. Named
+ * `owner`, this function's `raw === undefined` branch is textually identical to
+ * {@link readOwnerFilter}'s, and `verify-owner-filter.mjs` mutates that exact
+ * string — so a second copy makes its `null-is-no-filter` mutation match two
+ * sites, fail to apply, and the section it guards prove nothing. That proof
+ * caught this and said so rather than passing quietly. The name is also the
+ * truer one: what comes back is who the CALLER said it was, which is the same
+ * word the response block uses for it.
  */
-function readCallerOwner(raw: unknown): { owner: string | null } | { error: string } {
-  if (raw === undefined) return { owner: null };
+function readCallerOwner(raw: unknown): { askedAs: string | null } | { error: string } {
+  if (raw === undefined) return { askedAs: null };
   if (raw === null) {
     return {
       error:
@@ -2247,7 +2256,7 @@ function readCallerOwner(raw: unknown): { owner: string | null } | { error: stri
         `entirely if you are not saying who you are.`
     };
   }
-  return { owner: raw };
+  return { askedAs: raw };
 }
 
 /**
@@ -5459,7 +5468,7 @@ export class MessageRouter {
       // (KAN-596). Read off the record this call was already holding — the
       // owner `configure` froze onto it — and never from the occupying pane's
       // name, which is a derivation and not API. See `occupantOwnership`.
-      const ownership = occupantOwnership(config.owner, callerOwner.owner);
+      const ownership = occupantOwnership(config.owner, callerOwner.askedAs);
       fail(
         `Refusing to activate ${agentPath}: ${occupancy.occupants.length} live pane(s) are ` +
           `already running in that directory and none of them is ours.\n` +
