@@ -1789,6 +1789,19 @@ const _paneOccupantMatchesTheContract: Exact<
   keyof PaneOccupant,
   keyof typeof ROW_SHAPES.PaneOccupant
 > = true;
+// KAN-596. The block beside it, bound the same way — and the union's two
+// members carry the SAME key set deliberately, so that `keyof` here is the
+// whole shape rather than the intersection a differently-keyed union would
+// collapse to. Dropping `reading` from one arm would compile past this bind
+// while silently deleting the hedge from one of the two answers.
+const _occupantOwnershipMatchesTheContract: Exact<
+  keyof OccupantOwnership,
+  keyof typeof BLOCK_SHAPES.OccupantOwnership
+> = true;
+const _occupantRecognitionValuesAreExact: Exact<
+  (typeof VALUE_SETS.occupantRecognition)[number],
+  OccupantOwnership['recognition']
+> = true;
 const _provisionedArtifactMatchesTheContract: Exact<
   keyof ArtifactDisclosure,
   keyof typeof ROW_SHAPES.ProvisionedArtifact
@@ -2086,6 +2099,110 @@ const OWNER_FILTER_NOTE =
   'on this machine by omitting the filter, deliberately and by design. The only auth ' +
   'boundary is the socket\'s own file permission (0600 in a 0700 directory). Agents with no ' +
   'owner are matched by NO filter and are reachable only by an unfiltered read.';
+
+// ------------------------------------------------- who the directory is for
+
+/**
+ * What CrabCast can say about WHOSE the pane sitting in an occupied directory
+ * is — `occupantOwnership` on every response that carries `occupiedBy`.
+ *
+ * THE PREMISE AND THE CONCLUSION ARE DIFFERENT FIELDS, and that separation is
+ * the whole design rather than a presentational choice. `owner` is the opaque
+ * string a caller handed `configure` for this path, echoed back verbatim: it
+ * is a FACT, and it is all that is known. `reading` is the only place this
+ * daemon draws anything from it, and what it draws is deliberately hedged —
+ * because a recorded owner establishes who configured the DIRECTORY, and never
+ * who is running in the PANE. A caller that wants the fact reads `owner`; a
+ * human who wants to know what to do next reads `reading`.
+ *
+ * WHY THAT MATTERS HERE MORE THAN IT USUALLY WOULD: the failure this exists to
+ * avoid is a premise about a NAME yielding a conclusion about an AGENT. This
+ * daemon does not parse the occupant's pane name, and must not — a derived pane
+ * name is not API, and the first prefix match would invite a namespace this
+ * daemon would then owe compatibility on. The recorded owner replaces that
+ * inference with a value that was DECLARED, which is a better premise; it is
+ * not a stronger one, and the wording must not treat it as one.
+ *
+ * `none-recorded` IS `NOT RECOGNISED` AND IS NEVER `SOMEBODY ELSE'S`. Every
+ * agent configured before its caller began declaring an owner has none, so on
+ * a fleet mid-adoption absence is the MAJORITY state rather than the exotic
+ * one. A reading that rendered it as *not yours* would be confidently wrong
+ * about most of a fleet, and wrong in the direction that invites the
+ * destructive remedy — standing down a pane that turns out to be your own.
+ */
+export type OccupantOwnership =
+  | {
+      /** An `owner` was recorded for this path. `owner` carries it verbatim. */
+      recognition: 'recorded';
+      owner: string;
+      reading: string;
+    }
+  | {
+      /** No `owner` was ever recorded for this path. NOT a claim about whose it is. */
+      recognition: 'none-recorded';
+      /** Null, and unrepresentable as anything else — see the union above. */
+      owner: null;
+      reading: string;
+    };
+
+/**
+ * THE ONE SITE where a recorded `owner` becomes a sentence about identity.
+ *
+ * Every surface that reports an occupied directory prints what this returns,
+ * verbatim, and composes nothing of its own. That is not tidiness: a sentence
+ * written twice is a sentence that can be attached to a premise that does not
+ * carry it, which is exactly how a hedge gets dropped on the copy nobody
+ * re-reads. One site is what makes the hedge enforceable rather than
+ * remembered, and `verify-occupied-names-owner.mjs` §4 asserts the count.
+ */
+function occupantOwnership(config: Pick<AgentConfig, 'owner'> | undefined): OccupantOwnership {
+  const owner = config?.owner;
+  if (owner === undefined) {
+    return {
+      recognition: 'none-recorded',
+      owner: null,
+      reading:
+        'NOT RECOGNISED — no `owner` was ever recorded for this path, so CrabCast cannot say ' +
+        'whose the pane above is. THAT IS NOT THE SAME AS SOMEBODY ELSE\'S: an agent ' +
+        'configured before its caller began declaring an owner has none, and on a fleet ' +
+        'part-way through adopting the knob most agents are in exactly that state. Do not ' +
+        'read it as evidence about whose the pane above is. ' +
+        MIGRATION_PATH
+    };
+  }
+  return {
+    recognition: 'recorded',
+    owner,
+    reading:
+      `RECORDED — \`configure\` was handed owner ${JSON.stringify(owner)} for this path, and ` +
+      'that string is echoed here verbatim; CrabCast neither parses it nor matches it against ' +
+      'anything. WHAT IT ESTABLISHES IS WHO CONFIGURED THE DIRECTORY, NOT WHO IS RUNNING IN ' +
+      `THE PANE — so if ${JSON.stringify(owner)} is you, the pane above is most likely your ` +
+      'own agent under another runtime rather than a stranger\'s, and if it is not you, it is ' +
+      'somebody else\'s directory. Either way this daemon is reporting a record, not an ' +
+      'identification. ' +
+      MIGRATION_PATH
+  };
+}
+
+/**
+ * The way OUT of an occupied directory, said where the refusal is rather than
+ * in a document the reader would have to already know to look for.
+ *
+ * IT LEADS WITH THE COST BECAUSE THE COST IS THE UNRECOVERABLE PART. Standing
+ * a pane down and activating is two commands; what neither of them says on its
+ * own is that CrabCast resumes a conversation only where ITS OWN record shows
+ * this agent ran before. At a directory adopted from another runtime that
+ * record does not exist, so the first activation starts FRESH and whatever the
+ * occupying pane was in the middle of is gone. An ordering that is merely
+ * inconvenient to get wrong does not need warning about; this one cannot be
+ * undone.
+ */
+const MIGRATION_PATH =
+  'TO BRING IT UNDER CRABCAST: stand that pane down, then `activate`. ⚠ CrabCast resumes a ' +
+  'conversation only where its OWN record shows this agent ran before, so on a directory ' +
+  'adopted from another runtime the first activation starts a NEW one and the conversation ' +
+  'in that pane is not recoverable. Stand it down at a point you are willing to lose.';
 
 /**
  * The `owner` field of a request, validated, or the refusal naming what is
@@ -4171,6 +4288,11 @@ export class MessageRouter {
       // Advisory, never a refusal. Empty means the census answered and found
       // nothing live here.
       occupiedBy,
+      // Whose the directory is recorded as being, beside the panes that are in
+      // it — reported here for the same reason `occupiedBy` is: this is the
+      // call that happens HOURS before the occupant bites, so it is the cheap
+      // place to learn that the pane you are about to stand down is your own.
+      ...(occupiedBy.length ? { occupantOwnership: occupantOwnership(parsed.config) } : {}),
       // And when the census could NOT answer, that is said rather than
       // rendered as an all-clear: an empty `occupiedBy` from an unreachable
       // herdr would be a check reporting its own failure as good news.
@@ -5235,6 +5357,7 @@ export class MessageRouter {
         ...(coOccupants.length
           ? {
               occupiedBy: coOccupants,
+              occupantOwnership: occupantOwnership(config),
               note:
                 `This agent is running, and ${coOccupants.length} pane(s) that are not ours ` +
                 `are live in the same directory. Nothing was started and nothing was ` +
@@ -5247,6 +5370,10 @@ export class MessageRouter {
     }
 
     if (occupancy.occupants.length > 0) {
+      // Composed ONCE, above, and printed here rather than re-worded: the
+      // hedge on what a recorded owner establishes is the load-bearing part of
+      // it, and a second wording is where a hedge goes missing (KAN-596).
+      const ownership = occupantOwnership(config);
       fail(
         `Refusing to activate ${agentPath}: ${occupancy.occupants.length} live pane(s) are ` +
           `already running in that directory and none of them is ours.\n` +
@@ -5254,7 +5381,8 @@ export class MessageRouter {
           `\nNOTHING WAS STARTED. Two agents in one directory is how work gets overwritten ` +
           `and neither of them finds out. Stop the pane above, or point CrabCast at a ` +
           `different directory. This is not a claim on that pane: CrabCast never closes a ` +
-          `pane it did not start.`,
+          `pane it did not start.` +
+          `\nrecorded owner of this directory: ${ownership.reading}`,
         {
           path: agentPath,
           refused: 'occupied',
@@ -5267,7 +5395,14 @@ export class MessageRouter {
           // absence is asserted in verify-idempotent-lifecycle.mjs §4, because
           // one branch over the same value is correct and no type can tell
           // them apart. `started: false` comes from `fail`.
-          occupiedBy: occupancy.occupants
+          occupiedBy: occupancy.occupants,
+          // THE FIELD THIS BRANCH EXISTS TO CARRY (KAN-596). The refusal above
+          // says a pane is in the way and names it; this says whose CrabCast
+          // was told the directory is, which is what decides whether the
+          // reader's next move is `stand it down` or `I have the wrong path`.
+          // It is a record read back, never a judgement about the pane — see
+          // {@link OccupantOwnership}.
+          occupantOwnership: ownership
         }
       );
       return;

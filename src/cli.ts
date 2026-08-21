@@ -1044,7 +1044,19 @@ function renderActivate(reader: ResponseReader, request: Record<string, unknown>
       reader.take('verified') === false
         ? `${INDENT}verified:      false — the daemon could not confirm the agent exists`
         : null,
-      occupiedBlock(reader.take('occupiedBy')),
+      // The reading is the daemon's and rides `error` on this branch, exactly
+      // as `derivation` does — so the block below prints the owner value and
+      // not the paragraph a reader has just read.
+      (() => {
+        const ownership = reader.take<{ reading?: string }>('occupantOwnership');
+        return occupiedBlock(
+          reader.take('occupiedBy'),
+          ownership,
+          typeof error === 'string' &&
+            typeof ownership?.reading === 'string' &&
+            error.includes(ownership.reading)
+        );
+      })(),
       missingKnobs(reader.take('missing')),
       alreadyInError ? null : verbatim('derivation:', derivation),
       capacity ? `\ncapacity:\n${capacity}` : null,
@@ -1080,7 +1092,7 @@ function renderActivate(reader: ResponseReader, request: Record<string, unknown>
       // A stranger sharing the directory does not make this a refusal, but it
       // is never swallowed: two agents in one directory is what the whole
       // occupancy guard exists to make visible.
-      occupiedBlock(reader.take('occupiedBy')),
+      occupiedBlock(reader.take('occupiedBy'), reader.take('occupantOwnership')),
       (() => {
         const note = reader.take<string>('note');
         return note ? `\n${note}` : null;
@@ -1173,17 +1185,72 @@ function renderDeactivate(reader: ResponseReader, request: Record<string, unknow
   );
 }
 
-/** The advisory/refusal list of panes sitting in the target directory. */
-function occupiedBlock(occupants: unknown): string | null {
+/**
+ * The advisory/refusal list of panes sitting in the target directory, and whose
+ * CrabCast was told that directory is.
+ *
+ * THE OWNERSHIP LINE IS THE DAEMON'S SENTENCE, PRINTED AND NOT COMPOSED
+ * (KAN-596). What a recorded `owner` does and does not establish about the pane
+ * above it is a rule of the daemon's, hedged there on purpose, and a wording of
+ * this CLI's own is the copy that loses the hedge the first time either side
+ * moves. Same decision, and the same reason, as `remedy` and `unrecordedPane`
+ * elsewhere in this file.
+ *
+ * ⚠ AND IT IS PRINTED WHENEVER THE DAEMON SENDS IT, never only when an owner
+ * was recorded. `none-recorded` is the answer this block most needs to show:
+ * silence there would leave the reader to supply their own default, and the
+ * default a reader supplies for a missing owner is *"then it is not mine"* —
+ * which is wrong about most of a fleet mid-adoption and wrong in the direction
+ * that stands down somebody's own work.
+ */
+function occupiedBlock(
+  occupants: unknown,
+  ownership?: unknown,
+  readingAlreadyPrinted = false
+): string | null {
   if (!Array.isArray(occupants) || !occupants.length) return null;
+  const own = ownership as { owner?: string | null; reading?: string } | undefined;
   return lines(
     `\nlive panes already in that directory (${occupants.length}):`,
     ...occupants.map(
       (o: any) =>
         `${INDENT}pane_id ${o.paneId ?? '(not reported)'}  name ${o.name}  ` +
         `[${o.agentStatus}]${o.workDir ? `  cwd ${o.workDir}` : ''}`
-    )
+    ),
+    // Absent on a daemon older than the field — said as "not reported" rather
+    // than skipped, so an old daemon does not read as a fleet with no owners.
+    own === undefined
+      ? `${INDENT}recorded owner:  (not reported — this daemon predates the field)`
+      : lines(
+          `${INDENT}recorded owner:  ${own.owner === null || own.owner === undefined
+            ? 'NONE'
+            : JSON.stringify(own.owner)}`,
+          // THE VALUE ALWAYS, THE SENTENCE ONCE. On the refusal the daemon has
+          // already put its reading inside `error`, which this command prints
+          // above — so repeating it here would say the same paragraph twice on
+          // one screen and teach the reader to skip both. The VALUE still
+          // prints, on its own line, because that is the part somebody scans
+          // for. Same decision, and the same test, as `derivation` on a
+          // capacity refusal.
+          ...(readingAlreadyPrinted ? [] : wrapped(own.reading ?? '', `${INDENT}${INDENT}`))
+        )
   );
+}
+
+/** Prose folded to the terminal, so a long sentence does not become one line. */
+function wrapped(text: string, indent: string, width = 84): string[] {
+  const out: string[] = [];
+  let line = '';
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    if (line && line.length + 1 + word.length > width) {
+      out.push(indent + line);
+      line = word;
+    } else {
+      line = line ? `${line} ${word}` : word;
+    }
+  }
+  if (line) out.push(indent + line);
+  return out;
 }
 
 /** Which `configure` knobs the daemon says are missing. */
@@ -1344,7 +1411,7 @@ function renderConfigure(reader: ResponseReader, request: Record<string, unknown
     reader.take('occupancyUnknown')
       ? `${INDENT}occupancy:     UNKNOWN — herdr did not answer, so nothing was checked`
       : null,
-    occupiedBlock(occupied),
+    occupiedBlock(occupied, reader.take('occupantOwnership')),
     outcomesBlock(reader.take('outcomes')),
     // OURS BY NAME, AND UNKNOWN TO THE RECORD. Printed above the daemon's
     // `note` rather than folded into it: it is the one thing on a successful

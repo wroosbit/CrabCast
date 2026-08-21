@@ -115,7 +115,7 @@ import type { ResumeCause } from './resume.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 14;
+export const READ_CONTRACT_VERSION = 15;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -583,6 +583,32 @@ export const BLOCK_SHAPES = {
     agentRuntime: { bucket: 'observed' }
   } satisfies FieldTable,
 
+  /**
+   * `occupantOwnership` — whose CrabCast was TOLD the occupied directory is,
+   * beside the panes sitting in it (KAN-596). On every response that carries
+   * `occupiedBy`.
+   *
+   * THE TWO FIELDS ARE DIFFERENT KINDS OF THING AND THEIR BUCKETS SAY SO.
+   * `owner` and `recognition` are `durable`: the opaque string a caller froze
+   * onto this path at `configure`, read back off the registry and echoed
+   * verbatim, and the fact of whether one was ever frozen. `reading` is
+   * `derived` — it is this daemon's sentence about what that record does and
+   * does NOT establish, composed for this response and stored nowhere.
+   *
+   * READ THE BUCKETS AS THE WARNING THEY ARE. Nothing here is `observed`,
+   * because nothing here was read off herdr: the panes on `occupiedBy` are the
+   * observation and they are a separate field. An owner says who configured the
+   * DIRECTORY; it is not evidence about the process in the pane, and a consumer
+   * that joins the two into an identification has made a claim this surface
+   * does not support. See {@link VALUE_SETS.occupantRecognition} for why
+   * absence is `not recognised` rather than `somebody else's`.
+   */
+  OccupantOwnership: {
+    recognition: { bucket: 'durable' },
+    owner: { bucket: 'durable' },
+    reading: { bucket: 'derived' }
+  } satisfies FieldTable,
+
   OccupiedAgent: {
     path: { bucket: 'durable' },
     state: { bucket: 'derived' },
@@ -1048,6 +1074,13 @@ export const ACTIVATE_RESPONSE_FIELDS = {
   recordReconciled: { bucket: 'derived', optional: true },
   /** Live panes in the directory that are not ours. */
   occupiedBy: { bucket: 'observed', optional: true, rows: 'PaneOccupant' },
+  /**
+   * Whose CrabCast was TOLD that directory is (KAN-596). Present exactly where
+   * `occupiedBy` is non-empty, and `durable` rather than `observed` because it
+   * is a record read back — see {@link BLOCK_SHAPES.OccupantOwnership} for why
+   * that distinction is the point rather than bookkeeping.
+   */
+  occupantOwnership: { bucket: 'durable', optional: true, block: 'OccupantOwnership' },
   /** Prose for a human, beside a co-occupancy that was reported and not refused. */
   note: { bucket: 'derived', optional: true },
   /**
@@ -1205,7 +1238,8 @@ export const ACTIVATE_RESPONSE_BRANCHES = {
       'configuredAt', 'everActivated', 'activatedBy', 'promptChars', 'channelEnabled'
     ],
     sometimes: [
-      'reattached', 'recordReconciled', 'durable', 'durabilityError', 'occupiedBy', 'note'
+      'reattached', 'recordReconciled', 'durable', 'durabilityError', 'occupiedBy',
+      'occupantOwnership', 'note'
     ]
   },
   /**
@@ -1243,7 +1277,8 @@ export const ACTIVATE_RESPONSE_BRANCHES = {
    */
   occupied: {
     always: [
-      'action', 'success', 'started', 'error', 'path', 'refused', 'verified', 'occupiedBy'
+      'action', 'success', 'started', 'error', 'path', 'refused', 'verified', 'occupiedBy',
+      'occupantOwnership'
     ],
     sometimes: []
   },
@@ -1465,6 +1500,20 @@ export const VALUE_SETS = {
    * being true without anybody noticing.
    */
   activateRefusedBy: ['capacity'],
+  /**
+   * `occupantOwnership.recognition` (KAN-596) — whether an `owner` was ever
+   * recorded for the occupied directory.
+   *
+   * TWO MEMBERS, AND THE SECOND IS THE ONE THAT IS EASY TO MISREAD.
+   * `none-recorded` means NOT RECOGNISED — no owner was ever frozen onto this
+   * path — and it is NOT a claim that the directory belongs to somebody else.
+   * Every agent configured before its caller began declaring an owner carries
+   * it, so on a fleet part-way through adopting the knob it is the MAJORITY
+   * answer rather than the odd one. A consumer that reads it as *not mine* and
+   * acts on that stands down its own work; that is the destructive direction,
+   * which is why absence is a member with a name rather than a null.
+   */
+  occupantRecognition: ['recorded', 'none-recorded'],
   /** `activate_response.resume` — why a restore was a restore. Only on a restore. */
   resumeCause: ['reboot', 'daemon-restart', 'preempted'],
   /** `provisioned[].artifact` — what kind of thing was written. */

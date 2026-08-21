@@ -1111,6 +1111,7 @@ jobs:
             verify-cli-parity
             verify-herdr-version-notice
             verify-refuses-occupied-directory
+            verify-occupied-names-owner
             verify-idempotent-lifecycle
             verify-restart-survival
             verify-prompt-is-not-a-template
