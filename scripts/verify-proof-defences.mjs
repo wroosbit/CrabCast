@@ -2317,6 +2317,13 @@ const PROOF_DEFENCES = [
       'is the drift that really happened. THAT DRIVE IS NOT IN THE CI ARRAY and nothing gates on ' +
       'it, so the evidence that this guard bites is a hand-run pasted on the pull request for ' +
       'KAN-607. ' +
+      'IT CARRIES A SIGNAL-PATH TEARDOWN and is deliberately NOT in verify-proof-teardown-sweeps\' ' +
+      'NO_SIGNAL_TEARDOWN register — the first option that check offers rather than the second. ' +
+      'It starts no daemon, but an interrupted run DID leak a staged copy of the tree, and that ' +
+      'is what the handler removes. ⚠ ITS ARMS ARE ASYNC FOR THAT REASON ALONE: a handler on the ' +
+      'wholly synchronous version could not be reached until the run had finished, so it merely ' +
+      'SWALLOWED the interrupt — measured at 115 lines of output against 37 with no handler at ' +
+      'all. A teardown that cannot run is this suite\'s own defect one level down. ' +
       '⚠ THE SEAM, and it is a boundary rather than a hole: this joins the pages to the CLI\'s ' +
       'TABLES, never to its BEHAVIOUR. That `spawnsDaemon: false` really does exit 3 against a ' +
       'machine with no daemon is `verify-cli-refusal.mjs`, which drives a real CLI; if the tables ' +
