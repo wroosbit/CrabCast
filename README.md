@@ -852,8 +852,8 @@ whose last step is *"anything running that is not in my desired list → off"*, 
 such a caller has to be able to tell **not mine** from **unknown to me**.
 
 **A filtered response says what it narrowed and what it did not.** `agents`,
-`missingAgents`, `preemptedAgents`, `standbyAgents` and `unstartedAgents` are
-narrowed, and their `*Total`s and `pages.<category>` counts describe the
+`missingAgents`, `preemptedAgents`, `standbyAgents`, `unstartedAgents` and
+`strandedAgents` are narrowed, and their `*Total`s and `pages.<category>` counts describe the
 **filtered** set — which is what keeps paging correct under it, and which means
 the numbers alone cannot tell you a filter was applied. The `ownerFilter` block
 on the response is the only thing that can, and it also names the four arrays

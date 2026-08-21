@@ -159,6 +159,7 @@ would be N chances for the copy that goes stale.
 | 12 | 2026-08-16 | KAN-504 — `configure_agent` gains one knob, `args`: extra command-line arguments for the launcher's own process, which appear in the `config` echo on `list_agents` and `agent_status` with the other knobs. **Additive: no documented field changed meaning, was removed, or changed type, and a caller that never sends `args` receives byte-for-byte what it received at version 11** — an agent configured without them is spawned with the command line it was spawned with before this version existed. ⚠ **THE DIGEST IS UNCHANGED FROM VERSION 11, DELIBERATELY, AND THAT IS THE ONE THING TO READ ON THIS ROW.** The digest is over the canonical of THIS document's declarations, where `config` is a single field of bucket `durable` — its interior is the [event contract](event-contract.md)'s `CONFIG_FIELDS`, not this one's — so a knob added inside it cannot move this number. **A repeated digest here means exactly this: the version moved because a change happened that the digest cannot see.** It is not a rewritten row and not a mistake; a reader comparing digests to decide whether anything changed would conclude wrongly, which is why it is stated rather than left to be noticed. **What ignoring the new knob costs a consumer:** nothing, if they never send `args`. If they DO send it to a daemon older than this version, it is **silently ignored** — `configure` does not refuse unknown fields — so the agent starts, reports success, and its process is missing arguments the caller believes it has. That failure is invisible from the response, and **this integer is the only way to tell a daemon that will honour `args` from one that will drop them.** Read it before sending the knob, not after. | `c67cbe8b8525` |
 | 13 | 2026-08-18 | KAN-528 — `list_agents` **stops carrying the prompt text** and carries its size instead, and every echo-bearing response gains one field. `config.prompt` is absent from every row of a fleet read; the new `promptChars` on the config echo is its exact character count (`0` for an empty prompt somebody froze, `null` for a record with none), and `configEchoContract.summarised` names the knob, what replaced it and where the text still is. `agent_status` and `activate_response` are unchanged in what they carry — `config.prompt` whole — and gain `promptChars` beside it, where it is simply that string's length. ⚠ **This is the one entry in this table that is NOT purely additive, and it is a removal from one surface: a consumer reading `config.prompt` off a `list_agents` row got the text at version 12 and gets `undefined` at 13.** It was not optional. A prompt is accepted up to 131,072 characters and this response echoed one per row, so a fleet of ten supervisor-sized prompts exceeded the socket's 1 MiB framing bound — at which point `list_agents` did not return a shortened answer, it returned **nothing** and the connection closed. The removal is what makes the response deliverable at all, it is declared on the response rather than left to be discovered, and the text stays readable one agent at a time from `agent_status`. **No row is dropped and no total is reduced:** the reduction is per-field, never per-agent | `d4093ade8dc3` |
 | 14 | 2026-08-21 | KAN-572 — one field added to [MissingAgent](#missingagent), and therefore to every `missingAgents[]` row and to the `agent.lost` event that spreads that row whole: `occupiedBy`, a new block [MissingAgentOccupant](#missingagentoccupant) naming the live pane **this daemon did not start** that is sitting in the missing agent's directory, or `null`. **Additive: no documented field changed meaning, was removed, or changed type**, and a consumer that ignores it reads what it read at version 13. ⚠ **What DID change is a `derived` field's CONTENT, and that is the substance of this row rather than the new key.** `reason` had two cases and now has three: an occupied row no longer says *"herdr has no live agent in its directory"*, because that sentence was **false** and the same response disproved it under [`foreignPanes`](#foreignpane). The classification was never wrong — no agent *of ours* is running — but the ownership question is NAME-scoped (`ourPaneIn` asks for a pane called `paneNameFor(path)`) while the sentence was DIRECTORY-scoped, so a stranger's pane in that very directory was reported as an empty workspace. **What ignoring the new field costs a consumer:** the thing it cost before this version, which is why it is not cosmetic — this category's remedy is re-activation, which **resumes the conversation an agent was stopped in**, and a row whose directory is occupied was never stopped and would be refused anyway. Measured on one `crabcast list` run: 3 of 7 workspaces under *"their work has stopped while still looking staffed"* were alive at that moment, one of them the agent producing the output. A false red whose remedy is the damage is worse than a false green | `cd932937e273` |
+| 15 | 2026-08-21 | KAN-594 — `list_agents` gains a **sixth paged category**, [strandedAgents](#strandedagent), and the `strandedTotal` beside it: records whose **directory no longer exists**. **Additive on the wire: no documented field changed meaning, was removed, or changed type**, and a consumer that ignores both keys reads what it read at version 14. ⚠ **What DID change is which category some rows arrive in, and that is the substance of this row rather than the new key.** Before this version a record whose directory had been deleted reached a reader in one of two wrong ways. `standbyAgents` and `unstartedAgents` **dropped it silently** on a bare existence check — correct about what that filter was written for, since neither list may offer a switch that cannot be thrown, and wrong to decide on the same line that the record should not be REPORTED either, so the row left the response entirely while staying in the registry. `missingAgents` **kept it and described it wrongly**, having no existence check at all: an `activated`-last record with no directory was reported as *"herdr has no live agent in its directory"*, which asserts a directory that is not there and invites a re-activation that `activate` refuses. Those rows now appear under `strandedAgents` instead, so **`missingTotal` can go DOWN across this upgrade with nothing having been fixed** — the rows moved. **What ignoring the new category costs a consumer:** the thing it cost before, which is why this is not cosmetic — a reconciler summing the categories to account for its registry was short by exactly these rows and had no field that said so. `lastEvent` on each row is the `configured`-versus-`activated` distinction the population that commissioned this could not be read without: a count of configured-and-never-retired records and a raw count of log lines differed there by an order of magnitude and both were honest readings of the same file. ⚠ **Nothing retires a stranded row** — compaction never drops an agent, because a directory can also be absent because a mount is late | `705c1961d0ba` |
 
 The digest is `sha256(readContractCanonical())`, first 12 hex characters, over
 `src/read-contract.ts`'s declarations. **What it buys:** changing a documented
@@ -233,11 +234,13 @@ on a timer, and that five of its categories are **paged** and must be walked to
 | `preemptedAgents` | derived | stood down to make room — [PreemptedAgent](#preemptedagent) rows. **Paged** |
 | `standbyAgents` | derived | switched off, and it has run — [StandbyAgent](#standbyagent) rows. **Paged** |
 | `unstartedAgents` | derived | configured, never run — [UnstartedAgent](#unstartedagent) rows. **Paged** |
+| `strandedAgents` | derived | its **directory is gone** — [StrandedAgent](#strandedagent) rows. **Paged** |
 | `foreignPanes` | derived | live panes that are not ours — [ForeignPane](#foreignpane) rows. **Paged** |
 | `missingTotal` | derived | rows in the whole category, cursor or no cursor |
 | `preemptedTotal` | derived | as above |
 | `standbyTotal` | derived | as above |
 | `unstartedTotal` | derived | as above |
+| `strandedTotal` | derived | as above. **A zero here is the claim that no record outlives its directory** |
 | `foreignPanesTotal` | derived | as above |
 | `unreadableRecords` | durable | rows in the durable registry this daemon **could not read** — [UnreadableRecord](#unreadablerecord) rows. Present-and-empty on a wholly readable registry. **Not paged**: bounded at 25, and `unreadableRecordsTotal` is never clipped |
 | `unreadableRecordsTotal` | derived | how many there are, whatever this response carried |
@@ -532,8 +535,59 @@ stopped in*. An agent that has never run has nothing to continue, so the same
 call starts fresh. Folding the two together does not merely blur a label; it
 makes the standby list's own promise false for half its members.
 
-The four not-running categories — missing, preempted, standby, unstarted — are
-**disjoint on purpose**, so no agent grows two switches.
+The five not-running categories — missing, preempted, standby, unstarted,
+stranded — are **disjoint on purpose**, so no agent grows two switches.
+
+<a id="strandedagent"></a>
+### `strandedAgents[]` — StrandedAgent
+
+**The record is there and its directory is not.** Nothing to activate, nothing
+to resume, and `forget` is the only verb left.
+
+<!-- contract-table: ROW_SHAPES.StrandedAgent -->
+
+| field | bucket | what it is |
+| --- | --- | --- |
+| `path` | durable | |
+| `paneName` | derived | |
+| `label` | durable | |
+| `launcher` | durable | which launcher its record names. It will not run again under this record |
+| *config echo* | durable | |
+| `since` | durable | when the registry recorded `lastEvent` |
+| `lastEvent` | durable | `configured`, `activated` or `deactivated` — what the record's last event was, which is what says whether this agent ever ran |
+| `reason` | derived | |
+
+**It is not `missingAgents`, and the pair is the easiest confusion on this
+page.** `missing` is about the **pane**: the directory is there and nothing of
+ours is running in it, which is recoverable and usually means re-activate.
+`stranded` is about the **directory**: it is gone, and nothing is recoverable. A
+row is in exactly one of them, and `fs.existsSync(path)` is what separates them.
+
+**Why the test is the filesystem and not a path prefix.** The population that
+commissioned this category (KAN-594) was fixture rows under `/tmp` left behind
+by proof runs whose teardown deleted the directory without calling `forget`. A
+`/tmp` filter would have made exactly those rows stop being counted — invisible
+rather than accounted for, which is the defect wearing the fix's clothes. A
+prefix is not a fact about provenance either: an operator may legitimately keep
+a workspace under `/tmp`, and a proof may legitimately keep one elsewhere.
+Whether the directory exists is a fact.
+
+⚠ **Nothing retires these rows, and that is a limit rather than an omission.**
+Compaction never drops an agent — a directory can be temporarily unmounted, and
+*"your agent stopped existing because a mount was slow"* is not a trade anybody
+offered. This category makes the record **visible** so a person can retire it
+with `forget`; deciding on their behalf that it is gone for good is a much
+stronger claim, and one read of a filesystem is not evidence for it. A row whose
+mount comes back leaves this list by itself.
+
+⚠ **`path` is `durable` and resolves to nothing, and that is not a contradiction
+in the buckets.** `durable` says the value came off the log rather than being
+computed here; it does not claim the world still agrees with it. This is the one
+row shape where those two come apart by definition.
+
+**A non-empty `strandedAgents` is not an error.** It is the ordinary residue of
+workspaces somebody finished with and deleted. `strandedTotal: 0` is the claim
+that no record outlives its directory.
 
 <a id="foreignpane"></a>
 ### `foreignPanes[]` — ForeignPane

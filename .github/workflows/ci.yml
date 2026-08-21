@@ -1178,6 +1178,7 @@ jobs:
             verify-event-durability
             verify-fleet-enumeration
             verify-missing-agent-occupancy
+            verify-stranded-agents
             verify-fleet-read-fits-the-wire
             verify-config-echo-contract
             verify-ci-wiring-guards

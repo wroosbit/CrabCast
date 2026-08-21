@@ -1451,6 +1451,8 @@ function renderList(reader: ResponseReader, request: Record<string, unknown>): s
   const standbyTotal = reader.take('standbyTotal');
   const unstarted = reader.take<any[]>('unstartedAgents') ?? [];
   const unstartedTotal = reader.take('unstartedTotal');
+  const stranded = reader.take<any[]>('strandedAgents') ?? [];
+  const strandedTotal = reader.take('strandedTotal');
   // One entry per paged category: `returned`, `total`, `limit`, `remaining`
   // and the `nextCursor` that reaches the rest of it. Each heading below is
   // handed its own entry, so a truncated category prints the command that
@@ -1621,6 +1623,32 @@ function renderList(reader: ResponseReader, request: Record<string, unknown>): s
                 (u.label ? ` (${u.label})` : ''),
               `${INDENT}${INDENT}${u.reason}`,
               configBlock(u)
+            )
+          )
+        : [`${INDENT}(none)`])
+    ),
+
+    // The sixth answer to "not running", and the one that used to be reported
+    // in two different wrong ways (KAN-594). Printed always, even at zero, for
+    // the reason the others are — and here the zero is the useful reading, since
+    // it is the claim that no record outlives its directory.
+    lines(
+      categoryHeading(
+        'stranded agents',
+        stranded,
+        strandedTotal,
+        'their DIRECTORY is gone — nothing to activate and nothing to resume; ' +
+          '`forget` is what retires the record, and nothing does it for you',
+        pageOf('strandedAgents')
+      ),
+      ...(stranded.length
+        ? stranded.map((s: any) =>
+            lines(
+              `${INDENT}${s.path} — ${s.lastEvent} ${s.since}` +
+                (s.launcher ? `, launcher ${s.launcher}` : '') +
+                (s.label ? ` (${s.label})` : ''),
+              `${INDENT}${INDENT}${s.reason}`,
+              configBlock(s)
             )
           )
         : [`${INDENT}(none)`])
@@ -2461,7 +2489,7 @@ export const COMMANDS: CommandSpec[] = [
     // heading; keep going until no `more:` line is printed.
     flags: [
       { name: 'category', kind: 'string', value: '<name>',
-        help: 'page one category: missingAgents, preemptedAgents, standbyAgents, unstartedAgents, foreignPanes' },
+        help: 'page one category: missingAgents, preemptedAgents, standbyAgents, unstartedAgents, strandedAgents, foreignPanes' },
       { name: 'after', kind: 'string', value: '<cursor>',
         help: 'continue that category from a cursor printed by a previous list' },
       { name: 'limit', kind: 'number', value: '<n>',
