@@ -1540,7 +1540,7 @@ rule('6. NO STATE IN BETWEEN — every version of ci.yml a reader could catch ex
  * runs two; the window under test opens on EVERY write, so the rows after the
  * bound are more samples of a property already sampled thousands of times.
  *
- * `keepGoingUntilTorn` IS WHAT KEEPS THE BOUND HONEST, and it exists because of
+ * `keepGoingUntilEmpty` IS WHAT KEEPS THE BOUND HONEST, and it exists because of
  * a measurement rather than a worry. The red drive below has to CATCH the torn
  * window, and how many times it is caught in a fixed number of rows is itself
  * variable — 241, 68 and 14 on three runs of this machine, against 908 when the
@@ -1550,10 +1550,38 @@ rule('6. NO STATE IN BETWEEN — every version of ci.yml a reader could catch ex
  * variant watches AT LEAST as many rows as the fixed one did and then keeps
  * watching until it catches one, to the end of the run if that is what it
  * takes. The comparison stays like-for-like and the drive stops being a gamble.
+ *
+ * ⚠ AND UNTIL KAN-519 IT STOPPED ONE TEAR SHORT OF THE THING IT ASSERTS, which
+ * is why this option is no longer called `keepGoingUntilTorn`. The loop below
+ * stopped as soon as ANY torn read had been caught (`tornTotal > 0`) while the
+ * third assertion of the drive requires a ZERO-LENGTH one specifically — the
+ * `open(O_TRUNC)` window, which is a single instant at the head of each write,
+ * against the several page-boundary sizes a 90 KB `writeFileSync` passes
+ * through on its way up. So the loop's exit condition and the assertion's
+ * requirement were two different predicates, and the drive went on being a
+ * gamble on exactly the arm the paragraph above says it stopped gambling on.
+ *
+ * It is not hypothetical and it is not rare. Run 32509285481 on this branch
+ * caught `65536 bytes x1, 24576 bytes x1` — two tears, neither of them the
+ * truncation window — and failed with `zero-length observations: 0`, on a tree
+ * BYTE-IDENTICAL to 101d3c70, which had gone green an hour earlier. The same
+ * tree passed locally in the same hour with `0 bytes x3, 32768 bytes x1`. Three
+ * readings, one tree, and the only thing varying was which instant the sampler
+ * happened to land on.
+ *
+ * THE FIX IS TO MAKE THE LOOP WAIT FOR WHAT THE ASSERTION ASKS FOR, not to
+ * soften the assertion. Requiring size 0 is STRICTLY STRONGER than requiring
+ * any tear — 0 is itself a tear, so the `tornTotal > 0` assertion is satisfied
+ * by anything that satisfies this one, and neither assertion moved. What
+ * changed is only that the observer now looks for as long as the paragraph
+ * above always said it would: to the end of the run if that is what it takes.
+ * A machine on which the window genuinely never opens still fails, and fails
+ * having actually looked, rather than having stopped at the first tear of any
+ * size and reported the window absent.
  */
 const ROWS_WATCHED = 16;
 
-async function observeWorkflowStates(variantRel, { keepGoingUntilTorn = false } = {}) {
+async function observeWorkflowStates(variantRel, { keepGoingUntilEmpty = false } = {}) {
   restoreSandbox();
   const committed = readSandboxWorkflow();
   const child = spawn(process.execPath, [variantRel], { cwd: sandbox, stdio: 'ignore' });
@@ -1574,7 +1602,10 @@ async function observeWorkflowStates(variantRel, { keepGoingUntilTorn = false } 
       if (body.includes(MARKER_TAG)) {
         marked += 1;
         distinctMutations.add(body);
-        if (distinctMutations.size >= ROWS_WATCHED && (!keepGoingUntilTorn || tornTotal > 0)) break;
+        // `tornSizes.has(0)`, NOT `tornTotal > 0` — the drive's third assertion
+        // is about the truncation window specifically, so that is what the
+        // observer waits for. See the note on `keepGoingUntilEmpty` above.
+        if (distinctMutations.size >= ROWS_WATCHED && (!keepGoingUntilEmpty || tornSizes.has(0))) break;
       } else {
         tornTotal += 1;
         const size = Buffer.byteLength(body);
@@ -1627,7 +1658,7 @@ tornWindow: {
   if (!variant) break tornWindow;
   const rel = path.join('scripts', path.basename(variant));
 
-  const seen = await observeWorkflowStates(rel, { keepGoingUntilTorn: true });
+  const seen = await observeWorkflowStates(rel, { keepGoingUntilEmpty: true });
 
   check(seen.marked > 0,
     'PRECONDITION: the unmutated-write variant also really ran and mutated the file',
@@ -1647,7 +1678,11 @@ tornWindow: {
     '…and among them the file EMPTY: the whole of what a run killed there leaves behind, which is ' +
     'a tracked CI workflow with nothing in it to say who emptied it — layer 2\'s marker defeated by ' +
     'the write that was supposed to carry it',
-    `zero-length observations: ${seen.tornSizes.get(0) ?? 0}`);
+    seen.tornSizes.has(0)
+      ? `zero-length observations: ${seen.tornSizes.get(0)}`
+      : `zero-length observations: 0 — and this variant watched to the END OF THE RUN for one ` +
+        `rather than stopping at the first tear of any size (KAN-519), so the truncation window ` +
+        `was not merely missed by a short look. Caught instead: ${describeTorn(seen.tornSizes)}`);
 }
 
 // ===========================================================================
