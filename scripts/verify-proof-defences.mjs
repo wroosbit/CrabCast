@@ -1464,8 +1464,11 @@ const PROOF_DEFENCES = [
       'accident, and the one every assertion about shape passes. "reporter-noop" is the attack ' +
       "KAN-331's brief names outright (\"assume I will make it a no-op and see whether anything " +
       'notices"). "bound-hardcoded" runs the committed reporter and a constant-carrying mutant ' +
-      'against a tree declaring 40 rather than 20 minutes, so "it reads the workflow" is measured ' +
-      'rather than asserted. §4 mutates the workflow with `|| true` and requires the wiring ' +
+      'against a probe tree declaring a DIFFERENT bound from the committed one, so "it reads the ' +
+      'workflow" is measured rather than asserted — both values DERIVED from whatever the ' +
+      'workflow says (KAN-585), having been the literals 40 and 20 until raising the real bound ' +
+      'to 30 made the rewrite match nothing and the section unable to fail. ' +
+      '§4 mutates the workflow with `|| true` and requires the wiring ' +
       'reader to call it disabled. ' +
       'SEAM, AND IT IS THE ONE `prompts/task.md` ASKS FOR: this script SUPPLIES ITS OWN FIXTURES ' +
       'and their durations, so it proves the loop times and attributes whatever it is handed — ' +

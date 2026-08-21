@@ -504,34 +504,72 @@ if (!lifted.error) {
 //     that matters most for KAN-331's push: the whole reason the number is
 //     READ is so that editing ci.yml moves the printed percentage. A constant
 //     satisfies every other assertion in this file.
+//
+//     THIS SECTION CARRIED TWO COPIES OF THE NUMBER UNTIL KAN-585, and they
+//     were the same defect the section exists to catch, one layer out. The
+//     mutant hardcoded `20` and the probe tree was built by rewriting the
+//     literal `timeout-minutes: 20`, so raising the real bound to anything
+//     else made the rewrite match nothing: the probe tree would have declared
+//     the CURRENT bound, the "reporter reads it" check would have compared two
+//     equal numbers, and the PRECONDITION is what caught it. Both values are
+//     now DERIVED from whatever the workflow says, so this section keeps
+//     working at any bound and adds no number that can drift.
 {
+  // Read the committed bound, so nothing below is pinned to today's value.
+  const boundNow = Number(
+    fs.readFileSync(WORKFLOW, 'utf8').match(/^\s*timeout-minutes:\s*(\d+)\s*$/m)?.[1]
+  );
+  check(
+    Number.isInteger(boundNow) && boundNow > 0,
+    'PRECONDITION the committed workflow declares a readable bound',
+    `read ${boundNow}`
+  );
+
+  // Two DIFFERENT values, both different from the committed one:
+  //   probeBound  — what the probe tree declares; a reader must report this.
+  //   mutantBound — what the mutant pretends; a reader must NOT report this.
+  // They must differ from each other, or the mutant passes for a reader.
+  const probeBound = boundNow + 20;
+  const mutantBound = boundNow + 10;
+
   const mutant = mutateScript('bound-hardcoded', REPORTER, [
-    { find: "function hangBound(workflowPath = '.github/workflows/ci.yml') {", replace: "function hangBound(workflowPath = '.github/workflows/ci.yml') {\n  return { minutes: 20 };" }
+    {
+      find: "function hangBound(workflowPath = '.github/workflows/ci.yml') {",
+      replace:
+        "function hangBound(workflowPath = '.github/workflows/ci.yml') {\n" +
+        `  return { minutes: ${mutantBound} };`
+    }
   ]);
   if (mutant) {
-    // A tree whose ci.yml says 40 rather than 20. A reporter that READS gets
-    // 40; a reporter carrying a constant still says 20.
+    // A tree whose ci.yml declares probeBound rather than the committed bound.
+    // A reporter that READS gets probeBound; one carrying a constant does not.
     const tree = path.join(scratch, 'bound-tree');
     fs.mkdirSync(path.join(tree, '.github', 'workflows'), { recursive: true });
     const edited = fs
       .readFileSync(WORKFLOW, 'utf8')
-      .replace(/^(\s*)timeout-minutes: 20$/m, '$1timeout-minutes: 40');
+      .replace(/^(\s*)timeout-minutes:\s*\d+$/m, `$1timeout-minutes: ${probeBound}`);
     fs.writeFileSync(path.join(tree, '.github', 'workflows', 'ci.yml'), edited);
     check(
-      edited.includes('timeout-minutes: 40'),
-      'PRECONDITION the probe tree really declares a different bound'
+      edited.includes(`timeout-minutes: ${probeBound}`) && probeBound !== boundNow,
+      'PRECONDITION the probe tree really declares a different bound',
+      `committed ${boundNow}, probe tree ${probeBound}`
+    );
+    check(
+      mutantBound !== probeBound,
+      'PRECONDITION the mutant\'s constant differs from the probe tree\'s bound',
+      `mutant ${mutantBound}, probe tree ${probeBound}`
     );
 
     const input = 'verify-a\t0\t60000\tPASSED\n';
     const honest = spawnSync('node', [REPORTER], { cwd: tree, input, encoding: 'utf8' });
     const fake = spawnSync('node', [mutant], { cwd: tree, input, encoding: 'utf8' });
     check(
-      honest.stdout.includes('40-minute hang bound'),
+      honest.stdout.includes(`${probeBound}-minute hang bound`),
       'the committed reporter READS the bound out of the workflow it is run against',
       honest.stdout.match(/\d+-minute hang bound/)?.[0] ?? 'no bound line'
     );
     check(
-      fake.stdout.includes('20-minute hang bound'),
+      fake.stdout.includes(`${mutantBound}-minute hang bound`),
       'MUTANT a hardcoded bound ignores the workflow — the ratio would silently stop tracking',
       fake.stdout.match(/\d+-minute hang bound/)?.[0] ?? 'no bound line'
     );
