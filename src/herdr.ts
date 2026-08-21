@@ -1010,8 +1010,16 @@ export class HerdrBridge {
 
     const tab = this.createAgentTab(paneName, workDir);
     if (!tab) {
+      // ⚠ NO VERSION LITERAL HERE, DELIBERATELY (KAN-552). This message used to
+      // read "herdr 0.7+ has no way to …", and `verify-herdr-version-notice`
+      // refuses a quoted herdr version in any file but `herdr-health.ts` —
+      // *"the shape a second copy of the rule would have, whether it compared or
+      // merely told somebody which version to install."* It was the second kind:
+      // it told the reader a version fact, and a version fact stated twice is one
+      // that can drift. The capability is what the caller needs to know, and it
+      // is true of every herdr this code supports.
       throw new Error(
-        `Could not create a tab for ${paneName}, and herdr 0.7+ has no way to ` +
+        `Could not create a tab for ${paneName}, and this herdr has no way to ` +
         `start an agent without a pane to put it in`
       );
     }
