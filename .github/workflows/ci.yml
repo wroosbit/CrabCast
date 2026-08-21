@@ -1225,6 +1225,7 @@ jobs:
             verify-launcher-args
             verify-variadic-args-swallow-prompt
             verify-proof-teardown-sweeps
+            verify-butchr-proof-pin
             verify-install-doc-matches-cli
           )
           # One at a time, and one scratch $HOME each. Both halves are
@@ -1275,6 +1276,179 @@ jobs:
           printf '%s\n' "${timings[@]}" | node scripts/ci-timing-report.mjs
           echo "ran ${#scripts[@]} script(s); ${#failed[@]} failed"
           if [ ${#failed[@]} -ne 0 ]; then
+            printf 'FAILED: %s\n' "${failed[@]}"
+            exit 1
+          fi
+
+  # =========================================================================
+  # BUTCHR-PROOFS — Butchr's crabcast-facing proofs, run against THIS PR's
+  # CrabCast, on a runner with no herdr installed.
+  #
+  # KAN-519, implementing KAN-117. This job owns the seam nobody owned: KAN-117's
+  # task 1 showed a proof going red on a DEVELOPER MACHINE, against a REAL herdr
+  # and a HAND-STARTED socket. A red seen locally is not the gate going red. This
+  # is the transition — the job reds ON THE RUNNER, herdr-free, against a
+  # CI-BUILT daemon.
+  #
+  # ⚠ WHY THERE IS A LIVE PEER HERE, WHICH IS THE ENTIRE DESIGN AND NOT SETUP.
+  #
+  # KAN-518 measured that against a PINNED Butchr every input the CI-runnable
+  # sections read is a constant — Butchr's own source text, its own dist, or a
+  # socket the script stands up itself. "A required check built from them cannot
+  # change its answer in response to anything in CrabCast": it would run, cost
+  # twenty minutes, and gate nothing. That is this story's own defect class
+  # wearing the import as a costume.
+  #
+  # So this job stands up a REAL CrabCast daemon from this PR's build, behind a
+  # shimmed `herdr`, and points the proofs at it. The live arms then read
+  # CrabCast's OWN behaviour, which is the only thing on the path a CrabCast PR
+  # can move. IF YOU REMOVE THE PEER, THIS JOB STOPS BEING A GATE — it does not
+  # merely get faster. `butchr-proof-reconcile.mjs` §3 is what notices: with no
+  # peer every wired proof exits 2 INCOMPLETE rather than 0, deliberately, so a
+  # peer that fails to come up is a red rather than a green.
+  #
+  # WHICH PROOFS RUN, AND WHY NOT THE OTHER FIFTEEN. Per-arm evaluation is
+  # mandatory rather than a nicety: wiring a file wholesale imports whichever of
+  # its arms cannot fail as coverage it does not provide. Each of the three
+  # below was MEASURED going red on a deliberate CrabCast change; the fifteen
+  # excluded each carry a reason and a citation. Both lists, with the mutations
+  # that produced each red, are data in
+  # `scripts/butchr-proof-import-registry.mjs` — not prose here, because prose
+  # is a form no check can read, which is how the old exclusion list drifted
+  # (KAN-141).
+  #
+  # NOT A REQUIRED CHECK, AND THIS JOB DOES NOT PRETEND OTHERWISE. CrabCast
+  # main's required contexts are typecheck, build, verify, proof-registry,
+  # proof-verdicts. A guard arriving as its own job arrives UNGATED, and making
+  # it required is a branch-protection write on an account reporting
+  # admin: false — KAN-117's AC3, ruled out of scope by epic/KAN-59 and NOT
+  # built toward here. Whether this should instead be a step inside the required
+  # `verify` job is an open question put to epic/KAN-59; until they rule, this
+  # is the ticket as written.
+  # =========================================================================
+  butchr-proofs:
+    name: butchr-proofs
+    runs-on: ubuntu-latest
+    # A HANG BOUND, NOT A BUDGET — the same distinction the `verify` job's
+    # timeout records. These proofs stand up daemons and wait on sockets; this
+    # number exists so one that waits forever ends the job instead of the
+    # runner's six-hour ceiling. Generous on purpose: three proofs, each
+    # starting and tearing down a real daemon, plus a disposition pass that runs
+    # four more with no peer.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      # THE PIN IS READ, NEVER RETYPED. `verify-butchr-proof-pin.mjs` §2 fails
+      # this workflow if a 40-character SHA appears anywhere in it, because a
+      # pasted copy drifts silently while both halves go on looking
+      # authoritative. One place to change it: .butchr-proof-pin.json.
+      - name: check out Butchr at the pinned ref
+        run: |
+          set -euo pipefail
+          ref="$(node -p "require('./.butchr-proof-pin.json').ref")"
+          repo="$(node -p "require('./.butchr-proof-pin.json').repo")"
+          echo "pin: $repo @ $ref"
+          # NO --depth, NO --single-branch. A pinned SHA is not reachable from a
+          # shallow default-branch fetch, and the failure would arrive as
+          # "reference is not a tree" rather than as anything about depth.
+          git clone --no-checkout "$repo" .butchr-proofs
+          git -C .butchr-proofs checkout --detach "$ref"
+          # ASSERT THE CHECKOUT IS AT THE PIN. `git checkout` of a SHA that is
+          # not there fails loudly, but a clone that silently resolved something
+          # else would not — and this is the one fact the whole job rests on.
+          got="$(git -C .butchr-proofs rev-parse HEAD)"
+          if [ "$got" != "$ref" ]; then
+            echo "REFUSING: checkout is at $got, pin names $ref"
+            exit 1
+          fi
+          echo "checkout verified at $got"
+
+      - name: build the pinned Butchr daemon
+        run: |
+          set -euo pipefail
+          cd .butchr-proofs/daemon
+          npm ci
+          # NOT PIPED. `npm run build | tail` yields tail's exit status, so a
+          # failed build reads as 0 — and a proof run after a failed build ran
+          # against the previous dist, which means both its outcomes mislead.
+          npm run build
+          echo "BUILD_EXIT=$?"
+
+      # The register, reconciled against the proofs that actually exist at the
+      # pin, plus the missing-socket disposition. Runs BEFORE the proofs: if the
+      # disposition does not hold, the results below cannot be trusted to mean
+      # anything, and finding that out afterwards is finding it out too late.
+      - name: reconcile the register and assert the missing-socket disposition
+        run: node scripts/butchr-proof-reconcile.mjs
+
+      - name: butchr proofs (wired only, serialized)
+        run: |
+          set -euo pipefail
+          # NOT `scripts=(`. verify-proof-registry reads THE verify job's array
+          # by matching that exact line and requires there be exactly one in the
+          # file; a second one here would break the audit rather than extend it.
+          proofs=(
+            verify-crabcast-census-disclosure
+            verify-crabcast-priority-roundtrip
+            verify-crabcast-supervisor-exemption
+          )
+          # ONE AT A TIME, AND ONE SCRATCH $HOME EACH. Both halves are
+          # deliberate, and this is the comment for whoever is about to
+          # parallelise this loop.
+          #
+          # SERIAL: every one of these starts a real CrabCast daemon that binds
+          # a real unix socket. Run concurrently they contend for the socket
+          # path and for the machine, and the `verify` job above has already
+          # observed a timing-dependent failure from exactly that. Serial
+          # execution removes the contention.
+          #
+          # PER-SCRIPT $HOME: this is NOT tidiness and it is NOT only about
+          # leftovers. Butchr's `defaultCrabCastSocket()` ignores
+          # BUTCHR_CRABCAST_SOCKET and returns $HOME/.local/share/crabcast/
+          # crabcast.sock — two of the three proofs below resolve their peer that
+          # way. A shared $HOME means the second proof talks to the FIRST one's
+          # daemon, or to a leftover socket, and passes while proving nothing
+          # about its own peer. KAN-518 hit the same trap one step out and
+          # measured a misleading "EXIT=0 All assertions passed" from scripts
+          # that were talking to the machine's live peer. The scratch $HOME is
+          # what makes each measurement be about the daemon its own run started.
+          #
+          # ⚠ AND THE DIRECTORY NAME IS SHORT ON PURPOSE — `bp-` plus the
+          # proof's stem, not the whole proof name. A unix socket address holds
+          # at most 104 bytes, and this $HOME has
+          # `/.local/share/crabcast/crabcast.sock` (36 chars) appended to it by
+          # `defaultCrabCastSocket()`. Named `butchr-proof-home-$p` under
+          # $RUNNER_TEMP the socket path came to 112-114 characters and CrabCast
+          # REFUSED TO START — correctly, and with the arithmetic in the message.
+          # Measured on the runner, all three proofs, run 32504895294. Do not
+          # lengthen this stem; there are about twenty characters of headroom.
+          failed=()
+          for p in "${proofs[@]}"; do
+            echo "::group::$p"
+            home="$RUNNER_TEMP/bp-${p#verify-crabcast-}"
+            rm -rf "$home"
+            mkdir -p "$home"
+            if HOME="$home" node scripts/butchr-proof-harness.mjs "$p"; then
+              verdict=PASSED
+            else
+              verdict=FAILED
+              failed+=("$p")
+            fi
+            echo "--- $p $verdict"
+            echo "::endgroup::"
+          done
+          echo
+          echo "ran ${#proofs[@]} proof(s); ${#failed[@]} failed"
+          if [ ${#failed[@]} -ne 0 ]; then
+            # The harness has already printed WHICH CONSUMER BEHAVIOUR broke for
+            # each of these; this line is the index, not the report.
             printf 'FAILED: %s\n' "${failed[@]}"
             exit 1
           fi

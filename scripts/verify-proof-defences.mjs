@@ -2452,6 +2452,31 @@ const PROOF_DEFENCES = [
       'Its §5 mutates a COPY of this register and runs it as a child, requiring each sabotage to ' +
       'exit 1 with a named FAIL. That proves the checks report correctly about a register they are ' +
       'handed; it does not prove the register committed here is TRUE, and the header says so.'
+  },
+  {
+    script: 'verify-butchr-proof-pin',
+    defence: 'guard',
+    anchor: 'THE CHECKS ABOVE GO RED WHEN THE THINGS THEY GUARD BREAK',
+    central:
+      'the imported Butchr proofs CI runs are the ones somebody read — the pin names one full ' +
+      '40-character SHA, the workflow obtains the ref by READING that file rather than carrying a ' +
+      'second copy of it, and the register describing which imported proofs gate CrabCast is ' +
+      'internally honest (a reason and a citation per entry, a recorded red drive per wired one).',
+    note:
+      'ITS §5 RE-RUNS EVERY PREDICATE THE SECTIONS ABOVE USED, against deliberately broken copies ' +
+      'of the REAL register entries rather than against re-implemented logic — the predicates are ' +
+      'named once, in PREDICATES, and used in both places, so §5 cannot drift into agreeing with ' +
+      'itself. Each of the 24 drives is paired with a POSITIVE CONTROL requiring the genuine ' +
+      'entries to be accepted, because a predicate that refused everything would satisfy every ' +
+      'negative drive while being useless. ' +
+      '⚠ SEAM, and it is a wide one: this proof runs in the `verify` job, where the pinned ' +
+      'checkout DOES NOT EXIST. It therefore asserts NOTHING about whether the imported proofs ' +
+      'pass, whether their citations are real text in the files they name, or whether any of them ' +
+      'gates CrabCast at all. WHO COVERS THAT: scripts/butchr-proof-reconcile.mjs, in the ' +
+      '`butchr-proofs` job, which reconciles this register against the proofs actually at the pin ' +
+      'and asserts the missing-socket disposition. §3 of THIS script asserts that job still ' +
+      'invokes it, so the two halves cannot be separated silently — but a reader must not take ' +
+      'either one for the other. (KAN-519.)'
   }
 ];
 
