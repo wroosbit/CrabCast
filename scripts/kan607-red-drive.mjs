@@ -27,10 +27,10 @@
 // If those three do not go red, the sections they drive are lists of today's
 // answers wearing a join, and the header of the file they test is wrong.
 //
-// ⚠ ARM 0 IS THE CONTROL AND ARMS 14 AND 17 ARE THE FALSE-POSITIVE CONTROLS. Without
-// the first, a broken staging layout would redden every arm and read as seventeen
+// ⚠ ARM 0 IS THE CONTROL AND ARMS 14 AND 16 ARE THE FALSE-POSITIVE CONTROLS. Without
+// the first, a broken staging layout would redden every arm and read as sixteen
 // successes. Without the other two, a check that reddened on ANY edit would pass
-// every arm here and be worthless — arm 14 reorders a published list and arm 17
+// every arm here and be worthless — arm 14 reorders a published list and arm 16
 // moves every line on the page, and both must stay GREEN.
 //
 // ⚠ THE WORKING TREE IS NEVER TOUCHED. Every arm runs against a COPY, in a temp
@@ -50,6 +50,10 @@
 // `node_modules` is SYMLINKED rather than copied: the proof imports the
 // TypeScript parser, and copying a dependency tree per arm would make this
 // drive cost more than the suite it defends.
+//
+// AND IT TEARS DOWN ON A SIGNAL — see `staged` below for what that means here
+// and, just as much, what it does not: this drive starts no daemon, and the
+// thing an interrupt really leaked was a staged copy of the tree.
 //
 // Exits non-zero if any arm behaves differently. No daemon, no herdr, no
 // network, no build.
@@ -85,8 +89,31 @@ function check(ok, label, detail = '') {
   if (!ok) failures += 1;
 }
 
+/**
+ * Staged copies that exist right now, so a signal can remove them.
+ *
+ * ⚠ WHAT THIS TEARS DOWN IS TEMP DIRECTORIES, AND SAYING SO IS THE POINT. This
+ * drive starts NO DAEMON — the proof it runs reads three files and opens no
+ * socket — so there is nothing daemon-shaped here for a handler to stop, and a
+ * handler written as though there were would be an artifact whose sentence
+ * claims more than its mechanism covers, which is the class this whole suite
+ * exists against. What it DOES leak is real and was measured before this was
+ * written: `arm()` cleans up in a `finally`, and a SIGINT does not run one, so
+ * an interrupted run left a full staged copy of `docs/`, `scripts/` and `src/`
+ * behind. Driven red at TMPDIR=<scratch>: 0 staged dirs before, 1 surviving
+ * after a mid-run SIGINT.
+ *
+ * `verify-proof-teardown-sweeps` §4 flags this file because its predicate errs
+ * toward including — `mkdtempSync` plus `spawnSync(process.execPath, …*.mjs)`
+ * is how a drive usually causes daemons it never names. The predicate is right
+ * about the shape; this handler is the honest answer to it rather than a
+ * register line, and it fixes a leak that was genuinely there.
+ */
+const staged = new Set();
+
 function stage() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kan607-'));
+  staged.add(dir);
   for (const d of STAGED_DIRS) {
     fs.cpSync(path.join(repoRoot, d), path.join(dir, d), { recursive: true });
   }
@@ -95,6 +122,30 @@ function stage() {
   }
   fs.symlinkSync(path.join(repoRoot, 'node_modules'), path.join(dir, 'node_modules'), 'dir');
   return dir;
+}
+
+function discard(dir) {
+  fs.rmSync(dir, { recursive: true, force: true });
+  staged.delete(dir);
+}
+
+// The signal path. Removes what the happy path would have removed, reports how
+// many rather than claiming silently, and leaves by the signal's own convention
+// (128 + n) so a caller can still tell it was interrupted.
+for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]]) {
+  process.on(signal, () => {
+    const n = staged.size;
+    for (const dir of [...staged]) {
+      try {
+        discard(dir);
+      } catch {
+        // Reported below as a survivor rather than swallowed: a teardown that
+        // hides its own failure is the shape this suite is about.
+      }
+    }
+    console.log(`\n${signal}: removed ${n - staged.size} of ${n} staged cop(ies); this drive starts no daemon.`);
+    process.exit(code);
+  });
 }
 
 function runProof(dir) {
@@ -125,14 +176,66 @@ function editOnce(dir, rel, anchor, replacement) {
 const passed = (out, re) => new RegExp(`PASS {2}${re.source ?? re}`).test(out);
 const failed = (out, re) => new RegExp(`FAIL {2}${re.source ?? re}`).test(out);
 
-/** One arm: stage, mutate, run, judge. */
-function arm(title, mutate, judge) {
+/**
+ * One arm: stage, mutate, run, judge.
+ *
+ * ⚠ ASYNC FOR ONE REASON, AND IT IS NOT STYLE: it is what makes the signal
+ * handler above able to run at all. Node services a signal on the event loop,
+ * and this drive was a single synchronous block — every `cpSync`, `spawnSync`
+ * and `rmSync` in one top-level run — so a handler installed on it could not be
+ * reached until the script had finished, by which point there was nothing left
+ * to tear down.
+ *
+ * MEASURED, because "the handler cannot run" is exactly the kind of claim that
+ * should not be taken on reasoning. SIGINT at 5s of a 16s run, one variable
+ * changed:
+ *
+ *   handler installed, arms synchronous  -> 115 lines (RAN TO COMPLETION),
+ *                                           handler line never printed, 0 staged
+ *                                           dirs left — the interrupt was
+ *                                           SWALLOWED, not handled.
+ *   handler absent,    arms synchronous  ->  37 lines (stopped mid-run),
+ *                                           1 staged dir left — the leak.
+ *
+ * So the synchronous version had a handler that satisfied the text check in
+ * `verify-proof-teardown-sweeps` while being unable to fire: an artifact whose
+ * sentence claims more than its mechanism covers, which is the one thing this
+ * suite exists to prevent. The `await` below is what closes that gap.
+ *
+ * WHAT IT STILL DOES NOT PROMISE: an arm is itself synchronous, so an interrupt
+ * arriving inside one is serviced at the NEXT ARM BOUNDARY rather than at once.
+ * That wait is bounded by one arm — under a second — and it is a delay, not a
+ * leak.
+ */
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+async function arm(title, mutate, judge) {
+  await tick();
   console.log(`\n${title}`);
   const dir = stage();
   try {
+    // ⚠ THE SECOND YIELD IS WHAT MAKES THE HANDLER'S CLEANUP REAL RATHER THAN
+    // DECORATIVE, and it was added after measuring that the first one alone was
+    // not enough. With only the yield above, a signal is serviced at the START
+    // of the next arm — by which point the in-flight arm's `finally` has
+    // already run, so the handler always found an EMPTY set and reported
+    // `removed 0 of 0` at every one of five interrupt timings. It stopped the
+    // run, which is worth having, but its cleanup loop could never execute:
+    // a mechanism whose sentence claims more than it covers, one level down
+    // from the one this drive was written to catch.
+    //
+    // This yield adds a service point where a staged directory IS live and the
+    // ordinary path has not yet reclaimed it. MEASURED over 16 interrupt
+    // offsets at 0.1s steps: 15 reported `removed 0 of 0` and one reported
+    // `removed 1 of 1` — the loop is reachable and does the work, and it is
+    // reached about as often as staging's share of an arm, the rest of which is
+    // the `spawnSync` running the proof. Every one of the 16 left ZERO staged
+    // copies behind, which is the guarantee that actually matters; the removal
+    // path is the backstop for the staging window, not the common case.
+    await tick();
     if (mutate(dir) !== false) judge(runProof(dir));
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    discard(dir);
   }
 }
 
@@ -168,7 +271,7 @@ const NEW_COMMAND = `,
 export function commandNamed`;
 
 // ================================================================== arm 0
-arm(
+await arm(
   'arm 0   CONTROL — unmutated staged copy',
   () => true,
   ({ code, out }) => {
@@ -184,7 +287,7 @@ arm(
 
 // ================================================================== arm 1
 // §1, document side. The page types a verb the table has never had.
-arm(
+await arm(
   'arm 1   §1  THE PAGE TYPES A VERB THAT DOES NOT EXIST — `crabcast list` -> `crabcast lists`',
   (dir) => editOnce(dir, SETUP, SETUP_LIST_BLOCK, '```bash\ncrabcast lists\n```'),
   ({ code, out }) => {
@@ -207,7 +310,7 @@ arm(
 
 // ================================================================== arm 2
 // §1, CLI side. The table renames a verb the README still types.
-arm(
+await arm(
   'arm 2   §1  THE CLI RENAMES A VERB, DOCUMENTS UNTOUCHED — `tail` -> `tailx`',
   (dir) => editOnce(dir, CLI, CLI_TAIL_NAME, "    name: 'tailx',\n"),
   ({ code, out }) => {
@@ -229,7 +332,7 @@ arm(
 
 // ================================================================== arm 3
 // §2, CLI side. One verb moves across the split; every page is now wrong.
-arm(
+await arm(
   'arm 3   §2  ONE VERB MOVES ACROSS THE SPAWN SPLIT, DOCUMENTS UNTOUCHED — tail spawnsDaemon false -> true',
   (dir) => editOnce(dir, CLI, CLI_TAIL_SPAWN, "max 200)' }\n    ],\n    spawnsDaemon: true,"),
   ({ code, out }) => {
@@ -262,7 +365,7 @@ arm(
 // ================================================================== arm 4
 // §2, document side, ONE SITE ONLY. The discrimination arm: a page that drops a
 // verb must redden its own claim and nobody else's.
-arm(
+await arm(
   'arm 4   §2  ONE PAGE DROPS A VERB FROM ITS PUBLISHED LIST — SETUP §4.2 loses `tail`',
   (dir) =>
     editOnce(
@@ -295,7 +398,7 @@ arm(
 
 // ================================================================== arm 5
 // ⚠ THE ARM §2 EXISTS FOR. Not one character of any document changes.
-arm(
+await arm(
   'arm 5   §2  A COMMAND IS ADDED TO THE CLI, DOCUMENTS UNTOUCHED  <-- the drift this section exists for',
   (dir) => editOnce(dir, CLI, CLI_COMMANDS_END, NEW_COMMAND),
   ({ code, out }) => {
@@ -320,7 +423,7 @@ arm(
 
 // ================================================================== arm 6
 // §3. The pasted block stops being what the CLI would emit.
-arm(
+await arm(
   'arm 6   §3  THE PASTED CLI OUTPUT DRIFTS — SETUP §4.2\'s block loses `send`',
   (dir) => editOnce(dir, SETUP, SETUP_PASTED_SPAWNERS, '\n  configure, activate, deactivate, forget\n'),
   ({ code, out }) => {
@@ -342,7 +445,7 @@ arm(
 
 // ================================================================== arm 7
 // §4, document side. A quoted code is changed to one the CLI does not use here.
-arm(
+await arm(
   'arm 7   §4  A QUOTED EXIT CODE IS CHANGED ON THE PAGE — §3.2\'s retired-key refusal says 6',
   (dir) => editOnce(dir, SETUP, SETUP_RETIRED_EXIT, 'it to in this file.\nEXIT=6'),
   ({ code, out }) => {
@@ -365,7 +468,7 @@ arm(
 // ================================================================== arm 8
 // ⚠ THE ARM THAT DECIDES WHETHER §4 IS A RECONCILIATION OR A LIST OF TODAY'S
 // ANSWERS. The page is not touched. The CLI renumbers a code.
-arm(
+await arm(
   'arm 8   §4  THE CODE IS RENUMBERED IN THE CLI, PAGE UNTOUCHED — EXIT.CONFIG 4 -> 6  <-- reconciliation or list?',
   (dir) => editOnce(dir, CLI, CLI_CONFIG_CODE, '  CONFIG: 6,'),
   ({ code, out }) => {
@@ -394,7 +497,7 @@ arm(
 
 // ================================================================== arm 9
 // §4, the register's forward direction. A new claim nothing accounts for.
-arm(
+await arm(
   'arm 9   §4  AN UNREGISTERED EXIT-CODE CLAIM IS ADDED TO THE PAGE',
   (dir) =>
     editOnce(
@@ -418,7 +521,7 @@ arm(
 
 // ================================================================= arm 10
 // §4, the register's other direction. An entry guarding a claim that has gone.
-arm(
+await arm(
   'arm 10  §4  A REGISTERED CLAIM IS EDITED OFF THE PAGE — the register entry now guards nothing',
   (dir) => editOnce(dir, SETUP, SETUP_ROUNDTRIP_EXIT, '> `RESULT=0` against a scratch daemon.'),
   ({ code, out }) => {
@@ -440,7 +543,7 @@ arm(
 
 // ================================================================= arm 11
 // §5, document side. THE DEFECT ITSELF, reproduced on the corrected bullet.
-arm(
+await arm(
   'arm 11  §5  THE README DROPS A CODE FROM ITS CONTRACT SET — KAN-528\'s defect, replayed',
   (dir) => editOnce(dir, README, README_OVERSIZE, ' · `5` the answer was large'),
   ({ code, out }) => {
@@ -459,7 +562,7 @@ arm(
 // ================================================================= arm 12
 // ⚠ KAN-528 REPLAYED FROM THE SIDE IT ACTUALLY ARRIVED FROM. The README is not
 // touched. A code is added to the CLI, exactly as `OVERSIZE` was.
-arm(
+await arm(
   'arm 12  §5  A CODE IS ADDED TO THE CLI, README UNTOUCHED  <-- the drift that really happened',
   (dir) => editOnce(dir, CLI, CLI_OVERSIZE_CODE, '  OVERSIZE: 5,\n  DEADLINE: 6\n} as const;'),
   ({ code, out }) => {
@@ -481,7 +584,7 @@ arm(
 
 // ================================================================= arm 13
 // §0 must fail CLOSED. A table it can no longer read is red, never empty.
-arm(
+await arm(
   'arm 13  §0  THE CLI\'S TABLE STOPS BEING READABLE — EXIT gains a non-literal member',
   (dir) => editOnce(dir, CLI, '  OK: 0,', '  OK: BASE_CODE,'),
   ({ code, out }) => {
@@ -503,7 +606,7 @@ arm(
 // ⚠ FALSE-POSITIVE CONTROL. An edit of exactly the shape the arms above make,
 // which must stay GREEN. Without this, a check that reddened on any edit would
 // have passed all fourteen arms above.
-arm(
+await arm(
   'arm 14  FALSE-POSITIVE CONTROL — a published list is REORDERED, which is not a change to the set',
   (dir) =>
     editOnce(
@@ -528,14 +631,14 @@ arm(
 // once, for a page where nothing about an exit code moved. That red is worse
 // than no check: it teaches a reader to re-point numbers without reading
 // claims. This arm requires the page to be allowed to move.
-// ================================================================= arm 16
+// ================================================================= arm 15
 // The sweep's THIRD SHAPE, driven on its own. It exists because the first two
 // missed §4.1's *"Its exit status is the daemon's own — `0` for a clean
 // shutdown"* — a real exit-code claim in a wording neither matched, sitting
 // inside a register that reported every claim accounted for. A shape added to
 // close a blind spot has to be shown biting, or the fix is a comment.
-arm(
-  'arm 16  §4  A CLAIM IN THE WORDING THE SWEEP USED TO MISS — a quoted code with no `EXIT=` and no "exits"',
+await arm(
+  'arm 15  §4  A CLAIM IN THE WORDING THE SWEEP USED TO MISS — a quoted code with no `EXIT=` and no "exits"',
   (dir) =>
     editOnce(
       dir,
@@ -552,7 +655,7 @@ arm(
   }
 );
 
-// ================================================================= arm 17
+// ================================================================= arm 16
 const INSERTED_LINES = 3;
 /** Where the proof said the retired-key refusal was, so the shift can be measured. */
 const retiredKeyLine = (out) => {
@@ -561,8 +664,8 @@ const retiredKeyLine = (out) => {
 };
 let lineBeforeShift = null;
 
-arm(
-  'arm 17  FALSE-POSITIVE CONTROL — an unrelated paragraph shifts every line below it',
+await arm(
+  'arm 16  FALSE-POSITIVE CONTROL — an unrelated paragraph shifts every line below it',
   (dir) => {
     lineBeforeShift = retiredKeyLine(runProof(dir).out);
     return editOnce(

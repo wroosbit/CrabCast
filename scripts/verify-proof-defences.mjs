@@ -2308,7 +2308,7 @@ const PROOF_DEFENCES = [
       'tables and an unread table agrees with every document. ' +
       'WHAT IS NOT GUARDED HERE, and it is why this is `guard` and not `mutation`: nothing in this ' +
       'file mutates anything. The demonstration that these assertions go red is ' +
-      'scripts/kan607-red-drive.mjs — eighteen arms, control first and two FALSE-POSITIVE controls ' +
+      'scripts/kan607-red-drive.mjs — seventeen arms, control first and two FALSE-POSITIVE controls ' +
       'last, each mutating a staged copy so the working tree is never written to, and asserting ' +
       'byte-identity afterwards. ARMS 5, 8 AND 12 ARE THE ONES THAT DECIDE WHETHER THE FILE IS ' +
       'WORTH HAVING: each edits `src/cli.ts` ONLY — a command added, a code renumbered, a code ' +
