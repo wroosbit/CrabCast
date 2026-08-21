@@ -272,9 +272,17 @@ function tableAfter(text, at) {
  *
  * A row whose first cell reads `config echo` is EXPANDED into the six fields
  * of `BLOCK_SHAPES.ConfigEcho`, carrying that row's bucket and optionality. The
- * shorthand exists so eight tables do not each repeat five rows; the expansion
+ * shorthand exists so nine tables do not each repeat six rows; the expansion
  * is what keeps it from being a hole, and the document says so where the
  * shorthand is introduced.
+ *
+ * ⚠ KAN-578: "six rows" here was "five rows" until this ticket, and "nine
+ * tables" was "eight". The first is the SAME `BLOCK_SHAPES.ConfigEcho` drift
+ * KAN-530 corrected on the line directly above it, two lines away, left behind
+ * because the correction was made phrase by phrase. Neither number is held by
+ * anything: `verify-src-comment-counts` rules on the line above — it names its
+ * constant beside the count — and cannot reach this one, and no instrument in
+ * this repository counts markdown tables at all.
  */
 function parseTables(text, echoFields) {
   const tables = new Map();
