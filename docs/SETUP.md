@@ -187,6 +187,33 @@ mkdir -p ~/.config/crabcast
 printf '{}\n' > ~/.config/crabcast/crabcast.config.json
 ```
 
+> **Driven here, with the control that makes it mean anything.** That block was
+> run as written, and a read verb naming the file it wrote refused for
+> *transport* rather than for *config* — the config loaded, and there was no
+> daemon to reach:
+>
+> ```console
+> $ crabcast --config ~/.config/crabcast/crabcast.config.json daemon-status
+> crabcast: Could not reach the CrabCast daemon at …/crabcast.sock: connect ENOENT …
+> LOADS_EXIT=3
+> ```
+>
+> An exit 3 alone would look the same had the file been ignored, so the same
+> path was given a config that cannot load — §3.2's retired key — and the exit
+> moved:
+>
+> ```console
+> $ printf '{"workspaceTypes":{}}\n' > ~/.config/crabcast/crabcast.config.json
+> $ crabcast --config ~/.config/crabcast/crabcast.config.json daemon-status
+> crabcast: refusing to run: /home/…/.config/crabcast/crabcast.config.json:
+> "workspaceTypes" is no longer a config key — …
+> CONTROL_EXIT=4
+> ```
+>
+> The refusal names that path, so the 3 above was a file that was read. The
+> directory was removed afterwards; nothing auto-discovers it, and `--config`
+> naming it is the whole of what makes it work.
+
 ### 3.2 ⚠ A config that was *named* and will not load is a refusal, never a fallback
 
 This is the rule that stops a typo pointing you at somebody else's daemon. It
@@ -290,6 +317,18 @@ user unit template, `loginctl enable-linger`, the uninstall, and the two
 settings in it that are load-bearing rather than taste. Do not paraphrase it
 from memory; two of its settings look like preferences and are not:
 
+> **The install itself was not performed here.** No `crabcast.service` was ever
+> written, enabled or started on the machine this page was written on: it already
+> carries a live Butchr fleet's own `--user` units (§6), and installing, enabling
+> and then removing another one changes what is supervised on a box other people
+> depend on. §9's uninstall block is unrun for the same reason.
+>
+> **What that leaves standing, precisely:** the `Restart=on-failure` reasoning
+> below is driven, and so is the SIGTERM behaviour at the end of this section —
+> both are CLI-and-process facts that need no unit. The `Environment=PATH=`
+> bullet is **not**, for a separate reason it carries itself. The unit that
+> would hold all three is the part nobody has installed.
+
 * **`Restart=on-failure`, never `Restart=always`.** The CLI auto-spawns a daemon
   of its own, so two processes can contend for one socket. CrabCast resolves
   that correctly — the loser detects the incumbent and **exits 0**, cleanly.
@@ -312,6 +351,16 @@ from memory; two of its settings look like preferences and are not:
   `systemctl status` is green, and nothing is wrong until you try to start an
   agent. The `node` half of the same variable fails loudly instead (`203/EXEC`),
   because the installed `crabcast` is a `#!/usr/bin/env node` shim.
+
+  > **Not driven here, and §1.2 is the reason — the two sections rest on the
+  > same fact.** §1.2 says plainly why that red could not be produced:
+  > `resolveUserPath()` (`src/env.ts`) unconditionally appends `~/.local/bin`,
+  > where this machine's herdr lives, so driving it means moving a binary a live
+  > fleet depends on. **The wording above is stronger than §1.2's and is
+  > inherited, not observed** — it is [`supervision.md`](supervision.md)'s
+  > finding (KAN-320). The `203/EXEC` half is likewise not driven here. Read it
+  > as a well-sourced expectation; §1.2's *absence of a gate* is the part this
+  > page measured.
 
 **And SIGTERM releases the socket** — driven, so that a `systemctl restart` is
 known to leave a clean rendezvous rather than a stale file:
@@ -418,12 +467,19 @@ crabcast status    /tmp/cc-smoke
 crabcast deactivate /tmp/cc-smoke && crabcast forget /tmp/cc-smoke
 ```
 
-> **Driven only as far as `configure` and `list` here**, both of which returned
-> `EXIT=0` against a scratch daemon. `activate` was **not** run: this machine has
-> herdr 0.8.2 (§1.2), where activation is expected to fail at `herdr agent
-> start` — and it shares its herdr server with a live fleet, so producing that
-> red would have spawned a pane into it. On a machine with 0.6.4 this sequence
-> is the check that matters most.
+> **Driven here as far as everything except `activate`.** `configure`, `list`,
+> `status`, `deactivate` and `forget` all returned `EXIT=0` against a scratch
+> daemon. **`activate` was not run**: this machine has herdr 0.8.2 (§1.2), where
+> activation is expected to fail at `herdr agent start` — and it shares its
+> herdr server with a live fleet, so producing that red would have spawned a
+> pane into it.
+>
+> ⚠ **And skipping `activate` costs more than that one line.** With nothing ever
+> activated, `deactivate` took its *was not running* branch — it answered
+> `unstarted` and recorded nothing — so **the path that stops a live agent is
+> unexercised too**, and `forget` was only ever asked to remove a record it had
+> never started. On a machine with 0.6.4 this sequence is the check that matters
+> most, and it is the check this page can least stand in for.
 
 ---
 
@@ -443,6 +499,23 @@ side, by one environment variable read **once, at daemon construction**:
 | --- | --- | --- |
 | `BUTCHR_AGENT_RUNTIME=crabcast` | Butchr's daemon | serve agents through CrabCast (`CrabCastRuntime`) instead of `HerdrBridge`. Unset, empty or misspelled falls back to herdr **and says so** |
 | `BUTCHR_CRABCAST_SOCKET` | Butchr's daemon | which socket to reach CrabCast on. Defaults to `~/.local/share/crabcast/crabcast.sock` |
+
+> ⚠ **The Butchr side of this section is read out of source, not observed —
+> all of it.** No Butchr daemon has ever run in `BUTCHR_AGENT_RUNTIME=crabcast`
+> mode on the machine this page was written on. So that variable was never
+> watched taking effect, `BUTCHR_CRABCAST_SOCKET` was never watched redirecting
+> anything, and the *"falls back to herdr and says so"* behaviour was never
+> watched falling back. The table above is derived from `runtime-switch.ts` and
+> `crabcast-link.ts` at `wroosbit/butchr@origin/main`, and **the mismatch log
+> quoted below is a string literal that was read, not output that was seen
+> printed.**
+>
+> **Driving it needs a box already in that mode, and this is not one.** Standing
+> one up here would mean putting a live fleet onto an untested runtime to
+> produce a paragraph, which is a worse trade than an unobserved section
+> honestly labelled. **Whether some other machine could supply it is not
+> something this page can answer from here** — the note below says only what
+> *this* box is. §10 carries it until somebody runs it where it can be run.
 
 ⚠ **If you changed `dataDir` in §3, you must set `BUTCHR_CRABCAST_SOCKET` to
 match.** Butchr's default is the *stock* CrabCast socket path, not a value it
@@ -492,6 +565,13 @@ Read at `wroosbit/butchr@origin/main` on 2026-08-21, against CrabCast
 
 Both differ, and **both are expected to differ** — that is the ordinary state of
 a pin, and it is reported so an operator can see it rather than discover it.
+
+⚠ **Both columns are measurements; the comparison between them is not.** `v14`
+came off a live CrabCast `daemon-status`, and `CRABCAST_PIN` and
+`CRABCAST_CONTRACT_VERSION` came off Butchr's source — so the two values are
+real, and they are as far as this table goes. **No running Butchr daemon has
+ever compared them**, here or anywhere, for the reason in the note above.
+
 What the pin buys is that a surprise is *legible*: Butchr logs
 
 ```
@@ -609,6 +689,37 @@ npm install            # runs `prepare`, so this rebuilds and re-stamps dist/
 # then restart the daemon — see below
 ```
 
+**Driven, and the middle step is the one worth watching.** A throwaway clone was
+put a release behind, brought forward with this block, and its build stamp read
+at each step. `git pull` on its own leaves `dist/` at the **old** commit:
+
+```console
+$ npm install                    # at 30e224a
+stamp-build: …/dist/build-stamp.json — 30e224a32ab2 (clean)
+
+$ git pull
+ 8 files changed, 1442 insertions(+), 13 deletions(-)
+$ git rev-parse --short HEAD
+1742ab3
+$ node -e '…build-stamp.json…'   # dist has NOT moved
+30e224a32ab2
+
+$ npm install                    # after the pull
+> node scripts/stamp-build.mjs
+stamp-build: …/dist/build-stamp.json — 1742ab363e2a (clean)
+up to date in 6s
+```
+
+⚠ **Note `up to date in 6s`.** npm had no dependency to add and ran `prepare`
+anyway, so it is the `npm install` and not the dependency change that rebuilds.
+Skipping it because nothing needs installing leaves you running the old code
+off a clone that reads as current — which is §8.1's question and §8.3's failure.
+
+> **The clone driven here was never `npm install -g`'d.** What §7 establishes is
+> that a global install is a symlink *into* the clone, so "the installed clone"
+> and "the clone" are one directory; this block was driven on the second, and
+> the identity between them is composed from §7 rather than re-driven here.
+
 ### 8.3 ⚠ Rebuilding does not upgrade a running daemon, and nothing on disk shows it
 
 Driven, in both directions.
@@ -709,6 +820,16 @@ this page:**
 * `npm install -g .` and `npm link` both leave a symlink into the clone (same
   inode); a packed-tarball install does not (different inode) — positive control
   run.
+* A config at `~/.config/crabcast/crabcast.config.json` (§3.1) is found and
+  loaded when `--config` names it: `EXIT=3` for transport against a machine with
+  no daemon, against `EXIT=4` from the *same path* carrying a retired key —
+  the control that says the file was read rather than ignored.
+* §5.4's sequence as far as `configure`, `list`, `status`, `deactivate` and
+  `forget`, all `EXIT=0` against a scratch daemon. `activate` is below.
+* §8.2's upgrade block: `git pull` alone leaves `dist/` stamped at the old
+  commit, and the `npm install` after it re-runs `prepare` and re-stamps —
+  `30e224a32ab2` → `1742ab363e2a`, with npm reporting `up to date` and building
+  anyway.
 
 **Not observed, and not claimed:**
 
@@ -718,7 +839,37 @@ this page:**
   [KAN-546](https://wroosbit.atlassian.net/browse/KAN-546)'s *"one check nobody
   has run"*, and it is still unrun.
 * **An activation.** §5.4 — this machine's herdr is 0.8.2 and its herdr server is
-  shared with a live fleet.
+  shared with a live fleet. ⚠ **And nothing downstream of one either:** with no
+  agent ever started, `deactivate` was only ever asked about an `unstarted`
+  record, so **the path that stops a running agent is unexercised**, and so is
+  everything §5.4 exists to reach.
+* **The Butchr side of §6 — all of it.** No Butchr daemon has ever run in
+  `BUTCHR_AGENT_RUNTIME=crabcast` mode on this machine, so neither that variable
+  nor `BUTCHR_CRABCAST_SOCKET` was watched taking effect, and the fallback to
+  herdr was never watched happening. §6's env-var table is derived from
+  `runtime-switch.ts` and `crabcast-link.ts` at `wroosbit/butchr@origin/main`,
+  and its quoted mismatch log is a string literal that was read, not output
+  anybody has seen printed. The two pin values either side of that comparison
+  **are** measured — `v14` off a live CrabCast `daemon-status`, `CRABCAST_PIN`
+  and `CRABCAST_CONTRACT_VERSION` off Butchr's source; **the comparison between
+  them is what has never been performed by a running system.** Driving it needs
+  a box already in that mode; this one is not, and putting a live fleet onto an
+  untested runtime to produce a paragraph is the wrong trade. Whether another
+  machine could supply it is not a question this page can answer — §6 says only
+  what this box is.
+* **§4.3's `Environment=PATH=` claim**, for the reason §1.2 gives about the same
+  fact: `resolveUserPath()` appends `~/.local/bin` unconditionally, so the red
+  means moving a binary a live fleet depends on. §4.3's wording is stronger than
+  §1.2's and is inherited from [`supervision.md`](supervision.md) (KAN-320);
+  §4.3 now says so where it stands, so the two sections agree. The `203/EXEC`
+  half of that bullet is not driven here either.
+* **The systemd unit install in §4.3, and §9's uninstall block.** No
+  `crabcast.service` was written, enabled or started here: this box already
+  carries a live Butchr fleet's own `--user` units (§6), and installing and
+  removing another changes what is supervised on a machine other people depend
+  on. §9's `npm rm -g crabcast` and `rm -rf ~/.local/share/crabcast` halves had
+  nothing to remove on it in any case — neither a global install nor a stock
+  data directory exists here (§6).
 * **Anything about Node below 20** — §1.1.
 * **A reboot.** [`supervision.md`](supervision.md) records the one clean-shutdown
   reboot that was observed, on one machine and one init, and says what that one
