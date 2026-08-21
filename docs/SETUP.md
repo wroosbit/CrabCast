@@ -318,10 +318,11 @@ settings in it that are load-bearing rather than taste. Do not paraphrase it
 from memory; two of its settings look like preferences and are not:
 
 > **The install itself was not performed here.** No `crabcast.service` was ever
-> written, enabled or started on the machine this page was written on: it already
-> carries a live Butchr fleet's own `--user` units (§6), and installing, enabling
-> and then removing another one changes what is supervised on a box other people
-> depend on. §9's uninstall block is unrun for the same reason.
+> written, enabled or started on the machine this page was written on: it
+> already carries a live Butchr fleet's own `--user` units (§6), and
+> installing, enabling and then removing another one changes what is supervised
+> on a box other people depend on. §9's uninstall block is unrun for the same
+> reason.
 >
 > **What that leaves standing, precisely:** the `Restart=on-failure` reasoning
 > below is driven, and so is the SIGTERM behaviour at the end of this section —
