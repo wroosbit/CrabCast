@@ -167,8 +167,10 @@ jobs:
     # attempts walked):
     #   - the current suite, non-incident branches since 2026-08-15 (n=45):
     #     p50 14m01s, p95 14m31s, max 17m49s; 43 of 45 inside 13m25s-14m34s.
-    #   - the 17m49s is a TAIL, not a second mode: nothing else sits between
-    #     15m05s and 20m in the whole 364.
+    #   - the 17m49s is a TAIL, not a second mode: only four attempts reach
+    #     15m00s at all — 15m05s, the 17m49s itself, and the two censored
+    #     timeouts — so it is isolated by 2m44s from the nearest attempt
+    #     below it, with no cluster to belong to.
     #   - runner variance alone, on IDENTICAL content: 14m02s vs 17m49s
     #     (main@927df07 is the squash of butchr/KAN-578@6c9a9df) = x1.270.
     #   - the bound had already fired: run 32406501749 attempts 1 and 2,
