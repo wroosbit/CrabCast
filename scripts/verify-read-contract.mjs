@@ -270,7 +270,7 @@ function tableAfter(text, at) {
  * Every `<!-- contract-table: NAME -->` in the document, as
  * `NAME -> { field -> { bucket, optional } }`.
  *
- * A row whose first cell reads `config echo` is EXPANDED into the five fields
+ * A row whose first cell reads `config echo` is EXPANDED into the six fields
  * of `BLOCK_SHAPES.ConfigEcho`, carrying that row's bucket and optionality. The
  * shorthand exists so eight tables do not each repeat five rows; the expansion
  * is what keeps it from being a hole, and the document says so where the

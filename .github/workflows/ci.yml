@@ -852,6 +852,45 @@ jobs:
       #                                      named in its header and in the
       #                                      document.
       #
+      #   verify-doc-set-counts              the SENTENCE above a gated table,
+      #                                      which the gate under it does not
+      #                                      hold. verify-read-contract
+      #                                      reconciles WHICH fields a table
+      #                                      lists; nothing reconciled HOW MANY
+      #                                      the prose says it has, so
+      #                                      `docs/read-path-contract.md` read
+      #                                      "the five fields" about a
+      #                                      six-member `BLOCK_SHAPES.ConfigEcho`
+      #                                      in six places from KAN-528 until a
+      #                                      person read the page (KAN-512).
+      #                                      Every field name on the page was
+      #                                      right the whole time, which is why
+      #                                      a membership check was green and
+      #                                      could not have been anything else:
+      #                                      a count has no member to match.
+      #                                      It rules only on a count carrying a
+      #                                      DEFINITE ARTICLE — "the five
+      #                                      fields" is a claim about the size of
+      #                                      a set, "five fields added to X" is a
+      #                                      version-history delta and reconciling
+      #                                      it would be nonsense — whose subject
+      #                                      is named by an anchor link, by the
+      #                                      section's own published name, or by
+      #                                      the heading that introduces exactly
+      #                                      one table. WHAT IT CANNOT SEE: a
+      #                                      count whose subject is a different
+      #                                      line, a section declaring more than
+      #                                      one marker (it PRINTS every phrase
+      #                                      it declined rather than dropping
+      #                                      it), and any count in `src/` — three
+      #                                      source comments carried the same
+      #                                      drift and were found by reading, not
+      #                                      by this. It fails closed: zero
+      #                                      subjects in the tree is a FAILURE,
+      #                                      because a detector that silently
+      #                                      matches nothing has become the bug
+      #                                      it is looking for.
+      #
       #   verify-owner-filter                an application finds ITS OWN agents
       #                                      by an opaque `owner`, and an agent
       #                                      belonging to NOBODY is handed to
@@ -1054,6 +1093,7 @@ jobs:
             verify-daemon-started-at
             verify-daemon-status-over-mcp
             verify-read-contract
+            verify-doc-set-counts
             verify-path-problem
             verify-send-contract
             verify-channel-enabled

@@ -704,7 +704,7 @@ const STATE_READ_PROVENANCE = {
     // `unreadableRecords[]` (KAN-302, extended by KAN-344). These five are the
     // row's OWN bytes, read off the log and unchanged by a restart, which is
     // this bucket's definition applied to a row that is not an agent. The other
-    // five fields of that shape are this daemon's account of the row rather
+    // six fields of that shape are this daemon's account of the row rather
     // than the row, and are in `derived` below — see ROW_SHAPES.UnreadableRecord
     // for why the split falls where it does. `claimsAt` and `claimsEvent` are on
     // this side rather than the other precisely because they are quotes: this
