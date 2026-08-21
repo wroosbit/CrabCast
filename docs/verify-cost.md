@@ -163,9 +163,12 @@ fixed.
 | times the old bound had already fired | **twice**, run 32406501749 attempts 1 and 2 |
 
 **The 17m49s is a tail and not a second mode**, which was the question worth
-answering: across all 364 attempts nothing at all sits between 15m05s and 20m.
-There is no slower cluster — one draw went long, and the empty-diff pair says
-the runner did it, because between those two runs the diff *is* empty.
+answering. Across all 364 attempts, only four reach 15m00s at all: **15m05s,
+the 17m49s itself, and the two censored timeouts at 20m17s and 20m21s.** The
+17m49s is therefore isolated — the nearest attempt below it is **2m44s** away,
+and the only things above it are the two runs the bound cut off. There is no
+slower cluster for it to belong to: one draw went long, and the empty-diff pair
+says the runner did it, because between those two runs the diff *is* empty.
 
 ### The arithmetic the number comes from
 
