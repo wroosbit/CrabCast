@@ -614,7 +614,8 @@ const README_PATH = path.join(repoRoot, 'README.md');
  * The directory prefix the README's block shows, as a SUBSTITUTION rather than
  * a mask.
  *
- * The page was captured in `/tmp/kan174/crabcast` and this run's fixture is a
+ * The page was captured in `/tmp/kan592/crabcast` (re-captured there by KAN-592,
+ * which grew the freshness block by two lines) and this run's fixture is a
  * scratch directory; rewriting one to the other lets the four path lines
  * (`git root`, `loaded from`, `stamp`, `sources`) and the summary be compared
  * for what they say rather than skipped. A substitution and not a `<PATH>` mask
@@ -626,7 +627,7 @@ const README_PATH = path.join(repoRoot, 'README.md');
  * change — but the fix is to update this constant, and the check below says so
  * by name rather than leaving it to be deduced from a pile of missing lines.
  */
-const PAGE_TREE = '/tmp/kan174/crabcast';
+const PAGE_TREE = '/tmp/kan592/crabcast';
 
 /** `daemon-status` from the `build —` line to the end: the two blocks the page pastes. */
 function buildFreshnessLines(stdout) {
@@ -722,7 +723,7 @@ if (!check(pageBlock !== null,
  * WHEN A REVISION ON `main` CARRIES THOSE LINES, replace this entry with a
  * `green` one pinned to it and delete `redOnly`. That is the fix the sweep in
  * `docs/moving-baselines.md` prescribes — a newer revision, never a shorter
- * list — and it is owed rather than optional: KAN-610 tracks it.
+ * list — and it is owed rather than optional: KAN-617 tracks it.
  */
 const BLOCK_HISTORY = [
   {
@@ -737,11 +738,17 @@ const BLOCK_HISTORY = [
     // The two lines KAN-592 added, as MASKED shapes, because that is what
     // `compareSegment` reports. Naming them exactly is what keeps this entry
     // from being "this old page is old".
-    redOnly: /release line/,
-    redOnlyCount: 2,
+    // TWO ACCOUNTED-FOR CAUSES, AND NOTHING ELSE MAY BE MISSING. KAN-592 added
+    // the two `release line` lines, and re-captured the page in a new directory
+    // — so the five lines carrying PAGE_TREE differ from the prefix every
+    // pre-KAN-592 revision shows. Both are dated, both are this ticket's, and
+    // any SIXTH cause fails the count.
+    redOnly: /release line|\/tmp\/kan592\//,
+    redOnlyCount: 7,
     note: 'the newest README before KAN-200 — accurate until KAN-592 grew the freshness block by ' +
-          'two lines, so it is now red for AGE, and this entry pins exactly which two so that a ' +
-          'check degenerating into measuring the calendar would fail on the count'
+          'two lines and re-captured it under a new prefix, so it is now red for AGE, and this ' +
+          'entry pins exactly which lines so that a check degenerating into measuring the ' +
+          'calendar would fail on the count'
   }
 ];
 

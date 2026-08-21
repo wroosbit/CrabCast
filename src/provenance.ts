@@ -974,6 +974,16 @@ export function buildProvenanceReport(boot: BuildSnapshot): {
     summary =
       `FRESHNESS UNKNOWN — ` +
       (known.length ? `${known.join(', and ')}. ` : '') +
+      // The evidence behind whatever IS known, carried here as well as in the
+      // `current` branch (KAN-592). Until this state started being reachable
+      // for a build that is perfectly consistent — an unstamped one, which
+      // names no commit and so cannot be placed on the release line — the
+      // `file-times` fallback's bound sentence appeared ONLY under `current`,
+      // and demoting that build silently deleted the one clause telling a
+      // reader what "running the build on disk: yes" was resting on. A state
+      // that reports less about what it DID establish is a worse answer, not a
+      // more cautious one.
+      (comparison ? `Evidence for what is known: ${comparison}. ` : '') +
       `What could not be answered: ` +
       Object.values(unknown).join('; ') +
       `. This is not a clean bill of health: it is the part of the question that could not be ` +
