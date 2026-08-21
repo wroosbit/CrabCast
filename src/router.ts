@@ -6446,7 +6446,7 @@ export class MessageRouter {
       // hand-edited and is a fault report rather than an inventory. A registry
       // with more unreadable rows than fit here has one problem, not twenty-six
       // — the count says so, and the full set is spelled out in `daemon.log`.
-      unreadableRecordsTotal: unreadable.length,
+      unreadableRecordsTotalRENAMED: unreadable.length,
       // Agents that exist and have NEVER run — the fifth answer to "not
       // running", and the one that used to belong to no list at all. Kept
       // separate from standby because the difference is behavioural: switching
