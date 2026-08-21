@@ -1,3 +1,4 @@
+import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -65,6 +66,62 @@ import { fileURLToPath } from 'url';
  * from. That is caught here (see {@link STAMP_STALENESS_TOLERANCE_MS}) and
  * demoted to `unknown`, because a stamp that is confidently wrong is worse
  * than no stamp at all.
+ *
+ * ---------------------------------------------------------------------------
+ * AND SINCE KAN-592, A THIRD QUESTION: IS THAT COMMIT ON A RELEASED LINE?
+ *
+ * The two questions above are both about CONSISTENCY — is the process running
+ * the build on disk, is that build newer than `src/`. Both can be true of a
+ * build made from a branch nobody merged, and on 2026-08-20 both were: the
+ * fleet served `c730a98` for roughly 24 hours while `daemon-status` reported
+ * `freshness: CURRENT`, `running the build on disk: yes` and
+ * `checkout: clean when this build was made`. Every one of those was TRUE.
+ * `c730a98` was on `incident/kan-552-herdr-0.8-port` and on no release line at
+ * all, and nothing here asked.
+ *
+ * That is this epic's recurring shape — an artifact whose sentence claims more
+ * than its mechanism covers — sitting inside the instrument built to catch it.
+ * `CURRENT` means *consistent with the local checkout*; an operator reads it as
+ * *this is a build somebody released*. So the fix is not a fourth line under
+ * the greens, which nobody would read. It is a new value of `state`
+ * ({@link FreshnessReport.state}'s `off-release-line`), so the HEADLINE stops
+ * saying `CURRENT` for a build that is not on a released line.
+ *
+ * HOW IT IS ANSWERED, AND WHY IT TOUCHES NO NETWORK. `git merge-base
+ * --is-ancestor <the commit the stamp names> <a LOCAL ref>`, run in the package
+ * root this `dist/` was loaded from. Nothing here fetches, and nothing here may
+ * ever fetch: `daemon-status` has to work on a machine with no route out, and a
+ * check that reached the network would turn every offline run into a hang or a
+ * false answer. The refs it will accept are {@link RELEASE_REF_CANDIDATES}, and
+ * the one that answered is named on the wire beside the verdict.
+ *
+ * WHY IT IS COMPUTED HERE AND NOT STAMPED INTO `dist/`. The commit is
+ * immutable, which is what makes stamping it right. "Is it released" is not:
+ * the same commit is off the line on Monday and on it on Tuesday. Freezing a
+ * time-varying answer into an immutable artifact would be the same defect one
+ * layer down — a stamp that goes on asserting Monday's answer for the life of
+ * the build.
+ *
+ * ⚠ THE BOUND, AND IT IS ASYMMETRIC — WHICH IS WHY ONLY ONE BRANCH CARRIES A
+ * CAVEAT. The release ref is whatever this clone last fetched, so it can be
+ * behind the remote. That does not weaken a `yes`: reachability is monotonic
+ * under fast-forward, so a commit reachable from the release tip at any past
+ * moment stays reachable from every later one, and a stale ref can only ever
+ * make a `yes` late — never wrong. It DOES weaken a `no`: the commit may have
+ * landed since the last fetch. So the `no` says so in its own summary and tells
+ * the reader to fetch and ask again, and the `yes` does not carry a caveat it
+ * has not earned. (The one thing that can retract a `yes` is a history rewrite
+ * of the release branch — a force-push — which is a different event and is
+ * named in {@link readReleaseLine}.)
+ *
+ * ⚠ AND "CANNOT TELL" IS A FIRST-CLASS THIRD ANSWER, distinguishable from
+ * `yes` and from `no`, for the same reason every other field here is: no `git`
+ * on the machine, a `dist`-only install with no working tree, a clone holding
+ * none of the candidate refs, a repository that does not contain the commit at
+ * all. Each is `onReleaseLine: null` with its reason in the `unknown` map, and
+ * each demotes `state` to `unknown` rather than to `current` — because an
+ * unanswerable release-line question reporting `CURRENT` is exactly the defect
+ * this section exists to remove, recreated one layer down.
  */
 
 /** The stamp file `scripts/stamp-build.mjs` writes, inside `dist/`. */
@@ -95,6 +152,55 @@ export const BUILD_STAMP_VERSION = 1;
  * filesystems worse) would otherwise make a perfectly good build accuse itself.
  */
 export const STAMP_STALENESS_TOLERANCE_MS = 2000;
+
+/**
+ * The refs this daemon will read as "the release line", most authoritative
+ * first. The first one that RESOLVES is used, and it is named on the wire.
+ *
+ * All three are LOCAL. Nothing here fetches — see the header — so each is only
+ * as current as whoever last ran `git fetch` in that clone, and the verdict
+ * says which one it rested on so a reader can judge that for themselves.
+ *
+ * WHY THESE THREE, IN THIS ORDER:
+ *
+ *   `refs/remotes/origin/HEAD`  the remote's OWN idea of its default branch,
+ *                               so a repository that renames `main` is still
+ *                               answered correctly without editing this list.
+ *                               Not present in every clone — `git clone` sets
+ *                               it, `git init` plus `git remote add` does not.
+ *   `refs/remotes/origin/main`  what this repository actually protects and
+ *                               merges into. The ordinary answer.
+ *   `refs/heads/main`           the local branch, for a clone with no remote
+ *                               at all. Weakest of the three, because nothing
+ *                               says a local `main` tracks anything — and it
+ *                               is last for that reason rather than omitted,
+ *                               because a fixture, an air-gapped mirror and a
+ *                               fresh `git init` all have only this.
+ *
+ * ⚠ THIS LIST IS A CLAIM ABOUT WHAT "RELEASED" MEANS HERE, and it is
+ * deliberately not configurable. A knob would let a machine be pointed at a ref
+ * that makes any build look released, which is the failure this whole check
+ * exists to prevent, dressed as a setting. If this repository's release line
+ * ever stops being `main`, this constant is the edit — one place, in a diff a
+ * reviewer sees.
+ */
+export const RELEASE_REF_CANDIDATES = [
+  'refs/remotes/origin/HEAD',
+  'refs/remotes/origin/main',
+  'refs/heads/main'
+] as const;
+
+/**
+ * How long any one `git` invocation below may take before it is abandoned as
+ * unanswerable.
+ *
+ * The same 10s `scripts/stamp-build.mjs` gives its own git calls. These run on
+ * a `daemon_status` request rather than at build time, so the bound is doing
+ * real work: a repository on a wedged network filesystem must make this command
+ * SLOW AND HONEST rather than hung, and a timeout arrives as `onReleaseLine:
+ * null` with the reason naming the timeout — never as a `no`.
+ */
+export const RELEASE_LINE_GIT_TIMEOUT_MS = 10_000;
 
 /** The on-disk stamp, exactly as written. */
 export interface BuildStampFile {
@@ -157,15 +263,51 @@ export interface BuildSnapshot {
   code: DirFingerprint;
 }
 
-/** Where the running daemon stands relative to what is on disk right now. */
+/**
+ * Where the running daemon stands relative to what is on disk right now — and,
+ * since KAN-592, whether what it is running was ever released.
+ */
 export interface FreshnessReport {
-  state: 'current' | 'process-predates-build' | 'build-predates-sources' | 'unknown';
+  /**
+   * ⚠ `current` IS THE ONLY CLEAN VALUE AND IT NOW ASSERTS THREE THINGS, not
+   * two: the process is running the build on disk, that build is newer than
+   * `src/`, AND the commit it was built from is on the release line. Anything
+   * short of all three is one of the other four, deliberately — see
+   * `off-release-line`, which exists because the first two were true of a
+   * fleet running an unmerged incident branch for 24 hours (KAN-592).
+   */
+  state:
+    | 'current'
+    | 'process-predates-build'
+    | 'build-predates-sources'
+    | 'off-release-line'
+    | 'unknown';
   /** One sentence a human can act on. Names the state and what to do about it. */
   summary: string;
   /** Is the process executing the build that is on disk? Null when unmeasurable. */
   processIsCurrentBuild: boolean | null;
   /** Is `src/` newer than `dist/`? Null when unmeasurable. */
   sourcesNewerThanBuild: boolean | null;
+  /**
+   * Is {@link runningCommit} reachable from {@link releaseRefCommit}?
+   *
+   * `null` is "could not tell" and is NOT a `no`: the reason is in `unknown`
+   * under this field's own name, and it demotes `state` to `unknown` rather
+   * than letting an unanswered question read as `current`.
+   */
+  onReleaseLine: boolean | null;
+  /** Which of {@link RELEASE_REF_CANDIDATES} answered. Null when none did. */
+  releaseRef: string | null;
+  /**
+   * The commit that ref pointed at — and the object the ancestry test was
+   * ACTUALLY run against, so the verdict and this field cannot describe two
+   * different tips.
+   */
+  releaseRefCommit: string | null;
+  /** When {@link releaseRefCommit} was committed. Dates the line, not the fetch. */
+  releaseRefCommittedAt: string | null;
+  /** The working tree the question was asked of. May differ from `build.gitRoot`. */
+  releaseLineRepo: string | null;
   /** What the process-against-disk comparison actually rested on. */
   basis: 'build-stamp' | 'file-times' | 'none';
   /** The build this process is executing (from the boot stamp). */
@@ -416,6 +558,195 @@ export function snapshotBuild(distDir: string = loadedDistDir()): BuildSnapshot 
   };
 }
 
+// ---------------------------------------------------------- the release line
+
+/** What {@link readReleaseLine} established, and why it could not. */
+export interface ReleaseLineAnswer {
+  /** True, false, or null for "could not tell". Never a `false` standing in for null. */
+  onReleaseLine: boolean | null;
+  ref: string | null;
+  refCommit: string | null;
+  refCommittedAt: string | null;
+  /** The git working tree that answered — `--show-toplevel`, not the path asked. */
+  repo: string | null;
+  /** Why {@link onReleaseLine} is null. Null exactly when it is not. */
+  reason: string | null;
+}
+
+/** One local git question. Never a shell, never a fetch, always bounded. */
+function git(cwd: string, args: string[]) {
+  const run = spawnSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    timeout: RELEASE_LINE_GIT_TIMEOUT_MS,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  return {
+    status: run.status,
+    stdout: run.stdout ?? '',
+    stderr: String(run.stderr ?? '').trim(),
+    error: run.error as NodeJS.ErrnoException | undefined
+  };
+}
+
+/**
+ * Turn a git invocation that did not answer into a sentence a reader can act
+ * on. The failure shapes are told apart because they send a reader to three
+ * different places — the same three `scripts/stamp-build.mjs` distinguishes,
+ * for the same reason.
+ */
+function gitFailureReason(
+  run: ReturnType<typeof git>,
+  what: string,
+  where: string
+): string {
+  if (run.error?.code === 'ENOENT') {
+    return (
+      `there is no \`git\` on PATH on the machine this daemon is running on, so ${what} could ` +
+      `not be asked of ${where}. NOTHING WAS FETCHED and nothing could have been — this check ` +
+      `never reaches the network. A missing \`git\` is a missing ANSWER, not a "no"`
+    );
+  }
+  if (run.error?.code === 'ETIMEDOUT') {
+    return (
+      `\`git\` did not answer ${what} in ${where} within ${RELEASE_LINE_GIT_TIMEOUT_MS}ms and ` +
+      `was abandoned. A repository on a wedged filesystem makes this command slow and honest ` +
+      `rather than hung, and an abandoned question is unanswered rather than answered "no"`
+    );
+  }
+  if (run.error) {
+    return `\`git\` could not be run in ${where}: ${run.error.message}`;
+  }
+  if (/not a git repository|does not appear to be a git repository/i.test(run.stderr)) {
+    return (
+      `${where} is not inside a git working tree, so there is no history to walk and ${what} ` +
+      `cannot be asked. A \`dist\`-only install, a tarball or an export looks exactly like ` +
+      `this, and none of them is evidence that the build is released`
+    );
+  }
+  return `${what} could not be asked of ${where}: ${run.stderr || `git exited ${run.status}`}`;
+}
+
+/**
+ * Is `commit` reachable from this clone's release ref?
+ *
+ * THREE `git` INVOCATIONS, ALL LOCAL AND ALL READ-ONLY: `rev-parse
+ * --show-toplevel` to find the tree, `for-each-ref` to resolve the candidates
+ * in ONE call, and `merge-base --is-ancestor` for the verdict. No `fetch`, no
+ * `ls-remote`, no network of any kind — see this module's header for why that
+ * is a rule rather than an optimisation.
+ *
+ * ⚠ THE ANCESTRY TEST IS RUN AGAINST THE RESOLVED OBJECT, never against the
+ * refname. `refs/remotes/origin/HEAD` is a symbolic ref, and testing the name
+ * while REPORTING the object would let the two describe different tips if the
+ * ref moved between the calls. This way {@link ReleaseLineAnswer.refCommit} is
+ * by construction the thing the verdict is about.
+ *
+ * `builtInGitRoot` is the tree the STAMP says the build was made in, and is
+ * used only to write a better sentence when this repository turns out not to
+ * contain the commit — the commonest cause of which is that the build came
+ * from somewhere else entirely.
+ */
+export function readReleaseLine(
+  packageRoot: string,
+  commit: string | null,
+  builtInGitRoot: string | null = null
+): ReleaseLineAnswer {
+  const nothing = (reason: string): ReleaseLineAnswer => ({
+    onReleaseLine: null,
+    ref: null,
+    refCommit: null,
+    refCommittedAt: null,
+    repo: null,
+    reason
+  });
+
+  if (!commit) {
+    return nothing(
+      `the build this process is running names no commit, so there is nothing to look for on ` +
+        `the release line. WHY it names none is the \`build\` block's own \`unknown\` map, ` +
+        `directly above this one — this field is absent BECAUSE that one is, and repeating its ` +
+        `reason here would be a second copy that could disagree with the first`
+    );
+  }
+
+  const top = git(packageRoot, ['rev-parse', '--show-toplevel']);
+  if (top.status !== 0 || !top.stdout.trim()) {
+    return nothing(gitFailureReason(top, 'whether this build is on the release line', packageRoot));
+  }
+  const repo = top.stdout.trim();
+
+  // ONE call for every candidate. `for-each-ref` answers about the refs that
+  // EXIST and says nothing about the ones that do not, which is exactly the
+  // question — and it returns them in refname order rather than in the order
+  // they were asked for, so the precedence below is applied here and not
+  // inferred from git's output.
+  const refs = git(repo, [
+    'for-each-ref',
+    '--format=%(refname)%09%(objectname)%09%(committerdate:iso-strict)',
+    ...RELEASE_REF_CANDIDATES
+  ]);
+  if (refs.status !== 0) {
+    return nothing(gitFailureReason(refs, 'which ref is the release line', repo));
+  }
+
+  const resolved = new Map<string, { objectName: string; committedAt: string }>();
+  for (const line of refs.stdout.split('\n')) {
+    const [refname, objectName, committedAt] = line.split('\t');
+    if (refname && objectName) resolved.set(refname, { objectName, committedAt: committedAt ?? '' });
+  }
+
+  const ref = RELEASE_REF_CANDIDATES.find((candidate) => resolved.has(candidate)) ?? null;
+  if (!ref) {
+    return nothing(
+      `${repo} holds none of the refs this daemon reads as the release line ` +
+        `(${RELEASE_REF_CANDIDATES.join(', ')}), so there is no line to be on or off. A clone ` +
+        `that has never fetched \`origin\`, a repository whose remote is named something else, ` +
+        `and a shallow single-branch CI checkout all look like this. NOTHING WAS FETCHED to ` +
+        `find out — this check never reaches the network, so an absent ref is an absent ANSWER ` +
+        `rather than a "no"`
+    );
+  }
+
+  const tip = resolved.get(ref)!;
+  const committedMs = Date.parse(tip.committedAt);
+  const refCommittedAt = Number.isFinite(committedMs)
+    ? new Date(committedMs).toISOString()
+    : null;
+
+  const ancestry = git(repo, ['merge-base', '--is-ancestor', commit, tip.objectName]);
+  const evidence = { ref, refCommit: tip.objectName, refCommittedAt, repo };
+
+  // 0 and 1 are `--is-ancestor`'s two ANSWERS; anything else is git declining
+  // to answer, and the two must never be collapsed. The commonest decline is
+  // exit 128 for a commit this repository has never heard of, which reads as a
+  // plain "not an ancestor" to any check that only tests for zero — and would
+  // report a released build as unreleased.
+  if (ancestry.status === 0) return { onReleaseLine: true, ...evidence, reason: null };
+  if (ancestry.status === 1) return { onReleaseLine: false, ...evidence, reason: null };
+
+  if (/not a valid|bad object|unknown revision|no such/i.test(ancestry.stderr)) {
+    return {
+      onReleaseLine: null,
+      ...evidence,
+      reason:
+        `${repo} does not contain ${commit}, the commit this process was built from, so whether ` +
+        `it is on ${ref} cannot be answered here` +
+        (builtInGitRoot && builtInGitRoot !== repo
+          ? ` — the stamp says this build was made in ${builtInGitRoot}, which is a different ` +
+            `tree from the one beside the \`dist/\` that was loaded`
+          : ` — the build was made somewhere this repository cannot see, or its history has ` +
+            `been rewritten since`) +
+        `. Git said: ${ancestry.stderr}`
+    };
+  }
+
+  return {
+    onReleaseLine: null,
+    ...evidence,
+    reason: gitFailureReason(ancestry, `whether ${commit} is reachable from ${ref}`, repo)
+  };
+}
+
 // ----------------------------------------------------------- the comparison
 
 /** Do two snapshots describe the same build? */
@@ -542,13 +873,41 @@ export function buildProvenanceReport(boot: BuildSnapshot): {
     sourcesNewerThanBuild = src.newestMs > now.dist.newestMs;
   }
 
+  // ------------------------------------- is that commit on a released line?
+  //
+  // Asked of the RUNNING build's commit — `boot.provenance`, not `now` — for
+  // the same reason every other question here is: the thing an operator needs
+  // named is what this process is serving, and a `dist/` rebuilt underneath it
+  // from a different branch would otherwise have this field describe code that
+  // is not executing.
+  const releaseLine = readReleaseLine(
+    packageRootFor(distDir),
+    boot.provenance.commit,
+    boot.provenance.gitRoot
+  );
+  if (releaseLine.reason) unknown.onReleaseLine = releaseLine.reason;
+
   // ---------------------------------------------------------------- the state
   //
   // Precedence, not a summary: a process that predates the build on disk is
   // the failure a fleet actually hits — every filesystem check reads healthy
   // while the running code is something else — so it is named first when both
-  // are true. BOTH flags are on the report either way, so nothing is lost to
-  // the precedence.
+  // are true. ALL THREE flags are on the report either way, so nothing is lost
+  // to the precedence.
+  //
+  // `off-release-line` SITS THIRD, AND THAT IS A DECISION (KAN-592). The two
+  // above it name a remedy the reader can perform in one command — restart,
+  // rebuild — and both are about a tree that is INTERNALLY inconsistent, which
+  // is the sharper failure. Being off the release line is a fact about a build
+  // that is entirely self-consistent; it is what `current` was silently
+  // absorbing, and it displaces `current` rather than the two loud states.
+  //
+  // ⚠ AND IT IS RANKED ABOVE `current` BUT BELOW `unknown`'s CAUSES BY
+  // CONSTRUCTION: the `current` branch requires all three answered and good, so
+  // an unanswerable release-line question falls through to `unknown` rather
+  // than to `current`. That fall-through is the whole of task 2 on the ticket —
+  // an unreachable answer reporting `CURRENT` would recreate the defect this
+  // state exists to remove, one layer down.
   let state: FreshnessReport['state'];
   let summary: string;
 
@@ -572,11 +931,51 @@ export function buildProvenanceReport(boot: BuildSnapshot): {
       `(newest source ${src.newestFile} at ${src.newestAt}, newest build output ` +
       `${now.dist.newestAt}). This daemon is running the build that is on disk, but that build ` +
       `does not include those edits. Run \`npm run build\`, then restart the daemon.`;
-  } else if (processIsCurrentBuild === true && sourcesNewerThanBuild === false) {
+  } else if (releaseLine.onReleaseLine === false) {
+    state = 'off-release-line';
+    // ⚠ THIS BRANCH IS ALSO REACHED WHEN THE OTHER TWO ARE null, AND THE
+    // SENTENCE HAS TO KNOW THAT. It is guarded only against `false` and `true`
+    // above, so a daemon whose `dist/` has become unreadable AND whose build
+    // came off an unmerged branch lands here with `processIsCurrentBuild` and
+    // `sourcesNewerThanBuild` both unmeasured. A fixed preamble reading "this
+    // daemon is running the build on disk and that build is consistent with
+    // src/" would then assert two things nothing established — which is this
+    // ticket's own defect committed by its own fix. So the preamble is built
+    // from what was actually answered, exactly as the `unknown` branch's is.
+    const selfConsistent = processIsCurrentBuild === true && sourcesNewerThanBuild === false;
+    summary =
+      `THE RUNNING BUILD IS NOT ON THE RELEASE LINE. ` +
+      (selfConsistent
+        ? `This daemon is running the build on disk and that build is consistent with ` +
+          `${sourceDir}, but the commit it was built from `
+        : `The commit this process was built from `) +
+      `(${boot.provenance.commit}) is NOT reachable from ${releaseLine.ref} ` +
+      `(${releaseLine.refCommit}) in ${releaseLine.repo} — so what is running here was built ` +
+      `from a branch that has not landed. THIS IS NOT A STALENESS PROBLEM AND REBUILDING WILL ` +
+      `NOT CLEAR IT` +
+      (selfConsistent
+        ? `: the tree is entirely self-consistent, which is why every other check on this ` +
+          `response is green. `
+        : `. ⚠ AND THE REST OF THIS RESPONSE IS NOT A CLEAN BILL OF HEALTH EITHER — whether ` +
+          `this process is running the build on disk, or that build newer than ${sourceDir}, ` +
+          `could not be established here; the reasons are in the \`unknown\` map below. ` +
+          `This state names ONE thing that is wrong and is not a claim that it is the only one. `) +
+      `Find out why that branch is deployed before changing it — checking the tree out onto ` +
+      `the release line and rebuilding would change what this daemon serves, with no deploy ` +
+      `step and no announcement. NOTHING WAS FETCHED to establish this: ` +
+      `${releaseLine.ref} is this clone's own copy, as of whoever last fetched it, so a commit ` +
+      `that landed on the remote since then still reads as off the line here. \`git fetch\` and ` +
+      `ask again before treating it as final.`;
+  } else if (
+    processIsCurrentBuild === true &&
+    sourcesNewerThanBuild === false &&
+    releaseLine.onReleaseLine === true
+  ) {
     state = 'current';
     summary =
-      `This daemon is running the build that is on disk, and that build is newer than ` +
-      `${sourceDir}. Evidence: ${comparison}.`;
+      `This daemon is running the build that is on disk, that build is newer than ` +
+      `${sourceDir}, and the commit it was built from is on the release line ` +
+      `(${releaseLine.ref}). Evidence: ${comparison}.`;
   } else {
     // Deliberately NOT 'current'. One of the two questions could not be
     // answered, and a check that reports success when it could not run is
@@ -589,9 +988,22 @@ export function buildProvenanceReport(boot: BuildSnapshot): {
     if (sourcesNewerThanBuild === false) {
       known.push(`that build is newer than ${sourceDir}`);
     }
+    if (releaseLine.onReleaseLine === true) {
+      known.push(`the commit it was built from is on ${releaseLine.ref}`);
+    }
     summary =
       `FRESHNESS UNKNOWN — ` +
       (known.length ? `${known.join(', and ')}. ` : '') +
+      // The evidence behind whatever IS known, carried here as well as in the
+      // `current` branch (KAN-592). Until this state started being reachable
+      // for a build that is perfectly consistent — an unstamped one, which
+      // names no commit and so cannot be placed on the release line — the
+      // `file-times` fallback's bound sentence appeared ONLY under `current`,
+      // and demoting that build silently deleted the one clause telling a
+      // reader what "running the build on disk: yes" was resting on. A state
+      // that reports less about what it DID establish is a worse answer, not a
+      // more cautious one.
+      (comparison ? `Evidence for what is known: ${comparison}. ` : '') +
       `What could not be answered: ` +
       Object.values(unknown).join('; ') +
       `. This is not a clean bill of health: it is the part of the question that could not be ` +
@@ -605,6 +1017,11 @@ export function buildProvenanceReport(boot: BuildSnapshot): {
       summary,
       processIsCurrentBuild,
       sourcesNewerThanBuild,
+      onReleaseLine: releaseLine.onReleaseLine,
+      releaseRef: releaseLine.ref,
+      releaseRefCommit: releaseLine.refCommit,
+      releaseRefCommittedAt: releaseLine.refCommittedAt,
+      releaseLineRepo: releaseLine.repo,
       basis,
       runningBuiltAt: boot.provenance.builtAt,
       runningCommit: boot.provenance.commit,

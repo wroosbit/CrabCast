@@ -726,6 +726,42 @@ const PROOF_DEFENCES = [
       'rather than passing over them, and no sibling script covers the second.'
   },
   {
+    script: 'verify-doc-example-sets',
+    defence: 'guard',
+    anchor: 'this is the fixture that must fail to match',
+    central:
+      'an ILLUSTRATIVE fenced block in docs/ that lists a declared set agrees with that ' +
+      'declaration — the half nothing held at all, because at 662d18f no proof in this ' +
+      'repository opened a fence under docs/: verify-approval-marker and ' +
+      'verify-readme-is-current are the only two that parse a fence, and both read README.md ' +
+      'or a PR body.',
+    note:
+      'A MUST-REJECT FIXTURE IS WHAT EARNS THE KEEP, and it is the pair that matters: §3 runs ' +
+      'the attribution path over fixtures it MUST attach a marker to and one it MUST NOT — a ' +
+      'marker separated from its fence by more than MARKER_REACH blank lines. A detector that ' +
+      'attached everything would pass the accept side and fail the reject side; one that ' +
+      'attached nothing would do the reverse; neither test alone says anything. Two more ' +
+      'discriminators sit beside them: an unparseable fence must read as null rather than as an ' +
+      'empty object, because an empty object makes every set in it VACUOUSLY agree and the gate ' +
+      'would go green on a block it never read; and an unknown derivation must REFUSE rather ' +
+      'than pass through as "nothing to check". §5 also fails closed on zero markers, which is ' +
+      'this gate having been disconnected from its corpus while still printing a verdict. ' +
+      'THE SECOND HALF CARRIES ITS OWN CONTROL: §6 plants a real declared set into a synthetic ' +
+      'fence and requires attribution, so "no unmarked block carries a declared set" is a ' +
+      'finding about the tree and not about the search. ' +
+      'THREE HOLES NAMED RATHER THAN COVERED. (1) §6 attributes an unmarked block only on an ' +
+      'EXACT match, so a block that has ALREADY drifted matches nothing and is invisible to it ' +
+      '— which is precisely the state KAN-512 was filed about; ' +
+      'scripts/kan512-doc-example-sweep.mjs attributes by OVERLAP and is where that population ' +
+      'is measured, and it is a survey that gates nothing. (2) PROSE membership is held by ' +
+      'nobody — verify-doc-set-counts holds a prose COUNT against a gated set and has no ' +
+      'member to match a name against. (3) VALUES are not compared at all, only names, so an ' +
+      'example whose values are impossible passes here. An unlabelled fence meant to be JSON ' +
+      'that will not parse is silently outside the corpus; a fence LABELLED json/jsonc that ' +
+      'will not parse is declined OUT LOUD and printed every run, and a marker on one is a ' +
+      'failure rather than a skip.'
+  },
+  {
     script: 'verify-doc-set-counts',
     defence: 'guard',
     anchor: 'self-test: an article-less delta',
@@ -848,6 +884,26 @@ const PROOF_DEFENCES = [
       'epic/KAN-203 observed live and nothing on a runner reproduces it. It also asserts the ' +
       'row SAYS an activation would be refused, and never that the refusal works; ' +
       'verify-refuses-occupied-directory is what establishes that.'
+  },
+  {
+    script: 'verify-stranded-agents',
+    defence: 'mutation',
+    central:
+      'a registry record whose DIRECTORY IS GONE is reported exactly once, and in a sentence ' +
+      'that does not assert the directory — it is in `strandedAgents` and in no other category, ' +
+      'carries the `lastEvent` that says whether it ever ran, and no `missingAgents` row says ' +
+      '"herdr has no live agent in its directory" about a directory that is not there.',
+    note:
+      'TWO MUTANTS OF THE COMPILED BUILD, and they are deliberately OPPOSITE failures, because ' +
+      'a defence against only one licenses the other: a stranded category that collects nothing ' +
+      'must bring back the silent drop (the record in the registry, in no category, and no ' +
+      'total saying so), and a `missingAgents` blinded to the filesystem must bring back the ' +
+      'sentence asserting a directory that is not there AND put one record in two categories. ' +
+      'SEAM: the fixture is a herdr STUB, so what is defended is the daemon\'s reporting over a ' +
+      'census rather than herdr\'s reporting of one. It also does NOT defend the Butchr-side ' +
+      'question of why a proof teardown leaves rows behind (KAN-524 §6, KAN-519), nor whether ' +
+      '`daemon_status` agrees with this category — measured and filed as KAN-619, undefended ' +
+      'here and named so rather than left to be inferred.'
   },
   {
     script: 'verify-fleet-enumeration',
@@ -1881,6 +1937,24 @@ const PROOF_DEFENCES = [
       'NEGATIVE/POSITIVE PAIR on the loader: §1 requires four bad configs to exit 1 with the field ' +
       'named, §2 requires a good one to start and round-trip. A loader that refused everything ' +
       'fails §2; one that refused nothing fails §1.'
+  },
+  {
+    script: 'verify-release-line',
+    defence: 'mutation',
+    central:
+      '`daemon-status` names a running build that is not on a released line, and answers "cannot ' +
+      'tell" rather than a green when it cannot ask.',
+    anchor: 'THE MUTANT STILL PASSES.',
+    note:
+      'THREE MUTATIONS THROUGH THE SHARED HELPER, each a shape a real regression takes: the ' +
+      'ancestry verdict inverted, the state machine restored to its pre-KAN-592 form (two edits, ' +
+      'which reproduces THE INCIDENT — the right answer on the wire under the word `current`), ' +
+      'and the release-line conjunct dropped from `current` so an unanswerable question reads ' +
+      'clean. Each requires a named assertion above to go red. §5 additionally carries a POSITIVE ' +
+      'CONTROL that is not a mutation and is the load-bearing one for the no-network claim: a ' +
+      'clone whose remote-tracking ref is behind must answer `no`, and must answer `yes` only ' +
+      'after THIS SCRIPT runs the fetch — a reader that reached the network would answer `yes` ' +
+      'first time and the section would go red.'
   },
   {
     script: 'verify-daemon-provenance',

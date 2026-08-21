@@ -201,7 +201,11 @@ const basenames = (rows) => paths(rows).map((p) => path.basename(p)).sort();
 const has = (rows, dir) => paths(rows).includes(dir);
 
 /** Every category a filter is supposed to narrow, in one place. */
-const FILTERED = ['agents', 'missingAgents', 'preemptedAgents', 'standbyAgents', 'unstartedAgents'];
+const FILTERED = ['agents', 'missingAgents', 'preemptedAgents', 'standbyAgents', 'unstartedAgents',
+  // KAN-594. Filtered like every other category built from a record: a
+  // stranded row carries the owner its record was configured with, and the
+  // directory going away does not un-own it.
+  'strandedAgents'];
 /** Every row-carrying array it is supposed to leave whole. */
 const UNFILTERED = ['unbackedPanes', 'foreignPanes', 'priorities', 'unreadableRecords'];
 
@@ -300,7 +304,16 @@ const readS1 = async (request) => {
       derivation: 'written by verify-owner-filter.mjs §1; see its header'
     });
 
-    fleet[tag] = { unstarted, running, standby, missing, preempted };
+    // --- stranded: configured at a directory that EXISTED, which is then
+    //     deleted with no `forget` (KAN-594). The owner is on the record and
+    //     the directory going away does not un-own it, so this category is
+    //     filtered like every other one built from a record — which is the
+    //     property §§2-3 are about to assert over it.
+    const stranded = ownedDir('stranded', tag);
+    await s1produce.invoke({ action: 'configure_agent', path: stranded, ...KNOBS, ...withOwner });
+    fs.rmSync(stranded, { recursive: true, force: true });
+
+    fleet[tag] = { unstarted, running, standby, missing, preempted, stranded };
   }
 
   // The running agents are the census now, plus one pane that is NOT ours —
@@ -338,7 +351,7 @@ const readS1 = async (request) => {
 
   check(
     populated.length === FILTERED.length,
-    'PRECONDITION — every one of the five filtered categories really holds an agent owned by ' +
+    'PRECONDITION — every one of the six filtered categories really holds an agent owned by ' +
       'each of the two owners AND one owned by nobody, so the sections below assert over ' +
       'populated categories rather than empty ones',
     `${populated.length}/${FILTERED.length}: ${populated.join(', ')}`

@@ -614,7 +614,8 @@ const README_PATH = path.join(repoRoot, 'README.md');
  * The directory prefix the README's block shows, as a SUBSTITUTION rather than
  * a mask.
  *
- * The page was captured in `/tmp/kan174/crabcast` and this run's fixture is a
+ * The page was captured in `/tmp/kan592/crabcast` (re-captured there by KAN-592,
+ * which grew the freshness block by two lines) and this run's fixture is a
  * scratch directory; rewriting one to the other lets the four path lines
  * (`git root`, `loaded from`, `stamp`, `sources`) and the summary be compared
  * for what they say rather than skipped. A substitution and not a `<PATH>` mask
@@ -626,7 +627,7 @@ const README_PATH = path.join(repoRoot, 'README.md');
  * change — but the fix is to update this constant, and the check below says so
  * by name rather than leaving it to be deduced from a pile of missing lines.
  */
-const PAGE_TREE = '/tmp/kan174/crabcast';
+const PAGE_TREE = '/tmp/kan592/crabcast';
 
 /** `daemon-status` from the `build —` line to the end: the two blocks the page pastes. */
 function buildFreshnessLines(stdout) {
@@ -701,12 +702,28 @@ if (!check(pageBlock !== null,
  *
  * THE GREEN DIRECTION IS WHAT KEEPS THIS FROM MEASURING THE CALENDAR. A check
  * that called every older page stale would go red on `e7ffb58` for the wrong
- * reason and nobody would notice. `0edd2c1` is the newest README before KAN-200,
- * and its copy of THIS block is byte-identical to today's — so it is a page from
- * the past that must stay green, and the pair of expectations together is the
- * evidence. If a future change to the build or freshness renderer makes that
- * revision go red, the honest fix is a NEWER revision to carry the green, never
- * an empty list.
+ * reason and nobody would notice.
+ *
+ * ⚠ KAN-592 SPENT THE GREEN, AND SAYS SO RATHER THAN SHORTENING THE LIST.
+ * `0edd2c1` carried it: its copy of this block was byte-identical to today's
+ * until the freshness block grew `on the release line:` and `release line:`.
+ * No revision on `main` can be green until one carries those two lines, and
+ * this change is the one that introduces them — so for exactly one commit there
+ * is no historical green available, which is a bootstrap cost rather than a
+ * decision.
+ *
+ * WHAT REPLACES IT IS STRICTLY SHARPER THAN THE GREEN IT LOST, and that is the
+ * reason this is not a weakening. `redOnly` requires the revision to be red for
+ * EXACTLY the lines named and for nothing else: a check that had degenerated
+ * into measuring age would find other lines missing too, and `0edd2c1` would go
+ * red on the count. So the pair of expectations still tells drift from age —
+ * `e7ffb58` is red for a whole missing evidence tail, `0edd2c1` for two dated
+ * lines and no others.
+ *
+ * WHEN A REVISION ON `main` CARRIES THOSE LINES, replace this entry with a
+ * `green` one pinned to it and delete `redOnly`. That is the fix the sweep in
+ * `docs/moving-baselines.md` prescribes — a newer revision, never a shorter
+ * list — and it is owed rather than optional: KAN-617 tracks it.
  */
 const BLOCK_HISTORY = [
   {
@@ -717,9 +734,21 @@ const BLOCK_HISTORY = [
   },
   {
     rev: '0edd2c1',
-    expect: 'green',
-    note: 'the newest README before KAN-200 — this block was already accurate there and is ' +
-          'unchanged since, so a red here would mean this check is measuring age'
+    expect: 'red',
+    // The two lines KAN-592 added, as MASKED shapes, because that is what
+    // `compareSegment` reports. Naming them exactly is what keeps this entry
+    // from being "this old page is old".
+    // TWO ACCOUNTED-FOR CAUSES, AND NOTHING ELSE MAY BE MISSING. KAN-592 added
+    // the two `release line` lines, and re-captured the page in a new directory
+    // — so the five lines carrying PAGE_TREE differ from the prefix every
+    // pre-KAN-592 revision shows. Both are dated, both are this ticket's, and
+    // any SIXTH cause fails the count.
+    redOnly: /release line|\/tmp\/kan592\//,
+    redOnlyCount: 7,
+    note: 'the newest README before KAN-200 — accurate until KAN-592 grew the freshness block by ' +
+          'two lines and re-captured it under a new prefix, so it is now red for AGE, and this ' +
+          'entry pins exactly which lines so that a check degenerating into measuring the ' +
+          'calendar would fail on the count'
   }
 ];
 
@@ -740,6 +769,18 @@ for (const h of BLOCK_HISTORY) {
   }
   const oldMissing = compareSegment({ output: capturedBlock }, { output: old.body });
   const got = oldMissing.length ? 'red' : 'green';
+  if (h.redOnly) {
+    const offSubject = oldMissing.filter((m) => !h.redOnly.test(m.line));
+    check(
+      oldMissing.length === h.redOnlyCount && offSubject.length === 0,
+      `${h.rev}: and it is red for EXACTLY the ${h.redOnlyCount} line(s) this entry accounts for`,
+      offSubject.length === 0
+        ? `${oldMissing.length} missing, all matching ${h.redOnly}`
+        : `${offSubject.length} line(s) missing that this entry does not account for — the page ` +
+          `has drifted for a second reason, or this check has started measuring age: ` +
+          `${offSubject.map((m) => JSON.stringify(m.line)).join(', ')}`
+    );
+  }
   check(got === h.expect,
     `${h.rev}: the block is ${h.expect.toUpperCase()} — ${h.note.replace(/\s+/g, ' ')}`,
     got === h.expect
@@ -1250,10 +1291,25 @@ for (const f of walkFiles(ft.src)) touch(f, ftBase - 60_000);
 for (const f of walkFiles(ft.dist)) touch(f, ftBase);
 
 const ftStatus = await startDaemon(ft, 't-filetimes');
+// ⚠ THE STATE WORD WAS `current` HERE UNTIL KAN-592 AND IS NOW `unknown`, and
+// this section never cared about the word — its subject is `basis` and
+// `processIsCurrentBuild`. An unstamped build names no commit, so the
+// release-line question cannot be asked of it at all, and an unanswerable
+// question demotes the state rather than letting it read clean. Both halves are
+// asserted so the change is pinned rather than tolerated: the fallback is still
+// reached, and the reason the word moved is the one KAN-592 introduced.
 check(
-  ftStatus.freshness?.basis === 'file-times' && ftStatus.freshness?.state === 'current',
-  'PRECONDITION: an unstamped build reaches the fallback and reads as CURRENT on it',
-  `${ftStatus.freshness?.basis} / ${ftStatus.freshness?.state}`
+  ftStatus.freshness?.basis === 'file-times' && ftStatus.freshness?.processIsCurrentBuild === true,
+  'PRECONDITION: an unstamped build reaches the fallback and is judged current ON it',
+  `${ftStatus.freshness?.basis} / processIsCurrentBuild=${ftStatus.freshness?.processIsCurrentBuild}`
+);
+check(
+  ftStatus.freshness?.state === 'unknown' &&
+    ftStatus.freshness?.onReleaseLine === null &&
+    /names no commit/.test(String(ftStatus.freshness?.unknown?.onReleaseLine)),
+  'and its STATE is `unknown` since KAN-592, for the release-line question and nothing else',
+  `state=${ftStatus.freshness?.state}, onReleaseLine=${ftStatus.freshness?.onReleaseLine} — a ` +
+    `build nobody can name cannot be shown to be released, and "current" would assert it was`
 );
 show('freshness.summary:', String(ftStatus.freshness?.summary));
 check(
@@ -1306,8 +1362,11 @@ check(
   `pid ${ftAfter.pid}`
 );
 check(
-  ftAfter.freshness?.processIsCurrentBuild === true && ftAfter.freshness?.state === 'current',
-  'AND IT STILL SAYS "running the build on disk: yes" — which is the bound, measured rather than asserted about'
+  ftAfter.freshness?.processIsCurrentBuild === true,
+  'AND IT STILL SAYS "running the build on disk: yes" — which is the bound, measured rather than asserted about',
+  `the FLAG is what the bound is about; the state word is "unknown" here for the unrelated ` +
+    `release-line reason asserted above, and reading the bound off the word would have made this ` +
+    `assertion move for a cause that has nothing to do with file times`
 );
 check(
   /cannot distinguish/.test(String(ftAfter.freshness?.summary)),
