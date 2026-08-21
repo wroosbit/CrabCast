@@ -803,8 +803,10 @@ writes there.
 
 Stated plainly, because this page would otherwise read as a guarantee.
 
-**Observed on 2026-08-21, on this machine, and reproduced in the PR that added
-this page:**
+**Observed on 2026-08-21, on this machine, each reproduced in the pull request
+that added it here** — which is no longer a single PR, and the wording is
+deliberate: this list grows, and *"the PR that added this page"* stopped being
+true of it the first time somebody appended to it.
 
 * `npm install -g .` from a clone that never ran `npm install` fails `127` at
   `tsc: not found`.
