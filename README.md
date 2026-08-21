@@ -225,7 +225,7 @@ unstarted agents (0)
 
 where these fields came from — read at 2026-08-05T13:01:36.686Z
   durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, promptChars, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, identity, raw, claimsPath, claimsAt, claimsEvent
-  observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir
+  observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir, occupiedBy
   derived  (computed from the two):                 paneName, state, occupies, reason, line, problem, rawTruncated, promptRedacted, standing
   remembered (this daemon's memory, not durable):   statusSince
 
@@ -269,7 +269,7 @@ $ crabcast status /tmp/ac1-demo/notes
 
 where these fields came from — read at 2026-08-05T13:01:42.798Z
   durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, promptChars, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, identity, raw, claimsPath, claimsAt, claimsEvent
-  observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir
+  observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir, occupiedBy
   derived  (computed from the two):                 paneName, state, occupies, reason, line, problem, rawTruncated, promptRedacted, standing
   remembered (this daemon's memory, not durable):   statusSince
 

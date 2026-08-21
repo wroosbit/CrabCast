@@ -791,7 +791,7 @@ export interface UnreadableRecord {
    * A REDACTION THAT IS STATED IS HONEST; A SURFACE THAT QUIETLY WIDENS IS
    * NOT. `config.prompt` is the one field a caller froze onto an agent that
    * this daemon does NOT echo on an ordinary `list_agents` row — the config
-   * echo is five fields and `prompt` is not among them. Publishing an
+   * echo is six fields and `prompt` is not among them. Publishing an
    * unreadable row's bytes unfiltered would therefore hand back, on the same
    * response, a value the surface beside it withholds, and a registry row is
    * exactly where a caller's own bootstrap text sits. So a `prompt` is

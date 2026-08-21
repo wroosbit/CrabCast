@@ -2218,7 +2218,7 @@ rule('15. THE missingAgents ORDER RANKS ACTIVATION, NOT NEGLECT (KAN-96 AC 2)');
       'router.js',
       "                ...configEcho(intent, 'summarised'),\n" +
       '                since: intent.at,\n' +
-      '                // Both cases are',
+      '                occupiedBy: occupant',
       "                ...configEcho(intent, 'summarised'),\n" +
       '                since: intent.at,\n' +
       '                missingSince: (() => {\n' +
@@ -2231,7 +2231,7 @@ rule('15. THE missingAgents ORDER RANKS ACTIVATION, NOT NEGLECT (KAN-96 AC 2)');
       '                    }\n' +
       '                    return seen[agentPath];\n' +
       '                })(),\n' +
-      '                // Both cases are'
+      '                occupiedBy: occupant'
     );
     // Already a counted failure. Skip rather than assert about an unmutated build.
     if (!mutantDir) break mutation15c;

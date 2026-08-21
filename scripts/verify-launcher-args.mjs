@@ -52,6 +52,14 @@
 // here is scratch and under one temp root; §6 asserts the real one was never
 // addressed and that this run left nothing of its own behind.
 //
+// ⚠ §6 SEPARATES ITS DISCLOSURES FROM ITS MEASUREMENTS, and says which is
+// which on every line (KAN-524). Three of its checks read configuration this
+// script itself composed and so cannot fail once written correctly; two read
+// the world and can. The registry check is a MEASUREMENT and is attributable —
+// it asks whether a row THIS RUN caused is in the live fleet's registry, not
+// whether the file was written, because the live daemon writes that file for
+// its own reasons all day. `scripts/kan524-red-drive.mjs` drives it red.
+//
 // Needs node and bash. No real herdr, no real claude, no network, no PTY.
 //
 // Usage:
@@ -63,6 +71,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { spawn, spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import { sweepScratchRoot, killScratchRootSync, describe } from './scratch-processes.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(process.argv[2] ?? path.join(scriptDir, '..', 'dist'));
@@ -86,8 +95,15 @@ function rule(title) {
  * Read at the top rather than in §6, because a baseline taken afterwards would
  * be a comparison against a value this run could already have changed — which
  * is a check that cannot fail. `null` when there is no live CrabCast on this
- * machine, and §6 says so in words rather than reporting a vacuous pass as a
- * measurement.
+ * machine.
+ *
+ * ⚠ THIS IS NO LONGER A GATE, AND HAS NOT BEEN SINCE KAN-524. §6 prints it
+ * beside the registry verdict as information about the world and rests nothing
+ * on it: the live daemon writes that file for its own reasons while this runs,
+ * so an unchanged mtime is luck and a moved one is somebody else's correct
+ * behaviour. What §6 asserts on instead is whether a row THIS RUN caused is in
+ * the file. Kept rather than deleted because "the fleet was busy during this
+ * run" is worth a reader knowing when they are looking at (d)'s verdict.
  */
 const realAgentsLogMtimeAtStart = (() => {
   const f = path.join(os.homedir(), '.local', 'share', 'crabcast', 'agents.jsonl');
@@ -106,32 +122,52 @@ const bin = path.join(tmp, 'bin');
 for (const d of [home, shimState, bin]) fs.mkdirSync(d, { recursive: true });
 fs.writeFileSync(configPath, JSON.stringify({ dataDir }, null, 2));
 
-/** Every process this script caused, so §6 can prove none outlived it. */
+/**
+ * The fake `claude` spawns this script makes by hand.
+ *
+ * ⚠ THIS IS NO LONGER WHAT §6 ASSERTS ON, and the distinction is the whole of
+ * KAN-529. It is kept because the sections above genuinely want it — "this arm
+ * produced a live process" is a claim about a pid — but as a TEARDOWN
+ * population it was wrong in two directions at once: it missed the scratch
+ * daemon and its `herdr agent attach` children entirely, and it did not even
+ * hold every fake `claude`, because the pid a fixture reports is not the pid of
+ * the `bash` wrapper that `exec`s toward it. §6 asks the machine instead. See
+ * `scratch-processes.mjs`.
+ */
 const spawnedPids = new Set();
 
 /**
  * CLEAN UP ON A SIGNAL TOO, and this one is not tidiness.
  *
- * The fake `claude` this proof spawns holds itself open with `sleep 600`. On
- * the ordinary path §6 kills them and asserts they are gone — but a Ctrl+C, or
- * a CI job hitting its timeout, skips §6 entirely and would leave those
- * processes and a scratch tree behind on a machine other people are using. A
- * proof whose failure mode is litter on a shared box is a proof that gets
- * disabled.
+ * The fake `claude` this proof spawns holds itself open with `sleep 600`, and
+ * the scratch daemon holds itself open forever. On the ordinary path §6 sweeps
+ * them and asserts they are gone — but a Ctrl+C, or a CI job hitting its
+ * timeout, skips §6 entirely and would leave those processes and a scratch tree
+ * behind on a machine other people are using. A proof whose failure mode is
+ * litter on a shared box is a proof that gets disabled.
  *
  * Handlers rather than only a `finally`, because a signal does not run one.
+ *
+ * ⚠ SYNCHRONOUS, and `killScratchRootSync` says why: a handler that awaited
+ * would call `process.exit` before the sweep it started had finished.
  */
 function cleanUp() {
+  let swept = 0;
+  try { swept = killScratchRootSync(tmp); } catch {}
   for (const pid of spawnedPids) {
     try { process.kill(pid, 'SIGKILL'); } catch {}
   }
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  return swept;
 }
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
-    console.log(`\n[verify-launcher-args] ${signal} — killing ${spawnedPids.size} spawned ` +
-      `process(es) and removing ${tmp}`);
-    cleanUp();
+    // The count is printed AFTER the sweep because it is the sweep's own
+    // answer — `spawnedPids.size` was what this line used to print, and it
+    // named a population that was never the one being cleaned up.
+    const swept = cleanUp();
+    console.log(`\n[verify-launcher-args] ${signal} — killed ${swept} process(es) carrying ` +
+      `${tmp} and removed it`);
     process.exit(130);
   });
 }
@@ -673,45 +709,224 @@ rule('6. the RUNNING FLEET was never touched');
 // CrabCast is the live runtime for a whole fleet on the machine this was
 // written on, so this is a safety assertion rather than a tidiness one: a proof
 // that spawned into the real daemon could take somebody's session.
+//
+// ---------------------------------------------------------------------------
+// ⚠ WHICH OF THESE ARE MEASUREMENTS AND WHICH ARE DISCLOSURES (KAN-524 item 4)
+// ---------------------------------------------------------------------------
+//
+// Stated because a reader counts the PASS lines under this heading and takes
+// that many facts about the world off them, and only some of them are that.
+//
+//   DISCLOSURES — (a), (b) and (c). They read `dataDir`, `env.HOME` and
+//   `env.PATH`: values THIS SCRIPT COMPOSED near the top of the file. Once
+//   written correctly they cannot fail, so what they report is the proof's own
+//   CONFIGURATION and not the world. That is not a defect and they are not
+//   being retired — they are a regression guard on a future edit that reaches
+//   for the real data dir, and that edit is exactly the accident worth
+//   catching. But a green from them says "this is what was configured", never
+//   "this is what happened", and the difference is the whole of KAN-524.
+//     WHAT PARTIALLY COVERS THE GAP, named rather than left to be inferred:
+//     (c) is corroborated by a live reading elsewhere in this file — §1 and §2
+//     read the argv of a process that really ran out of `/proc/<pid>/cmdline`,
+//     and that process is the shim `bin` put first on PATH, so a PATH that had
+//     not taken effect would redden them. (a) and (b) have no such corroboration
+//     here: nothing in this file observes a child's own view of its HOME or of
+//     the data dir it opened. WHO COVERS THAT: nobody yet.
+//
+//   MEASUREMENTS — (d) and (e). (d) reads a file this run does not own and asks
+//   whether this run's footprint is in it; (e) reads `/proc` for processes this
+//   run started. Both can be false while the configuration above is perfect,
+//   which is what makes them measurements rather than disclosures.
 {
   const realDataDir = path.join(os.homedir(), '.local', 'share', 'crabcast');
   check(
     !dataDir.startsWith(realDataDir) && dataDir.startsWith(tmp),
-    'the data dir this proof drove is scratch, not the fleet\'s',
+    '(a) [disclosure] the data dir this proof drove is scratch, not the fleet\'s',
     `used ${dataDir}`
   );
   check(
     env.HOME === home && home.startsWith(tmp),
-    'HOME was scratch, so no real ~/.claude.json trust entry or transcript was read or written',
+    '(b) [disclosure] HOME was scratch, so no real ~/.claude.json trust entry or transcript was ' +
+      'read or written',
     `HOME = ${env.HOME}`
   );
   check(
     env.PATH.startsWith(bin),
-    'PATH put the shim first, so no real herdr or real claude binary was ever invoked',
+    '(c) [disclosure] PATH put the shim first, so no real herdr or real claude binary was ever ' +
+      'invoked',
     `PATH = ${env.PATH}`
   );
+
+  // -------------------------------------------------------------------- (d)
+  // ⚠ THE GATE IS ATTRIBUTION, AND IT USED TO BE THE MTIME (KAN-524).
+  //
+  // This asserted `realMtimeNow === realAgentsLogMtimeAtStart` until KAN-524,
+  // and that reading is wrong in two different directions at once:
+  //
+  //   ON A CLEAN CI RUNNER it is VACUOUS. The `verify` job hands every proof a
+  //   scratch `$HOME` (`HOME="$RUNNER_TEMP/verify-home-$s"`), so there is no
+  //   live registry under it and there never can be — the check is green
+  //   forever and cannot report anything. That is where it looks healthiest.
+  //
+  //   ON THE MACHINE THIS WAS WRITTEN ON it is a FALSE RED. A real CrabCast
+  //   serves a real fleet, other agents activate and deactivate while this
+  //   runs, and the daemon writes that file for its own reasons — none of which
+  //   this proof caused or could prevent. Measured 2026-08-18 while writing
+  //   `verify-variadic-args-swallow-prompt.mjs`, whose §5 was a copy of this
+  //   idiom: the mtime moved during a 20-second run that went nowhere near the
+  //   file, and the check printed `the live fleet's own agents.jsonl was not
+  //   written` as a FAILURE, corroborated by a `stat` showing the live registry
+  //   written 8 seconds before the reading.
+  //
+  // ⚠ AND THE FALSE RED IS THE ALARMING KIND RATHER THAN THE ANNOYING KIND.
+  // Its message says *this proof touched the running fleet*, which is the one
+  // thing the boundary above forbids, so a reader meeting it goes hunting for a
+  // proof that spawned into production. A safety check that fires on somebody
+  // else's correct behaviour is one people learn to skip — and the next time it
+  // fires, it will be skipped too.
+  //
+  // THE ATTRIBUTABLE QUESTION is whether THIS RUN wrote into it. The scratch
+  // root's name is unique to this process, so a row this proof caused would
+  // carry it and nothing else could. That is the gate. The mtime is still read
+  // and printed beside the verdict — it is real information about the world —
+  // with the reason it is not what the verdict rests on.
+  //
+  // `scripts/kan524-red-drive.mjs` is what shows this can go red rather than
+  // assuming it: it stages a registry under a scratch HOME, appends a row
+  // carrying this run's own scratch root while the proof is mid-flight, and
+  // requires (d) to FAIL — and in the same staged world requires the retired
+  // mtime gate to fail on a registry that was merely touched, which is the
+  // false red above reproduced deterministically instead of waited for.
+  //
+  // WHERE ELSE THE IDIOM LIVES — swept 2026-08-20, written down so the next
+  // reader inherits the answer rather than the question (KAN-524 item 2).
+  // `grep -rn mtimeMs scripts/` returns 9 files, and this file is among them,
+  // which is what says the grep can find the thing it is looking for. Of the
+  // other eight, exactly one ever gated on a file it did not own:
+  // `verify-variadic-args-swallow-prompt.mjs` §5, already moved to this same
+  // attributable form by KAN-514 — it is where the defect was first measured.
+  // The rest read mtimes of things the proof itself created (the scratch
+  // workspace and sidecar in `verify-restart-survival`, the scratch `$HOME` in
+  // `verify-reattach-leaves-global-config-alone`) or compare `dist` against
+  // `src`, which is a different question and a correct one.
+  //
+  // ⚠ AND `mtimeMs` IS THE IDIOM'S SPELLING, NOT ITS SHAPE, so the grep the
+  // ticket named is necessary and not sufficient: the shape is *gating on a
+  // file the live daemon writes*, which could be phrased on size or bytes just
+  // as easily. Swept that way too — `os.homedir()` joined to the fleet's data
+  // dir — which finds one file the mtime grep did not:
+  // `verify-fleet-read-fits-the-wire.mjs` §7. It reads no live registry at all;
+  // it asserts its own instances' dataDirs sit under its scratch root, which is
+  // a DISCLOSURE of the same kind as (a) above and not this defect.
   const realAgentsLog = path.join(realDataDir, 'agents.jsonl');
+  const realRegistry = (() => {
+    try { return fs.readFileSync(realAgentsLog, 'utf8'); } catch { return null; }
+  })();
   const realMtimeNow = fs.existsSync(realAgentsLog) ? fs.statSync(realAgentsLog).mtimeMs : null;
+
+  /**
+   * Does `registry` carry a row THIS RUN caused?
+   *
+   * Named and called three times rather than inlined once, so that the two
+   * controls below exercise THE SAME CODE the gate does. A control that
+   * re-implements the detector tests the re-implementation.
+   */
+  const carriesOurRows = (registry) => registry !== null && registry.includes(tmp);
+
   check(
-    realMtimeNow === realAgentsLogMtimeAtStart,
-    "the live fleet's own agents.jsonl was not written",
-    realMtimeNow === null
-      ? '(no live registry on this machine — vacuously true, and stated so it is not read as a measurement)'
-      : `mtime unchanged at ${realMtimeNow}`
+    !carriesOurRows(realRegistry),
+    "(d) [measurement] the live fleet's own agents.jsonl carries no row this proof put there",
+    realRegistry === null
+      ? `(no registry under ${realDataDir} — NOTHING WAS MEASURED HERE, and this line is the ` +
+        'disclosure of that rather than a pass. The two controls below still ran.)'
+      : `${realRegistry.length} bytes, no occurrence of ${tmp}; mtime ` +
+        `${realMtimeNow === realAgentsLogMtimeAtStart
+          ? 'also unchanged'
+          : 'MOVED during this run — the live fleet writing its own registry, which is exactly ' +
+            'why the mtime is not the gate'}`
   );
 
-  // Every process this proof caused, ended. Asserted rather than assumed:
-  // `sleep 600` outliving the run would leave litter on a shared machine.
-  for (const pid of spawnedPids) {
-    try { process.kill(pid, 'SIGKILL'); } catch {}
-  }
-  crabcast(['daemon', 'stop']);
-  await new Promise((r) => setTimeout(r, 500));
-  const survivors = [...spawnedPids].filter((pid) => liveCmdline(pid) !== null);
+  // ⚠ THE TWO CONTROLS, and they are what make (d) a check rather than a hope.
+  //
+  // `!carriesOurRows(x)` is true of a registry that is ABSENT, that is EMPTY,
+  // and that this run genuinely did not touch — three worlds one green cannot
+  // tell apart, and on a bare runner it is always the first. So (d) on its own
+  // is still a search that would come back empty whatever the world held, which
+  // is the shape KAN-524 was filed about wearing a better question's clothes.
+  //
+  // These two are claims about the INSTRUMENT rather than about the world, and
+  // that is precisely why they are worth having: unlike (d) they CAN GO RED ON
+  // ANY MACHINE, a bare CI runner included, so this section is no longer one
+  // that only ever passes anywhere its author will see it.
+  check(
+    carriesOurRows(`{"key":"probe","dataDir":${JSON.stringify(dataDir)}}\n`),
+    '(d-control +) and that same detector DOES fire on a row carrying this run\'s scratch root — ' +
+      'so the green above is a reading of the registry, not of a detector that never fires',
+    `probe row names ${dataDir}`
+  );
+  check(
+    !carriesOurRows('{"key":"probe","dataDir":"/home/somebody/.local/share/crabcast"}\n'),
+    '(d-control −) and does NOT fire on a row naming somebody else\'s data dir — so a red above ' +
+      'would be attributable to THIS RUN rather than to registry traffic of any kind',
+    'probe row names a data dir outside this run'
+  );
+
+  // -------------------------------------------------------------------------
+  // EVERY PROCESS CARRYING THIS RUN'S SCRATCH ROOT, ENDED (KAN-529)
+  // -------------------------------------------------------------------------
+  //
+  // This block used to kill `spawnedPids`, call `crabcast(['daemon', 'stop'])`
+  // and assert that the pids it remembered were gone. All three parts were
+  // wrong together, which is why it went green while leaking:
+  //
+  //   * `crabcast daemon stop` IS NOT A COMMAND. It exits 2 with a usage error
+  //     ("`crabcast daemon` takes no arguments, and got \"stop\"") and stops
+  //     nothing. The status was never read.
+  //   * `spawnedPids` never held the scratch daemon — nothing here spawns it;
+  //     the first CLI call does, detached — nor any `herdr agent attach` the
+  //     daemon then spawns.
+  //   * and it did not hold every fake `claude` either: the pid the fixture
+  //     reports is the process that writes the record, not the `bash` wrapper
+  //     that `exec`s toward it.
+  //
+  // Measured on 2026-08-18: a run of this file printing `53/53 checks passed`
+  // and `every process this proof started is gone — 3 ended` left FOUR live
+  // processes carrying its own scratch root.
+  //
+  // ⚠ THE POPULATION IS NOW READ OFF THE MACHINE rather than remembered, keyed
+  // on this run's scratch root — six random characters from `mkdtempSync` that
+  // exist nowhere else — so a process this run caused carries it and nothing
+  // else can. `found` is reported beside the verdict because a sweep that
+  // matched nothing and a sweep that cleaned up correctly are the same verdict
+  // with different evidence, and only one of them means the instrument is
+  // working.
+  const { found, survivors } = await sweepScratchRoot(tmp);
+
+  // ⚠ THE PRECONDITION, AND IT IS NOT CEREMONY. Without it the check below
+  // passes when the sweep found NOTHING TO SWEEP, which is not the same fact as
+  // "nothing leaked" and reads identically. `epic/KAN-59` met it while reviewing
+  // KAN-529: a long `TMPDIR` pushed the daemon's socket path past 104
+  // characters, the daemon refused to start, no agent ever ran — and this
+  // section printed `PASS … 0 swept`. That run went red for other reasons, so
+  // nothing was hidden that day; on a run where it did not, the boundary
+  // section would have reported a clean teardown for a proof that never
+  // started anything.
+  //
+  // Every arm above activates an agent, so a completed run always has a daemon
+  // and at least one consumer to sweep. Zero here means the run did not happen.
+  check(
+    found.length > 0,
+    '(precondition) the sweep had something to sweep — so the verdict below is about a ' +
+      'teardown rather than about a run that never started',
+    `${found.length} process(es) carried ${tmp}`
+  );
   check(
     survivors.length === 0,
-    'every process this proof started is gone',
-    survivors.length ? `still alive: ${survivors.join(', ')}` : `${spawnedPids.size} ended`
+    '(e) [measurement] every process carrying this run\'s scratch root is gone — the daemon ' +
+      'and its attaches included, not merely the pids this script remembered',
+    survivors.length
+      ? `still alive:\n          ${describe(survivors)}`
+      : `${found.length} swept (${found.length - spawnedPids.size} of them never in spawnedPids)`
   );
 }
 

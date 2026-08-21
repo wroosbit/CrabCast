@@ -704,7 +704,7 @@ const STATE_READ_PROVENANCE = {
     // `unreadableRecords[]` (KAN-302, extended by KAN-344). These five are the
     // row's OWN bytes, read off the log and unchanged by a restart, which is
     // this bucket's definition applied to a row that is not an agent. The other
-    // five fields of that shape are this daemon's account of the row rather
+    // six fields of that shape are this daemon's account of the row rather
     // than the row, and are in `derived` below — see ROW_SHAPES.UnreadableRecord
     // for why the split falls where it does. `claimsAt` and `claimsEvent` are on
     // this side rather than the other precisely because they are quotes: this
@@ -723,7 +723,15 @@ const STATE_READ_PROVENANCE = {
    */
   observed: [
     'paneId', 'herdrStatus', 'agentRuntime', 'status', 'sessionId', 'createdAt',
-    'sessionless', 'workDir'
+    'sessionless', 'workDir',
+    // `missingAgents[].occupiedBy` (KAN-572). OBSERVED rather than derived, and
+    // the neighbouring `occupies` two buckets down is why the distinction is
+    // worth stating: that field is a JOIN — a census cwd tested against the
+    // registry — so it is this daemon's conclusion. This one is a census record
+    // QUOTED. The pane is not ours, there is nothing durable to be had about it,
+    // and every field under the block was read from herdr for this response and
+    // is true as of `observedAt` and no longer.
+    'occupiedBy'
   ],
   /**
    * Computed by this daemon from the two above. Never stored and never read off
@@ -1123,6 +1131,38 @@ function invalidFlag(name: string, value: unknown): string | null {
  * it that herdr cannot show is a loss, reported on every `list_agents` poll
  * rather than written to a log.
  */
+/**
+ * A live pane THIS DAEMON DID NOT START sitting in a missing agent's directory
+ * — the same pane `foreignPanes` reports, named on the row that would otherwise
+ * be read as an empty workspace (KAN-572).
+ *
+ * WHY THE ROW CARRIES IT RATHER THAN LEAVING IT TO BE JOINED. `missingAgents`
+ * and `foreignPanes` are computed from ONE census in one pass, and until this
+ * field existed they were published side by side with nothing reconciling them:
+ * a `crabcast list` naming a live pane by pane id sixty lines above the sentence
+ * *"herdr has no live agent in its directory and this daemon holds no session
+ * for it. It is not running."* — about the same directory, in the same run. The
+ * classification was right and the EXPLANATION was false, which is the half
+ * nobody re-checks.
+ *
+ * The mechanism is that our ownership question is NAME-scoped and that sentence
+ * was DIRECTORY-scoped. `ourPaneIn` asks the census for a pane called
+ * `paneNameFor(path)`; a stranger's pane in that directory carries a name we did
+ * not derive, so it answers "no pane of ours" — correctly — and the row then
+ * said herdr had nothing there at all. Both readings are explained at once by
+ * that one difference.
+ *
+ * ALL FOUR FIELDS ARE `observed`: this is one census read, quoted, about a pane
+ * that is on no record of ours. Nothing here is durable and nothing is
+ * re-checked after the response is sent.
+ */
+export interface MissingAgentOccupant {
+  paneName: string;
+  paneId: string | null;
+  herdrStatus: HerdrAgentStatus;
+  agentRuntime: string | null;
+}
+
 export interface MissingAgent extends ConfigEcho {
   path: string;
   paneName: string;
@@ -1189,6 +1229,22 @@ export interface MissingAgent extends ConfigEcho {
    * decision made with the consumer rather than a field added quietly.
    */
   since: string;
+  /**
+   * The foreign pane occupying this directory, or null when there is none.
+   *
+   * ⚠ **`null` IS THE ANSWER "NOTHING IS RUNNING THERE", NOT "WE DID NOT LOOK".**
+   * It is computed from the same census and the same pass as `foreignPanes` on
+   * this response, so the two cannot disagree about the same directory. A
+   * non-null value means the classification is still correct — no agent OF OURS
+   * is running — and the words *"their work has stopped"* are NOT: something is
+   * running there, it is somebody else's, and activating this agent will be
+   * refused until it is gone.
+   *
+   * Read it before you act on this row. The remedy this category invites is
+   * re-activation, which RESUMES a conversation; offering that for a directory
+   * whose agent never stopped is a false red whose remedy is the damage.
+   */
+  occupiedBy: MissingAgentOccupant | null;
   reason: string;
 }
 
@@ -1716,6 +1772,13 @@ const _occupiedAgentMatchesTheContract: Exact<
   keyof NonNullable<ForeignPane['occupiedAgent']>,
   keyof typeof BLOCK_SHAPES.OccupiedAgent
 > = true;
+// KAN-572. The pane occupying a MISSING agent's directory — the other half of
+// the block above, and bound for the same reason: it is a nested object on a
+// row, so the row's own key binding cannot see inside it.
+const _missingAgentOccupantMatchesTheContract: Exact<
+  keyof MissingAgentOccupant,
+  keyof typeof BLOCK_SHAPES.MissingAgentOccupant
+> = true;
 
 // KAN-287. `activate_response`'s composites. The response's OWN top-level field
 // set has no type — it is an object literal spread into `respond({…})`, exactly
@@ -1780,6 +1843,7 @@ void _configEchoContractMatchesTheContract;
 void _provenanceMatchesTheContract;
 void _preemptedByMatchesTheContract;
 void _occupiedAgentMatchesTheContract;
+void _missingAgentOccupantMatchesTheContract;
 void _paneOccupantMatchesTheContract;
 void _provisionedArtifactMatchesTheContract;
 void _preemptionOfferMatchesTheContract;
@@ -6254,7 +6318,7 @@ export class MessageRouter {
       // answering those four grounds, and `verify-agent-power-controls.mjs`
       // §15 goes red on a build that quietly flips the order or grows the row
       // a second timestamp.
-      ['missingAgents', narrow(this.missingAgents(agents, staleSessions, intents)),
+      ['missingAgents', narrow(this.missingAgents(agents, foreignPanes, staleSessions, intents)),
         (r: any) => r.since, (r: any) => r.path],
       // Work taken off the machine to make room, still owed a decision.
       ['preemptedAgents', narrow(this.preemptedAgents(agents, intents)),
@@ -6622,15 +6686,33 @@ export class MessageRouter {
    */
   private missingAgents(
     agents: ListedAgent[],
+    foreignPanes: ForeignPane[],
     staleSessions?: Set<string>,
     sharedIntents?: Map<string, AgentIntent>
   ): MissingAgent[] {
     const alive = new Set(agents.map((a) => a.path));
     const missing: MissingAgent[] = [];
 
+    // THE RECONCILIATION, AND IT TAKES THE FOREIGN PANES OF THIS SAME SWEEP
+    // (KAN-572). `foreignPanes` is a parameter rather than a second census read
+    // for the reason every other category here is: two answers to "what is
+    // running" is one answer too many, and the defect this closes was precisely
+    // two sections of ONE response disagreeing about one directory.
+    //
+    // Only a pane whose `occupies` is set can be here: that field is non-null
+    // exactly when the pane's cwd is a directory we hold a record for, which is
+    // the join. A stranger's pane somewhere else on the machine is not news.
+    const occupants = new Map<string, ForeignPane>();
+    for (const pane of foreignPanes) {
+      if (pane.occupies) occupants.set(pane.occupies, pane);
+    }
+
     for (const [agentPath, intent] of sharedIntents ?? this.deps.agentRegistry.intents()) {
       if (intent.event !== 'activated') continue;
       if (alive.has(agentPath)) continue;
+
+      const occupant = occupants.get(agentPath) ?? null;
+      const heldASession = staleSessions?.has(agentPath) ?? false;
 
       missing.push({
         path: agentPath,
@@ -6641,16 +6723,48 @@ export class MessageRouter {
         // halves of that need to know what would come back.
         ...configEcho(intent, 'summarised'),
         since: intent.at,
-        // Both cases are "not running", but they are not the same event and a
-        // reader acting on this deserves the difference: an agent that never
-        // came back, versus one that was running under this daemon and died
-        // while we held its session. The second is a crash we witnessed.
-        reason: staleSessions?.has(agentPath)
-          ? 'The registry records this agent as active and this daemon held a session ' +
-            'for it, but herdr has no live agent in its directory: it started and then died. ' +
-            'It is not running.'
-          : 'The registry records this agent as active, but herdr has no live agent in its ' +
-            'directory and this daemon holds no session for it. It is not running.'
+        occupiedBy: occupant
+          ? {
+              paneName: occupant.paneName,
+              paneId: occupant.paneId,
+              herdrStatus: occupant.herdrStatus,
+              agentRuntime: occupant.agentRuntime
+            }
+          : null,
+        // THREE CASES, and the third is the one this sentence used to get wrong.
+        //
+        // Both of the original two are "not running", and they are not the same
+        // event: an agent that never came back, versus one that was running
+        // under this daemon and died while we held its session. The second is a
+        // crash we witnessed.
+        //
+        // THE THIRD IS NOT "NOT RUNNING" AT ALL, and saying that it was is the
+        // defect (KAN-572). Our ownership question is NAME-scoped — is there a
+        // pane called `paneNameFor(path)` — and this sentence was
+        // DIRECTORY-scoped, so a stranger's live pane in that very directory
+        // answered "no pane of ours" and was then reported as an empty
+        // workspace. It is not empty, this response says so sixty lines away
+        // under `foreignPanes`, and a reader who takes the section header at its
+        // word resumes a conversation nobody stopped.
+        reason: occupant
+          ? 'The registry records this agent as active' +
+            (heldASession ? ' and this daemon held a session for it' : '') +
+            ', and herdr has no live agent of OURS in its directory. THE DIRECTORY IS NOT ' +
+            `EMPTY: ${occupant.paneName}` +
+            (occupant.paneId ? ` (pane ${occupant.paneId})` : '') +
+            ' is a live pane this daemon did not start' +
+            (occupant.agentRuntime ? `, running ${occupant.agentRuntime}` : '') +
+            `, herdr status ${occupant.herdrStatus}, and it is sitting in this exact ` +
+            'directory — it is listed under foreignPanes on this same response. So work IS ' +
+            'happening there and it is not ours: do NOT read this row as work that has ' +
+            'stopped. Activating this agent will be REFUSED until that pane is gone, and ' +
+            'nothing here should be resumed on the strength of this row.'
+          : heldASession
+            ? 'The registry records this agent as active and this daemon held a session ' +
+              'for it, but herdr has no live agent in its directory: it started and then died. ' +
+              'It is not running.'
+            : 'The registry records this agent as active, but herdr has no live agent in its ' +
+              'directory and this daemon holds no session for it. It is not running.'
       });
     }
 
@@ -6799,10 +6913,16 @@ export class MessageRouter {
    */
   public observeFleet(): FleetObservation {
     const intents = this.deps.agentRegistry.intents();
-    const { agents, staleSessions, census } = this.surveyAgents(intents);
+    const { agents, foreignPanes, staleSessions, census } = this.surveyAgents(intents);
     return {
       reachable: census.reachable,
-      missing: this.missingAgents(agents, staleSessions, intents),
+      // THE SAME RECONCILIATION THE LIST GETS, and it is here rather than only
+      // at the request because `agent.lost` is published from this sweep
+      // (KAN-572). A `missingAgents` row and an `agent.lost` payload are the
+      // same object, so a fix applied at the printing surface would have left
+      // the event — and every consumer polling it — carrying the sentence the
+      // list had stopped saying.
+      missing: this.missingAgents(agents, foreignPanes, staleSessions, intents),
       // Ours only. A foreign pane's status is not ours to publish — it belongs
       // to whoever started it, and this daemon holds no record it could name
       // the agent by.

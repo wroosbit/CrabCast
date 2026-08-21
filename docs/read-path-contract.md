@@ -37,7 +37,7 @@ by that name rather than by position — so a table that moves, or one that is
 added for a declaration that does not exist, is caught rather than silently
 skipped. The second column is the field's **provenance bucket** (§3), followed
 by `, optional` where the field can be absent. A row reading *config echo*
-stands for the five fields in [the config echo](#configecho), and the proof
+stands for the six fields in [the config echo](#configecho), and the proof
 expands it; it is a shorthand for readability, not a hole.
 
 ---
@@ -158,6 +158,7 @@ would be N chances for the copy that goes stale.
 | 11 | 2026-08-14 | KAN-193 — `list_agents` takes an optional **request** argument, `owner`, and gains one field on the success response: [ownerFilter](#ownerfilter), a new block present **only** when that argument was passed. `configure_agent` gains the `owner` knob it filters on, which appears in the `config` echo with the others. **Additive: no documented field changed meaning, was removed, or changed type, and a caller that never passes `owner` receives byte-for-byte what it received at version 10.** What is new for a caller that DOES pass it is stated here rather than left to be inferred, because it is the one thing the field set cannot show: under a filter, `agents`, `missingAgents`, `preemptedAgents`, `standbyAgents` and `unstartedAgents` are narrowed **and their `*Total`s and `pages.<category>` counts describe the FILTERED set** — which is what keeps paging correct under it, and which means every count on a filtered response is honest about a category the numbers alone cannot say was narrowed. `unbackedPanes`, `foreignPanes`, `priorities` and `unreadableRecords` are **not** narrowed, each for a reason `ownerFilter.unfiltered` names. **`owner` is NOT a permission boundary**: an unfiltered read returns every agent whatever its owner, deliberately, and the socket's `0600` in a `0700` directory remains the only auth boundary. **An agent with no owner is matched by no filter** and is reachable only by an unfiltered read — absence is a real state, never a wildcard. **What ignoring the new field costs a consumer:** exactly what it cost before this version — there is no way to ask CrabCast which agents are its own, so it must identify them by parsing the pane name CrabCast derives from the path (`paneNameFor`, `crabcast-<slug>-<hash>`). That derivation is not API, it is the parseable-name coupling [KAN-103](https://wroosbit.atlassian.net/browse/KAN-103) and [KAN-123](https://wroosbit.atlassian.net/browse/KAN-123) deleted from the rest of this surface, and a consumer resting on it breaks silently the day the slug rule changes | `c67cbe8b8525` |
 | 12 | 2026-08-16 | KAN-504 — `configure_agent` gains one knob, `args`: extra command-line arguments for the launcher's own process, which appear in the `config` echo on `list_agents` and `agent_status` with the other knobs. **Additive: no documented field changed meaning, was removed, or changed type, and a caller that never sends `args` receives byte-for-byte what it received at version 11** — an agent configured without them is spawned with the command line it was spawned with before this version existed. ⚠ **THE DIGEST IS UNCHANGED FROM VERSION 11, DELIBERATELY, AND THAT IS THE ONE THING TO READ ON THIS ROW.** The digest is over the canonical of THIS document's declarations, where `config` is a single field of bucket `durable` — its interior is the [event contract](event-contract.md)'s `CONFIG_FIELDS`, not this one's — so a knob added inside it cannot move this number. **A repeated digest here means exactly this: the version moved because a change happened that the digest cannot see.** It is not a rewritten row and not a mistake; a reader comparing digests to decide whether anything changed would conclude wrongly, which is why it is stated rather than left to be noticed. **What ignoring the new knob costs a consumer:** nothing, if they never send `args`. If they DO send it to a daemon older than this version, it is **silently ignored** — `configure` does not refuse unknown fields — so the agent starts, reports success, and its process is missing arguments the caller believes it has. That failure is invisible from the response, and **this integer is the only way to tell a daemon that will honour `args` from one that will drop them.** Read it before sending the knob, not after. | `c67cbe8b8525` |
 | 13 | 2026-08-18 | KAN-528 — `list_agents` **stops carrying the prompt text** and carries its size instead, and every echo-bearing response gains one field. `config.prompt` is absent from every row of a fleet read; the new `promptChars` on the config echo is its exact character count (`0` for an empty prompt somebody froze, `null` for a record with none), and `configEchoContract.summarised` names the knob, what replaced it and where the text still is. `agent_status` and `activate_response` are unchanged in what they carry — `config.prompt` whole — and gain `promptChars` beside it, where it is simply that string's length. ⚠ **This is the one entry in this table that is NOT purely additive, and it is a removal from one surface: a consumer reading `config.prompt` off a `list_agents` row got the text at version 12 and gets `undefined` at 13.** It was not optional. A prompt is accepted up to 131,072 characters and this response echoed one per row, so a fleet of ten supervisor-sized prompts exceeded the socket's 1 MiB framing bound — at which point `list_agents` did not return a shortened answer, it returned **nothing** and the connection closed. The removal is what makes the response deliverable at all, it is declared on the response rather than left to be discovered, and the text stays readable one agent at a time from `agent_status`. **No row is dropped and no total is reduced:** the reduction is per-field, never per-agent | `d4093ade8dc3` |
+| 14 | 2026-08-21 | KAN-572 — one field added to [MissingAgent](#missingagent), and therefore to every `missingAgents[]` row and to the `agent.lost` event that spreads that row whole: `occupiedBy`, a new block [MissingAgentOccupant](#missingagentoccupant) naming the live pane **this daemon did not start** that is sitting in the missing agent's directory, or `null`. **Additive: no documented field changed meaning, was removed, or changed type**, and a consumer that ignores it reads what it read at version 13. ⚠ **What DID change is a `derived` field's CONTENT, and that is the substance of this row rather than the new key.** `reason` had two cases and now has three: an occupied row no longer says *"herdr has no live agent in its directory"*, because that sentence was **false** and the same response disproved it under [`foreignPanes`](#foreignpane). The classification was never wrong — no agent *of ours* is running — but the ownership question is NAME-scoped (`ourPaneIn` asks for a pane called `paneNameFor(path)`) while the sentence was DIRECTORY-scoped, so a stranger's pane in that very directory was reported as an empty workspace. **What ignoring the new field costs a consumer:** the thing it cost before this version, which is why it is not cosmetic — this category's remedy is re-activation, which **resumes the conversation an agent was stopped in**, and a row whose directory is occupied was never stopped and would be refused anyway. Measured on one `crabcast list` run: 3 of 7 workspaces under *"their work has stopped while still looking staffed"* were alive at that moment, one of them the agent producing the output. A false red whose remedy is the damage is worse than a false green | `cd932937e273` |
 
 The digest is `sha256(readContractCanonical())`, first 12 hex characters, over
 `src/read-contract.ts`'s declarations. **What it buys:** changing a documented
@@ -349,7 +350,7 @@ contract](event-contract.md) is where its declared-field behaviour lives, and
 `config`'s own knobs are declared by `CONFIG_FIELDS` in `src/events.ts`.
 
 <a id="configecho"></a>
-### The config echo — the five fields a *config echo* row stands for
+### The config echo — the six fields a *config echo* row stands for
 
 <!-- contract-table: BLOCK_SHAPES.ConfigEcho -->
 
@@ -374,7 +375,7 @@ Two kinds of entry share this shape, told apart by `sessionless`.
 | `sessionless` | observed | `false` — this daemon holds the agent's terminal attach. `true` — the agent is alive in herdr but no session of ours describes it, which is every surviving agent after a daemon restart. **The session-only fields are null because there is no session, not because the agent is impaired** |
 | `state` | derived | see [state](#state). `running` on every row in this category |
 | `configured` | durable | whether a durable record backs this row. `false` means `config` is null and the three gate flags are the **safe reading of an unknown** rather than anybody's configuration |
-| *config echo* | durable | the five fields [above](#configecho) |
+| *config echo* | durable | the six fields [above](#configecho) |
 | `path` | durable | the canonical directory this agent **is**. The address; nothing else is |
 | `paneName` | derived | the opaque herdr token for that path. **Nothing parses it back out** |
 | `paneId` | observed | **never store this.** herdr pane ids are positions in a list that compacts whenever any pane anywhere closes, so one stored as configuration goes stale when an unrelated agent finishes. Null when the census had nothing |
@@ -434,7 +435,23 @@ The registry says this should be running and herdr does not have it. A **loss**.
 | `label` | durable | |
 | *config echo* | durable | the row a supervisor most needs the configuration on: the decision it prompts is "re-activate or stand down", and both halves need to know what would come back |
 | `since` | durable | **ACTIVE SINCE, NOT MISSING SINCE.** When the registry last recorded this agent as *activated*. An agent activated last Tuesday that died a minute ago carries a `since` of last Tuesday, exactly like one that died last Tuesday |
-| `reason` | derived | which of the two losses this is: never came back, or died while this daemon held its session |
+| `occupiedBy` | observed | the live pane **this daemon did not start** that is sitting in this directory, or `null` — [MissingAgentOccupant](#missingagentoccupant). **`null` means "nothing is running there", never "we did not look"** |
+| `reason` | derived | which of the **three** cases this is: never came back, died while this daemon held its session, or **occupied** — no agent of ours, and a stranger's live pane in the directory |
+
+⚠ **A row is not necessarily stopped work, and `occupiedBy` is the field that
+says so.** The classification is about **our** agent: `ourPaneIn` asks the census
+for a pane named `paneNameFor(path)`, so a stranger's pane in that directory —
+carrying a name CrabCast did not derive — correctly answers *"no pane of ours"*.
+Until [KAN-572](https://wroosbit.atlassian.net/browse/KAN-572) the `reason` then
+went on to say herdr had **nothing** there, which the same response disproved
+under [`foreignPanes`](#foreignpane). A correct verdict travelled with a false
+*"because"* attached, and the *"because"* is the half nobody re-checks.
+
+**It matters because the remedy is destructive.** Re-activating an agent
+**resumes the conversation it was stopped in**; a row whose directory is occupied
+was never stopped, and activating it is refused anyway while the pane is there.
+**Read `occupiedBy` before you act on a row in this category** — a false red whose
+remedy is the damage is worse than a false green.
 
 **Nothing records when it went, and KAN-189 decided nothing will.** If you want
 down-time, keep the first `at` you saw on the matching `agent.lost` event (or
@@ -967,7 +984,31 @@ block is absent** when this daemon could not read its own descriptor usage.
 | --- | --- | --- |
 | `path` | durable | the directory both are in |
 | `state` | derived | **asked properly rather than assumed stopped** — ours and a stranger can be live in the same directory, which is the case this row exists to make visible |
-| *config echo* | durable | the five fields [above](#configecho) |
+| *config echo* | durable | the six fields [above](#configecho) |
+
+<a id="missingagentoccupant"></a>
+### `missingAgents[].occupiedBy` — MissingAgentOccupant
+
+<!-- contract-table: BLOCK_SHAPES.MissingAgentOccupant -->
+
+| field | bucket | what it is |
+| --- | --- | --- |
+| `paneName` | observed | herdr's name for the pane. **Not one of ours** — that is what makes it foreign |
+| `paneId` | observed | herdr's pane id, or null. Renumbered whenever any pane closes, exactly as elsewhere |
+| `herdrStatus` | observed | what herdr says that pane is doing |
+| `agentRuntime` | observed | the runtime behind it. Non-null on every row here: a pane with nothing behind it is not reported as occupying anything |
+
+**The mirror of [OccupiedAgent](#occupiedagent), and the pair describes one
+collision from two sides.** That block hangs off a `foreignPanes` row and names
+**our** agent — the one whose `activate` the stranger's pane will refuse. This one
+hangs off a `missingAgents` row and names **the stranger's pane** — the thing that
+makes *"their work has stopped"* false about that row. One response carried both
+facts and reconciled neither until [KAN-572](https://wroosbit.atlassian.net/browse/KAN-572).
+
+**Computed from the same census, in the same pass, as `foreignPanes`.** That is
+what makes the two sections of a single response unable to disagree about one
+directory, and it is why this is a field on the row rather than a join every
+consumer is left to write.
 
 <a id="preemptionoffer"></a>
 ### `activate_response.preemption` — PreemptionOffer
@@ -1089,7 +1130,7 @@ not evidence.
 | `label` | durable, optional | |
 | `configured` | durable, optional | |
 | `state` | derived, optional | [state](#state) |
-| *config echo* | durable, optional | the five fields [above](#configecho) |
+| *config echo* | durable, optional | the six fields [above](#configecho) |
 | `channelEnabled` | durable, optional | whether the spawn this agent is running from was **channel-enabled** — see [below](#channelenabled). Absent on **bad-address** only |
 | `provenance` | derived, optional | [Provenance](#provenance) |
 | `configEchoContract` | derived | **every branch**, refusals included |
@@ -1202,7 +1243,7 @@ by habit, and one seam is worth stating before the table:
   re-readable from anywhere. They are a report about a moment that has passed.
 * **`durable` means what it always means** — on the registry, and answering the
   same after a restart. It is `path` (the registry's own key), `priority`,
-  `launcher`, the five-field config echo and `channelEnabled`: the only fields
+  `launcher`, the six-field config echo and `channelEnabled`: the only fields
   here that outlive the process that sent them. Everything else on this response
   describes either a census read that has already expired or an action that has
   already finished.
@@ -1244,7 +1285,7 @@ of refusal it is holding.
 | `verified` | observed, optional | **the agent was found in herdr's census before this was sent.** `true` on both successes; `false` on the three refusals that looked and could not confirm; absent on the refusals that never looked. Success is never reported without it |
 | `priority` | durable, optional | from the frozen record. On the spawning branch and the `capacity` refusal. **A duplicate of `config.priority` wherever the echo is also present** — which is both successful branches. On `capacity` there is no echo, so it is the only copy and the only branch where it is load-bearing |
 | `launcher` | durable, optional | from the frozen record. **On the spawning branch only, and a duplicate of `config.launcher`** — which the echo carries on both successful branches. Its absence from the idempotent branch removes no information from that response. Read the echo, and see the first note below |
-| *config echo* | durable, optional | the five fields [above](#configecho), **re-read after the activation's own durable write** rather than taken from the intent this call opened with — which is how `everActivated` can read `true` here and remain a purely durable fact |
+| *config echo* | durable, optional | the six fields [above](#configecho), **re-read after the activation's own durable write** rather than taken from the intent this call opened with — which is how `everActivated` can read `true` here and remain a purely durable fact |
 | `channelEnabled` | durable, optional | whether this spawn was channel-enabled — [channelEnabled](#channelenabled--was-this-spawn-channel-enabled). Answered from the record, not from the session, so this surface and `agent_status` agree **by construction** |
 | `resume` | derived, optional | which cause the resume prompt was written for — [resumeCause](#resumecause). Only on a restore |
 | `resumedConversation` | observed, optional | whether a conversation was there to hand back. `true` means the agent is sitting at an empty prompt and needs a nudge; `false` means it came up with the degraded-resume prompt and is already working. Only on a restore |

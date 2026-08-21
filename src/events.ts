@@ -317,6 +317,24 @@ export const CAPACITY_FIELDS = {
 
 const CAPACITY_SHAPE: FieldShape = { kind: 'object', fields: CAPACITY_FIELDS };
 
+/**
+ * `agent.lost`'s `occupiedBy` — the live pane, not ours, sitting in the
+ * directory of the agent this event says is gone (KAN-572).
+ *
+ * Four scalars and no optionals: the row builds all four together off one census
+ * record or sets the whole block to `null`, so a key missing here is a producing
+ * site that has changed, which is precisely what `missing` should report.
+ */
+const MISSING_AGENT_OCCUPANT_SHAPE: FieldShape = {
+  kind: 'object',
+  fields: {
+    paneName: SCALAR,
+    paneId: SCALAR,
+    herdrStatus: SCALAR,
+    agentRuntime: SCALAR
+  }
+};
+
 /** `preemption.by` — who took the slot. Asserted against `router.ts` too. */
 export const PREEMPTION_BY_FIELDS = {
   path: SCALAR,
@@ -514,9 +532,17 @@ export const EVENT_CONTRACT: Record<CrabcastEventName, EventSpec> = {
   'agent.lost': {
     formerly: 'agent_lost_event',
     fires:
-      'the sweep found an agent the registry records as active with no live agent in ' +
-      'its directory. Latched per path: announced when it becomes missing and not ' +
-      'again while it stays missing',
+      // "OF OURS" IS LOAD-BEARING HERE (KAN-572), and this string is the third
+      // place the flat version had to come out of. The ownership test is
+      // name-scoped, so a stranger's live pane in that very directory produces
+      // this event — the classification is right and "no live agent in its
+      // directory" was not. `occupiedBy` is what a subscriber reads to tell the
+      // two apart, and a `fires` sentence still promising an empty directory
+      // would be the contract disagreeing with its own payload.
+      'the sweep found an agent the registry records as active with no live agent OF OURS ' +
+      'in its directory — which is usually an empty directory, and is not when `occupiedBy` ' +
+      'names a live pane this daemon did not start. Latched per path: announced when it ' +
+      'becomes missing and not again while it stays missing',
     required: [
       'path',
       'paneName',
@@ -552,13 +578,34 @@ export const EVENT_CONTRACT: Record<CrabcastEventName, EventSpec> = {
       // the agent that just went missing is.
       'promptChars',
       'since',
+      // THE PANE OCCUPYING THE DIRECTORY, or `null` (KAN-572). Declared for the
+      // reason the two paragraphs above give in advance — an undeclared field is
+      // DROPPED from every forwarded event while sitting on the socket, and the
+      // two surfaces then disagree about one row.
+      //
+      // ⚠ AND HERE THAT DISAGREEMENT WOULD BE THE DEFECT ITSELF RATHER THAN AN
+      // INSTANCE OF IT. This event fires under the name `agent.lost` and its
+      // `reason` says an agent is not running; the field is the one thing on the
+      // payload that can say *"and yet something IS running in that directory,
+      // it is not ours, and re-activating will be refused"*. Dropped, a
+      // subscriber would be told an agent was lost with the qualification
+      // removed — which is exactly the false red, one carrier further out.
+      'occupiedBy',
       'reason'
     ],
     optional: [],
     // The same `config` interior as `agent.configured`, and reached the same
     // way — this payload is the `MissingAgent` row spread whole, so the echo's
     // shape is this event's shape by construction.
-    shapes: { config: CONFIG_SHAPE },
+    //
+    // ⚠ `occupiedBy` NEEDS ITS SHAPE HERE, and leaving it out would fail in the
+    // one direction that looks like success: a declared field with no interior
+    // written down is a SCALAR, and `projectValue` reports-and-drops a scalar
+    // that arrives with an interior. So the field would be declared, published
+    // as absent on every occupied row, and its keys reported as drift — while
+    // `null` (the unoccupied case, which is most of them) passed untouched. The
+    // event would look correct in exactly the fleet where nothing is occupied.
+    shapes: { config: CONFIG_SHAPE, occupiedBy: MISSING_AGENT_OCCUPANT_SHAPE },
     subject: 'path'
   },
   'agent.detached': {

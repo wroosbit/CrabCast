@@ -77,6 +77,7 @@ import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
 import { makeMutator, FIX_THE_MUTATION } from './mutation.mjs';
+import { killScratchRootSync } from './scratch-processes.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
@@ -110,6 +111,36 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'crabcast-kan504-red-'));
 // by running this drive rather than by reading it — arm 1 reported §2 red with
 // §1 red beside it, which is what sent me looking.
 fs.symlinkSync(path.join(repoRoot, 'node_modules'), path.join(scratch, 'node_modules'), 'dir');
+
+/**
+ * TEARDOWN THAT RUNS ON EVERY EXIT PATH (KAN-529).
+ *
+ * The same defect KAN-529 was filed against `kan514-red-drive.mjs` for, in
+ * this file, found by sweeping the suite for the shape rather than by trusting
+ * that it was one file's problem: `scratch` was removed on exactly ONE path —
+ * the last line — with no signal handlers, so the arm-0 guard's `process.exit`
+ * and any Ctrl+C both left the whole tree behind.
+ *
+ * ⚠ IT SWEEPS PROCESSES AS WELL AS DIRECTORIES: every arm runs the proof
+ * against a MUTANT BUILD under `scratch`, so the daemon that run auto-spawns
+ * carries this directory in its own argv. Removing the tree without killing
+ * them leaves daemons executing a build that no longer exists on disk.
+ */
+function cleanUp() {
+  let swept = 0;
+  try { swept = killScratchRootSync(scratch); } catch {}
+  try { fs.rmSync(scratch, { recursive: true, force: true }); } catch {}
+  return swept;
+}
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, () => {
+    const swept = cleanUp();
+    console.log(`\n[kan504-red-drive] ${signal} — killed ${swept} process(es) carrying ` +
+      `${scratch} and removed it`);
+    process.exit(130);
+  });
+}
+
 const { mutate, mutationsSkipped } = makeMutator({ distDir, scratch, report });
 
 /**
@@ -172,6 +203,9 @@ if (control.exit !== 0) {
   console.log('\n  ⚠ the control is red, so every arm below would measure the harness rather ' +
     'than the proof. Stopping.\n');
   console.log(control.out.split('\n').slice(-40).join('\n'));
+  // KAN-529: this exit used to precede the only `rmSync` in the file, so the
+  // path taken when something is ALREADY wrong was the one path that leaked.
+  cleanUp();
   process.exit(1);
 }
 
@@ -330,6 +364,6 @@ console.log(`\n${'='.repeat(78)}`);
 console.log(`${checks - failures}/${checks} checks passed`);
 console.log('='.repeat(78));
 
-try { fs.rmSync(scratch, { recursive: true, force: true }); } catch {}
+cleanUp();
 
 process.exit(failures ? 1 : 0);

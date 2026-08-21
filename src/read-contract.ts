@@ -115,7 +115,7 @@ import type { ResumeCause } from './resume.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 13;
+export const READ_CONTRACT_VERSION = 14;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -186,7 +186,7 @@ type FieldTable = Readonly<Record<string, ReadFieldSpec>>;
  * line here does not build. That is the "vice versa" half of this contract's
  * acceptance criterion, and it fires before the proof does.
  *
- * The `config` echo's five fields are on EVERY shape here, spelled out rather
+ * The `config` echo's six fields are on EVERY shape here, spelled out rather
  * than spread, because `ConfigEcho` is an interface a row extends and the
  * binding above is over the row's whole key set. `ConfigEcho` gets its own
  * entry too, for the one place it appears nested rather than spread
@@ -246,6 +246,7 @@ export const ROW_SHAPES = {
     activatedBy: { bucket: 'durable' },
     promptChars: { bucket: 'durable' },
     since: { bucket: 'durable' },
+    occupiedBy: { bucket: 'observed', block: 'MissingAgentOccupant' },
     reason: { bucket: 'derived' }
   } satisfies FieldTable,
 
@@ -560,6 +561,28 @@ export const BLOCK_SHAPES = {
    * pane is sitting in, or null. Nested rather than spread precisely so a
    * `config` on a foreign row cannot be read as the stranger's.
    */
+  /**
+   * `missingAgents[].occupiedBy` — a live pane THIS DAEMON DID NOT START, in
+   * the directory of an agent this response is reporting as missing (KAN-572).
+   *
+   * THE MIRROR OF `OccupiedAgent` ABOVE, and the pair is worth reading together
+   * because they describe the same collision from the two sides. That block
+   * hangs off a `foreignPanes` row and names OUR agent — the one whose
+   * activation the stranger's pane will refuse. This one hangs off a
+   * `missingAgents` row and names THE STRANGER'S PANE — the thing that makes
+   * *"their work has stopped"* false about that row. Until this field existed,
+   * one response carried both facts and reconciled neither.
+   *
+   * ALL FOUR ARE `observed`: one census read, quoted, about a pane on no record
+   * of ours. There is nothing durable to be had — that is what makes it foreign.
+   */
+  MissingAgentOccupant: {
+    paneName: { bucket: 'observed' },
+    paneId: { bucket: 'observed' },
+    herdrStatus: { bucket: 'observed' },
+    agentRuntime: { bucket: 'observed' }
+  } satisfies FieldTable,
+
   OccupiedAgent: {
     path: { bucket: 'durable' },
     state: { bucket: 'derived' },
@@ -804,11 +827,19 @@ export const AGENT_STATUS_FIELDS = {
 /**
  * EXACTLY WHAT EACH BRANCH CARRIES.
  *
- * Four branches, and the difference between them is not cosmetic: a caller
- * diffing desired state against ours reads `state` off three of them and gets
- * an error off the fourth. `success` is about whether the QUESTION could be
- * answered, never about whether the agent is up — a record is an answer, so a
- * stopped agent succeeds.
+ * The four branches of `AGENT_STATUS_BRANCHES` differ in ways that are not
+ * cosmetic: a caller diffing desired state against ours reads `state` off three
+ * of them and gets an error off the fourth. `success` is about whether the
+ * QUESTION could be answered, never about whether the agent is up — a record is
+ * an answer, so a stopped agent succeeds.
+ *
+ * ⚠ KAN-578: that first sentence read "Four branches, and the difference
+ * between them is not cosmetic" until this ticket. Nothing was wrong with it —
+ * the count was right — and nothing held it either. Naming the constant BESIDE
+ * the number is what puts it inside `verify-src-comment-counts`, which is the
+ * only form that script can attribute; see its header for why a comment that
+ * merely MENTIONS a constant is not attributable to it. If you move this
+ * count, move the wording with it or the check goes red naming this file.
  *
  * `no-record-no-pane` is the only branch that means the caller asked about
  * something that has never been an agent, and it still carries the echo (all

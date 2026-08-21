@@ -647,6 +647,43 @@ function categoryHeading(
   return `\n${label} (${count})${clipped}${count ? ` — ${gloss}` : ''}${more}`;
 }
 
+/**
+ * The `missing agents` gloss, WRITTEN FROM THE ROWS RATHER THAN FIXED (KAN-572).
+ *
+ * ⚠ THE OLD GLOSS WAS A STANDING SENTENCE AND IT WAS FALSE FOR A ROW THE SAME
+ * OUTPUT CONTRADICTED SIXTY LINES ABOVE IT. *"their work has stopped while
+ * still looking staffed"* reads as an instruction to intervene — and of the
+ * seven workspaces one measured run listed under it, three were demonstrably
+ * alive at that moment, one of them the guardian producing the output. The
+ * remedy the category invites is re-activation, which RESUMES a conversation,
+ * so **a false red here recommends a destructive remedy**: worse than a false
+ * green, because the remedy is the damage.
+ *
+ * ⚠ AND IT IS DERIVED FROM `occupiedBy`, NEVER FROM A SECOND JOIN HERE. The
+ * daemon computes the reconciliation against the same census the rows come from
+ * (`MessageRouter.missingAgents`), so this function only reads the answer. A CLI
+ * that re-derived it by matching `foreignPanes[].occupies` against `path` would
+ * be a second implementation of the ownership question — which is the shape that
+ * produced the defect: two tests that can disagree about the same directory.
+ *
+ * THE MIXED CASE IS SPELLED OUT rather than rounded to whichever half is larger.
+ * A page holding four stopped agents and one occupied directory needs both
+ * sentences, because a reader acting on the wrong one takes the wrong action on
+ * a row — and rounding would silently pick which.
+ */
+function missingGloss(rows: any[]): string {
+  const stopped = 'recorded active, not running: their work has stopped while still looking staffed';
+  const occupied = rows.filter((m) => m?.occupiedBy).length;
+  if (occupied === 0) return stopped;
+  const occupiedClause =
+    `${occupied} OCCUPIED by a live pane this daemon did not start (see foreign panes above): ` +
+    `that work has NOT stopped, and re-activating will be refused`;
+  return occupied === rows.length
+    ? `recorded active, no agent of OURS running — and every row shown is ${occupiedClause}`
+    : `recorded active, no agent of OURS running — ${rows.length - occupied} whose directory is ` +
+      `empty (work has stopped while still looking staffed), ${occupiedClause}`;
+}
+
 /** The three gate flags, printed only where they differ from the safe default. */
 function gateFlags(a: any): string {
   const off = (['refusable', 'chargeable', 'preemptable'] as const).filter((f) => a[f] === false);
@@ -1495,13 +1532,26 @@ function renderList(reader: ResponseReader, request: Record<string, unknown>): s
         'missing agents',
         missing,
         missingTotal,
-        'recorded active, not running: their work has stopped while still looking staffed',
+        missingGloss(missing),
         pageOf('missingAgents')
       ),
       ...(missing.length
         ? missing.map((m: any) =>
             lines(
               `${INDENT}${m.path} — since ${m.since}` + (m.label ? ` (${m.label})` : ''),
+              // THE OCCUPANT FIRST, ABOVE THE REASON (KAN-572). The reason says
+              // it too, in a sentence; this line is the one a reader skimming
+              // rows cannot miss, and it is where they meet the fact that the
+              // remedy this category invites — re-activate, which RESUMES a
+              // conversation — is not available for this row and would be
+              // refused.
+              m.occupiedBy
+                ? `${INDENT}${INDENT}⚠ OCCUPIED by ${m.occupiedBy.paneName} ` +
+                  `[${m.occupiedBy.herdrStatus}]  runtime ${m.occupiedBy.agentRuntime}` +
+                  (m.occupiedBy.paneId ? `  pane_id ${m.occupiedBy.paneId}` : '') +
+                  ` — a live pane this daemon did not start (see foreign panes above). ` +
+                  `Work has NOT stopped here, and activating this agent will be refused.`
+                : null,
               `${INDENT}${INDENT}${m.reason}`,
               configBlock(m)
             )

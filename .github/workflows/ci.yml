@@ -150,7 +150,56 @@ jobs:
     # The reporter READS this line rather than carrying its own copy, and
     # verify-timing-attribution.mjs asserts that it does — so editing the number
     # moves the percentage, and no second number exists to disagree with it.
-    timeout-minutes: 20
+    #
+    # ---------------------------------------------------------------------
+    # 20 -> 30 ON 2026-08-21 (KAN-585). THE PREDICTION TWELVE LINES UP CAME
+    # TRUE, and this is it being acted on rather than re-predicted.
+    #
+    # "A bound the loop grows into stops being purely a hang bound and becomes
+    # a budget whose number nobody chose" is exactly what had happened: the
+    # loop was 38s when 20 was chosen on 2026-08-03 and is ~14m19s now, so 20
+    # had become a cost limit by drift, which this job's own recorded decision
+    # says it must not be. The reporter's ratio — built for this — was reading
+    # 89.1%.
+    #
+    # MEASURED (scripts/kan585-verify-duration-survey.mjs, 364 run-attempts
+    # that actually ran, 2026-08-03 -> 2026-08-21, no conclusion filter, all
+    # attempts walked):
+    #   - the current suite, non-incident branches since 2026-08-15 (n=45):
+    #     p50 14m01s, p95 14m31s, max 17m49s; 43 of 45 inside 13m25s-14m34s.
+    #   - the 17m49s is a TAIL, not a second mode: only four attempts reach
+    #     15m00s at all — 15m05s, the 17m49s itself, and the two censored
+    #     timeouts — so it is isolated by 2m44s from the nearest attempt
+    #     below it, with no cluster to belong to.
+    #   - runner variance alone, on IDENTICAL content: 14m02s vs 17m49s
+    #     (main@927df07 is the squash of butchr/KAN-578@6c9a9df) = x1.270.
+    #   - the bound had already fired: run 32406501749 attempts 1 and 2,
+    #     annotated by GitHub "has exceeded the maximum execution time".
+    #
+    # THE ARITHMETIC THE NUMBER COMES FROM. Worst measured runner draw on a
+    # typical run of today's suite: 14m19s x 1.270 = 18m11s — 1m49s under the
+    # old bound. So the margin was already thinner than one measured draw. At
+    # 30, the suite's p50 can grow 65% (to 23m37s) before that same draw
+    # reaches the bound.
+    #
+    # WHAT IT TRADES, stated as a cost and not waved at: a genuinely hung job
+    # now burns up to 10 more minutes of runner wall-clock before it is
+    # killed. That is the whole of the downside. It is bounded, it is paid in
+    # free runner time, and 30m is still ~12x tighter than the six-hour
+    # ceiling this bound exists to avoid. Measured rate at which that cost
+    # gets paid: 0 of 364 attempts were killed for an actual hang.
+    #
+    # AND THE REASON IT IS NOT MERELY CONVENIENCE: a bound sitting inside the
+    # healthy distribution's variance destroys its own meaning. When it fired
+    # above, it produced 20m21s and 20m17s — two measurements OF THE BOUND,
+    # not of the job, so nobody could tell a hung branch from a slow one. A
+    # bound clear of the distribution makes a firing informative again.
+    #
+    # NOT A LICENCE TO TRIM PROOFS, and not a budget now either. Nothing here
+    # fails because the loop got slower; see docs/verify-cost.md, which is
+    # where the reasoning above lives in full.
+    # ---------------------------------------------------------------------
+    timeout-minutes: 30
     steps:
       # Full history, for two scripts: verify-ci-wiring-guards reproduces the
       # defect it exists for by loading the PRE-FIX scripts/ci-workflow.mjs out
@@ -852,6 +901,93 @@ jobs:
       #                                      named in its header and in the
       #                                      document.
       #
+      #   verify-doc-set-counts              the SENTENCE above a gated table,
+      #                                      which the gate under it does not
+      #                                      hold. verify-read-contract
+      #                                      reconciles WHICH fields a table
+      #                                      lists; nothing reconciled HOW MANY
+      #                                      the prose says it has, so
+      #                                      `docs/read-path-contract.md` read
+      #                                      "the five fields" about a
+      #                                      six-member `BLOCK_SHAPES.ConfigEcho`
+      #                                      in six places from KAN-528 until a
+      #                                      person read the page (KAN-512).
+      #                                      Every field name on the page was
+      #                                      right the whole time, which is why
+      #                                      a membership check was green and
+      #                                      could not have been anything else:
+      #                                      a count has no member to match.
+      #                                      It rules only on a count carrying a
+      #                                      DEFINITE ARTICLE — "the five
+      #                                      fields" is a claim about the size of
+      #                                      a set, "five fields added to X" is a
+      #                                      version-history delta and reconciling
+      #                                      it would be nonsense — whose subject
+      #                                      is named by an anchor link, by the
+      #                                      section's own published name, or by
+      #                                      the heading that introduces exactly
+      #                                      one table. WHAT IT CANNOT SEE: a
+      #                                      count whose subject is a different
+      #                                      line, a section declaring more than
+      #                                      one marker (it PRINTS every phrase
+      #                                      it declined rather than dropping
+      #                                      it), and any count in `src/` — three
+      #                                      source comments carried the same
+      #                                      drift and were found by reading, not
+      #                                      by this. It fails closed: zero
+      #                                      subjects in the tree is a FAILURE,
+      #                                      because a detector that silently
+      #                                      matches nothing has become the bug
+      #                                      it is looking for. That last hole is
+      #                                      the one verify-src-comment-counts
+      #                                      now takes a narrow slice out of.
+      #
+      #   verify-src-comment-counts          the same defect one directory over:
+      #                                      a COMMENT in `src/` or `scripts/`
+      #                                      stating how many members a declared
+      #                                      constant has, while the arity moved
+      #                                      underneath it. Four such comments
+      #                                      were live at `234243d`, one of them
+      #                                      INSIDE verify-read-contract, the
+      #                                      gate whose greenness made the
+      #                                      surrounding claims credible; all
+      #                                      were found by reading.
+      #                                      ⚠ READ THE RATIO IT PRINTS BEFORE
+      #                                      TRUSTING ITS GREEN. It rules on a
+      #                                      COUNT WHOSE SUBJECT IS SPELLED
+      #                                      BESIDE IT — "the six fields of
+      #                                      `SET`", "`SET` has six members" —
+      #                                      and that is about 2% of the count
+      #                                      phrases in the corpus. The other
+      #                                      98% is NOT held, and the script
+      #                                      prints `ruled on N of M` every run
+      #                                      so the green cannot be read as
+      #                                      more. KAN-578 measured the three
+      #                                      wider handles its ticket proposed —
+      #                                      `{@link SET}` in the block, the
+      #                                      constant named anywhere in the
+      #                                      block, the block being the
+      #                                      declaration's own — and all three
+      #                                      redden correct prose: 17
+      #                                      disagreements at `234243d`, 2 of
+      #                                      them the defect, and one false red
+      #                                      that NO correct wording can clear
+      #                                      because the sentence is about a
+      #                                      SUBSET of the set. WHAT IT CANNOT
+      #                                      SEE: a subject named
+      #                                      anaphorically ("that shape"), which
+      #                                      is three of the four filed
+      #                                      instances; a subject that is a TYPE
+      #                                      rather than a constant with a
+      #                                      runtime arity; and a QUOTATION of a
+      #                                      count, which it cannot tell from a
+      #                                      claim — its own first draft went
+      #                                      red on its own header. It fails
+      #                                      closed: zero rulings is a FAILURE.
+      #                                      scripts/kan578-src-count-sweep.mjs
+      #                                      is the wider-recall survey those
+      #                                      numbers come from and re-takes them.
+      #
       #   verify-owner-filter                an application finds ITS OWN agents
       #                                      by an opaque `owner`, and an agent
       #                                      belonging to NOBODY is handed to
@@ -1041,6 +1177,7 @@ jobs:
             verify-proof-cleans-up-when-interrupted
             verify-event-durability
             verify-fleet-enumeration
+            verify-missing-agent-occupancy
             verify-fleet-read-fits-the-wire
             verify-config-echo-contract
             verify-ci-wiring-guards
@@ -1053,6 +1190,8 @@ jobs:
             verify-daemon-started-at
             verify-daemon-status-over-mcp
             verify-read-contract
+            verify-doc-set-counts
+            verify-src-comment-counts
             verify-path-problem
             verify-send-contract
             verify-channel-enabled
@@ -1070,6 +1209,7 @@ jobs:
             verify-doc-proof-ci-class
             verify-launcher-args
             verify-variadic-args-swallow-prompt
+            verify-proof-teardown-sweeps
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

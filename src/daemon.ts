@@ -860,9 +860,22 @@ function announceLosses(missing: MissingAgent[]) {
   for (const agent of missing) {
     if (announcedMissing.has(agent.path)) continue;
     announcedMissing.add(agent.path);
+    // THE LOG LINE CARRIES THE QUALIFICATION TOO (KAN-572). It is a third
+    // surface saying the same thing, and it said the flat version — "herdr has
+    // no live agent in that directory" — which is FALSE of an occupied row and
+    // is exactly the sentence the row itself stopped saying. A fix applied to
+    // the response and the event, with the operator's log left asserting the
+    // old claim, would have left the contradiction where an operator debugging
+    // a false alarm is most likely to meet it.
     log(
       `AGENT LOST: ${agent.path} is recorded as active since ${agent.since} but herdr has no ` +
-      `live agent in that directory.`
+      `live agent of ours in that directory.` +
+      (agent.occupiedBy
+        ? ` A pane this daemon did not start is in it — ${agent.occupiedBy.paneName}` +
+          `${agent.occupiedBy.paneId ? ` (pane ${agent.occupiedBy.paneId})` : ''}, ` +
+          `${agent.occupiedBy.herdrStatus} — so work has NOT stopped there and activating ` +
+          `this agent would be refused.`
+        : '')
     );
     broadcast({ action: 'agent.lost', ...agent });
   }

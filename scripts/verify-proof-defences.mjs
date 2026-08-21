@@ -726,6 +726,95 @@ const PROOF_DEFENCES = [
       'rather than passing over them, and no sibling script covers the second.'
   },
   {
+    script: 'verify-doc-set-counts',
+    defence: 'guard',
+    anchor: 'self-test: an article-less delta',
+    central:
+      'a prose sentence in docs/ that states HOW MANY members a gated set has agrees with the ' +
+      'declaration that set is gated against — the half `verify-read-contract` structurally ' +
+      'cannot hold, because it reconciles WHICH fields a table lists and a count has no member ' +
+      'to match.',
+    note:
+      'A NEGATIVE CASE IN THE FILE, and the pair is the point: §5 runs the whole attribution path ' +
+      'over a fixture it MUST rule on and one it MUST NOT, before it sweeps anything real. A ' +
+      'detector that accepted everything would pass the first and fail the second; one that ' +
+      'accepted nothing would pass the second and fail the first; neither test alone says ' +
+      'anything. The must-reject fixture is the discriminator that earns this script\'s keep — ' +
+      '"three fields added to [the fixture](#fx)", the form every version-history row uses, which ' +
+      'is a DELTA and whose reconciliation against an arity would be a false red on correct ' +
+      'prose. It also FAILS CLOSED: zero attributed subjects across docs/ is a FAILURE, not a ' +
+      'clean sweep, because the defect being hunted is a check that quietly matches nothing. ' +
+      'THE ARITY MUTATION IS ON THE PR RATHER THAN IN THE FILE, and finding one that COMPILES was ' +
+      'the substance of it. The obvious mutation — add a seventh field to ' +
+      '`BLOCK_SHAPES.ConfigEcho` and leave the prose at six — does not build: ' +
+      '`_configEchoMatchesTheContract: Exact<keyof ConfigEcho, keyof typeof ' +
+      'BLOCK_SHAPES.ConfigEcho>` in src/router.ts refuses it, and adding the field to the ' +
+      'interface as well then fails at every construction site. A proof run after a failed ' +
+      'build runs on the previous dist and its verdict is about code nobody wrote, so that ' +
+      'mutation was DISCARDED rather than re-run. The mutation on record adds a fifth branch to ' +
+      '`AGENT_STATUS_BRANCHES`, builds clean, and is required to turn ' +
+      '`docs/read-path-contract.md`\'s "The four branches" red naming the page, the count and the ' +
+      'constant. WHAT THAT COMPILE ERROR ALSO ESTABLISHES: the KAN-528 drift happened WITH all ' +
+      'that type machinery in place and working — the types forced the table and the interface ' +
+      'to agree, and the sentence above them was the only unheld thing on the page. SEAM: this ' +
+      'rules only on a count carrying a definite article whose subject is named by an anchor ' +
+      'link, the section\'s own published name, or the heading introducing exactly one table. ' +
+      'Every phrase it declines is PRINTED rather than dropped. TWO HOLES NAMED RATHER THAN ' +
+      'COVERED: a count whose subject sits on a different line (docs/send-contract.md\'s "One of ' +
+      'the five branches" is one, correct today and held by nothing), and every count in `src/` ' +
+      '— three source comments carried this exact drift, were found by reading and are fixed ' +
+      'here. KAN-578 took a NARROW slice out of that second hole — ' +
+      'verify-src-comment-counts rules on a src/ comment whose count names its constant BESIDE ' +
+      'it, which is ~2% of that corpus, and the other 98% is still held by nobody. ' +
+      'scripts/kan530-doc-count-sweep.mjs is the ' +
+      'wider-recall survey over the same corpus and does not close either hole; it reports them.'
+  },
+  {
+    script: 'verify-src-comment-counts',
+    defence: 'guard',
+    anchor: 'THE MUST-REJECT FIXTURE IS THE ONE THAT EARNS',
+    central:
+      'a COMMENT in src/ or scripts/ that states how many members a declared constant has agrees ' +
+      'with that constant — the class KAN-530 named as uncovered when it gated the same defect in ' +
+      'docs/, and the class verify-read-contract could not hold about a comment sitting inside ' +
+      'itself.',
+    note:
+      'FOUR FIXTURES IT MUST REJECT AND THREE IT MUST ACCEPT, run BEFORE it sweeps anything real, ' +
+      'and the reject side is the half that earns the keep. They are not invented: "the other five ' +
+      'fields of" is src/router.ts\'s own wording about a SUBSET of an 11-field ' +
+      'ROW_SHAPES.UnreadableRecord, and "the one field of" is the ONLY-X idiom that is 150 of the ' +
+      '312 count phrases in this corpus. A detector that ruled on everything would pass the accept ' +
+      'side and fail the reject side; one that ruled on nothing would do the reverse; so §1 also ' +
+      'asserts the accept fixtures really produced rulings, because "refuses everything" otherwise ' +
+      'passes every must-reject silently. EVERY FIXTURE IS PREFIXED WITH A REGEX LITERAL CONTAINING ' +
+      'A BACKTICK, which guards the INSTRUMENT rather than the rule: two comment readers were tried ' +
+      'before TypeScript\'s parser and both were silently wrong on exactly that input — a ' +
+      'hand-rolled scanner swallowed the rest of the file, and ts.createScanner returned ZERO ' +
+      'comments for it while appearing to work on the real tree, where it read 747 comments in ' +
+      'src/router.ts against the parser\'s 1967. Both failures print a healthy-looking total. ' +
+      'THE MUTATION IS ON THE PR RATHER THAN IN THE FILE, and finding one that COMPILES was the ' +
+      'substance of it — the same wall KAN-530 hit. Adding a seventh field to ' +
+      'BLOCK_SHAPES.ConfigEcho, which every other ruled comment here is about, fails the BUILD on ' +
+      'Exact<keyof ConfigEcho, keyof typeof BLOCK_SHAPES.ConfigEcho> in src/router.ts, and a proof ' +
+      'run after a failed build runs on the previous dist, so that mutation was DISCARDED rather ' +
+      'than re-run. The mutation on record adds a fifth branch to AGENT_STATUS_BRANCHES, builds ' +
+      'clean at exit 0, and turns src/read-contract.ts\'s "The four branches of ' +
+      'AGENT_STATUS_BRANCHES" red naming the file, the count and the constant. A SECOND RED IS ON ' +
+      'REAL HISTORY: --tree= a checkout of 234243d and the rule reddens the genuine drifted comment ' +
+      'inside scripts/verify-read-contract.mjs, which is the arity-moved direction rather than a ' +
+      'planted one. ⚠ SEAM, AND IT IS LARGE: this rules ONLY on a count whose subject is spelled ' +
+      'beside it, which is ~2% of the count phrases in this corpus, and the script PRINTS ' +
+      '"ruled on N of M" every run so its green cannot be read as coverage of the rest. Three of ' +
+      'the four instances the ticket was filed for name their subject anaphorically and are reached ' +
+      'by NOTHING here. The three wider handles the ticket proposed were measured and rejected: 17 ' +
+      'disagreements at 234243d, 2 of them real, and one false red no correct wording can clear ' +
+      'because the sentence is about a subset. It also cannot tell a claim from a QUOTATION of one ' +
+      '— its own first draft went red on its own header — so a cited stale count must be described, ' +
+      'not reproduced. It FAILS CLOSED: zero rulings across the tree is a FAILURE, not a clean ' +
+      'sweep. scripts/kan578-src-count-sweep.mjs is the wider-recall survey behind the shape ' +
+      'decision, with a control, and it reports the population this gate declines.'
+  },
+  {
     script: 'verify-event-contract',
     defence: 'mutation',
     central:
@@ -741,6 +830,24 @@ const PROOF_DEFENCES = [
     note:
       'It injects the write failure by sealing the log to 0400 and proves the seal took, so it ' +
       'covers "a failed append is reported truthfully" and not "a full disk reaches this path".'
+  },
+  {
+    script: 'verify-missing-agent-occupancy',
+    defence: 'mutation',
+    central:
+      'one response cannot name a live pane under `foreignPanes` and assert that the same ' +
+      'directory has no live agent under `missingAgents` — the row carries `occupiedBy`, the ' +
+      'reason and the CLI heading stop saying work has stopped about a directory the same ' +
+      'output shows occupied, and `agent.lost` carries the qualification too.',
+    note:
+      'TWO MUTANTS OF THE COMPILED BUILD, one per surface: the router blinded to occupancy ' +
+      '(`occupant = null`) must bring the pre-fix contradiction back verbatim, and a CLI ' +
+      'heading that ignores its own rows must go back to asserting "their work has stopped". ' +
+      'SEAM: the fixture is a herdr STUB, so what is defended is the daemon\'s reconciliation ' +
+      'over a census and not a real second `claude` in a configured directory — that is what ' +
+      'epic/KAN-203 observed live and nothing on a runner reproduces it. It also asserts the ' +
+      'row SAYS an activation would be refused, and never that the refusal works; ' +
+      'verify-refuses-occupied-directory is what establishes that.'
   },
   {
     script: 'verify-fleet-enumeration',
@@ -1202,7 +1309,27 @@ const PROOF_DEFENCES = [
       'arguments is the runtime\'s behaviour, not CrabCast\'s. What is bounded is CrabCast\'s ' +
       'half, and it is measured off `/proc/<pid>/cmdline` rather than off any string the fixture ' +
       'composed: the fake `claude` reports only WHICH pid to look at, and the kernel says what its ' +
-      'argv is.'
+      'argv is. ' +
+      '§6 HAS A DRIVE OF ITS OWN SINCE KAN-524, `scripts/kan524-red-drive.mjs`, and it is listed ' +
+      'here rather than folded into the sentence above because it defends a different assertion: ' +
+      'not that args reach the argv, but that the SAFETY section can report anything at all. §6 ' +
+      "compared the live registry's MTIME until KAN-524 — vacuous on a CI runner, which hands " +
+      'every proof a scratch $HOME so no registry exists under it, and a FALSE RED on a machine ' +
+      'serving a fleet, where the live daemon writes that file for its own reasons. Four arms, ' +
+      'control first: a row naming the run\'s OWN scratch root appended mid-flight (the gate goes ' +
+      'red, every other §6 check stays green); the retired predicate and the current one run in ' +
+      'the SAME touched-registry world, requiring the old to go red and the new to stay green, ' +
+      'which is the only place the fix is stated as a difference rather than as one run; and the ' +
+      "detector forced never-to-fire and always-to-fire, which is what makes §6's two controls " +
+      'gates instead of decoration. ⚠ THE ARM 1 SEAM, named in the drive\'s header too: the ' +
+      'contaminating row is written by the harness, so what is shown is that the detector fires ' +
+      'on a registry carrying this run\'s footprint — never that CrabCast could produce one. ' +
+      'WHO COVERS THAT: nobody, and nobody can, since a proof of it would be the accident. ' +
+      '§6 also now labels each of its five checks [disclosure] or [measurement]: (a), (b) and (c) ' +
+      "read values the script itself composed and cannot fail once written right, and (c) alone is " +
+      'corroborated elsewhere — §1/§2 read a real process\'s argv out of /proc, and that process ' +
+      'is the shim PATH put first. Nothing here observes a child\'s own view of HOME or of the ' +
+      'data dir it opened; that gap is stated in §6 rather than left to be inferred.'
   },
   {
     script: 'verify-variadic-args-swallow-prompt',
@@ -1238,6 +1365,34 @@ const PROOF_DEFENCES = [
       'the fixture cannot be the explanation of the difference between §1 and §2. The real ' +
       'binary was measured by hand on Claude Code 2.1.234 and by `task/KAN-496`; that transcript ' +
       'is on the pull request and is not runnable in CI.'
+  },
+  {
+    script: 'verify-proof-teardown-sweeps',
+    defence: 'guard',
+    central:
+      'a proof that CLAIMS no process outlived it derives that answer from the machine, keyed ' +
+      'on its own scratch root — never from a pid set maintained by hand; and the dead call ' +
+      '`crabcast([\'daemon\', \'stop\'])`, on which the leaking teardown rested, appears nowhere.',
+    anchor: 'the same checks over a broken fixture',
+    note:
+      'A NEGATIVE CASE rather than a mutation, and §5 is where it lives: every predicate is run ' +
+      'over fixture text BUILT TO VIOLATE IT and must say so, then over text built to satisfy ' +
+      'it and must clear that. Both directions, because a predicate that flags everything and ' +
+      'one that flags nothing both produce a section full of passes. ' +
+      '⚠ §6 IS THE ONE WORTH READING, and it exists because this file accused the wrong files ' +
+      'TWICE while it was being written — both times reporting a proof as CALLING the dead ' +
+      'command when what it held was a quoted SPECIMEN of it. Once because a regex after ' +
+      '`return` was read as division, so the `[\'"]` inside it opened a string and every ' +
+      'offset after it parsed in the wrong mode; once because a template nested in a `${}` ' +
+      "interpolation — this file's own `check` helper — closed the outer template early. §6 " +
+      'pins both, AND pins the opposite direction: a real call sitting after that same regex ' +
+      'must still be FOUND, because both fixes blank more text and a masker that blanked too ' +
+      'much would clear the whole repository while printing the same reassuring "none". ' +
+      'WHAT THIS FILE DOES NOT ESTABLISH, said plainly because §2 reads like it does: importing ' +
+      'the sweeper is not sweeping. This is a gate on the SHAPE. That the sweep actually works ' +
+      'is `kan529-red-drive.mjs`, which disarms it and watches the check go red, and ' +
+      '`kan529-suite-leak-survey.mjs`, which runs the suite and counts what each proof leaves ' +
+      'alive. Three artifacts, and this is the cheap one that runs on every PR.'
   },
   {
     script: 'verify-ci-wiring-guards',
@@ -1309,8 +1464,11 @@ const PROOF_DEFENCES = [
       'accident, and the one every assertion about shape passes. "reporter-noop" is the attack ' +
       "KAN-331's brief names outright (\"assume I will make it a no-op and see whether anything " +
       'notices"). "bound-hardcoded" runs the committed reporter and a constant-carrying mutant ' +
-      'against a tree declaring 40 rather than 20 minutes, so "it reads the workflow" is measured ' +
-      'rather than asserted. §4 mutates the workflow with `|| true` and requires the wiring ' +
+      'against a probe tree declaring a DIFFERENT bound from the committed one, so "it reads the ' +
+      'workflow" is measured rather than asserted — both values DERIVED from whatever the ' +
+      'workflow says (KAN-585), having been the literals 40 and 20 until raising the real bound ' +
+      'to 30 made the rewrite match nothing and the section unable to fail. ' +
+      '§4 mutates the workflow with `|| true` and requires the wiring ' +
       'reader to call it disabled. ' +
       'SEAM, AND IT IS THE ONE `prompts/task.md` ASKS FOR: this script SUPPLIES ITS OWN FIXTURES ' +
       'and their durations, so it proves the loop times and attributes whatever it is handed — ' +
