@@ -186,7 +186,7 @@ type FieldTable = Readonly<Record<string, ReadFieldSpec>>;
  * line here does not build. That is the "vice versa" half of this contract's
  * acceptance criterion, and it fires before the proof does.
  *
- * The `config` echo's five fields are on EVERY shape here, spelled out rather
+ * The `config` echo's six fields are on EVERY shape here, spelled out rather
  * than spread, because `ConfigEcho` is an interface a row extends and the
  * binding above is over the row's whole key set. `ConfigEcho` gets its own
  * entry too, for the one place it appears nested rather than spread

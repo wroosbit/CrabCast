@@ -37,7 +37,7 @@ by that name rather than by position — so a table that moves, or one that is
 added for a declaration that does not exist, is caught rather than silently
 skipped. The second column is the field's **provenance bucket** (§3), followed
 by `, optional` where the field can be absent. A row reading *config echo*
-stands for the five fields in [the config echo](#configecho), and the proof
+stands for the six fields in [the config echo](#configecho), and the proof
 expands it; it is a shorthand for readability, not a hole.
 
 ---
@@ -350,7 +350,7 @@ contract](event-contract.md) is where its declared-field behaviour lives, and
 `config`'s own knobs are declared by `CONFIG_FIELDS` in `src/events.ts`.
 
 <a id="configecho"></a>
-### The config echo — the five fields a *config echo* row stands for
+### The config echo — the six fields a *config echo* row stands for
 
 <!-- contract-table: BLOCK_SHAPES.ConfigEcho -->
 
@@ -375,7 +375,7 @@ Two kinds of entry share this shape, told apart by `sessionless`.
 | `sessionless` | observed | `false` — this daemon holds the agent's terminal attach. `true` — the agent is alive in herdr but no session of ours describes it, which is every surviving agent after a daemon restart. **The session-only fields are null because there is no session, not because the agent is impaired** |
 | `state` | derived | see [state](#state). `running` on every row in this category |
 | `configured` | durable | whether a durable record backs this row. `false` means `config` is null and the three gate flags are the **safe reading of an unknown** rather than anybody's configuration |
-| *config echo* | durable | the five fields [above](#configecho) |
+| *config echo* | durable | the six fields [above](#configecho) |
 | `path` | durable | the canonical directory this agent **is**. The address; nothing else is |
 | `paneName` | derived | the opaque herdr token for that path. **Nothing parses it back out** |
 | `paneId` | observed | **never store this.** herdr pane ids are positions in a list that compacts whenever any pane anywhere closes, so one stored as configuration goes stale when an unrelated agent finishes. Null when the census had nothing |
@@ -984,7 +984,7 @@ block is absent** when this daemon could not read its own descriptor usage.
 | --- | --- | --- |
 | `path` | durable | the directory both are in |
 | `state` | derived | **asked properly rather than assumed stopped** — ours and a stranger can be live in the same directory, which is the case this row exists to make visible |
-| *config echo* | durable | the five fields [above](#configecho) |
+| *config echo* | durable | the six fields [above](#configecho) |
 
 <a id="missingagentoccupant"></a>
 ### `missingAgents[].occupiedBy` — MissingAgentOccupant
@@ -1130,7 +1130,7 @@ not evidence.
 | `label` | durable, optional | |
 | `configured` | durable, optional | |
 | `state` | derived, optional | [state](#state) |
-| *config echo* | durable, optional | the five fields [above](#configecho) |
+| *config echo* | durable, optional | the six fields [above](#configecho) |
 | `channelEnabled` | durable, optional | whether the spawn this agent is running from was **channel-enabled** — see [below](#channelenabled). Absent on **bad-address** only |
 | `provenance` | derived, optional | [Provenance](#provenance) |
 | `configEchoContract` | derived | **every branch**, refusals included |
@@ -1243,7 +1243,7 @@ by habit, and one seam is worth stating before the table:
   re-readable from anywhere. They are a report about a moment that has passed.
 * **`durable` means what it always means** — on the registry, and answering the
   same after a restart. It is `path` (the registry's own key), `priority`,
-  `launcher`, the five-field config echo and `channelEnabled`: the only fields
+  `launcher`, the six-field config echo and `channelEnabled`: the only fields
   here that outlive the process that sent them. Everything else on this response
   describes either a census read that has already expired or an action that has
   already finished.
@@ -1285,7 +1285,7 @@ of refusal it is holding.
 | `verified` | observed, optional | **the agent was found in herdr's census before this was sent.** `true` on both successes; `false` on the three refusals that looked and could not confirm; absent on the refusals that never looked. Success is never reported without it |
 | `priority` | durable, optional | from the frozen record. On the spawning branch and the `capacity` refusal. **A duplicate of `config.priority` wherever the echo is also present** — which is both successful branches. On `capacity` there is no echo, so it is the only copy and the only branch where it is load-bearing |
 | `launcher` | durable, optional | from the frozen record. **On the spawning branch only, and a duplicate of `config.launcher`** — which the echo carries on both successful branches. Its absence from the idempotent branch removes no information from that response. Read the echo, and see the first note below |
-| *config echo* | durable, optional | the five fields [above](#configecho), **re-read after the activation's own durable write** rather than taken from the intent this call opened with — which is how `everActivated` can read `true` here and remain a purely durable fact |
+| *config echo* | durable, optional | the six fields [above](#configecho), **re-read after the activation's own durable write** rather than taken from the intent this call opened with — which is how `everActivated` can read `true` here and remain a purely durable fact |
 | `channelEnabled` | durable, optional | whether this spawn was channel-enabled — [channelEnabled](#channelenabled--was-this-spawn-channel-enabled). Answered from the record, not from the session, so this surface and `agent_status` agree **by construction** |
 | `resume` | derived, optional | which cause the resume prompt was written for — [resumeCause](#resumecause). Only on a restore |
 | `resumedConversation` | observed, optional | whether a conversation was there to hand back. `true` means the agent is sitting at an empty prompt and needs a nudge; `false` means it came up with the degraded-resume prompt and is already working. Only on a restore |

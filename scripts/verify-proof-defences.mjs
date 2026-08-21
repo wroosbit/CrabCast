@@ -726,6 +726,47 @@ const PROOF_DEFENCES = [
       'rather than passing over them, and no sibling script covers the second.'
   },
   {
+    script: 'verify-doc-set-counts',
+    defence: 'guard',
+    anchor: 'self-test: an article-less delta',
+    central:
+      'a prose sentence in docs/ that states HOW MANY members a gated set has agrees with the ' +
+      'declaration that set is gated against — the half `verify-read-contract` structurally ' +
+      'cannot hold, because it reconciles WHICH fields a table lists and a count has no member ' +
+      'to match.',
+    note:
+      'A NEGATIVE CASE IN THE FILE, and the pair is the point: §5 runs the whole attribution path ' +
+      'over a fixture it MUST rule on and one it MUST NOT, before it sweeps anything real. A ' +
+      'detector that accepted everything would pass the first and fail the second; one that ' +
+      'accepted nothing would pass the second and fail the first; neither test alone says ' +
+      'anything. The must-reject fixture is the discriminator that earns this script\'s keep — ' +
+      '"three fields added to [the fixture](#fx)", the form every version-history row uses, which ' +
+      'is a DELTA and whose reconciliation against an arity would be a false red on correct ' +
+      'prose. It also FAILS CLOSED: zero attributed subjects across docs/ is a FAILURE, not a ' +
+      'clean sweep, because the defect being hunted is a check that quietly matches nothing. ' +
+      'THE ARITY MUTATION IS ON THE PR RATHER THAN IN THE FILE, and finding one that COMPILES was ' +
+      'the substance of it. The obvious mutation — add a seventh field to ' +
+      '`BLOCK_SHAPES.ConfigEcho` and leave the prose at six — does not build: ' +
+      '`_configEchoMatchesTheContract: Exact<keyof ConfigEcho, keyof typeof ' +
+      'BLOCK_SHAPES.ConfigEcho>` in src/router.ts refuses it, and adding the field to the ' +
+      'interface as well then fails at every construction site. A proof run after a failed ' +
+      'build runs on the previous dist and its verdict is about code nobody wrote, so that ' +
+      'mutation was DISCARDED rather than re-run. The mutation on record adds a fifth branch to ' +
+      '`AGENT_STATUS_BRANCHES`, builds clean, and is required to turn ' +
+      '`docs/read-path-contract.md`\'s "The four branches" red naming the page, the count and the ' +
+      'constant. WHAT THAT COMPILE ERROR ALSO ESTABLISHES: the KAN-528 drift happened WITH all ' +
+      'that type machinery in place and working — the types forced the table and the interface ' +
+      'to agree, and the sentence above them was the only unheld thing on the page. SEAM: this ' +
+      'rules only on a count carrying a definite article whose subject is named by an anchor ' +
+      'link, the section\'s own published name, or the heading introducing exactly one table. ' +
+      'Every phrase it declines is PRINTED rather than dropped. TWO HOLES NAMED RATHER THAN ' +
+      'COVERED: a count whose subject sits on a different line (docs/send-contract.md\'s "One of ' +
+      'the five branches" is one, correct today and held by nothing), and every count in `src/` ' +
+      '— three source comments carried this exact drift, were found by reading and are fixed ' +
+      'here, and no script covers that class. scripts/kan530-doc-count-sweep.mjs is the ' +
+      'wider-recall survey over the same corpus and does not close either hole; it reports them.'
+  },
+  {
     script: 'verify-event-contract',
     defence: 'mutation',
     central:
