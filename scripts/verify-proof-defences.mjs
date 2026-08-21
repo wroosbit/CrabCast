@@ -1883,6 +1883,24 @@ const PROOF_DEFENCES = [
       'fails §2; one that refused nothing fails §1.'
   },
   {
+    script: 'verify-release-line',
+    defence: 'mutation',
+    central:
+      '`daemon-status` names a running build that is not on a released line, and answers "cannot ' +
+      'tell" rather than a green when it cannot ask.',
+    anchor: 'THE MUTANT STILL PASSES.',
+    note:
+      'THREE MUTATIONS THROUGH THE SHARED HELPER, each a shape a real regression takes: the ' +
+      'ancestry verdict inverted, the state machine restored to its pre-KAN-592 form (two edits, ' +
+      'which reproduces THE INCIDENT — the right answer on the wire under the word `current`), ' +
+      'and the release-line conjunct dropped from `current` so an unanswerable question reads ' +
+      'clean. Each requires a named assertion above to go red. §5 additionally carries a POSITIVE ' +
+      'CONTROL that is not a mutation and is the load-bearing one for the no-network claim: a ' +
+      'clone whose remote-tracking ref is behind must answer `no`, and must answer `yes` only ' +
+      'after THIS SCRIPT runs the fetch — a reader that reached the network would answer `yes` ' +
+      'first time and the section would go red.'
+  },
+  {
     script: 'verify-daemon-provenance',
     defence: 'guard',
     central:
