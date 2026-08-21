@@ -488,13 +488,33 @@ const EXIT_CLAIMS = [
   { anchor: 'the loser detects the incumbent', member: null, why: '`crabcast daemon`’s OWN status, not the client table — §4.1: "nothing here asked a daemon anything"' },
   { anchor: 'SECOND_DAEMON_EXIT', member: null, why: 'same as §4.3’s prose above it: the losing second daemon’s own exit' },
   { anchor: 'The failing branch of this check', member: 'TRANSPORT', what: '§5.1 the failing branch of the socket check' },
-  { anchor: 'against a scratch daemon', member: 'OK', what: '§5.4 `configure` and `list` round-tripped against a scratch daemon' },
+  { anchor: 'and `forget` all returned', member: 'OK', what: '§5.4 driven: configure, list, status, deactivate and forget round-tripped' },
+  // ⚠ THIS ENTRY MIGRATED, and it is the register's one soft spot made concrete.
+  // It anchored `against a scratch daemon` and described §5.4. KAN-618 rewrote
+  // §5.4's driven note and gave §10 a new bullet carrying the SAME WORDS, so the
+  // anchor re-bound to a different claim and the register went on reporting it
+  // live — correctly, since both are `OK` claims, but with a `what` that had
+  // quietly stopped describing the line it named. An anchor proves the text is
+  // there; it cannot prove it is the same sentence. Re-pointed deliberately.
+  { anchor: 'against a scratch daemon', member: 'OK', what: '§10 observed: §5.4’s sequence as far as `forget`' },
   { anchor: 'REBUILD_EXIT', member: null, why: '`npm run build`’s exit, §8.3 — a rebuild, with no CLI invocation in it' },
   { anchor: 'never ran `npm install` fails', member: null, why: 'npm’s 127 again, §10 restating §2' },
   { anchor: 'A named config that will not load exits', member: 'CONFIG', what: '§10 observed: a named config that will not load' },
   { anchor: 'A read verb against a machine with no daemon exits', member: 'TRANSPORT', what: '§10 observed: a read verb with no daemon' },
   { anchor: '`daemon-status` answers', member: 'OK', what: '§10 observed: `daemon-status` answers' },
-  { anchor: 'A second daemon on a live socket exits', member: null, why: '§10 observed: the second daemon’s own exit — the §4.3 case' }
+  { anchor: 'A second daemon on a live socket exits', member: null, why: '§10 observed: the second daemon’s own exit — the §4.3 case' },
+
+  // ---------------------------------------------------------------------
+  // ADDED BY KAN-618 (#140), and found by this sweep rather than by a person:
+  // the page grew from 733 lines to 896 and gained six exit-code claims, all
+  // six of which failed §4 by line number with the repair named. That is the
+  // register working on its first encounter with an edit it did not make.
+  // ---------------------------------------------------------------------
+  { anchor: 'LOADS_EXIT', member: 'TRANSPORT', what: '§3.1 driven: a config at ~/.config IS read when `--config` names it, so the read verb fails for transport rather than config' },
+  { anchor: 'alone would look the same had the file been ignored', member: 'TRANSPORT', what: '§3.1 the sentence that makes the control necessary — a transport exit alone does not prove the file was read' },
+  { anchor: 'CONTROL_EXIT', member: 'CONFIG', what: '§3.1 THE CONTROL: the same path carrying a retired key refuses at load, which is what proves the 3 above was a file that was read' },
+  { anchor: 'loaded when `--config` names it', member: 'TRANSPORT', what: '§10 observed: the ~/.config path is read — the transport half' },
+  { anchor: 'from the *same path* carrying a retired key', member: 'CONFIG', what: '§10 observed: the ~/.config path is read — the config half, its control' }
 ];
 
 // THREE SHAPES, AND THE THIRD WAS ADDED BECAUSE THE FIRST TWO MISSED ONE.

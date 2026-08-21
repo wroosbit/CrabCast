@@ -244,7 +244,12 @@ const SETUP_LIST_BLOCK = '```bash\ncrabcast list\n```';
 const SETUP_NO_SPAWN = '`list`, `status`, `tail`, `capacity` and `daemon-status` all exit `3` rather than';
 const SETUP_PASTED_SPAWNERS = '\n  configure, activate, deactivate, forget, send\n';
 const SETUP_RETIRED_EXIT = 'it to in this file.\nEXIT=4';
-const SETUP_ROUNDTRIP_EXIT = '> `EXIT=0` against a scratch daemon.';
+// ⚠ RE-ANCHORED AFTER KAN-618 (#140) REWROTE §5.4. The old anchor — §5.4's
+// driven note, `> \`EXIT=0\` against a scratch daemon.` — no longer exists, and
+// `editOnce` said so by name rather than mutating nothing and letting the arm
+// read as a guard that failed to bite. This is §10's bullet, which carries the
+// claim the register entry `against a scratch daemon` now binds to.
+const SETUP_ROUNDTRIP_EXIT = 'all `EXIT=0` against a scratch daemon.';
 const README_OVERSIZE = " · `5` the answer would not fit the socket's framing";
 const README_SPAWNERS_2 = '**Which commands start a daemon:** `configure`, `activate`,';
 
@@ -451,15 +456,15 @@ await arm(
   ({ code, out }) => {
     check(code !== 0, 'the proof goes red', `exit ${code}`);
     check(
-      failed(out, /docs\/SETUP\.md:207 quotes EXIT\.CONFIG/),
-      'and names the line and the member it should have agreed with'
+      failed(out, /docs\/SETUP\.md:\d+ quotes EXIT\.CONFIG — [^\n]*the retired-key refusal/),
+      'and names the claim and the member it should have agreed with'
     );
     check(
       /page says 6, src\/cli\.ts says EXIT\.CONFIG = 4/.test(out),
       'and prints both numbers'
     );
     check(
-      passed(out, /docs\/SETUP\.md:224 quotes EXIT\.CONFIG/),
+      passed(out, /docs\/SETUP\.md:\d+ quotes EXIT\.CONFIG — [^\n]*the over-long dataDir refusal/),
       'and the OTHER §3.2 refusal, which was not edited, stays green'
     );
   }
@@ -489,7 +494,7 @@ await arm(
       'and reports the direction of the drift'
     );
     check(
-      passed(out, /docs\/SETUP\.md:279 quotes EXIT\.TRANSPORT/),
+      passed(out, /docs\/SETUP\.md:\d+ quotes EXIT\.TRANSPORT — [^\n]*a read verb against a machine with no daemon/),
       'and every TRANSPORT claim stays green — only the renumbered member moved'
     );
   }
@@ -523,7 +528,7 @@ await arm(
 // §4, the register's other direction. An entry guarding a claim that has gone.
 await arm(
   'arm 10  §4  A REGISTERED CLAIM IS EDITED OFF THE PAGE — the register entry now guards nothing',
-  (dir) => editOnce(dir, SETUP, SETUP_ROUNDTRIP_EXIT, '> `RESULT=0` against a scratch daemon.'),
+  (dir) => editOnce(dir, SETUP, SETUP_ROUNDTRIP_EXIT, 'all `RESULT=0` against a scratch daemon.'),
   ({ code, out }) => {
     check(code !== 0, 'the proof goes red', `exit ${code}`);
     check(
