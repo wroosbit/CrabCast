@@ -549,6 +549,22 @@ const BARE_ACTIVATIONS = [
     evidence: 'setCensus([ourPane(dir, paneId)]);'
   },
   {
+    script: 'verify-stranded-agents',
+    classification: 'census-seeded',
+    sites: 3,
+    reason:
+      'Three scaffolding activations, each preceded by `setCensus([ourPane(<the same dir>, …)])` ' +
+      'so `handleActivate` takes the already-running branch and returns before the gate. Their ' +
+      'only job is to put an `activated` or `deactivated` row in the registry, because the file\'s ' +
+      'subject is what a record whose DIRECTORY IS LATER DELETED is reported as — one record per ' +
+      'last event, which is the only reason it activates anything at all. Two are §1\'s fixture ' +
+      '(`ranThenGone` stays activated, `stoodDown` is then deactivated through the verb) and the ' +
+      'third is `fleetOn`, which stands the same shape up against each mutated build in §7. The ' +
+      'capacity gate is not this file\'s subject and reaching it would make the fixture a ' +
+      'function of the load average.',
+    evidence: "setCensus([ourPane(ranThenGone, '%100'), ourPane(stoodDown, '%101')]);"
+  },
+  {
     script: 'verify-missing-agent-occupancy',
     classification: 'census-seeded',
     sites: 2,

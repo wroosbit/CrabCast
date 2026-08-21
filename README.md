@@ -225,8 +225,11 @@ standby agents (0)
 unstarted agents (0)
   (none)
 
+stranded agents (0)
+  (none)
+
 where these fields came from — read at 2026-08-05T13:01:36.686Z
-  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, promptChars, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, identity, raw, claimsPath, claimsAt, claimsEvent
+  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, promptChars, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, lastEvent, identity, raw, claimsPath, claimsAt, claimsEvent
   observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir, occupiedBy
   derived  (computed from the two):                 paneName, state, occupies, reason, line, problem, rawTruncated, promptRedacted, standing
   remembered (this daemon's memory, not durable):   statusSince
@@ -270,7 +273,7 @@ $ crabcast status /tmp/ac1-demo/notes
   created:       2026-08-05T13:01:31.515Z
 
 where these fields came from — read at 2026-08-05T13:01:42.798Z
-  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, promptChars, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, identity, raw, claimsPath, claimsAt, claimsEvent
+  durable  (from the registry, survives a restart): path, config, configVersion, configuredAt, everActivated, activatedBy, configured, promptChars, label, refusable, chargeable, preemptable, launcher, priority, since, at, wasPreempted, by, derivation, herdrStatusWhenPreempted, occupiedAgent, lastEvent, identity, raw, claimsPath, claimsAt, claimsEvent
   observed (read from herdr just now):              paneId, herdrStatus, agentRuntime, status, sessionId, createdAt, sessionless, workDir, occupiedBy
   derived  (computed from the two):                 paneName, state, occupies, reason, line, problem, rawTruncated, promptRedacted, standing
   remembered (this daemon's memory, not durable):   statusSince
@@ -854,8 +857,8 @@ whose last step is *"anything running that is not in my desired list → off"*, 
 such a caller has to be able to tell **not mine** from **unknown to me**.
 
 **A filtered response says what it narrowed and what it did not.** `agents`,
-`missingAgents`, `preemptedAgents`, `standbyAgents` and `unstartedAgents` are
-narrowed, and their `*Total`s and `pages.<category>` counts describe the
+`missingAgents`, `preemptedAgents`, `standbyAgents`, `unstartedAgents` and
+`strandedAgents` are narrowed, and their `*Total`s and `pages.<category>` counts describe the
 **filtered** set — which is what keeps paging correct under it, and which means
 the numbers alone cannot tell you a filter was applied. The `ownerFilter` block
 on the response is the only thing that can, and it also names the four arrays
