@@ -201,6 +201,30 @@ if (argv[0] === 'agent' && argv[1] === 'start') {
   ok({});
 }
 
+// \`agent attach\` HOLDS THE TERMINAL, and modelling that is load-bearing rather
+// than cosmetic. Real herdr hands this process the agent's terminal and stays
+// in the foreground for as long as the client wants it; CrabCast spawns it
+// under a PTY and treats that PTY's lifetime AS the session's lifetime
+// (\`getSessionByPath\` answers only for a session whose status is still
+// \`active\`). A stub that fell through to the \`ok({})\` below exited at once, so
+// every session this daemon opened was dead microseconds after it was created,
+// and the ONLY thing keeping section 1 green was a race: activate #2 and #3
+// had to arrive before the exit event was processed. \`shell\` won that race and
+// \`claude\` lost it — the launcher settles for ~8.6s answering the startup trust
+// dialog, by which time the session had died, so activate #2 legitimately
+// RE-ATTACHED and legitimately broadcast a second \`agent.activated\`. The event
+// count read 2 for a daemon whose no-op guard was working perfectly.
+//
+// So this branch is not here to make an assertion pass. It is here so the
+// fixture models the one property the assertion depends on. Blocking on stdin
+// is what a real attach does and it is what a PTY teardown ends: destroying
+// the PTY closes this process's stdin and it exits, which is how \`deactivate\`
+// still tears a session down in every section below.
+if (argv[0] === 'agent' && argv[1] === 'attach') {
+  process.stdin.resume();
+  return;
+}
+
 if (argv[0] === 'pane' && argv[1] === 'close') {
   const at = panes.findIndex((p) => p.pane_id === argv[2]);
   if (at === -1) err('pane_not_found', 'no such pane');
