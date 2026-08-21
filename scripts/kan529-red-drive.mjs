@@ -300,32 +300,36 @@ rule('2. ⚠ THE PRE-FIX TEARDOWN — the merged check goes GREEN while leaking'
 // whether the remembered pids are gone. They are — they were killed on the line
 // above — so the check passes, and says so in the words it shipped with.
 {
+  // ⚠ ANCHORED ON ONE LINE, NOT ON THE WHOLE BLOCK. The first version of this
+  // arm carried the entire boundary section as its `find` string, and the first
+  // edit to that section — the `found.length > 0` precondition, added when
+  // review showed the check could pass on a run whose daemon never started —
+  // made it match zero times. The harness reported that as a COUNTED FAILURE
+  // ("expected exactly 1 occurrence … found 0"), which is the behaviour worth
+  // keeping; but an arm that breaks whenever its target gains a comment is an
+  // arm that will be deleted rather than fixed. One line is enough.
+  //
+  // WHAT THE REPLACEMENT REPRODUCES: the pre-fix teardown's SEMANTICS, which is
+  // what the arm is about — kill the pids this script remembered, call a
+  // command that does not exist, and let `survivors` mean "of the remembered
+  // pids, which are still alive". `found` becomes the remembered set, so the
+  // precondition passes too, and that is the honest outcome rather than a
+  // limitation: the precondition guards against a run that never STARTED, and
+  // has nothing to say about a run that measured the WRONG POPULATION. Both
+  // checks go green while the machine is still carrying the daemon.
+  const SWEEP_CALL = '  const { found, survivors } = await sweepScratchRoot(tmp);';
   const PRE_FIX = `  for (const pid of spawnedPids) {
     try { process.kill(pid, 'SIGKILL'); } catch {}
   }
   crabcast(['daemon', 'stop']);
   await new Promise((r) => setTimeout(r, 500));
-  const survivors = [...spawnedPids].filter((pid) => {
+  const found = [...spawnedPids].map((pid) => ({ pid, argv: [] }));
+  const survivors = found.filter(({ pid }) => {
     try { fs.readFileSync(\`/proc/\${pid}/cmdline\`); return true; } catch { return false; }
-  });
-  check(
-    survivors.length === 0,
-    'every process this proof started is gone',
-    survivors.length ? \`still alive: \${survivors.join(', ')}\` : \`\${spawnedPids.size} ended\`
-  );`;
-
-  const CURRENT = `  const { found, survivors } = await sweepScratchRoot(tmp);
-  check(
-    survivors.length === 0,
-    'every process carrying this run\\'s scratch root is gone — the daemon and its ' +
-      'attaches included, not merely the pids this script remembered',
-    survivors.length
-      ? \`still alive:\\n          \${describe(survivors)}\`
-      : \`\${found.length} swept (\${found.length - spawnedPids.size} of them never in spawnedPids)\`
-  );`;
+  });`;
 
   const mutant = mutate('pre-fix-teardown',
-    PROOFS.map((p) => ({ file: `${p}.mjs`, find: CURRENT, replace: PRE_FIX })));
+    PROOFS.map((p) => ({ file: `${p}.mjs`, find: SWEEP_CALL, replace: PRE_FIX })));
 
   if (mutant) {
     for (const proof of PROOFS) {

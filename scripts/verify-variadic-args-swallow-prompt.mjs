@@ -892,6 +892,25 @@ rule('5. the RUNNING FLEET was never touched');
   // nothing and a sweep that cleaned up correctly are the same verdict with
   // different evidence, and only one of them means the instrument is working.
   const { found, survivors } = await sweepScratchRoot(tmp);
+
+  // ⚠ THE PRECONDITION, AND IT IS NOT CEREMONY. Without it the check below
+  // passes when the sweep found NOTHING TO SWEEP, which is not the same fact as
+  // "nothing leaked" and reads identically. `epic/KAN-59` met it while reviewing
+  // KAN-529: a long `TMPDIR` pushed the daemon's socket path past 104
+  // characters, the daemon refused to start, no agent ever ran — and this
+  // section printed `PASS … 0 swept`. That run went red for other reasons, so
+  // nothing was hidden that day; on a run where it did not, the boundary
+  // section would have reported a clean teardown for a proof that never
+  // started anything.
+  //
+  // Every arm above activates an agent, so a completed run always has a daemon
+  // and at least one consumer to sweep. Zero here means the run did not happen.
+  check(
+    found.length > 0,
+    '(precondition) the sweep had something to sweep — so the verdict below is about a ' +
+      'teardown rather than about a run that never started',
+    `${found.length} process(es) carried ${tmp}`
+  );
   check(
     survivors.length === 0,
     'every process carrying this run\'s scratch root is gone — the daemon and its ' +

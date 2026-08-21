@@ -210,12 +210,65 @@ export function importsTheSweeper(text) {
   return /from\s+['"]\.\/scratch-processes\.mjs['"]/.test(text);
 }
 
-/** Does it make a scratch root and drive the CLI, so a daemon gets spawned? */
-export function spawnsAScratchDaemon(text) {
-  return /mkdtempSync/.test(text) && /\bcli\.js\b/.test(text);
+/**
+ * Does this script CAUSE a scratch daemon to exist?
+ *
+ * ⚠ THE FIRST VERSION OF THIS ASKED A NARROWER QUESTION AND MISSED TWO THIRDS
+ * OF THE POPULATION. It was `mkdtempSync && /\bcli\.js\b/`, which assumes a
+ * script starts its daemon by driving the CLI itself. `task/KAN-524` found the
+ * hole from the outside, by being caught by this section and then not caught by
+ * it: a RED DRIVE spawns its daemons THROUGH ANOTHER SCRIPT and never names
+ * `cli.js`, so `kan524-red-drive.mjs` — measured exiting 0 with `43/43 checks
+ * passed` while 24 processes were alive across 6 scratch roots — was skipped
+ * entirely, register open or closed.
+ *
+ * ⚠ AND THE TWO DRIVES THAT WERE ON THE LIST MATCHED FOR THE WRONG REASON,
+ * which is the part that would have rotted quietly. Checked when the report
+ * came in: `kan514-red-drive.mjs`'s only two occurrences of `cli.js` are a
+ * COMMENT and a mutation TARGET FILENAME (`mutate(…, 'cli.js', …)`) — neither
+ * is driving anything — and `kan504-red-drive.mjs` does not contain the string
+ * at all. A predicate that reaches the right files by accident is one bad
+ * refactor from reaching none of them.
+ *
+ * So the question is asked three ways, and a script matching ANY of them counts:
+ * it drives the CLI, it starts a daemon directly, or it runs another `.mjs`
+ * script as a child node process — which is how a drive causes daemons it never
+ * mentions.
+ *
+ * ⚠ THIS ERRS TOWARD INCLUDING, and that is the safe direction for a list whose
+ * purpose is "somebody should look at this". A script that spawns node for a
+ * fixture rather than for a proof lands here and costs a register line; a script
+ * that leaks daemons and is not here costs what KAN-529 measured.
+ */
+export function causesAScratchDaemon(text) {
+  if (!/mkdtempSync/.test(text)) return false;
+  const drivesCli = /\bcli\.js\b/.test(text);
+  const startsDaemon = /\bdaemon\.js\b/.test(text);
+  const drivesAScript =
+    /(?:spawnSync|spawn|execFileSync)\(\s*process\.execPath/.test(text) &&
+    /['"`][\w./\\${}-]*\.mjs/.test(text);
+  return drivesCli || startsDaemon || drivesAScript;
 }
 
-/** Does it clean up on a signal, rather than only on the happy path? */
+/**
+ * Does it clean up on a signal, rather than only on the happy path?
+ *
+ * ⚠ WHAT THIS CANNOT VOUCH FOR, stated because the name promises more than the
+ * mechanism delivers and this file is about exactly that gap. It sees that a
+ * handler EXISTS. It cannot see whether the handler does the job: `task/KAN-524`
+ * reports that `kan524-red-drive.mjs` carried SIGINT and SIGTERM handlers
+ * throughout the period it was leaking 24 processes, because those handlers ran
+ * `fs.rmSync` and killed nothing — so the scratch tree went away and the daemons
+ * carried on executing out of a root that no longer existed, which is the state
+ * this file's own header describes.
+ *
+ * That is not fixable by tightening this regex and no attempt is made to: a
+ * handler's behaviour is not a property of its presence. What closes it is the
+ * SURVEY, which interrupts nothing and simply counts what is left, and
+ * `verify-proof-cleans-up-when-interrupted`, which kills a proof and counts.
+ * ⚠ SO A GREEN §4 MEANS "EVERY SUCH SCRIPT HAS A HANDLER", NEVER "NO SCRIPT
+ * LEAKS ON A SIGNAL". Read it as the first and nothing more.
+ */
 export function cleansUpOnSignal(text) {
   return /process\.on\(\s*signal\s*,|process\.on\(\s*['"]SIG/.test(text);
 }
@@ -235,25 +288,69 @@ export function cleansUpOnSignal(text) {
 // signal handler is for and what none of these has.
 // ---------------------------------------------------------------------------
 const NOT_MEASURED =
-  'Spawns a scratch daemon and has no signal-path teardown, so an INTERRUPTED run leaves ' +
-  'it up. Whether a run that COMPLETES leaks was measured separately — see the survey ' +
-  'output on KAN-529 — and is not restated here, because a note copied by hand is the ' +
-  'first thing to go stale.';
+  'Causes a scratch daemon and has no signal-path teardown, so an INTERRUPTED run leaves it ' +
+  'up. Whether a run that COMPLETES leaks is a separate question, answered by ' +
+  '`kan529-suite-leak-survey.mjs` and reported on KAN-529 rather than restated here — a note ' +
+  'copied by hand is the first thing to go stale.';
 
+/**
+ * ⚠ THIS LIST TRIPLED WHEN THE PREDICATE ABOVE WAS CORRECTED, from 13 to 45,
+ * and the growth is the finding rather than a regression. Nothing changed in
+ * these scripts: `causesAScratchDaemon` simply stopped assuming that a script
+ * starts its daemon by driving the CLI itself, and two thirds of the population
+ * became visible. A register of 13 that felt manageable was a register missing
+ * 28 files.
+ *
+ * ⚠ THESE ARE NOT BLESSED. They are RECORDED, so the count cannot grow
+ * silently. A new script joining this list is a FAILURE — the list is closed,
+ * and §4 is what closes it.
+ */
 const NO_SIGNAL_TEARDOWN = new Map([
+  ['kan117-red-drive', NOT_MEASURED],
+  ['kan173-red-drive', NOT_MEASURED],
+  ['kan328-red-drive', NOT_MEASURED],
+  ['kan386-red-drive', NOT_MEASURED],
+  ['kan392-red-drive', NOT_MEASURED],
+  ['kan394-red-drive', NOT_MEASURED],
+  ['kan426-red-drive', NOT_MEASURED],
+  ['kan428-red-drive', NOT_MEASURED],
+  ['kan433-red-drive', NOT_MEASURED],
   ['kan448-red-drive', NOT_MEASURED],
+  ['run-verify', NOT_MEASURED],
   ['verify-activated-by', NOT_MEASURED],
+  ['verify-agent-power-controls', NOT_MEASURED],
+  ['verify-channel-enabled', NOT_MEASURED],
   ['verify-ci-wiring-guards', NOT_MEASURED],
   ['verify-cli-refusal', NOT_MEASURED],
+  ['verify-config-and-socket', NOT_MEASURED],
+  ['verify-config-echo-contract', NOT_MEASURED],
   ['verify-cpu-headroom', NOT_MEASURED],
   ['verify-daemon-foreground', NOT_MEASURED],
   ['verify-daemon-provenance', NOT_MEASURED],
+  ['verify-daemon-started-at', NOT_MEASURED],
+  ['verify-daemon-status-over-mcp', NOT_MEASURED],
+  ['verify-event-contract', NOT_MEASURED],
   ['verify-herdr-release', NOT_MEASURED],
   ['verify-herdr-version-notice', NOT_MEASURED],
+  ['verify-mcp-tools', NOT_MEASURED],
+  ['verify-panes-are-reclaimed', NOT_MEASURED],
+  ['verify-path-problem', NOT_MEASURED],
+  ['verify-pretrust-survives-concurrency', NOT_MEASURED],
+  ['verify-prompt-is-not-a-template', NOT_MEASURED],
   ['verify-proof-defences', NOT_MEASURED],
+  ['verify-proof-verdicts', NOT_MEASURED],
+  ['verify-pty-init-rejects-unknown-session', NOT_MEASURED],
+  ['verify-pty-payload-refusal', NOT_MEASURED],
+  ['verify-read-contract', NOT_MEASURED],
   ['verify-readme-is-current', NOT_MEASURED],
+  ['verify-reattach-leaves-global-config-alone', NOT_MEASURED],
   ['verify-reconfiguration-refuses', NOT_MEASURED],
-  ['verify-state-read-echoes-config', NOT_MEASURED]
+  ['verify-registry-survives-retired-rows', NOT_MEASURED],
+  ['verify-restore-admission', NOT_MEASURED],
+  ['verify-scaffolding-past-the-gate', NOT_MEASURED],
+  ['verify-state-read-echoes-config', NOT_MEASURED],
+  ['verify-submit-withheld-at-dialog', NOT_MEASURED],
+  ['verify-unreadable-row-standing', NOT_MEASURED]
 ]);
 
 // ---------------------------------------------------------------------------
@@ -353,7 +450,7 @@ rule('4. The no-signal-teardown register is exact — closed, and not stale');
 // how a register becomes a lie nobody rechecks.
 {
   const offenders = tracked
-    .filter((f) => spawnsAScratchDaemon(f.text) && !cleansUpOnSignal(f.text))
+    .filter((f) => causesAScratchDaemon(f.text) && !cleansUpOnSignal(f.text))
     .map((f) => f.name);
 
   const unregistered = offenders.filter((n) => !NO_SIGNAL_TEARDOWN.has(n));
@@ -408,8 +505,39 @@ rule('5. THE PREDICATES DISCRIMINATE — the same checks over a broken fixture')
     '§2\'s predicate reports the fixture as UNBACKED — claim present, sweeper absent'
   );
   check(
-    spawnsAScratchDaemon(BAD_TEARDOWN) && !cleansUpOnSignal(BAD_TEARDOWN),
+    causesAScratchDaemon(BAD_TEARDOWN) && !cleansUpOnSignal(BAD_TEARDOWN),
     '§4\'s predicates flag a fixture that spawns a scratch daemon with no signal handler'
+  );
+
+  // ⚠ THE DRIVE SHAPE, and this case exists because the predicate MISSED it in
+  // the version that shipped. A drive names no `cli.js` and no `daemon.js` — it
+  // runs another script, which starts the daemon on its behalf. `task/KAN-524`
+  // measured `kan524-red-drive.mjs` exiting 0 with `43/43 checks passed` while
+  // 24 processes were alive across 6 scratch roots, invisible to this section.
+  const DRIVE = `
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'x-red-'));
+    const proof = path.join(scriptDir, 'verify-launcher-args.mjs');
+    const res = spawnSync(process.execPath, [proof, against], { encoding: 'utf8' });
+  `;
+  check(
+    causesAScratchDaemon(DRIVE),
+    '⚠ §4\'s predicate FLAGS a drive, which names neither cli.js nor daemon.js and starts ' +
+      'its daemons through the script it runs',
+    'the shipped version returned false here and skipped every drive in the suite'
+  );
+  check(
+    !cleansUpOnSignal(DRIVE),
+    'and reports that same drive as having no signal-path teardown'
+  );
+
+  // AND THE DIRECT-DAEMON SHAPE, the other thing `cli.js` alone could not see.
+  const DIRECT = `
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'x-'));
+    const d = spawn(process.execPath, [path.join(distDir, 'daemon.js'), configPath]);
+  `;
+  check(
+    causesAScratchDaemon(DIRECT),
+    '§4\'s predicate FLAGS a script that starts daemon.js directly'
   );
 
   // AND THE OPPOSITE DIRECTION, because a predicate that flags everything is
@@ -432,6 +560,22 @@ rule('5. THE PREDICATES DISCRIMINATE — the same checks over a broken fixture')
   check(
     cleansUpOnSignal(GOOD_TEARDOWN),
     '§4\'s predicate CLEARS a fixture that installs a signal handler'
+  );
+
+  // ⚠ AND THE PREDICATE MUST STILL SAY NO TO SOMETHING. It was widened three
+  // ways at once; one that returns true for every file would close the register
+  // question by making every script an offender, and §4 would read as a large
+  // tidy list rather than as a gate.
+  const NO_DAEMON = `
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'x-'));
+    const text = fs.readFileSync(path.join(repoRoot, 'README.md'), 'utf8');
+    check(/warning/.test(text), 'the page carries the warning', '');
+  `;
+  check(
+    !causesAScratchDaemon(NO_DAEMON),
+    '⚠ but a scratch root with NO daemon and NO child script is NOT flagged — the widened ' +
+      'predicate still discriminates',
+    'a predicate that flagged everything would make the register meaningless rather than wrong'
   );
 }
 
