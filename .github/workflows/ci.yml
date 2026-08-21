@@ -1041,6 +1041,7 @@ jobs:
             verify-proof-cleans-up-when-interrupted
             verify-event-durability
             verify-fleet-enumeration
+            verify-missing-agent-occupancy
             verify-fleet-read-fits-the-wire
             verify-config-echo-contract
             verify-ci-wiring-guards

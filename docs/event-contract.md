@@ -34,7 +34,7 @@ payload below.
 | `agent.deactivated` | `agent_deactivated_event` **(breaking)**, with `agent_preempted_event` **merged in** | a stand-down confirmed | `path`, `reason` (`requested` \| `preempted`), `durable`; `paneName`, `sessionId`, `preemption` when they exist; `durabilityError` when `durable` is false |
 | `agent.forgotten` | `agent_forgotten_event` **(breaking)** | `forget` accepted | `path`, `removed[]` |
 | `agent.status_changed` | — **(new)** | the fleet sweep observed a different herdr status than it last observed | `path`, `paneName`, `paneId`, `from`, `to` |
-| `agent.lost` | `agent_lost_event` **(breaking)** | an agent the registry records as active has no live agent in its directory | `path`, `paneName`, `label`, `config`, `configVersion`, `configuredAt`, `everActivated`, `activatedBy`, `promptChars`, `since`, `reason` |
+| `agent.lost` | `agent_lost_event` **(breaking)** | an agent the registry records as active has no live agent **of ours** in its directory | `path`, `paneName`, `label`, `config`, `configVersion`, `configuredAt`, `everActivated`, `activatedBy`, `promptChars`, `since`, `occupiedBy`, `reason` |
 | `agent.detached` | `agent_detached_event` **(breaking)** | a PTY this daemon held died | `path`, `paneName`, `sessionId`, `reason`, `exitCode` |
 | `capacity.overridden` | `capacity_override_event` **(breaking)** | an activation started past the capacity gate on an explicit override | `what`, `capacity` — **no `path`** |
 | `registry.degraded` | `registry_degraded_event` **(breaking)** | a durable registry write failed | `what`, `error`, `consequence` — **no `path`** |
@@ -48,6 +48,20 @@ is the machine and the daemon respectively, and it is named by `what`. A
 renderer that assumes `path` on every event prints `undefined` on these two —
 which is precisely what the retired MCP format string did, for three of the
 events, before this change.
+
+⚠ **`agent.lost` does not always mean the directory is empty, and `occupiedBy` is
+what says so (KAN-572).** The classification is about **our** agent: the ownership
+question is name-scoped — is there a pane called `paneNameFor(path)` — so a live
+pane a stranger started in that very directory answers *"no pane of ours"*, and
+this event fires. `occupiedBy` is `null` on an ordinary loss and, when it is not,
+carries that pane's `paneName`, `paneId`, `herdrStatus` and `agentRuntime` — the
+same pane `list_agents` reports under `foreignPanes`, from the same census and
+the same pass. **A renderer that turns this event into "work has stopped, resume
+it" must read the field first**: re-activating resumes a conversation nobody
+stopped, and would be refused while that pane is there. It is a `null`-carrying
+composite, so it is **declared with a shape** in `EVENT_CONTRACT` rather than left
+to default to a scalar — an undeclared interior is reported as drift and dropped,
+which would have published the field as absent on exactly the rows it exists for.
 
 **`agent.lost` names its evidence `reason`, not `evidence`.** The design table
 called the field `evidence`; the shipped name is `reason`, because these rows
