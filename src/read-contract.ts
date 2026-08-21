@@ -827,11 +827,19 @@ export const AGENT_STATUS_FIELDS = {
 /**
  * EXACTLY WHAT EACH BRANCH CARRIES.
  *
- * Four branches, and the difference between them is not cosmetic: a caller
- * diffing desired state against ours reads `state` off three of them and gets
- * an error off the fourth. `success` is about whether the QUESTION could be
- * answered, never about whether the agent is up — a record is an answer, so a
- * stopped agent succeeds.
+ * The four branches of `AGENT_STATUS_BRANCHES` differ in ways that are not
+ * cosmetic: a caller diffing desired state against ours reads `state` off three
+ * of them and gets an error off the fourth. `success` is about whether the
+ * QUESTION could be answered, never about whether the agent is up — a record is
+ * an answer, so a stopped agent succeeds.
+ *
+ * ⚠ KAN-578: that first sentence read "Four branches, and the difference
+ * between them is not cosmetic" until this ticket. Nothing was wrong with it —
+ * the count was right — and nothing held it either. Naming the constant BESIDE
+ * the number is what puts it inside `verify-src-comment-counts`, which is the
+ * only form that script can attribute; see its header for why a comment that
+ * merely MENTIONS a constant is not attributable to it. If you move this
+ * count, move the wording with it or the check goes red naming this file.
  *
  * `no-record-no-pane` is the only branch that means the caller asked about
  * something that has never been an agent, and it still carries the echo (all

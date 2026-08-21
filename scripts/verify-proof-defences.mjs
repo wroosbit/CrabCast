@@ -763,8 +763,56 @@ const PROOF_DEFENCES = [
       'COVERED: a count whose subject sits on a different line (docs/send-contract.md\'s "One of ' +
       'the five branches" is one, correct today and held by nothing), and every count in `src/` ' +
       '— three source comments carried this exact drift, were found by reading and are fixed ' +
-      'here, and no script covers that class. scripts/kan530-doc-count-sweep.mjs is the ' +
+      'here. KAN-578 took a NARROW slice out of that second hole — ' +
+      'verify-src-comment-counts rules on a src/ comment whose count names its constant BESIDE ' +
+      'it, which is ~2% of that corpus, and the other 98% is still held by nobody. ' +
+      'scripts/kan530-doc-count-sweep.mjs is the ' +
       'wider-recall survey over the same corpus and does not close either hole; it reports them.'
+  },
+  {
+    script: 'verify-src-comment-counts',
+    defence: 'guard',
+    anchor: 'THE MUST-REJECT FIXTURE IS THE ONE THAT EARNS',
+    central:
+      'a COMMENT in src/ or scripts/ that states how many members a declared constant has agrees ' +
+      'with that constant — the class KAN-530 named as uncovered when it gated the same defect in ' +
+      'docs/, and the class verify-read-contract could not hold about a comment sitting inside ' +
+      'itself.',
+    note:
+      'FOUR FIXTURES IT MUST REJECT AND THREE IT MUST ACCEPT, run BEFORE it sweeps anything real, ' +
+      'and the reject side is the half that earns the keep. They are not invented: "the other five ' +
+      'fields of" is src/router.ts\'s own wording about a SUBSET of an 11-field ' +
+      'ROW_SHAPES.UnreadableRecord, and "the one field of" is the ONLY-X idiom that is 150 of the ' +
+      '312 count phrases in this corpus. A detector that ruled on everything would pass the accept ' +
+      'side and fail the reject side; one that ruled on nothing would do the reverse; so §1 also ' +
+      'asserts the accept fixtures really produced rulings, because "refuses everything" otherwise ' +
+      'passes every must-reject silently. EVERY FIXTURE IS PREFIXED WITH A REGEX LITERAL CONTAINING ' +
+      'A BACKTICK, which guards the INSTRUMENT rather than the rule: two comment readers were tried ' +
+      'before TypeScript\'s parser and both were silently wrong on exactly that input — a ' +
+      'hand-rolled scanner swallowed the rest of the file, and ts.createScanner returned ZERO ' +
+      'comments for it while appearing to work on the real tree, where it read 747 comments in ' +
+      'src/router.ts against the parser\'s 1967. Both failures print a healthy-looking total. ' +
+      'THE MUTATION IS ON THE PR RATHER THAN IN THE FILE, and finding one that COMPILES was the ' +
+      'substance of it — the same wall KAN-530 hit. Adding a seventh field to ' +
+      'BLOCK_SHAPES.ConfigEcho, which every other ruled comment here is about, fails the BUILD on ' +
+      'Exact<keyof ConfigEcho, keyof typeof BLOCK_SHAPES.ConfigEcho> in src/router.ts, and a proof ' +
+      'run after a failed build runs on the previous dist, so that mutation was DISCARDED rather ' +
+      'than re-run. The mutation on record adds a fifth branch to AGENT_STATUS_BRANCHES, builds ' +
+      'clean at exit 0, and turns src/read-contract.ts\'s "The four branches of ' +
+      'AGENT_STATUS_BRANCHES" red naming the file, the count and the constant. A SECOND RED IS ON ' +
+      'REAL HISTORY: --tree= a checkout of 234243d and the rule reddens the genuine drifted comment ' +
+      'inside scripts/verify-read-contract.mjs, which is the arity-moved direction rather than a ' +
+      'planted one. ⚠ SEAM, AND IT IS LARGE: this rules ONLY on a count whose subject is spelled ' +
+      'beside it, which is ~2% of the count phrases in this corpus, and the script PRINTS ' +
+      '"ruled on N of M" every run so its green cannot be read as coverage of the rest. Three of ' +
+      'the four instances the ticket was filed for name their subject anaphorically and are reached ' +
+      'by NOTHING here. The three wider handles the ticket proposed were measured and rejected: 17 ' +
+      'disagreements at 234243d, 2 of them real, and one false red no correct wording can clear ' +
+      'because the sentence is about a subset. It also cannot tell a claim from a QUOTATION of one ' +
+      '— its own first draft went red on its own header — so a cited stale count must be described, ' +
+      'not reproduced. It FAILS CLOSED: zero rulings across the tree is a FAILURE, not a clean ' +
+      'sweep. scripts/kan578-src-count-sweep.mjs is the wider-recall survey behind the shape ' +
+      'decision, with a control, and it reports the population this gate declines.'
   },
   {
     script: 'verify-event-contract',
