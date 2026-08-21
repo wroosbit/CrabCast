@@ -532,9 +532,17 @@ export const EVENT_CONTRACT: Record<CrabcastEventName, EventSpec> = {
   'agent.lost': {
     formerly: 'agent_lost_event',
     fires:
-      'the sweep found an agent the registry records as active with no live agent in ' +
-      'its directory. Latched per path: announced when it becomes missing and not ' +
-      'again while it stays missing',
+      // "OF OURS" IS LOAD-BEARING HERE (KAN-572), and this string is the third
+      // place the flat version had to come out of. The ownership test is
+      // name-scoped, so a stranger's live pane in that very directory produces
+      // this event — the classification is right and "no live agent in its
+      // directory" was not. `occupiedBy` is what a subscriber reads to tell the
+      // two apart, and a `fires` sentence still promising an empty directory
+      // would be the contract disagreeing with its own payload.
+      'the sweep found an agent the registry records as active with no live agent OF OURS ' +
+      'in its directory — which is usually an empty directory, and is not when `occupiedBy` ' +
+      'names a live pane this daemon did not start. Latched per path: announced when it ' +
+      'becomes missing and not again while it stays missing',
     required: [
       'path',
       'paneName',
