@@ -1,0 +1,76 @@
+{
+  "$comment": [
+    "KAN-518: the acquisition pin for Butchr's crabcast-facing proofs.",
+    "",
+    "CrabCast does not vendor these proofs. It CHECKS THEM OUT at the ref below,",
+    "at CI time, into an untracked directory, and runs them in Butchr's own tree.",
+    "Vendoring was measured impossible rather than merely judged untidy: every one",
+    "of the ten CI-runnable proofs computes `repoRoot = <scriptDir>/../..` and then",
+    "reads `daemon/src/*.ts` and/or `daemon/dist/*.js` out of it. Copied into",
+    "`crabcast/scripts/`, all ten resolve repoRoot to a tree that has no `daemon/`",
+    "and fail — 10/10, none of them silently. See docs/butchr-proof-import.md for",
+    "the measurement and for what this pin does NOT cover.",
+    "",
+    "WHO CONSUMES THIS: KAN-519, which wires the CI job. Nothing reads it yet.",
+    "This file is the decision made concrete; it is not wiring."
+  ],
+
+  "repo": "https://github.com/wroosbit/butchr",
+
+  "ref": "e8729f53353280a6cb395aeac00c994e72a7aa11",
+
+  "refComment": [
+    "A full 40-character SHA, deliberately. A branch name or a short SHA is a",
+    "moving or ambiguous target, and the whole value of a pin is that the proofs",
+    "CI runs are the proofs somebody read.",
+    "",
+    "WHY THIS SHA AND NOT origin/main's TIP: every measurement in the KAN-518",
+    "decision was taken here. While that work was in progress origin/main advanced",
+    "to 17a5672 (KAN-552), which touched verify-crabcast-priority-roundtrip.mjs —",
+    "one of the seven scripts swept. That commit was re-read: it adds `owner`",
+    "assertions and leaves the skip/exit shape untouched, so the sweep's verdict",
+    "holds there too. The pin still names e8729f5 because a pin should name what",
+    "was actually validated, and moving it is a reviewed act rather than a default."
+  ],
+
+  "pinnedAt": "2026-08-21",
+  "pinnedBy": "task/KAN-518",
+  "validatedAgainstCrabcast": "927df07dfd898f862b922be423a4134a1e87c89d",
+
+  "staleness": {
+    "policy": "reviewed-bump",
+    "detail": [
+      "This pin does not expire on a date, and that is a decision rather than an",
+      "omission. A date-triggered red goes off when the calendar moves rather than",
+      "when anything drifted, and the only action it can prompt is bumping the",
+      "date — which trains a reviewer to clear the check without reading it. That",
+      "is a lying green with extra steps.",
+      "",
+      "What is true instead: this pin is refreshed when somebody changes what the",
+      "imported proofs assert, and the refresh is a PR against CrabCast carrying a",
+      "re-run of the suite at the new ref. Whoever moves a crabcast-facing proof in",
+      "Butchr moves this line."
+    ],
+    "whoNoticesWhenItRots": [
+      "⚠ NOBODY, MECHANICALLY, AND THAT IS THE ACCEPTED COST OF THIS DECISION.",
+      "",
+      "Stated plainly because Task 2 of KAN-518 permits 'nothing' as an answer only",
+      "if it is written down. Both of CrabCast's guards scope to the flat path",
+      "`scripts/verify-*.mjs`; this file is not that path, an untracked CI-time",
+      "checkout is not any path `git ls-files` returns, and neither guard audits",
+      "either. Measured, at the refs above: three real imported proofs plus their",
+      "shared library, tracked at `scripts/butchr/`, left verify-proof-registry and",
+      "verify-proof-verdicts BOTH green, both exit 0, and the registry counted the",
+      "same 84 proofs as if the four files were not there.",
+      "",
+      "The same two guards go RED BY NAME on a flat unaccounted file, measured in",
+      "the same session, which is what makes the green above a reading of the world",
+      "rather than a reading of a broken search.",
+      "",
+      "The honest half-cover, when KAN-519 builds it: a CrabCast-owned proof at the",
+      "flat path can audit THIS FILE — that the ref is 40 hex characters and that",
+      "the checkout CI performed is at it. That puts the PIN inside the perimeter.",
+      "It never puts the PROOFS inside it, and no placement does."
+    ]
+  }
+}
