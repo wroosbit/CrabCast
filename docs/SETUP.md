@@ -470,10 +470,19 @@ crabcast deactivate /tmp/cc-smoke && crabcast forget /tmp/cc-smoke
 
 > **Driven here as far as everything except `activate`.** `configure`, `list`,
 > `status`, `deactivate` and `forget` all returned `EXIT=0` against a scratch
-> daemon. **`activate` was not run**: this machine has herdr 0.8.2 (§1.2), where
-> activation is expected to fail at `herdr agent start` — and it shares its
-> herdr server with a live fleet, so producing that red would have spawned a
-> pane into it.
+> daemon. **`activate` was not run, and the reason is the herdr *server*, not
+> the herdr *version***: this box shares its herdr server with a live fleet, so
+> an activation here spawns a pane into that fleet. That reason holds whatever
+> is installed.
+>
+> ⚠ **Do not read §1.2's version band as the reason — it was, and it stopped
+> being.** KAN-552 made the spawn path version-aware: 0.7+ goes through
+> `pane run` rather than `agent start --cwd`, and that ticket reports three
+> activations `verified: true` on 0.8.2. So an activation on this machine is no
+> longer *expected* to fail at `herdr agent start`. **§1.2 is unaffected and
+> still correct** — 0.6.x remains the only line CrabCast is *verified* against,
+> and the daemon still prints exactly that. *Works* and *verified* are different
+> claims, and this note now rests on neither.
 >
 > ⚠ **And skipping `activate` costs more than that one line.** With nothing ever
 > activated, `deactivate` took its *was not running* branch — it answered
