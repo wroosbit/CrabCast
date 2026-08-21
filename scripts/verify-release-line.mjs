@@ -161,6 +161,17 @@ function cleanup() {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
 process.on('exit', cleanup);
+// AND ON THE SIGNAL PATH, which `exit` does not cover (KAN-529). A run that
+// completes tidily is not the case a teardown is for: an INTERRUPTED one is,
+// and without this a Ctrl+C between §1 and §2 would leave two scratch daemons
+// executing out of a directory that is about to be deleted. Caught by
+// `verify-proof-teardown-sweeps` §4 rather than by review, on this very script.
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    cleanup();
+    process.exit(130);
+  });
+}
 
 const ENV = {
   ...process.env,
