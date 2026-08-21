@@ -201,7 +201,7 @@ not passed."*
 **There is a way through, and it is CrabCast's to give.** CrabCast's `verify`
 job already stands up real CrabCast daemons on a runner — a shimmed `herdr`
 binary on PATH answering herdr's own JSON shapes, a scratch `$HOME` and
-dataDir, everything else real compiled code (`.github/workflows/ci.yml:186-190`).
+dataDir, everything else real compiled code (`.github/workflows/ci.yml:184-188`).
 Pointing `BUTCHR_CRABCAST_SOCKET` at such a daemon turns the socket-only live
 sections from skips into checks that gate on **CrabCast's** behaviour, which is
 the entire point of the import. Sections that spawn real agents through real
