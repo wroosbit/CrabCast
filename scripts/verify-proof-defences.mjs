@@ -850,6 +850,26 @@ const PROOF_DEFENCES = [
       'verify-refuses-occupied-directory is what establishes that.'
   },
   {
+    script: 'verify-stranded-agents',
+    defence: 'mutation',
+    central:
+      'a registry record whose DIRECTORY IS GONE is reported exactly once, and in a sentence ' +
+      'that does not assert the directory — it is in `strandedAgents` and in no other category, ' +
+      'carries the `lastEvent` that says whether it ever ran, and no `missingAgents` row says ' +
+      '"herdr has no live agent in its directory" about a directory that is not there.',
+    note:
+      'TWO MUTANTS OF THE COMPILED BUILD, and they are deliberately OPPOSITE failures, because ' +
+      'a defence against only one licenses the other: a stranded category that collects nothing ' +
+      'must bring back the silent drop (the record in the registry, in no category, and no ' +
+      'total saying so), and a `missingAgents` blinded to the filesystem must bring back the ' +
+      'sentence asserting a directory that is not there AND put one record in two categories. ' +
+      'SEAM: the fixture is a herdr STUB, so what is defended is the daemon\'s reporting over a ' +
+      'census rather than herdr\'s reporting of one. It also does NOT defend the Butchr-side ' +
+      'question of why a proof teardown leaves rows behind (KAN-524 §6, KAN-519), nor whether ' +
+      '`daemon_status` agrees with this category — measured and filed as KAN-619, undefended ' +
+      'here and named so rather than left to be inferred.'
+  },
+  {
     script: 'verify-fleet-enumeration',
     defence: 'mutation',
     central:
