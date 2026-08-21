@@ -1204,6 +1204,7 @@ jobs:
             verify-daemon-status-over-mcp
             verify-read-contract
             verify-doc-set-counts
+            verify-doc-example-sets
             verify-src-comment-counts
             verify-path-problem
             verify-send-contract

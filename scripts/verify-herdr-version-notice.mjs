@@ -126,6 +126,12 @@ fs.appendFileSync(path.join(state, 'invocations.jsonl'), JSON.stringify(args) + 
 const startedFile = path.join(state, 'started.json');
 const load = () => fs.existsSync(startedFile) ? JSON.parse(fs.readFileSync(startedFile, 'utf8')) : [];
 const save = (list) => fs.writeFileSync(startedFile, JSON.stringify(list, null, 2));
+
+// Tabs opened by \`tab create\`, so the pane the 0.7+ spawn path is handed can be
+// resolved back to its cwd when \`pane report-agent\` declares an agent in it.
+const tabsFile = path.join(state, 'tabs.json');
+const loadTabs = () => fs.existsSync(tabsFile) ? JSON.parse(fs.readFileSync(tabsFile, 'utf8')) : [];
+const saveTabs = (list) => fs.writeFileSync(tabsFile, JSON.stringify(list, null, 2));
 const out = (obj) => { process.stdout.write(JSON.stringify(obj)); process.exit(0); };
 const [a, b] = args;
 
@@ -163,13 +169,80 @@ if (a === 'agent' && b === 'read') {
   }
   out({ result: { read: { text: \`KAN-102 pane text for \${args[2]}\`, truncated: false } } });
 }
+if (a === 'pane' && b === 'report-agent') {
+  // MEASURED, not assumed (KAN-552). The 0.7+ spawn path never calls
+  // \`agent start\` — it opens a tab, runs the command in that tab's pane, and
+  // then DECLARES the agent with this call. The shim acknowledged it and
+  // recorded nothing, so \`agent list\` stayed empty and every activation died
+  // at "the agent was not in \`herdr agent list\`" — read by three sections as
+  // CrabCast vetoing on version grounds.
+  //
+  // herdr 0.7.5 and 0.8.2, each against its own private server, behave
+  // identically: \`agent list\` is [] before the call and carries the agent
+  // after it, keyed \`agent\` (not \`name\`) and reporting the declared state:
+  //   {agent, agent_status, cwd, pane_id, tab_id, terminal_id, workspace_id, …}
+  // \`deriveAgentName\` (herdr.ts) already reads either key, which is why the
+  // existing \`name\` shape below still resolves.
+  const paneId = args[2];
+  const agentAt = args.indexOf('--agent');
+  const stateAt = args.indexOf('--state');
+  const tab = loadTabs().find((t) => t.pane_id === paneId);
+  const started = load();
+  started.push({
+    name: agentAt === -1 ? '' : args[agentAt + 1],
+    pane_id: paneId,
+    cwd: tab ? tab.cwd : '',
+    agent_status: stateAt === -1 ? 'working' : args[stateAt + 1],
+    command: []
+  });
+  save(started);
+  out({ result: {} });
+}
+
 if (a === 'agent' && b === 'attach') {
   setInterval(() => {}, 60000); // hold the terminal open, as a real attach would
 } else if (a === 'pane' && b === 'close') {
   save(load().filter((s) => s.pane_id !== args[2]));
   out({ result: {} });
 } else if (a === 'tab' && b === 'create') {
-  out({ result: { tab: { tab_id: '7' }, root_pane: { workspace_id: 'w1', terminal_id: 't1' } } });
+  // MEASURED against the real binaries, not assumed (KAN-552). This response
+  // omitted \`root_pane.pane_id\`, which \`createAgentTab\` requires along with
+  // the other three — so every activation under this shim threw
+  // "no usable tab" and three sections read that as CrabCast vetoing on
+  // version grounds. It was the fixture missing a field, not the product
+  // refusing.
+  //
+  // herdr 0.7.5 and 0.8.2, each run out-of-place against its own private
+  // server, both answer \`tab create\` with the SAME shape:
+  //   root_pane: {agent_status, cwd, focused, foreground_cwd, pane_id,
+  //               revision, scroll, tab_id, terminal_id, workspace_id}
+  //   tab:       {agent_status, focused, label, number, pane_count,
+  //               tab_id, workspace_id}
+  // Ids are herdr's own \`w1:p2\` / \`w1:t2\` form. So 0.7.x is NOT missing the
+  // field this port needs, and the supported-version line does not move.
+  const tabs = loadTabs();
+  const n = tabs.length + 2;
+  const cwdAt = args.indexOf('--cwd');
+  const tab = {
+    tab_id: \`w1:t\${n}\`,
+    pane_id: \`w1:p\${n}\`,
+    terminal_id: \`term_kan552shim\${n}\`,
+    cwd: cwdAt === -1 ? '' : args[cwdAt + 1]
+  };
+  tabs.push(tab);
+  saveTabs(tabs);
+  out({
+    result: {
+      tab: { tab_id: tab.tab_id, workspace_id: 'w1', label: args[args.indexOf('--label') + 1] ?? '' },
+      root_pane: {
+        workspace_id: 'w1',
+        tab_id: tab.tab_id,
+        pane_id: tab.pane_id,
+        terminal_id: tab.terminal_id,
+        cwd: tab.cwd
+      }
+    }
+  });
 } else if (a === 'pane' && b === 'list') {
   out({ result: { panes: [] } });
 } else if (a !== 'agent') {

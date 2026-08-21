@@ -92,6 +92,8 @@ The migration is tracked as **KAN-182**. Until it lands, this page says only wha
 
 ## Install
 
+**[`docs/SETUP.md`](docs/SETUP.md) is the install document** — the same sequence as below, plus the config, a daemon that survives a reboot, the checks that say it is actually serving, how to point Butchr at it, and how to upgrade. This section is the short form for a reader who already knows the shape; that page is what to follow on a machine that has none of our state, and it says what breaks at each step when it is skipped.
+
 ```bash
 git clone https://github.com/wroosbit/crabcast.git
 cd crabcast

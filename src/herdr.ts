@@ -413,11 +413,97 @@ export type SessionEndReason = 'taken-over' | 'exited';
  * and pane ids are positions in lists that compact whenever anything earlier
  * closes, while a terminal id belongs to the terminal for as long as it runs.
  */
+/**
+ * Quote one argv element for a shell command line.
+ *
+ * `pane run` takes a COMMAND LINE, not an argv array, so every element has to
+ * survive the shell's own parsing. Single quotes with the `'"'"'` escape are
+ * the only form that is literal for every byte including spaces, $, backticks
+ * and newlines — which matters because one of these elements is an entire
+ * `bash -c` script built by a launcher.
+ */
+/**
+ * Did this herdr drop `--cwd` from `agent start`?
+ *
+ * 0.7 redesigned the call; 0.6.x still creates the pane itself. An UNREADABLE
+ * version answers FALSE — the 0.6.x path, which is the line CrabCast is
+ * verified against. Guessing the newer shape on no evidence would turn a
+ * missing measurement into a broken activation.
+ */
+export function herdrDroppedCwdFromAgentStart(version: string): boolean {
+  const m = /^([0-9]+)\.([0-9]+)\./.exec(String(version ?? ''));
+  if (!m) return false;
+  const major = Number(m[1]), minor = Number(m[2]);
+  if (major > 0) return true;
+  return minor >= 7;
+}
+
+/**
+ * The agent's name, however this herdr reports it.
+ *
+ * ⚠ 0.8.x REMOVED `name` FROM `agent list` ENTIRELY (KAN-552 incident,
+ * 2026-08-20). Rows now carry `agent` — the KIND for a herdr-started agent
+ * ("claude"), or whatever a supervisor declared via `pane report-agent`, which
+ * is where CrabCast puts its own pane name. The old code FILTERED OUT every
+ * row without a string `name`, so on 0.8.x the census came back EMPTY and each
+ * activation "failed" verification while its agent was in fact running — the
+ * daemon then retried, and every retry started ANOTHER agent. Duplicate agents
+ * in one workspace were the symptom; an empty census was the cause.
+ *
+ * Preferring `name` keeps 0.6.x byte-identical. Falling back to `agent` is
+ * what makes a 0.8.x row addressable at all. Neither present -> dropped, as
+ * before: an unnameable agent is one no caller can ask for.
+ */
+function deriveAgentName(agent: any): string | null {
+  if (!agent) return null;
+  if (typeof agent.name === 'string' && agent.name) return agent.name;
+  if (typeof agent.agent === 'string' && agent.agent) return agent.agent;
+  return null;
+}
+
+/**
+ * The development-channels trust dialog, by the lines that identify it.
+ *
+ * ⚠ ALL THREE must be present. The prompt text alone appears in an agent's own
+ * SCROLLBACK long after the dialog is gone — on 2026-08-20 a dead pane whose
+ * process had taken SIGTERM still showed this text, and a keystroke sent on
+ * that evidence went into a bare shell instead. Requiring the option lines and
+ * the confirm hint together is what separates a live dialog from its ghost.
+ */
+const DEV_CHANNELS_DIALOG_MARKERS = [
+  'development channels',
+  '1. I am using this for local development',
+  'Enter to confirm'
+] as const;
+
+/**
+ * How long a freshly-present pane is watched for a startup dialog before its
+ * presence is believed. Measured: the development-channels dialog draws at
+ * ~4.4s after spawn while the census reads present at ~1.8s. 8s covers that
+ * with margin on a loaded machine, and it is paid once per activation.
+ */
+const STARTUP_DIALOG_SETTLE_MS = 8_000;
+
+/** How many times one activation may answer this dialog before giving up. */
+const MAX_TRUST_DIALOG_ANSWERS = 3;
+
+function shellQuoteArg(arg: string): string {
+  return `'${String(arg).replace(/'/g, `'"'"'`)}'`;
+}
+
 interface AgentTab {
   tabId: string;
   workspaceId: string;
   /** The shell `herdr tab create` opens the tab on, which the agent replaces. */
   placeholderTerminalId: string;
+  /**
+   * The pane `tab create` opened the tab on.
+   *
+   * ⚠ Under 0.6.4 this was a placeholder to dispose of. Under 0.7+ it IS the
+   * agent's pane: `agent start` no longer creates one, it attaches to an
+   * existing pane at a shell prompt, which is exactly what this is.
+   */
+  rootPaneId: string;
 }
 
 /** Told to clients when a PTY dies, so a dead terminal never renders as a live one. */
@@ -829,14 +915,17 @@ export class HerdrBridge {
    * twice the file descriptors; {@link closeTabPlaceholder} takes the
    * placeholder back out again.
    */
-  private startAgentInOwnTab(paneName: string, workDir: string, argv: string[]): void {
+  /**
+   * The 0.6.x call: `agent start` CREATES the pane and takes `--cwd`.
+   *
+   * Kept, not deleted, because the installed herdr decides which shape is
+   * correct and 0.6.4 is still the only line CrabCast is verified against.
+   */
+  private startAgentInOwnTabLegacy(paneName: string, workDir: string, argv: string[]): void {
     const start = (placement: string[]) => this.runHerdr([
       'agent', 'start', paneName,
       '--cwd', workDir,
       ...placement,
-      // Spawning is a background event; the human is usually reading something
-      // else. herdr already defaults this way, but a default that flipped
-      // would yank the screen away on every activation, so it is stated.
       '--no-focus',
       '--',
       ...argv
@@ -844,8 +933,6 @@ export class HerdrBridge {
 
     const tab = this.createAgentTab(paneName, workDir);
     if (!tab) {
-      // No tab is a cosmetic loss; no agent is a broken activation. Spawn the
-      // agent the old way rather than fail over where it gets drawn.
       start([]);
       return;
     }
@@ -854,16 +941,7 @@ export class HerdrBridge {
       try {
         start(['--tab', tab.tabId]);
       } catch (e: any) {
-        // The name being taken means the agent exists already — the caller
-        // handles that, and retrying would start a second one.
         if ((e as HerdrCliError)?.herdrCode === AGENT_NAME_TAKEN) throw e;
-
-        // Tab ids are positional and renumber whenever an earlier tab closes,
-        // so the id we were just handed can go stale between the two calls.
-        // Ours is always the newest and therefore the highest-numbered, so a
-        // renumber can only leave it dangling — herdr answers
-        // `agent_placement_not_found` and never resolves it to somebody else's
-        // tab. Falling back keeps the spawn working through that race.
         console.error(
           `[HerdrBridge] Could not place ${paneName} in tab ${tab.tabId} ` +
           `(${e?.message ?? String(e)}); starting it in herdr's default placement instead`
@@ -871,9 +949,129 @@ export class HerdrBridge {
         start([]);
       }
     } finally {
-      // Also on the failure paths: an abandoned tab would otherwise sit there
-      // holding a shell nobody asked for.
       this.closeTabPlaceholder(tab);
+    }
+  }
+
+  /** Installed herdr version, read once and cached for the process's life. */
+  private cachedHerdrVersion: string | undefined;
+  private herdrVersion(): string {
+    if (this.cachedHerdrVersion === undefined) {
+      try {
+        const out = spawnSync('herdr', ['--version'], { encoding: 'utf8' })?.stdout ?? '';
+        this.cachedHerdrVersion = (out.match(/[0-9]+\.[0-9]+\.[0-9]+/) ?? [''])[0];
+      } catch {
+        this.cachedHerdrVersion = '';
+      }
+    }
+    return this.cachedHerdrVersion;
+  }
+
+  private startAgentInOwnTab(paneName: string, workDir: string, argv: string[]): void {
+    // ── herdr 0.7+ inverted this call (KAN-552 incident, 2026-08-20) ─────
+    // Until 0.7, `agent start` CREATED the pane and took `--cwd`, `--tab`,
+    // `--no-focus` and a trailing `-- <argv>` run under `bash -c`. 0.7 removed
+    // all four: `agent start <NAME> --kind <KIND> --pane <ID>` attaches a
+    // *named agent kind* to a pane that already exists at a shell prompt.
+    // Passing `--cwd` to 0.7+ dies with `unknown option: --cwd`, which is what
+    // took the whole fleet down — every activation failed while every daemon
+    // reported healthy.
+    //
+    // WHY THIS TAKES THE PANE-RUN ROUTE AND NOT `--kind`. `--kind` names an
+    // executable from herdr's closed list and passes only its ARGUMENTS after
+    // `--`. Our launchers do not expose that split: `launcher.command()`
+    // returns a shell command STRING, and argv here is an `env … bash -c …`
+    // invocation. Restructuring every launcher into (executable, args) is a
+    // real refactor and not one to attempt while the fleet is down. The pane
+    // `tab create` hands back is already a shell in the right cwd, so running
+    // the exact command we always ran is a smaller, more faithful change: the
+    // bytes on the command line are unchanged from 0.6.4.
+    //
+    // ⚠ WHAT THIS ROUTE DOES NOT BUY. `agent start` under 0.7 returns only
+    // once the agent is DETECTED AND READY FOR INPUT — it turns a wedged
+    // startup dialog into a spawn failure. `pane run` cannot: it asserts the
+    // agent is up rather than observing it. That is a real loss and it is
+    // recorded here rather than hidden. Closing it means giving launchers a
+    // kind/args split so `--kind` becomes usable.
+    //
+    // ⚠ NO FALLBACK PLACEMENT. Under 0.6.4 a failed `tab create` fell back to
+    // herdr's default placement — a cosmetic loss beat a broken activation.
+    // That trade no longer exists: without a pane there is nothing to attach
+    // to, so a fallback could only fail later and less clearly.
+    // ── Which call shape does the INSTALLED herdr take? ────────────────
+    // Not a preference and not a config: 0.6.x REQUIRES --cwd and 0.7+ REFUSES
+    // it, so a build that only speaks one of them is broken on the other. The
+    // version is read from the binary rather than assumed, because the binary
+    // is what will parse the arguments.
+    if (!herdrDroppedCwdFromAgentStart(this.herdrVersion())) {
+      this.startAgentInOwnTabLegacy(paneName, workDir, argv);
+      return;
+    }
+
+    const tab = this.createAgentTab(paneName, workDir);
+    if (!tab) {
+      // ⚠ NO VERSION LITERAL HERE, DELIBERATELY (KAN-552). This message used to
+      // read "herdr 0.7+ has no way to …", and `verify-herdr-version-notice`
+      // refuses a quoted herdr version in any file but `herdr-health.ts` —
+      // *"the shape a second copy of the rule would have, whether it compared or
+      // merely told somebody which version to install."* It was the second kind:
+      // it told the reader a version fact, and a version fact stated twice is one
+      // that can drift. The capability is what the caller needs to know, and it
+      // is true of every herdr this code supports.
+      throw new Error(
+        `Could not create a tab for ${paneName}, and this herdr has no way to ` +
+        `start an agent without a pane to put it in`
+      );
+    }
+
+    // `agent start` used to refuse a name already in use, and callers depend on
+    // that refusal — retrying past it starts a SECOND agent under one name.
+    // This route has no such check built in, so it is made explicitly.
+    if (this.agentNameIsTaken(paneName)) {
+      this.closeTabPlaceholder(tab);
+      const err: any = new Error(`An agent named ${paneName} is already running`);
+      err.herdrCode = AGENT_NAME_TAKEN;
+      throw err;
+    }
+
+    try {
+      // One command line, quoted exactly as a shell would need it. `pane run`
+      // appends the Enter that `pane send-text` deliberately does not.
+      this.runHerdr(['pane', 'run', tab.rootPaneId, argv.map(shellQuoteArg).join(' ')]);
+
+      // Declare what we put in the pane. Without this the pane is a shell as
+      // far as herdr is concerned, and `agent list`/`get`/`attach` cannot
+      // resolve the name — which is how an agent becomes invisible to its own
+      // supervisor.
+      this.runHerdr([
+        'pane', 'report-agent', tab.rootPaneId,
+        '--source', 'crabcast',
+        '--agent', paneName,
+        '--state', 'working'
+      ]);
+    } catch (e: any) {
+      // A half-started agent is worse than none: the pane would sit there
+      // holding a shell that nobody can address by name.
+      this.closeTabPlaceholder(tab);
+      throw e;
+    }
+  }
+
+  /**
+   * Is an agent already running under this name?
+   *
+   * Answers FALSE only when herdr answered and did not know the name. A failed
+   * query is not a free name — treating "I could not ask" as "nobody is there"
+   * is how a second agent gets started under one name, so an unreadable answer
+   * is reported as taken and the activation refuses instead.
+   */
+  private agentNameIsTaken(paneName: string): boolean {
+    try {
+      const agents = this.runHerdr(['agent', 'list'])?.result?.agents;
+      if (!Array.isArray(agents)) return true;
+      return agents.some((a: any) => a?.name === paneName);
+    } catch {
+      return true;
     }
   }
 
@@ -891,11 +1089,15 @@ export class HerdrBridge {
       const tabId = result?.tab?.tab_id;
       const workspaceId = result?.root_pane?.workspace_id;
       const placeholderTerminalId = result?.root_pane?.terminal_id;
-      if (typeof tabId !== 'string' || typeof workspaceId !== 'string' || typeof placeholderTerminalId !== 'string') {
+      const rootPaneId = result?.root_pane?.pane_id;
+      if (
+        typeof tabId !== 'string' || typeof workspaceId !== 'string' ||
+        typeof placeholderTerminalId !== 'string' || typeof rootPaneId !== 'string'
+      ) {
         throw new Error('herdr tab create returned no usable tab');
       }
 
-      return { tabId, workspaceId, placeholderTerminalId };
+      return { tabId, workspaceId, placeholderTerminalId, rootPaneId };
     } catch (e: any) {
       console.error(
         `[HerdrBridge] Could not create a tab for ${paneName} (${e?.message ?? String(e)}); ` +
@@ -1599,11 +1801,11 @@ export class HerdrBridge {
       return {
         reachable: true,
         agents: agents
-          .filter((agent: any) => agent && typeof agent.name === 'string')
+          .filter((agent: any) => agent && typeof deriveAgentName(agent) === 'string')
           .map((agent: any) => {
             const workDir = typeof agent.cwd === 'string' ? agent.cwd : null;
             return {
-              name: agent.name as string,
+              name: deriveAgentName(agent) as string,
               paneId: typeof agent.pane_id === 'string' && agent.pane_id ? agent.pane_id : null,
               agentRuntime: typeof agent.agent === 'string' && agent.agent ? agent.agent : null,
               workDir,
@@ -1736,6 +1938,95 @@ export class HerdrBridge {
    * what becomes the record's durable binding — taking it from a second call
    * would bind to a different moment than the one that proved the agent there.
    */
+  /**
+   * Read one pane's visible frame BY PANE ID.
+   *
+   * Deliberately not {@link tailAgent}, which resolves by agent NAME —
+   * herdr 0.8.x dropped name resolution from `agent read` (`agent_not_found`),
+   * while `pane read <id>` still answers. The confirm loop already holds the id
+   * from the census it just read, so this asks the question the id can answer.
+   */
+  private readPaneFrame(paneId: string): string | null {
+    try {
+      const out = this.runHerdrRaw(['pane', 'read', paneId, '--source', 'visible', '--lines', '40']);
+      return typeof out === 'string' && out.length ? out : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Clear the development-channels trust dialog if the pane is sitting on it.
+   *
+   * WHY THIS EXISTS. `--dangerously-load-development-channels` opens a
+   * confirmation on EVERY spawn and its acceptance is persisted nowhere, so a
+   * respawned agent stops dead at a prompt nobody is watching. It is invisible
+   * to every status: the dialog draws a `❯`, readiness detection reads that as
+   * a prompt, and the agent reports `working` while doing nothing. On
+   * 2026-08-20 all 16 panes in the fleet were wedged on it simultaneously and
+   * every one of them reported healthy.
+   *
+   * WHY `1` AND NOT Enter. Enter SUBMITS whatever the pane holds — at a
+   * composer that is somebody's unsent text posted as if a human typed it. The
+   * literal `1` selects option 1 at this dialog and, if the frame turns out not
+   * to be a dialog after all, types one harmless character instead. It fails
+   * toward doing nothing.
+   *
+   * ⚠ SCOPE, DELIBERATELY NARROW. This answers ONE dialog, matched on three
+   * lines together. It is not a general dialog-dismisser and must not become
+   * one: the next dialog may be a folder-trust prompt, whose answer is a real
+   * decision about whether to run code from a directory. Auto-answering that
+   * would be a machine making a security choice on a human's behalf.
+   */
+  private async answerStartupTrustDialog(paneId: string, paneName: string): Promise<boolean> {
+    const frame = this.readPaneFrame(paneId);
+    if (!frame) return false;
+    const lower = frame.toLowerCase();
+    if (!DEV_CHANNELS_DIALOG_MARKERS.every((m) => lower.includes(m.toLowerCase()))) return false;
+
+    try {
+      // `send-text` answers with an EMPTY body on success — no JSON, no ack —
+      // so a clean return here proves only that herdr took the bytes, not that
+      // the dialog went. The read-back below is the actual evidence.
+      this.runHerdr(['pane', 'send-text', paneId, '1']);
+    } catch (e: any) {
+      console.error(
+        `[HerdrBridge] ${paneName}: could not answer the development-channels dialog ` +
+        `(${e?.message ?? String(e)}); it will stay wedged until somebody answers it`
+      );
+      return false;
+    }
+
+    // Verify, rather than assume: re-read the frame and require the dialog to
+    // be GONE. A keystroke that herdr accepted but the pane never applied — a
+    // dialog that re-drew, a pane that was not focused on the prompt — would
+    // otherwise be logged as answered, and the next poll would find the agent
+    // present-by-declaration and stop looking. That is exactly the silent
+    // wedge this exists to prevent, so the claim is not made until the
+    // screen backs it.
+    await delay(600); // the frame needs a redraw before it can show the dialog gone
+    const after = this.readPaneFrame(paneId);
+    const stillThere = after !== null &&
+      DEV_CHANNELS_DIALOG_MARKERS.every((m) => after.toLowerCase().includes(m.toLowerCase()));
+    if (stillThere) {
+      console.error(
+        `[HerdrBridge] ${paneName}: sent '1' to the development-channels dialog in ${paneId} ` +
+        `but the dialog is still on screen; not counting it as answered`
+      );
+      return false;
+    }
+
+    // Said out loud on purpose. An automatic answer to a prompt that names
+    // itself "dangerously" must be visible in the log, not silent — somebody
+    // reading back should see that a machine pressed this, and which pane.
+    console.error(
+      `[HerdrBridge] ${paneName}: answered the development-channels trust dialog in ${paneId} ` +
+      `(sent '1' = "I am using this for local development", and the dialog is gone on re-read). ` +
+      `This dialog blocks every spawn and its acceptance is not persisted anywhere.`
+    );
+    return true;
+  }
+
   public async confirmAgentPresent(
     paneName: string,
     requireRuntime: boolean,
@@ -1746,6 +2037,8 @@ export class HerdrBridge {
     let checks = 0;
     let reachable = false;
     let registered = false;
+    let dialogsAnswered = 0;
+    let settleStartedAt: number | null = null;
 
     for (;;) {
       const census = this.listHerdrAgentsChecked();
@@ -1755,7 +2048,53 @@ export class HerdrBridge {
       if (reachable) {
         const record = census.agents.find(agent => agent.name === paneName);
         registered = record !== undefined;
+
+        // Clear the one startup dialog we know how to clear, on EVERY poll
+        // that has a pane to look at — not only when the runtime reads absent.
+        //
+        // ⚠ That narrower gate was the first version of this, and it could
+        // never fire: the 0.7+ spawn path DECLARES the agent via
+        // `pane report-agent`, so `agentRuntime` is non-null from the first
+        // census read and "registered but no runtime" is a state the new path
+        // cannot produce. A fresh spawn with the flag sat on the dialog with
+        // this code in place and nothing happened — caught only because the
+        // test was built to go red. The dialog check is cheap (one pane read)
+        // and harmless when there is no dialog, so it gates on nothing but
+        // having a pane and not having exhausted its attempts.
+        if (
+          record?.paneId && dialogsAnswered < MAX_TRUST_DIALOG_ANSWERS &&
+          await this.answerStartupTrustDialog(record.paneId, paneName)
+        ) {
+          dialogsAnswered++;
+          // A dialog was just answered: the runtime behind it is only now
+          // starting, so the settle window begins again from here.
+          settleStartedAt = null;
+          await delay(AGENT_CONFIRM_POLL_MS);
+          continue;
+        }
+
         if (record && (!requireRuntime || record.agentRuntime !== null)) {
+          // ── Do not trust the FIRST `present` on a pane that may still be
+          // drawing its startup dialog. ──────────────────────────────────
+          // Measured 2026-08-20: the pane exists and the census reads
+          // `present` at +1.8s, but the development-channels dialog is not
+          // drawn until +4.4s. Returning on the first present meant the
+          // dialog check above ran exactly once, against a frame the dialog
+          // had not reached yet, and then never again — the agent wedged
+          // with a verified activation on record. So presence is held for a
+          // settle window, re-reading the pane each poll; the dialog check
+          // above keeps running for every one of those polls, and a dialog
+          // that appears inside the window is answered and the window
+          // restarted. The window is the ONLY cost of this change: an
+          // agent that starts clean is reported present a few seconds later
+          // than before.
+          if (record.paneId && requireRuntime && dialogsAnswered < MAX_TRUST_DIALOG_ANSWERS) {
+            if (settleStartedAt === null) settleStartedAt = Date.now();
+            if (Date.now() - settleStartedAt < STARTUP_DIALOG_SETTLE_MS) {
+              await delay(AGENT_CONFIRM_POLL_MS);
+              continue;
+            }
+          }
           return {
             present: true,
             paneId: record.paneId,
@@ -1875,6 +2214,37 @@ export class HerdrBridge {
    * on stderr for others, so both streams are worth reading before we fall
    * back to quoting a raw payload at the caller.
    */
+  /**
+   * Run a herdr command that answers with TEXT rather than JSON.
+   *
+   * `pane read` is the case that needs this: it returns the frame itself, so
+   * {@link runHerdr}'s `parseJson` yields null and the caller sees nothing —
+   * which on 2026-08-20 read as "supervision is blind" when the bytes were
+   * there the whole time. An error is still surfaced the same way, because
+   * herdr reports those as JSON on either stream even when success is text.
+   */
+  private runHerdrRaw(args: string[]): string {
+    const result = spawnSync('herdr', args, {
+      encoding: 'utf8',
+      timeout: HERDR_CLI_TIMEOUT_MS
+    });
+
+    if (result.error) {
+      throw new Error(`herdr ${args.join(' ')} failed: ${result.error.message}`);
+    }
+
+    const stdout = (result.stdout ?? '').trim();
+    const reported = parseJson(stdout)?.error ?? parseJson((result.stderr ?? '').trim())?.error;
+    if (reported) {
+      const error: HerdrCliError =
+        new Error(reported.message ?? `herdr reported ${reported.code ?? 'an error'}`);
+      if (typeof reported.code === 'string') error.herdrCode = reported.code;
+      throw error;
+    }
+
+    return stdout;
+  }
+
   private runHerdr(args: string[]): any {
     const result = spawnSync('herdr', args, {
       encoding: 'utf8',
