@@ -436,12 +436,13 @@ const unstartedDirs = [];
     `${walked.rows.length} rows over ${walked.pages.length} pages`
   );
 
-  // The other three paged categories answer a page block even when empty, so a
-  // consumer can write one loop rather than five special cases.
+  // The other paged categories answer a page block even when empty, so a
+  // consumer can write one loop rather than six special cases.
   const blocks = Object.keys(first.pages ?? {}).sort();
   check(
     JSON.stringify(blocks) === JSON.stringify(
-      ['foreignPanes', 'missingAgents', 'preemptedAgents', 'standbyAgents', 'unstartedAgents']),
+      ['foreignPanes', 'missingAgents', 'preemptedAgents', 'standbyAgents', 'strandedAgents',
+        'unstartedAgents']),
     'every paged category carries a `pages` entry on every response, empty or not — a ' +
       'consumer checking nextCursor is doing the ordinary thing, not handling an exception',
     blocks.join(', ')
