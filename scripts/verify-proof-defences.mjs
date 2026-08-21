@@ -726,6 +726,42 @@ const PROOF_DEFENCES = [
       'rather than passing over them, and no sibling script covers the second.'
   },
   {
+    script: 'verify-doc-example-sets',
+    defence: 'guard',
+    anchor: 'this is the fixture that must fail to match',
+    central:
+      'an ILLUSTRATIVE fenced block in docs/ that lists a declared set agrees with that ' +
+      'declaration — the half nothing held at all, because at 662d18f no proof in this ' +
+      'repository opened a fence under docs/: verify-approval-marker and ' +
+      'verify-readme-is-current are the only two that parse a fence, and both read README.md ' +
+      'or a PR body.',
+    note:
+      'A MUST-REJECT FIXTURE IS WHAT EARNS THE KEEP, and it is the pair that matters: §3 runs ' +
+      'the attribution path over fixtures it MUST attach a marker to and one it MUST NOT — a ' +
+      'marker separated from its fence by more than MARKER_REACH blank lines. A detector that ' +
+      'attached everything would pass the accept side and fail the reject side; one that ' +
+      'attached nothing would do the reverse; neither test alone says anything. Two more ' +
+      'discriminators sit beside them: an unparseable fence must read as null rather than as an ' +
+      'empty object, because an empty object makes every set in it VACUOUSLY agree and the gate ' +
+      'would go green on a block it never read; and an unknown derivation must REFUSE rather ' +
+      'than pass through as "nothing to check". §5 also fails closed on zero markers, which is ' +
+      'this gate having been disconnected from its corpus while still printing a verdict. ' +
+      'THE SECOND HALF CARRIES ITS OWN CONTROL: §6 plants a real declared set into a synthetic ' +
+      'fence and requires attribution, so "no unmarked block carries a declared set" is a ' +
+      'finding about the tree and not about the search. ' +
+      'THREE HOLES NAMED RATHER THAN COVERED. (1) §6 attributes an unmarked block only on an ' +
+      'EXACT match, so a block that has ALREADY drifted matches nothing and is invisible to it ' +
+      '— which is precisely the state KAN-512 was filed about; ' +
+      'scripts/kan512-doc-example-sweep.mjs attributes by OVERLAP and is where that population ' +
+      'is measured, and it is a survey that gates nothing. (2) PROSE membership is held by ' +
+      'nobody — verify-doc-set-counts holds a prose COUNT against a gated set and has no ' +
+      'member to match a name against. (3) VALUES are not compared at all, only names, so an ' +
+      'example whose values are impossible passes here. An unlabelled fence meant to be JSON ' +
+      'that will not parse is silently outside the corpus; a fence LABELLED json/jsonc that ' +
+      'will not parse is declined OUT LOUD and printed every run, and a marker on one is a ' +
+      'failure rather than a skip.'
+  },
+  {
     script: 'verify-doc-set-counts',
     defence: 'guard',
     anchor: 'self-test: an article-less delta',
