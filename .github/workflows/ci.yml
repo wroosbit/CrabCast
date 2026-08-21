@@ -1225,6 +1225,7 @@ jobs:
             verify-launcher-args
             verify-variadic-args-swallow-prompt
             verify-proof-teardown-sweeps
+            verify-install-doc-matches-cli
           )
           # One at a time, and one scratch $HOME each. Both halves are
           # deliberate (KAN-88 item 11): these scripts start real daemons,

@@ -2356,6 +2356,59 @@ const PROOF_DEFENCES = [
       'measured — every proof named anywhere in docs/*.md joined to what CI runs — and it asserts ' +
       'nothing and gates nothing, so running it closes no part of this.'
   },
+  {
+    script: 'verify-install-doc-matches-cli',
+    defence: 'guard',
+    central:
+      '`docs/SETUP.md` and `README.md` agree with `src/cli.ts` about which commands exist, which ' +
+      'of them spawn a daemon (by SET, at all three places either page states it), what the CLI ' +
+      'would actually emit in the block §4.2 pastes, and what every exit code either page quotes ' +
+      'is a NAME for — so a verb, a spawn rule or a renumbered code cannot leave a page saying ' +
+      'what it said yesterday.',
+    anchor: 'and the register accounts for it',
+    note:
+      'THE ANCHOR IS THE GUARD, and it is what makes §4 a SWEEP rather than a list of today\'s ' +
+      'answers. §4 finds every exit-code-shaped claim on the page and requires each to be either ' +
+      'reconciled to an `EXIT` member or excluded with a recorded reason; the anchored branch is ' +
+      'the one that fires for a claim in NEITHER. Delete it and §4 still checks the sixteen claims ' +
+      'somebody remembered to register, stays green forever, and silently stops covering the ' +
+      'seventeenth — which is the exact shape of the drift this file was commissioned against. ' +
+      'The register is keyed by ANCHOR rather than by line number, and an anchor may not contain ' +
+      'the number it reconciles: the first draft anchored a claim on the literal `EXIT=4`, which ' +
+      'pinned the very digit the section exists to check. ' +
+      'THE SECOND GUARD, uncited because one anchor is what an entry carries: §0 FAILS CLOSED. ' +
+      'The tables are read from `src/cli.ts` through the TypeScript parser, and a shape it can no ' +
+      'longer read exits 1 before any section runs, because every section compares against those ' +
+      'tables and an unread table agrees with every document. ' +
+      'WHAT IS NOT GUARDED HERE, and it is why this is `guard` and not `mutation`: nothing in this ' +
+      'file mutates anything. The demonstration that these assertions go red is ' +
+      'scripts/kan607-red-drive.mjs — seventeen arms, control first and two FALSE-POSITIVE controls ' +
+      'last, each mutating a staged copy so the working tree is never written to, and asserting ' +
+      'byte-identity afterwards. ARMS 5, 8 AND 12 ARE THE ONES THAT DECIDE WHETHER THE FILE IS ' +
+      'WORTH HAVING: each edits `src/cli.ts` ONLY — a command added, a code renumbered, a code ' +
+      'added — leaves every document byte-identical, and requires the red anyway. A check holding ' +
+      'a hard-coded list could not go red in any of the three. Arm 12 is KAN-528 replayed, which ' +
+      'is the drift that really happened. THAT DRIVE IS NOT IN THE CI ARRAY and nothing gates on ' +
+      'it, so the evidence that this guard bites is a hand-run pasted on the pull request for ' +
+      'KAN-607. ' +
+      'IT CARRIES A SIGNAL-PATH TEARDOWN and is deliberately NOT in verify-proof-teardown-sweeps\' ' +
+      'NO_SIGNAL_TEARDOWN register — the first option that check offers rather than the second. ' +
+      'It starts no daemon, but an interrupted run DID leak a staged copy of the tree, and that ' +
+      'is what the handler removes. ⚠ ITS ARMS ARE ASYNC FOR THAT REASON ALONE: a handler on the ' +
+      'wholly synchronous version could not be reached until the run had finished, so it merely ' +
+      'SWALLOWED the interrupt — measured at 115 lines of output against 37 with no handler at ' +
+      'all. A teardown that cannot run is this suite\'s own defect one level down. ' +
+      '⚠ THE SEAM, and it is a boundary rather than a hole: this joins the pages to the CLI\'s ' +
+      'TABLES, never to its BEHAVIOUR. That `spawnsDaemon: false` really does exit 3 against a ' +
+      'machine with no daemon is `verify-cli-refusal.mjs`, which drives a real CLI; if the tables ' +
+      'ever stopped governing the behaviour this file would go on agreeing with them. ' +
+      '⚠ AND A REAL HOLE, measured rather than assumed: §4\'s sweep matches three written shapes ' +
+      'and cannot see a claim with NO DIGIT IN IT. §4.1\'s own "non-zero for a refusal to boot" is ' +
+      'exactly that, and nothing holds it. The third shape exists because the first two missed ' +
+      '§4.1\'s "`0` for a clean shutdown" while the register reported every claim accounted for — ' +
+      'the file\'s own empty-result-is-a-claim-about-your-search, found by reading the page ' +
+      'against the sweep rather than by the sweep.'
+  },
 
   // -------------------------------------------------------------------------
   // none — and each names what that leaves undefended. This is the half the
