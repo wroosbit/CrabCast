@@ -549,6 +549,21 @@ const BARE_ACTIVATIONS = [
     evidence: 'setCensus([ourPane(dir, paneId)]);'
   },
   {
+    script: 'verify-missing-agent-occupancy',
+    classification: 'census-seeded',
+    sites: 2,
+    reason:
+      'Two scaffolding activations, each on the line after `setCensus([ourPane(<the same dir>, ' +
+      '…)])`, so both take the already-running branch and return at router.ts:4880 before the ' +
+      'gate at :4931. Their only job is to put an `activated` row in the registry, because that ' +
+      'is what makes the agent a LOSS once the census stops carrying its pane — which is the ' +
+      'state the whole file is about. The census is then rewritten to hold a FOREIGN pane in ' +
+      'that directory, and no activation happens after that point: the occupied-directory ' +
+      'refusal is a thing this file asserts the rows SAY, never a thing it drives. Reaching the ' +
+      'gate would make a fixture about one directory depend on the runner\'s load average.',
+    evidence: "setCensus([ourPane(dir, '%100')]);"
+  },
+  {
     script: 'verify-owner-filter',
     classification: 'census-seeded',
     sites: 6,
