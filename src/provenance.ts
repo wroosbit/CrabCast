@@ -933,16 +933,36 @@ export function buildProvenanceReport(boot: BuildSnapshot): {
       `does not include those edits. Run \`npm run build\`, then restart the daemon.`;
   } else if (releaseLine.onReleaseLine === false) {
     state = 'off-release-line';
+    // ⚠ THIS BRANCH IS ALSO REACHED WHEN THE OTHER TWO ARE null, AND THE
+    // SENTENCE HAS TO KNOW THAT. It is guarded only against `false` and `true`
+    // above, so a daemon whose `dist/` has become unreadable AND whose build
+    // came off an unmerged branch lands here with `processIsCurrentBuild` and
+    // `sourcesNewerThanBuild` both unmeasured. A fixed preamble reading "this
+    // daemon is running the build on disk and that build is consistent with
+    // src/" would then assert two things nothing established — which is this
+    // ticket's own defect committed by its own fix. So the preamble is built
+    // from what was actually answered, exactly as the `unknown` branch's is.
+    const selfConsistent = processIsCurrentBuild === true && sourcesNewerThanBuild === false;
     summary =
-      `THE RUNNING BUILD IS NOT ON THE RELEASE LINE. This daemon is running the build on disk ` +
-      `and that build is consistent with ${sourceDir}, but the commit it was built from ` +
+      `THE RUNNING BUILD IS NOT ON THE RELEASE LINE. ` +
+      (selfConsistent
+        ? `This daemon is running the build on disk and that build is consistent with ` +
+          `${sourceDir}, but the commit it was built from `
+        : `The commit this process was built from `) +
       `(${boot.provenance.commit}) is NOT reachable from ${releaseLine.ref} ` +
       `(${releaseLine.refCommit}) in ${releaseLine.repo} — so what is running here was built ` +
       `from a branch that has not landed. THIS IS NOT A STALENESS PROBLEM AND REBUILDING WILL ` +
-      `NOT CLEAR IT: the tree is entirely self-consistent, which is why every other check on ` +
-      `this response is green. Find out why that branch is deployed before changing it — ` +
-      `checking the tree out onto the release line and rebuilding would change what this daemon ` +
-      `serves, with no deploy step and no announcement. NOTHING WAS FETCHED to establish this: ` +
+      `NOT CLEAR IT` +
+      (selfConsistent
+        ? `: the tree is entirely self-consistent, which is why every other check on this ` +
+          `response is green. `
+        : `. ⚠ AND THE REST OF THIS RESPONSE IS NOT A CLEAN BILL OF HEALTH EITHER — whether ` +
+          `this process is running the build on disk, or that build newer than ${sourceDir}, ` +
+          `could not be established here; the reasons are in the \`unknown\` map below. ` +
+          `This state names ONE thing that is wrong and is not a claim that it is the only one. `) +
+      `Find out why that branch is deployed before changing it — checking the tree out onto ` +
+      `the release line and rebuilding would change what this daemon serves, with no deploy ` +
+      `step and no announcement. NOTHING WAS FETCHED to establish this: ` +
       `${releaseLine.ref} is this clone's own copy, as of whoever last fetched it, so a commit ` +
       `that landed on the remote since then still reads as off the line here. \`git fetch\` and ` +
       `ask again before treating it as final.`;

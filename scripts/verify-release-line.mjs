@@ -594,6 +594,76 @@ check(
     `released, which is a different claim and a false one`
 );
 
+// ---------------------------------------------------------------------------
+// 3f. AND `off-release-line` DOES NOT CLAIM THE TWO THINGS IT IS NOT GUARDING.
+//
+// The branch is guarded against `processIsCurrentBuild === false` and
+// `sourcesNewerThanBuild === true` above it, NOT against `null` — so a daemon
+// whose `dist/` has become unreadable AND whose build came off an unmerged
+// branch lands in it with both unmeasured. A fixed preamble would then assert
+// "this daemon is running the build on disk and that build is consistent with
+// src/" on the strength of nothing, which is this ticket's own defect committed
+// by its own fix. Found by reading the branch rather than by a failing run,
+// which is why it gets a section instead of a comment.
+// ---------------------------------------------------------------------------
+
+rule('3f. THE off-release-line SENTENCE SAYS ONLY WHAT WAS MEASURED');
+
+const halfKnown = makeTree('halfknown');
+const halfKnownMain = g(halfKnown.dir, 'rev-parse', 'HEAD');
+const halfKnownCommit = commitOnBranch(halfKnown, 'incident', 'KAN-592 fixture: unmerged, and the dist goes away');
+stamp(halfKnown);
+pinTimes(halfKnown);
+
+// Snapshot the build FIRST — that is the boot the daemon would be holding —
+// and only then take the `dist/` away, so the report has a commit to place on
+// the release line and nothing to compare against.
+const halfProvenance = await import(path.join(repoDist, 'provenance.js'));
+const halfBoot = halfProvenance.snapshotBuild(halfKnown.dist);
+fs.rmSync(halfKnown.dist, { recursive: true, force: true });
+const halfReport = halfProvenance.buildProvenanceReport(halfBoot);
+
+check(
+  halfBoot.provenance.commit === halfKnownCommit &&
+    halfReport.freshness.processIsCurrentBuild === null &&
+    halfReport.freshness.sourcesNewerThanBuild === null,
+  '(setup) the boot snapshot names the commit and the other two questions are UNMEASURED',
+  `commit=${halfBoot.provenance.commit?.slice(0, 12)}, ` +
+    `processIsCurrentBuild=${halfReport.freshness.processIsCurrentBuild}, ` +
+    `sourcesNewerThanBuild=${halfReport.freshness.sourcesNewerThanBuild} — if either were `+
+    `answered this section would be checking the other preamble`
+);
+check(
+  halfReport.freshness.state === 'off-release-line' &&
+    halfReport.freshness.onReleaseLine === false,
+  'the state is still `off-release-line`, because that question WAS answered',
+  `${halfReport.freshness.state} / ${halfReport.freshness.onReleaseLine} — the commit is fixed ` +
+    `at boot, so losing the tree on disk cannot take the release-line answer with it`
+);
+show('freshness.summary:', String(halfReport.freshness.summary));
+check(
+  !/running the build on disk and that build is consistent/.test(
+    String(halfReport.freshness.summary)
+  ) && !/every other check on this response is green/.test(String(halfReport.freshness.summary)),
+  'AND THE SUMMARY CLAIMS NEITHER OF THE TWO THINGS NOBODY MEASURED',
+  'a fixed preamble here would assert the process is running the build on disk — on a run where ' +
+    'the build on disk could not be read at all'
+);
+check(
+  /NOT A CLEAN BILL OF HEALTH EITHER/.test(String(halfReport.freshness.summary)) &&
+    /is not a claim that it is the only one/.test(String(halfReport.freshness.summary)),
+  'and it says so out loud rather than going quiet about the half it could not answer',
+  'naming ONE thing that is wrong reads as naming the ONLY thing that is wrong unless it says ' +
+    'otherwise, which is the same defect one more layer down'
+);
+check(
+  /This daemon is running the build on disk and that build is consistent/.test(
+    String(offFresh.summary)
+  ),
+  'CONTROL: the fully-measured §1 run DOES carry that preamble, so the two are told apart',
+  'without this, a summary that had simply lost the clause everywhere would pass the check above'
+);
+
 // ===========================================================================
 // 4. "CANNOT TELL" IS A THIRD ANSWER AND READS AS NEITHER OF THE OTHER TWO
 // ===========================================================================
