@@ -566,6 +566,150 @@ console.log('\n== e2. configure when herdr does not answer ==');
 }
 
 // ---------------------------------------------------------------------------
+// f. WHOSE the occupied directory is (KAN-596). The refusal above names the
+//    pane; these name the OWNER, and they are four answers rather than two.
+//
+//    WHAT FAILURE THIS WOULD CATCH: a refusal that reads an ABSENT owner as
+//    "not yours". Only agents configured since somebody started passing
+//    `--owner` carry one, so `unowned` is the majority case on any fleet that
+//    has been running a while — and the remedy this refusal invites is
+//    standing a pane down. Collapsing `unowned` (or `unasked`) into `others`
+//    is therefore not a wording slip: it tells the majority of callers that
+//    their own agent belongs to somebody else, in the direction that stops
+//    agents. §f1 is the section that would go red, and it is the one a passing
+//    fleet will not exercise for itself, because a demo fleet is one where
+//    every agent happens to have been configured with an owner.
+//
+//    ⚠ WHAT THESE DO NOT COVER, named rather than left to be inferred: they
+//    seed the registry record themselves — `recordConfigured` with an `owner`
+//    on it — so they prove what the REFUSAL does with a recorded owner and NOT
+//    that `configure` stores one. That second half is `verify-owner-filter.mjs`,
+//    which drives `configure_agent` over the wire and reads the value back.
+//    Neither script owns the seam between them; this comment is its edge.
+//    The CLI's own rendering of these four answers (`occupantOwnerLine` in
+//    src/cli.ts) is asserted by neither and is exercised by hand — the pasted
+//    `crabcast activate` output on the PR is that evidence.
+// ---------------------------------------------------------------------------
+const OCCUPYING_PANE = {
+  name: 'butchr-task-kan-77',
+  pane_id: '%41',
+  agent: 'claude',
+  agent_status: 'working'
+};
+
+/** One occupied refusal, with whatever owner the record and the caller carry. */
+async function refuseOccupied(label, { recordOwner, askedAs, paneName }) {
+  const dir = ownedDir(label);
+  setCensus([{ ...OCCUPYING_PANE, name: paneName ?? OCCUPYING_PANE.name, cwd: dir }]);
+  const deps = newCase((reg) =>
+    reg.recordConfigured({
+      path: dir,
+      config: recordOwner === undefined ? KNOBS : { ...KNOBS, owner: recordOwner }
+    })
+  );
+  return invoke(deps, {
+    action: 'activate_agent',
+    path: dir,
+    ...(askedAs === undefined ? {} : { owner: askedAs })
+  });
+}
+
+console.log('\n== f1. NO owner on the record — the majority case, and the one that must not read as foreign ==');
+{
+  const res = await refuseOccupied('case-f1', { recordOwner: undefined, askedAs: 'butchr' });
+  console.log(JSON.stringify(res.occupantOwner, null, 2));
+  check('the refusal still refuses — ownership changes no outcome',
+    res.success === false && res.refused === 'occupied');
+  check(
+    "an ABSENT owner is reported as `unowned` and NEVER as `others` — the caller named " +
+      'itself and still must not be told the directory is somebody else\'s',
+    res.occupantOwner?.relation === 'unowned',
+    JSON.stringify(res.occupantOwner)
+  );
+  check('`recorded` is null rather than an invented empty string',
+    res.occupantOwner?.recorded === null, JSON.stringify(res.occupantOwner));
+  check('what the caller asked as is still echoed, so the verdict is auditable',
+    res.occupantOwner?.askedAs === 'butchr', JSON.stringify(res.occupantOwner));
+  check(
+    'and the PROSE refuses the inference in words, for the human who reads the error ' +
+      'rather than the field',
+    /NOT EVIDENCE THAT IT IS NOT YOURS/.test(res.error ?? ''),
+    res.error
+  );
+}
+
+console.log('\n== f2. the recorded owner IS the caller — your own agent under another runtime ==');
+{
+  const res = await refuseOccupied('case-f2', { recordOwner: 'butchr', askedAs: 'butchr' });
+  console.log(JSON.stringify(res.occupantOwner, null, 2));
+  check('reported as `yours`', res.occupantOwner?.relation === 'yours',
+    JSON.stringify(res.occupantOwner));
+  check('naming the owner it was handed, verbatim', res.occupantOwner?.recorded === 'butchr');
+  check(
+    'and the refusal names the MIGRATION PATH rather than only the problem — the ' +
+      'documented adoption sequence, which is the whole point of telling a caller the ' +
+      'pane is its own',
+    /stand your own\s+pane down, then activate again/.test((res.error ?? '').replace(/\s+/g, ' ')) ||
+      /stand your own pane down, then activate again/.test((res.error ?? '').replace(/\s+/g, ' ')),
+    res.error
+  );
+}
+
+console.log('\n== f3. a DIFFERENT owner — the only branch entitled to say somebody else\'s ==');
+{
+  const res = await refuseOccupied('case-f3', { recordOwner: 'butchr', askedAs: 'someone-else' });
+  console.log(JSON.stringify(res.occupantOwner, null, 2));
+  check('reported as `others`', res.occupantOwner?.relation === 'others',
+    JSON.stringify(res.occupantOwner));
+  check('carrying BOTH strings, so the reader can check the comparison rather than trust it',
+    res.occupantOwner?.recorded === 'butchr' && res.occupantOwner?.askedAs === 'someone-else',
+    JSON.stringify(res.occupantOwner));
+}
+
+console.log('\n== f4. an owner is recorded and the caller did not say who it is ==');
+{
+  const res = await refuseOccupied('case-f4', { recordOwner: 'butchr', askedAs: undefined });
+  console.log(JSON.stringify(res.occupantOwner, null, 2));
+  check(
+    'reported as `unasked` and NOT as `others` — a caller that did not identify itself has ' +
+      'not been told the directory is foreign; the question was never put',
+    res.occupantOwner?.relation === 'unasked',
+    JSON.stringify(res.occupantOwner)
+  );
+  check('`askedAs` is null, which is what "did not say" looks like on the wire',
+    res.occupantOwner?.askedAs === null, JSON.stringify(res.occupantOwner));
+}
+
+console.log('\n== f5. the verdict comes from the RECORD, never from the pane\'s name ==');
+{
+  // THE CONTROL FOR "no pane-name parsing". The occupying pane is renamed from
+  // `butchr-task-kan-77` to a name carrying no owner-ish token at all, and the
+  // record is left alone. A daemon that had learned to read an owner out of a
+  // pane name would answer differently here; one that reports what `configure`
+  // handed it cannot.
+  const named = await refuseOccupied('case-f5a', {
+    recordOwner: 'butchr', askedAs: 'butchr', paneName: 'butchr-task-kan-77'
+  });
+  const renamed = await refuseOccupied('case-f5b', {
+    recordOwner: 'butchr', askedAs: 'butchr', paneName: 'zzz-unrelated-9f3c'
+  });
+  check(
+    'renaming the occupying pane changes NOTHING about the ownership verdict — the ' +
+      'answer is read off the record, so a pane name is not an input to it',
+    named.occupantOwner?.relation === 'yours' &&
+      renamed.occupantOwner?.relation === 'yours' &&
+      renamed.occupantOwner?.recorded === 'butchr',
+    JSON.stringify({ named: named.occupantOwner, renamed: renamed.occupantOwner })
+  );
+  check(
+    'and the refusal still names the pane it found, under its new name — reporting it is ' +
+      'not the same as parsing it',
+    (renamed.error ?? '').includes('zzz-unrelated-9f3c'),
+    renamed.error
+  );
+}
+
+// ---------------------------------------------------------------------------
 process.env.PATH = realPath;
 fs.rmSync(tmp, { recursive: true, force: true });
 

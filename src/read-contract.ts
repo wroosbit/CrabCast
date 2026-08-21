@@ -115,7 +115,7 @@ import type { ResumeCause } from './resume.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 14;
+export const READ_CONTRACT_VERSION = 15;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -536,6 +536,27 @@ export const BLOCK_SHAPES = {
     filtered: { bucket: 'derived' },
     unfiltered: { bucket: 'derived' },
     note: { bucket: 'derived' }
+  } satisfies FieldTable,
+
+  /**
+   * `activate_response.occupantOwner` on the `occupied` refusal (KAN-596) —
+   * whose the occupied directory is.
+   *
+   * ⚠ `recorded` IS `durable` AND `askedAs` IS NOT, and the split is the whole
+   * reason this block is declared rather than flattened. `recorded` is the
+   * agent's own `config.owner`, read off the append-only registry and reported
+   * verbatim — so it survives a restart and means the same thing tomorrow.
+   * `askedAs` is THIS CALL'S input echoed back: on no record, from no census,
+   * and true of nothing but the request that carried it. It is `derived`
+   * because that is the bucket for what this daemon composed during the call,
+   * and classifying it `durable` beside the field that really is would be the
+   * one misreading this block can produce — a consumer caching `askedAs` as a
+   * fact about the agent.
+   */
+  OccupantOwner: {
+    recorded: { bucket: 'durable' },
+    askedAs: { bucket: 'derived' },
+    relation: { bucket: 'derived' }
   } satisfies FieldTable,
 
   /** `list_agents.herdrHealth` — present only when the descriptor count could be read. */
@@ -1048,6 +1069,11 @@ export const ACTIVATE_RESPONSE_FIELDS = {
   recordReconciled: { bucket: 'derived', optional: true },
   /** Live panes in the directory that are not ours. */
   occupiedBy: { bucket: 'observed', optional: true, rows: 'PaneOccupant' },
+  /**
+   * Whose the occupied directory is, on the `occupied` refusal (KAN-596).
+   * Absent on every other branch, because no other branch looked.
+   */
+  occupantOwner: { bucket: 'derived', optional: true, block: 'OccupantOwner' },
   /** Prose for a human, beside a co-occupancy that was reported and not refused. */
   note: { bucket: 'derived', optional: true },
   /**
@@ -1243,7 +1269,12 @@ export const ACTIVATE_RESPONSE_BRANCHES = {
    */
   occupied: {
     always: [
-      'action', 'success', 'started', 'error', 'path', 'refused', 'verified', 'occupiedBy'
+      'action', 'success', 'started', 'error', 'path', 'refused', 'verified', 'occupiedBy',
+      // ALWAYS, NEVER `sometimes` (KAN-596). The question "whose is this" is
+      // answered on every occupied refusal — `unowned` and `unasked` ARE
+      // answers, so a branch that omitted the field when it had no name to
+      // give would make absence mean two things at once.
+      'occupantOwner'
     ],
     sometimes: []
   },

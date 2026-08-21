@@ -159,6 +159,7 @@ would be N chances for the copy that goes stale.
 | 12 | 2026-08-16 | KAN-504 — `configure_agent` gains one knob, `args`: extra command-line arguments for the launcher's own process, which appear in the `config` echo on `list_agents` and `agent_status` with the other knobs. **Additive: no documented field changed meaning, was removed, or changed type, and a caller that never sends `args` receives byte-for-byte what it received at version 11** — an agent configured without them is spawned with the command line it was spawned with before this version existed. ⚠ **THE DIGEST IS UNCHANGED FROM VERSION 11, DELIBERATELY, AND THAT IS THE ONE THING TO READ ON THIS ROW.** The digest is over the canonical of THIS document's declarations, where `config` is a single field of bucket `durable` — its interior is the [event contract](event-contract.md)'s `CONFIG_FIELDS`, not this one's — so a knob added inside it cannot move this number. **A repeated digest here means exactly this: the version moved because a change happened that the digest cannot see.** It is not a rewritten row and not a mistake; a reader comparing digests to decide whether anything changed would conclude wrongly, which is why it is stated rather than left to be noticed. **What ignoring the new knob costs a consumer:** nothing, if they never send `args`. If they DO send it to a daemon older than this version, it is **silently ignored** — `configure` does not refuse unknown fields — so the agent starts, reports success, and its process is missing arguments the caller believes it has. That failure is invisible from the response, and **this integer is the only way to tell a daemon that will honour `args` from one that will drop them.** Read it before sending the knob, not after. | `c67cbe8b8525` |
 | 13 | 2026-08-18 | KAN-528 — `list_agents` **stops carrying the prompt text** and carries its size instead, and every echo-bearing response gains one field. `config.prompt` is absent from every row of a fleet read; the new `promptChars` on the config echo is its exact character count (`0` for an empty prompt somebody froze, `null` for a record with none), and `configEchoContract.summarised` names the knob, what replaced it and where the text still is. `agent_status` and `activate_response` are unchanged in what they carry — `config.prompt` whole — and gain `promptChars` beside it, where it is simply that string's length. ⚠ **This is the one entry in this table that is NOT purely additive, and it is a removal from one surface: a consumer reading `config.prompt` off a `list_agents` row got the text at version 12 and gets `undefined` at 13.** It was not optional. A prompt is accepted up to 131,072 characters and this response echoed one per row, so a fleet of ten supervisor-sized prompts exceeded the socket's 1 MiB framing bound — at which point `list_agents` did not return a shortened answer, it returned **nothing** and the connection closed. The removal is what makes the response deliverable at all, it is declared on the response rather than left to be discovered, and the text stays readable one agent at a time from `agent_status`. **No row is dropped and no total is reduced:** the reduction is per-field, never per-agent | `d4093ade8dc3` |
 | 14 | 2026-08-21 | KAN-572 — one field added to [MissingAgent](#missingagent), and therefore to every `missingAgents[]` row and to the `agent.lost` event that spreads that row whole: `occupiedBy`, a new block [MissingAgentOccupant](#missingagentoccupant) naming the live pane **this daemon did not start** that is sitting in the missing agent's directory, or `null`. **Additive: no documented field changed meaning, was removed, or changed type**, and a consumer that ignores it reads what it read at version 13. ⚠ **What DID change is a `derived` field's CONTENT, and that is the substance of this row rather than the new key.** `reason` had two cases and now has three: an occupied row no longer says *"herdr has no live agent in its directory"*, because that sentence was **false** and the same response disproved it under [`foreignPanes`](#foreignpane). The classification was never wrong — no agent *of ours* is running — but the ownership question is NAME-scoped (`ourPaneIn` asks for a pane called `paneNameFor(path)`) while the sentence was DIRECTORY-scoped, so a stranger's pane in that very directory was reported as an empty workspace. **What ignoring the new field costs a consumer:** the thing it cost before this version, which is why it is not cosmetic — this category's remedy is re-activation, which **resumes the conversation an agent was stopped in**, and a row whose directory is occupied was never stopped and would be refused anyway. Measured on one `crabcast list` run: 3 of 7 workspaces under *"their work has stopped while still looking staffed"* were alive at that moment, one of them the agent producing the output. A false red whose remedy is the damage is worse than a false green | `cd932937e273` |
+| 15 | 2026-08-21 | KAN-596 — `activate_agent` takes an optional **request** argument, `owner`, and its `occupied` refusal gains one field: [occupantOwner](#occupantowner), a new block saying **whose the occupied directory is**. **Additive: no documented field changed meaning, was removed, or changed type**, and a caller that never passes `owner` receives the same refusal it received at version 14 plus one field. The value is the `owner` frozen onto the AGENT's own record by `configure` and is reported **verbatim**; the occupying pane is not ours, has no record and has no owner of its own, and **nothing here parses a pane name** — that derivation is not API, and matching one would put a consumer's naming rule under this daemon's compatibility promise. ⚠ **`relation` has four members and two of them are questions rather than answers.** `unowned` means no owner is recorded — which is **not** a claim that the directory is somebody else's, since every agent configured before anybody passed an owner carries none, and that is most of a fleet that has been running a while. `unasked` means an owner IS recorded and the caller did not say who it was, so the comparison was never made. Folding either into `others` would manufacture a false NON-match, and a false non-match is the direction that **stops agents**: the caller this refusal exists for reads it and decides whether to stand a pane down. **What ignoring the new field costs a consumer:** what it cost before this version — the refusal named the pane and left the operator to work out whose it was from the pane's name, which is the inference this surface refuses to require | `7a21b1aec330` |
 
 The digest is `sha256(readContractCanonical())`, first 12 hex characters, over
 `src/read-contract.ts`'s declarations. **What it buys:** changing a documented
@@ -698,6 +699,59 @@ the full detail for whoever is repairing them.
 record at the end of the log; that is expected, it is dropped, and reporting it
 here would make an ordinary crash look like data loss. Only lines that parse as
 JSON objects and are still unreadable appear.
+
+<a id="occupantowner"></a>
+### `occupantOwner` — OccupantOwner
+
+**On `activate_response` only** ([§8](#8-activate_response)), and only on the
+`occupied` refusal. It answers *whose is the directory I was refused*, which the
+refusal used to leave the reader to infer from the occupying pane's name.
+
+**The value is the AGENT's, not the pane's.** The pane in the way is not ours,
+so it has no record and carries no owner; what carries one is the agent whose
+directory it is sitting in — the agent this call was asked to activate. Its
+`owner` was frozen on by `configure` and is reported verbatim, matched **exactly**
+and never interpreted. **Nothing here parses a pane name**, and that absence is a
+design position rather than an oversight.
+
+<!-- contract-table: BLOCK_SHAPES.OccupantOwner -->
+
+| field | bucket | what it is |
+| --- | --- | --- |
+| `recorded` | durable | the `owner` on the agent's own record, verbatim, or `null` when it carries none |
+| `askedAs` | derived | who the caller said it was on **this call**, or `null` when it did not say. Echoed exactly as sent |
+| `relation` | derived | this daemon's comparison of the two — [occupantOwnerRelation](#occupantownerrelation) |
+
+⚠ **`recorded` is `durable` and `askedAs` is not, and the split is why this is a
+block rather than two flat fields.** `recorded` is read off the append-only
+registry and means the same thing tomorrow. `askedAs` is this call's own input
+handed back: on no record, from no census, and true of nothing but the request
+that carried it. A consumer that caches it as a fact about the agent has cached
+a fact about itself.
+
+**Both inputs are carried beside the verdict deliberately.** `relation` is what a
+program branches on, but a reader who wants to show an operator the two strings,
+or who disagrees with the comparison, must not have to re-derive them from the
+prose in `error`. They are also what makes the verdict auditable: `unowned`
+beside a non-null `recorded` is a contradiction anybody can see, where a bare
+verdict is one nobody can check.
+
+<a id="occupantownerrelation"></a>
+#### `occupantOwner.relation` — four members, and two of them are not answers
+
+| value | what it means |
+| --- | --- |
+| `unowned` | **no owner is recorded** for the agent configured here. ⚠ **Not a claim that it is not yours** — every agent configured before anybody passed an owner carries none |
+| `yours` | an owner is recorded and it **exactly equals** what the caller passed as `owner` — the caller's own agent, running under another runtime |
+| `others` | an owner is recorded, the caller said who it was, and **they differ** |
+| `unasked` | an owner is recorded and the caller **did not say** who it was, so the comparison was never made |
+
+⚠ **`unowned` and `unasked` must never be folded into `others`.** Both are
+questions nobody answered; `others` is an answer. The caller this refusal exists
+for reads it and decides whether to stand a pane down, so a false NON-match here
+does not over-report a listing — it stops an agent. `unowned` is also the
+**majority** case on any fleet older than the `owner` field, so it is the branch
+a reader meets first.
 
 <a id="paneoccupant"></a>
 ### `occupiedBy[]` — PaneOccupant
@@ -1296,6 +1350,7 @@ of refusal it is holding.
 | `reattached` | derived, optional | present only when **this call** took the terminal back — the agent was running and unreachable, and now is not. Silent on the steady-state no-op |
 | `recordReconciled` | derived, optional | present only when the disk disagreed with the world and this call settled it |
 | `occupiedBy` | observed, optional | [PaneOccupant](#paneoccupant) rows — live panes here that are **not ours** |
+| `occupantOwner` | derived, optional | whose the occupied directory is — [OccupantOwner](#occupantowner). **On the `occupied` refusal and nowhere else**, because no other branch asked |
 | `note` | derived, optional | prose for a human, beside a co-occupancy that was **reported and not refused** |
 | `refused` | derived, optional | the machine-readable kind — [activateRefused](#activaterefused). **On the pre-flight refusals**, by the rule in note 2 below; read that note before branching on its absence |
 | `refusedBy` | derived, optional | which subsystem refused — [activateRefusedBy](#activaterefusedby). On the `capacity` refusal only — so a consumer branching on `refused` alone reads `undefined` on the **most actionable refusal this surface has**. See note 2 |
@@ -1332,7 +1387,7 @@ condition named above, and nothing else may.
 | `bad-flag` | `override` or `preempt` was not a boolean | `action` `success` `started` `error` `path` | — |
 | `not-configured` | no `configure` has ever run for this path | `action` `success` `started` `error` `path` `refused` `missing` | — |
 | `unverifiable` | herdr did not answer `agent list`, so occupancy could not be checked | `action` `success` `started` `error` `path` `refused` `verified` | — |
-| `occupied` | live panes here and **none of them ours** | `action` `success` `started` `error` `path` `refused` `verified` `occupiedBy` | — |
+| `occupied` | live panes here and **none of them ours** | `action` `success` `started` `error` `path` `refused` `verified` `occupiedBy` `occupantOwner` | — |
 | `capacity` | the capacity gate refused | `action` `success` `started` `error` `path` `refusedBy` `reason` `derivation` `capacity` `priority` | `preemption` |
 | `spawn-error` | herdr refused the spawn | `action` `success` `started` `error` `path` | — |
 | `attach-error` | the pane is ours and live, and taking its terminal back failed | `action` `success` `started` `error` `path` `paneName` `paneId` `alreadyRunning` | `recordReconciled` |

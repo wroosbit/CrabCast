@@ -411,7 +411,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "crabcast_activate_agent",
         description:
-          "Starts an agent that crabcast_configure_agent has already made exist. It takes NO attributes: everything the agent is comes from its record, so there is nothing here that could disagree with what it already is. Refused when the path was never configured, naming what is missing. Refused when the machine is at capacity — see crabcast_capacity — unless override or preempt is set; that refusal names what is running and what each one is worth, and carries a `preemption` block when this activation outranks one of them. REFUSED, ALWAYS, when a live pane that is not ours is already in that directory: the refusal names each one's pane_id, name and agent_status, and nothing is started. Refused as unverifiable when herdr does not answer at all, because an empty census from an unreachable herdr is silence rather than evidence that the directory is free. SAFE TO CALL AGAIN, as a contract rather than as a happy accident — a reconciler calls this on agents that are already exactly as asked for, constantly. Activating an agent that is already running is not an error: it answers `alreadyRunning: true` with `started: false` and the pane it is already in, starts no second pane, and does not touch the capacity gate, because an agent already running is already counted. Both fields are on EVERY successful response, true or false, so 'did this call start it' is read rather than inferred from a missing field. It also CONVERGES the durable record: if the record does not say this agent is running while its pane is live — which is what a failed registry write leaves behind — the repeat call writes the activation and says `recordReconciled: true`, so calling again is what repairs a `durable: false` rather than papering over it. What is NOT idempotent, deliberately: a live FOREIGN pane in the directory refuses every time. It is somebody else's agent, not this one already running.",
+          "Starts an agent that crabcast_configure_agent has already made exist. It takes NO attributes: everything the agent is comes from its record, so there is nothing here that could disagree with what it already is — `owner` is not an exception to that, because it says who is ASKING rather than anything about the agent. Refused when the path was never configured, naming what is missing. Refused when the machine is at capacity — see crabcast_capacity — unless override or preempt is set; that refusal names what is running and what each one is worth, and carries a `preemption` block when this activation outranks one of them. REFUSED, ALWAYS, when a live pane that is not ours is already in that directory: the refusal names each one's pane_id, name and agent_status, and nothing is started. THAT REFUSAL ALSO ANSWERS WHOSE THE DIRECTORY IS, on `occupantOwner` — the owner frozen onto the agent's own record, reported verbatim and never inferred from the occupying pane's name. Its `relation` is one of four: `yours` (the recorded owner is the one you passed as `owner` — so this is your own agent under another runtime, and the fix is to stand that pane down and activate again), `others`, `unowned` (NO owner is recorded — which is NOT a claim that it is not yours, since every agent configured before anybody passed one carries none) and `unasked` (an owner is recorded and you did not say who you are, so the question was not put). Read `unowned` and `unasked` as questions nobody answered rather than as ‘not yours’: treating either as foreignness is how a caller reasons its way to standing down an agent that was its own. Refused as unverifiable when herdr does not answer at all, because an empty census from an unreachable herdr is silence rather than evidence that the directory is free. SAFE TO CALL AGAIN, as a contract rather than as a happy accident — a reconciler calls this on agents that are already exactly as asked for, constantly. Activating an agent that is already running is not an error: it answers `alreadyRunning: true` with `started: false` and the pane it is already in, starts no second pane, and does not touch the capacity gate, because an agent already running is already counted. Both fields are on EVERY successful response, true or false, so 'did this call start it' is read rather than inferred from a missing field. It also CONVERGES the durable record: if the record does not say this agent is running while its pane is live — which is what a failed registry write leaves behind — the repeat call writes the activation and says `recordReconciled: true`, so calling again is what repairs a `durable: false` rather than papering over it. What is NOT idempotent, deliberately: a live FOREIGN pane in the directory refuses every time. It is somebody else's agent, not this one already running.",
         inputSchema: {
           type: "object",
           properties: {
@@ -420,6 +420,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "boolean",
               description:
                 "Optional. Start the agent even when the machine is at capacity. The refusal it bypasses is recorded with the load and memory figures at the time. Use it deliberately, not reflexively: the cap exists because a human noticed the desktop had become unusable. It does NOT override the occupied-directory refusal, which is about somebody else's agent rather than about the machine.",
+            },
+            owner: {
+              type: "string",
+              description:
+                "Optional. Who YOU are, matched EXACTLY — no prefix, no glob, no case-folding — against the owner frozen onto the agent's record by crabcast_configure_agent. It changes NOTHING about whether this activation is refused; its only effect is that an occupied refusal can tell you whether the pane in the way belongs to your own agent. Omit it and that refusal reports `unasked` rather than `others`: a caller that did not say who it is has not been told the directory is somebody else's.",
             },
             preempt: {
               type: "boolean",
@@ -583,11 +588,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === "crabcast_activate_agent") {
-      const { path, override, preempt } = args as any;
+      const { path, override, preempt, owner } = args as any;
       if (!path) throw new Error("Missing required argument: path");
 
       const res = await callDaemonAPI('activate_agent', {
-        path: agentPath(path), override, preempt });
+        path: agentPath(path), override, preempt, owner });
       return {
         content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
         // Without it a failed activation arrives as ordinary text, which is
