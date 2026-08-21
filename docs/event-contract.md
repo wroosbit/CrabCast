@@ -175,6 +175,8 @@ exercise.
 Present exactly when `reason === 'preempted'`. It carries everything the
 retired `agent_preempted_event` carried:
 
+<!-- contract-example: . = events.PREEMPTION_FIELDS -->
+<!-- contract-example: by = events.PREEMPTION_BY_FIELDS -->
 ```json
 {
   "at": "2026-08-04T06:11:03.114Z",
@@ -263,6 +265,7 @@ invisible.**
 **The remedy, in the same breath as the requirement.** Every response carries a
 `pages` block, one entry per paged category:
 
+<!-- contract-example: pages.standbyAgents = read-contract.BLOCK_SHAPES.FleetPage -->
 ```json
 "pages": {
   "standbyAgents": { "returned": 25, "total": 89, "limit": 25, "remaining": 64,
@@ -343,6 +346,9 @@ and the response says which you are reading:**
 | **`list_agents` response** | **reported and still delivered.** `configEchoContract.drops` is `false` |
 | **`agent_status` response** | **the same**: reported by path, still delivered, `drops` is `false` (KAN-168) |
 
+<!-- contract-example: configEchoContract = read-contract.BLOCK_SHAPES.ConfigEchoContract -->
+<!-- contract-example: configEchoContract.declared = events.CONFIG_FIELDS -->
+<!-- contract-example: configEchoContract.verbatim = verbatim(events.CONFIG_FIELDS) -->
 ```json
 "configEchoContract": {
   "declared": ["priority", "refusable", "chargeable", "preemptable", "launcher", "args", "prompt", "mcpServers", "label", "owner"],
