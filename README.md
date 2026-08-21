@@ -881,9 +881,9 @@ is a snapshot. `node scripts/verify-owner-filter.mjs` is the proof.
 Reaching the interesting state takes a rebuild in the middle of a session — the daemon is spawned out of the `dist/` that is on disk, and then that `dist/` is rebuilt underneath it while it keeps running:
 
 ```
-$ crabcast configure /tmp/kan174/prov/notes --priority 1 --launcher shell   # spawns the daemon
+$ crabcast configure /tmp/kan592/prov/notes --priority 1 --launcher shell   # spawns the daemon
 $ crabcast daemon-status                                                    # freshness: CURRENT
-$ touch /tmp/kan174/crabcast/src/router.ts && ( cd /tmp/kan174/crabcast && npm run build )
+$ touch /tmp/kan592/crabcast/src/router.ts && ( cd /tmp/kan592/crabcast && npm run build )
 $ crabcast daemon-status
 ```
 
@@ -891,32 +891,49 @@ $ crabcast daemon-status
 
 ```
 build — what THIS process was loaded from, read when it started:
-  commit:          b058fda6d68d0282663961ca54e21185fc9d76bb
+  commit:          284d86472927ec605c8e6d3dda684ab5bcffb799
   checkout:        clean when this build was made
-  built:           2026-08-05T14:47:59.617Z
-  git root:        /tmp/kan174/crabcast
-  loaded from:     /tmp/kan174/crabcast/dist
-  stamp:           /tmp/kan174/crabcast/dist/build-stamp.json
-  read at:         2026-08-05T14:51:59.463Z
+  built:           2026-08-21T20:59:35.067Z
+  git root:        /tmp/kan592/crabcast
+  loaded from:     /tmp/kan592/crabcast/dist
+  stamp:           /tmp/kan592/crabcast/dist/build-stamp.json
+  read at:         2026-08-21T20:59:42.575Z
 
 freshness: PROCESS-PREDATES-BUILD
-  THE RUNNING DAEMON IS NOT THE BUILD ON DISK. /tmp/kan174/crabcast/dist was rebuilt after this process loaded it, and the process is still executing what it read at boot (2026-08-05T14:47:59.617Z); the build on disk is 2026-08-05T14:52:04.764Z. Nothing on the filesystem shows this — restart the daemon to pick the new build up.
+  THE RUNNING DAEMON IS NOT THE BUILD ON DISK. /tmp/kan592/crabcast/dist was rebuilt after this process loaded it, and the process is still executing what it read at boot (2026-08-21T20:59:35.067Z); the build on disk is 2026-08-21T20:59:56.549Z. Nothing on the filesystem shows this — restart the daemon to pick the new build up.
   running the build on disk: no
   sources newer than build:  no
+  on the release line:       yes
+  release line:              refs/heads/main at 284d86472927ec605c8e6d3dda684ab5bcffb799, committed 2026-08-21T20:58:56.000Z, in /tmp/kan592/crabcast
   compared by:               build-stamp
-  build on disk:             2026-08-05T14:52:04.764Z
-  newest in dist/:           2026-08-05T14:52:04.763Z
-  sources:                   /tmp/kan174/crabcast/src
-  newest source:             2026-08-05T14:52:00.756Z (router.ts)
+  build on disk:             2026-08-21T20:59:56.549Z
+  newest in dist/:           2026-08-21T20:59:56.549Z
+  sources:                   /tmp/kan592/crabcast/src
+  newest source:             2026-08-21T20:59:47.305Z (router.ts)
 ```
 
 **The evidence tail is the answer, not decoration.** `built:` and `read at:` are what the *process* holds — the stamp it read at boot — and `build on disk:` is what is there *now*; the two disagreeing is the whole finding. `compared by: build-stamp` says which of the two comparisons was available: a `dist/` with no stamp is compared by file times instead, and that line then says so *and* names what file times cannot see — a weaker answer that must not look like this one.
 
-`npm run build` writes `dist/build-stamp.json` (its `postbuild` step, `scripts/stamp-build.mjs`); the daemon reads it **once, at boot**, out of the `dist/` it was itself loaded from. Three freshness states are told apart, and each is measured rather than assumed:
+`npm run build` writes `dist/build-stamp.json` (its `postbuild` step, `scripts/stamp-build.mjs`); the daemon reads it **once, at boot**, out of the `dist/` it was itself loaded from. Four freshness states are told apart, and each is measured rather than assumed:
 
-* **`current`** — this daemon is running the build on disk, and that build is newer than `src/`.
+* **`current`** — this daemon is running the build on disk, that build is newer than `src/`, **and** the commit it was built from is on the release line. **All three**, since KAN-592; it used to be the first two, and the gap between them is what that ticket was filed for.
 * **`process-predates-build`** — somebody rebuilt under a live daemon. It is still serving the old `dist/`. **No filesystem check can see this**: the tree on disk looks entirely current, which is exactly why the process has to answer it.
 * **`build-predates-sources`** — `src/` has changed since `dist/` was built. Run `npm run build`.
+* **`off-release-line`** — the running build is entirely self-consistent and was made from a commit that has never landed. **Rebuilding will not clear it**, which is what separates it from the two above.
+
+### Is it a build somebody released?
+
+**`CURRENT` meant *consistent with the local checkout* and was read as *this is a build somebody released*, and on 2026-08-20 those came apart.** The fleet served a build made from a commit on `incident/kan-552-herdr-0.8-port` for roughly 24 hours while `daemon-status` reported `freshness: CURRENT`, `running the build on disk: yes` and `checkout: clean when this build was made`. **Every one of those was true.** None of them asks whether the commit is reachable from a released branch, and CrabCast is consumed as a linked checkout — so a `git checkout` plus an `npm run build` in that tree changes what the fleet runs, with no deploy step and no announcement.
+
+So the answer is a **qualifier on `freshness` itself** rather than a fourth green line, because the headline word is what gets read:
+
+* **`on the release line:`** — `yes`, `no`, or `UNKNOWN`, from `git merge-base --is-ancestor` against the first ref that resolves out of `refs/remotes/origin/HEAD`, `refs/remotes/origin/main`, `refs/heads/main`. The `release line:` beneath it names which one answered, the object the test actually ran against, when that object was committed, and the tree it was all read from.
+* **Nothing about it touches the network, and nothing about it ever may.** `daemon-status` has to work on a machine with no route out. The ref is whatever this clone last fetched, so **`git fetch` before treating a `no` as final** — and the `no` says so itself.
+* **The bound is asymmetric, so only the `no` carries a caveat.** Reachability is monotonic under fast-forward: a commit reachable from the release tip at any past moment stays reachable from every later one, so a stale ref can make a `yes` **late** but not wrong. A `no` can be a commit that landed since the last fetch. (A force-push of the release branch is the one event that can retract a `yes`, and it is a different event.)
+* **"Cannot tell" is a third answer and is not a `no`.** No `git` on the machine, a `dist`-only install with no working tree beside it, a clone holding none of those refs, a repository that has never heard of the commit — each is `UNKNOWN` with its reason, and each demotes the state to `unknown` rather than to `current`. An unanswerable release-line question printing `CURRENT` would be the same defect one layer down. **A build with no stamp therefore reads `freshness: UNKNOWN`** where it used to read `CURRENT`: `tsc` run by hand names no commit, and a build nobody can name cannot be shown to be released.
+* **A detached HEAD changes nothing.** The question is about the commit the *stamp* names, not about what is checked out.
+
+`node scripts/verify-release-line.mjs` is the live proof, and §5 of it is the one worth reading: it shows the answer flipping from `no` to `yes` only once the proof itself runs `git fetch`, which is how "this never reaches the network" is established by consequence rather than by reading the source.
 
 **"I don't know" is a first-class answer and never renders as "clean".** A tree with no `.git`, a `dist/` built by running `tsc` directly (no stamp), a stamp whose `dist/` was rewritten under it, a machine with no `git` — each reports `UNKNOWN` with the reason that made it unknown, under a heading that says so. A check that reports success when it could not run is worse than no check. `node scripts/verify-daemon-provenance.mjs` is the live proof, including that the unknowns are unknowns.
 

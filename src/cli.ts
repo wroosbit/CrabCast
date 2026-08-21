@@ -1857,7 +1857,8 @@ const BUILD_FIELDS = [
 ] as const;
 
 const FRESHNESS_FIELDS = [
-  'state', 'summary', 'processIsCurrentBuild', 'sourcesNewerThanBuild', 'basis',
+  'state', 'summary', 'processIsCurrentBuild', 'sourcesNewerThanBuild', 'onReleaseLine',
+  'releaseRef', 'releaseRefCommit', 'releaseRefCommittedAt', 'releaseLineRepo', 'basis',
   'runningBuiltAt', 'runningCommit', 'onDiskBuiltAt', 'onDiskCommit', 'distNewestAt',
   'sourceDir', 'sourceNewestAt', 'sourceNewestFile', 'unknown'
 ] as const;
@@ -1979,6 +1980,27 @@ function freshnessBlock(freshness: any): string | null {
     freshness.summary ? indent(String(freshness.summary)) : null,
     knownOrUnknown('running the build on disk', yesNo(freshness.processIsCurrentBuild), 26),
     knownOrUnknown('sources newer than build', yesNo(freshness.sourcesNewerThanBuild), 26),
+    // KAN-592. `knownOrUnknown` rather than `field`, and it is the whole point:
+    // the three lines above this one were all TRUE for a fleet serving an
+    // unmerged incident branch for 24 hours, and the question nobody was asking
+    // has to print the word UNKNOWN when it cannot be answered rather than
+    // vanish into a block that then reads as three greens again.
+    knownOrUnknown('on the release line', yesNo(freshness.onReleaseLine), 26),
+    // The evidence for the line above, on ONE line: which ref answered, the
+    // object the ancestry test was actually run against, when that object was
+    // committed — which is what tells a reader how far behind their copy of the
+    // line may be — and the tree it was all read out of. `field`, so a run that
+    // resolved no ref at all prints nothing here and says UNKNOWN above, with
+    // the reason in the block underneath.
+    field(
+      'release line',
+      freshness.releaseRef
+        ? `${freshness.releaseRef} at ${freshness.releaseRefCommit}` +
+          `${freshness.releaseRefCommittedAt ? `, committed ${freshness.releaseRefCommittedAt}` : ''}` +
+          `${freshness.releaseLineRepo ? `, in ${freshness.releaseLineRepo}` : ''}`
+        : null,
+      26
+    ),
     // The basis, and — when it is the weak one — what that basis cannot see
     // (KAN-170 item 11). `compared by: file-times` named the evidence without
     // naming its bound, so a reader took "running the build on disk: yes" as

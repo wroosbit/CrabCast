@@ -1120,6 +1120,18 @@ jobs:
       # "reports unknown rather than something plausible" cannot be
       # demonstrated in a tree that has a commit in it (KAN-122).
       #
+      # verify-release-line is its sibling and the same shape for the same
+      # reason (KAN-592): it builds real little git repositories — one with a
+      # commit on an unmerged branch, one whose remote-tracking ref is behind a
+      # bare remote that already has the commit, one with a detached HEAD, one
+      # with no candidate ref at all — because "is the running build on a
+      # released line" has no answer worth checking in a tree that is on one.
+      # ⚠ IT RUNS `git fetch` AGAINST A BARE REPOSITORY IT CREATED UNDER THE
+      # SYSTEM TEMP DIR, which is a local path and not a network operation; that
+      # fetch is the POSITIVE CONTROL for the claim that the daemon never
+      # fetches, and the section goes red without it. Nothing in it reaches the
+      # runner's network.
+      #
       # DELIBERATELY EXCLUDED — seven scripts need a real herdr server and real
       # terminal panes, which no GitHub runner has (herdr's public
       # availability is itself an open question on this project). Running them
@@ -1167,6 +1179,7 @@ jobs:
             verify-agy-mcp-reversal
             verify-agy-mcp-write-refusals
             verify-daemon-provenance
+            verify-release-line
             verify-state-read-echoes-config
             verify-activated-by
             verify-reconfiguration-refuses
