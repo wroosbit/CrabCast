@@ -901,9 +901,39 @@ const PROOF_DEFENCES = [
       'sentence asserting a directory that is not there AND put one record in two categories. ' +
       'SEAM: the fixture is a herdr STUB, so what is defended is the daemon\'s reporting over a ' +
       'census rather than herdr\'s reporting of one. It also does NOT defend the Butchr-side ' +
-      'question of why a proof teardown leaves rows behind (KAN-524 §6, KAN-519), nor whether ' +
-      '`daemon_status` agrees with this category — measured and filed as KAN-619, undefended ' +
-      'here and named so rather than left to be inferred.'
+      'question of why a proof teardown leaves rows behind (KAN-524 §6, KAN-519). Whether ' +
+      '`daemon_status` AGREES with this category was named here as undefended when this entry ' +
+      'was written, was filed as KAN-619, and is now defended by ' +
+      '`verify-daemon-status-accounts-for-stranded` — the entry below. The pointer is updated ' +
+      'rather than deleted: what this script leaves uncovered is the same as it was, and the ' +
+      'only thing that changed is that something now covers it.'
+  },
+  {
+    script: 'verify-daemon-status-accounts-for-stranded',
+    defence: 'mutation',
+    central:
+      '`daemon_status` accounts for the records `expectedAgents` counts and cannot start, and ' +
+      'agrees with `list_agents` about the registry they both read — `expectedStranded` is the ' +
+      'startable-subtraction, `strandedTotal` is the whole-registry figure, and it equals ' +
+      '`list_agents.strandedTotal` because both surfaces read one membership expression.',
+    note:
+      'THREE MUTANTS OF THE COMPILED BUILD, and the middle one is why the fixture is shaped the ' +
+      'way it is. A build whose `expectedStranded` is blind to the filesystem brings back the ' +
+      'defect as filed (2 expected to be running, nothing stranded, while `list_agents` reports ' +
+      '2 stranded on the same registry). A build that publishes ONE count under BOTH names — ' +
+      'the likeliest wrong fix, because `list_agents.strandedTotal` was already there and ' +
+      'reusing it is one line — passes every assertion a single-stranded-record fixture could ' +
+      'make, so the fixture holds FOUR stranded records with THREE last events and exactly one ' +
+      '`activated`, and §4 asserts the two fields DIFFER. A build whose `daemon_status` keeps a ' +
+      'membership test of its own brings back the disagreement itself. SEAM: the router is ' +
+      'driven in-process, so this does NOT defend that the two fields reach the wire — ' +
+      '`verify-daemon-status-over-mcp` §3 compares the MCP payload field for field against the ' +
+      'socket, and `verify-read-contract` §1/§3 hold the declaration, the document and the live ' +
+      'daemon to each other. It also does NOT defend the `strandedAgents` category itself, ' +
+      'which is `verify-stranded-agents` above. ⚠ AND ONE THING IS DEFENDED BY NOBODY: no proof ' +
+      'anywhere observes a REAL fleet accumulating stranded rows and a supervisor reading these ' +
+      'counts off it. The population is real — thirteen such rows on 2026-08-21 — and every ' +
+      'proof that touches it, this one included, builds its own.'
   },
   {
     script: 'verify-fleet-enumeration',

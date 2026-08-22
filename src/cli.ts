@@ -299,9 +299,23 @@ function indent(text: string, prefix = INDENT): string {
     .join('\n');
 }
 
-function field(label: string, value: unknown, width = 14): string | null {
+const FIELD_WIDTH = 14;
+
+function field(label: string, value: unknown, width = FIELD_WIDTH): string | null {
   if (value === undefined || value === null || value === '') return null;
   return `${INDENT}${(label + ':').padEnd(width)} ${String(value)}`;
+}
+
+/**
+ * A continuation line under a {@link field}, aligned to that field's value
+ * column.
+ *
+ * Derived from {@link FIELD_WIDTH} rather than written as a literal: the two
+ * would otherwise be a number in two places, and the one that goes stale is the
+ * one nothing renders in a test.
+ */
+function continuation(text: string): string {
+  return `${INDENT}${' '.repeat(FIELD_WIDTH + 1)}${text}`;
 }
 
 /**
@@ -432,12 +446,14 @@ function agentsField(
       : '';
   return lines(
     field('agents', base),
-    `${INDENT}${' '.repeat(15)}` +
+    continuation(
       `⚠ ${expectedStranded} of those ${expected} cannot be started: the directory is gone. ` +
-      (startable === null ? '' : `${startable} can.`),
-    `${INDENT}${' '.repeat(15)}` +
-      `\`crabcast list\` names them under "stranded agents"${extra}; \`crabcast forget <path>\` ` +
-      `is what retires one.`
+        (startable === null ? '' : `${startable} can.`)
+    ),
+    continuation(
+      `\`crabcast list\` names them under "stranded agents"${extra}; ` +
+        `\`crabcast forget <path>\` is what retires one.`
+    )
   );
 }
 
