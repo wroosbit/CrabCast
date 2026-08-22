@@ -96,6 +96,8 @@ no other, and `crabcast daemon-status` prints it as `read contract`.
 | `contractVersion` | derived | the revision of this document the answering process implements. An integer, incrementing by one |
 | `unreadableRecords` | durable | registry rows this daemon could not read — [UnreadableRecord](#unreadablerecord) rows, the same shape `list_agents` carries |
 | `unreadableRecordsTotal` | derived | how many there are, whatever this response carried |
+| `expectedStranded` | derived | how many of `expectedAgents` have **no directory to run in**. The subset, so `expectedAgents - expectedStranded` is what can actually be started |
+| `strandedTotal` | derived | how many records in the whole registry are stranded, whatever their last event — the same name, population and value [`list_agents`](#4-list_agents) carries |
 
 ```json
 { "action": "daemon_status_response", "success": true,
@@ -103,6 +105,7 @@ no other, and `crabcast daemon-status` prints it as `read contract`.
   "contractVersion": 4,
   "configuredAgents": 0, "expectedAgents": 0,
   "unreadableRecords": [ … ], "unreadableRecordsTotal": 1,
+  "expectedStranded": 0, "strandedTotal": 0,
   "build": { … }, "freshness": { … } }
 ```
 
@@ -119,6 +122,36 @@ registry reads, on a registry that had a row in it. A count that silently
 excludes what it could not read is the whole defect, one field to the left.
 They are the same shape `list_agents` carries, deliberately: a consumer that
 branches on one must be able to branch on the other.
+
+**`expectedStranded` and `strandedTotal` are here on that same argument, one
+field to the right** ([KAN-619](https://wroosbit.atlassian.net/browse/KAN-619)).
+`unreadableRecordsTotal` qualifies those two counts for rows this daemon could
+not **parse**. `expectedStranded` qualifies `expectedAgents` for rows it parsed
+perfectly and whose **directory is gone**: such a record says `activated`, so
+`expectedAgents` counts it, and it cannot be started — `activate` refuses a path
+that does not resolve, and `list_agents` reports it under
+[`strandedAgents`](#strandedagent). Two instruments, one registry, different
+answers about one row.
+
+⚠ **The number is disclosed rather than subtracted, and that is a decision.**
+Excluding stranded records from `expectedAgents` would make this response
+disagree with **`reconcile`** instead, which restores from `registry.expected()`
+— the same `activated` filter with no existence check — so the count would stop
+describing the set the daemon acts on and the disagreement would move one field
+to the right rather than going away.
+
+⚠ **The two new fields count two different populations, and reading either as
+the other is the mistake to avoid.** `expectedStranded` is the subset **of**
+`expectedAgents`. `strandedTotal` is every stranded record whatever its last
+event, so it also counts `configured`- and `deactivated`-last rows that
+`expectedAgents` never counted: **`strandedTotal >= expectedStranded` always**,
+and on a registry where every stranded record was activated the two are equal.
+Only `strandedTotal` is comparable against `list_agents.strandedTotal`, and it
+is identical to it by construction — both surfaces read one expression.
+
+**`configuredAgents` is deliberately not qualified by either.** It answers *what
+is in my registry*, and a stranded record **is** in the registry, so it is right
+as it stands; adding a caveat would imply an exclusion that is not happening.
 
 **How to read it: once per boot.** The version is a property of the *process*,
 and a process change is announced by **`bootId`**, which rides every
@@ -161,6 +194,7 @@ would be N chances for the copy that goes stale.
 | 14 | 2026-08-21 | KAN-572 — one field added to [MissingAgent](#missingagent), and therefore to every `missingAgents[]` row and to the `agent.lost` event that spreads that row whole: `occupiedBy`, a new block [MissingAgentOccupant](#missingagentoccupant) naming the live pane **this daemon did not start** that is sitting in the missing agent's directory, or `null`. **Additive: no documented field changed meaning, was removed, or changed type**, and a consumer that ignores it reads what it read at version 13. ⚠ **What DID change is a `derived` field's CONTENT, and that is the substance of this row rather than the new key.** `reason` had two cases and now has three: an occupied row no longer says *"herdr has no live agent in its directory"*, because that sentence was **false** and the same response disproved it under [`foreignPanes`](#foreignpane). The classification was never wrong — no agent *of ours* is running — but the ownership question is NAME-scoped (`ourPaneIn` asks for a pane called `paneNameFor(path)`) while the sentence was DIRECTORY-scoped, so a stranger's pane in that very directory was reported as an empty workspace. **What ignoring the new field costs a consumer:** the thing it cost before this version, which is why it is not cosmetic — this category's remedy is re-activation, which **resumes the conversation an agent was stopped in**, and a row whose directory is occupied was never stopped and would be refused anyway. Measured on one `crabcast list` run: 3 of 7 workspaces under *"their work has stopped while still looking staffed"* were alive at that moment, one of them the agent producing the output. A false red whose remedy is the damage is worse than a false green | `cd932937e273` |
 | 15 | 2026-08-21 | KAN-594 — `list_agents` gains a **sixth paged category**, [strandedAgents](#strandedagent), and the `strandedTotal` beside it: records whose **directory no longer exists**. **Additive on the wire: no documented field changed meaning, was removed, or changed type**, and a consumer that ignores both keys reads what it read at version 14. ⚠ **What DID change is which category some rows arrive in, and that is the substance of this row rather than the new key.** Before this version a record whose directory had been deleted reached a reader in one of two wrong ways. `standbyAgents` and `unstartedAgents` **dropped it silently** on a bare existence check — correct about what that filter was written for, since neither list may offer a switch that cannot be thrown, and wrong to decide on the same line that the record should not be REPORTED either, so the row left the response entirely while staying in the registry. `missingAgents` **kept it and described it wrongly**, having no existence check at all: an `activated`-last record with no directory was reported as *"herdr has no live agent in its directory"*, which asserts a directory that is not there and invites a re-activation that `activate` refuses. Those rows now appear under `strandedAgents` instead, so **`missingTotal` can go DOWN across this upgrade with nothing having been fixed** — the rows moved. **What ignoring the new category costs a consumer:** the thing it cost before, which is why this is not cosmetic — a reconciler summing the categories to account for its registry was short by exactly these rows and had no field that said so. `lastEvent` on each row is the `configured`-versus-`activated` distinction the population that commissioned this could not be read without: a count of configured-and-never-retired records and a raw count of log lines differed there by an order of magnitude and both were honest readings of the same file. ⚠ **Nothing retires a stranded row** — compaction never drops an agent, because a directory can also be absent because a mount is late | `705c1961d0ba` |
 | 16 | 2026-08-21 | KAN-596 — `activate_agent` takes an optional **request** argument, `owner`, and its `occupied` refusal gains one field: [occupantOwner](#occupantowner), a new block saying **whose the occupied directory is**. **Additive: no documented field changed meaning, was removed, or changed type**, and a caller that never passes `owner` receives the same refusal it received at version 14 plus one field. The value is the `owner` frozen onto the AGENT's own record by `configure` and is reported **verbatim**; the occupying pane is not ours, has no record and has no owner of its own, and **nothing here parses a pane name** — that derivation is not API, and matching one would put a consumer's naming rule under this daemon's compatibility promise. ⚠ **`relation` has four members and two of them are questions rather than answers.** `unowned` means no owner is recorded — which is **not** a claim that the directory is somebody else's, since every agent configured before anybody passed an owner carries none, and that is most of a fleet that has been running a while. `unasked` means an owner IS recorded and the caller did not say who it was, so the comparison was never made. Folding either into `others` would manufacture a false NON-match, and a false non-match is the direction that **stops agents**: the caller this refusal exists for reads it and decides whether to stand a pane down. **What ignoring the new field costs a consumer:** what it cost before this version — the refusal named the pane and left the operator to work out whose it was from the pane's name, which is the inference this surface refuses to require | `5c0f7f0bcca2` |
+| 17 | 2026-08-22 | KAN-619 — two fields added to `daemon_status`: `expectedStranded` and `strandedTotal`, both `derived`, disclosing what `expectedAgents` beside them could not say. **Additive: no documented field changed meaning, was removed, or changed type**, and a consumer that ignores both reads exactly what it read at version 16. ⚠ **What this version announces is that `expectedAgents` was already a count whose sentence outran its population, and it still is — deliberately.** It counts records whose last event is `activated`, and its sentence is *expected to be **running***; a record whose directory has been deleted is counted by it and cannot run, because `activate` refuses a path that does not resolve. `list_agents`, one call away on the same head and the same registry, reported that record under [`strandedAgents`](#strandedagent) — so the two instruments gave different answers about one row, which is the defect. **The count is NOT narrowed to fix it**, and that is the substance of this row rather than the new keys: excluding stranded records would make `expectedAgents` disagree with **`reconcile`**, which restores from `registry.expected()` — the same `activated` filter with no existence check — moving the disagreement one field to the right instead of removing it. ⚠ **The two new fields are two POPULATIONS and a consumer must not read either as the other.** `expectedStranded` is the subset **of** `expectedAgents`, so `expectedAgents - expectedStranded` is what can actually be started; `strandedTotal` is every stranded record whatever its last event, is therefore `>=` the first, and is the **only** one comparable against `list_agents.strandedTotal`, which it equals by construction because both surfaces read one expression. **What ignoring them costs a consumer:** what it cost before this version — `daemon_status` is the cheapest call on the socket and the one a supervisor asks *what should be running*, and its answer counted records with nowhere to run while disclosing nothing, which is indistinguishable from a registry in which every expected agent is startable | `1b553b730186` |
 
 The digest is `sha256(readContractCanonical())`, first 12 hex characters, over
 `src/read-contract.ts`'s declarations. **What it buys:** changing a documented

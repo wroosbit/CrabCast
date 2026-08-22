@@ -115,7 +115,7 @@ import type { ResumeCause } from './resume.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 16;
+export const READ_CONTRACT_VERSION = 17;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -1370,11 +1370,33 @@ export const ACTIVATE_RESPONSE_BRANCHES = {
  * `list_agents` carries, and a consumer that branches on one must be able to
  * branch on the other; publishing it on one surface and not the other is how
  * the two come to disagree.
+ *
+ * THE FOURTH AND FIFTH ARE HERE ON THAT SAME ARGUMENT, ONE FIELD TO THE RIGHT
+ * (KAN-619). `unreadableRecordsTotal` qualifies those two counts for rows this
+ * daemon could not PARSE; `expectedStranded` qualifies `expectedAgents` for
+ * rows it parsed perfectly and whose DIRECTORY IS GONE. Both are the same
+ * defect — a count whose sentence promises more than its population supports —
+ * and the second was live while the first was fixed: `daemon_status` said "2
+ * expected to be running" for a registry in which `list_agents`, one call away
+ * on the same head, reported one of the two stranded.
+ *
+ * ⚠ AND THEY ARE TWO FIELDS RATHER THAN ONE BECAUSE THEY COUNT TWO
+ * POPULATIONS. `expectedStranded` is the subset OF `expectedAgents`, so
+ * `expectedAgents - expectedStranded` is what can actually be started.
+ * `strandedTotal` is every stranded record whatever its last event — the same
+ * name, population and value `list_agents` publishes, carried here for exactly
+ * the reason `unreadableRecords` is carried on both surfaces. Publishing only
+ * the subset would have minted a field that LOOKS like `list_agents`'
+ * `strandedTotal`, counts something narrower, and is discovered to differ by a
+ * consumer doing arithmetic across the two responses — which is this ticket's
+ * own defect, re-committed by its fix.
  */
 export const DAEMON_STATUS_CONTRACT_FIELDS = {
   contractVersion: { bucket: 'derived' },
   unreadableRecords: { bucket: 'durable', rows: 'UnreadableRecord' },
-  unreadableRecordsTotal: { bucket: 'derived' }
+  unreadableRecordsTotal: { bucket: 'derived' },
+  expectedStranded: { bucket: 'derived' },
+  strandedTotal: { bucket: 'derived' }
 } as const satisfies FieldTable;
 
 // --------------------------------------------------------- the boundary ----
