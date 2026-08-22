@@ -115,7 +115,7 @@ import type { ResumeCause } from './resume.js';
  * sees. Neither is the compiler. The bump is a human step, exactly as the
  * notice is.
  */
-export const READ_CONTRACT_VERSION = 15;
+export const READ_CONTRACT_VERSION = 16;
 
 // ------------------------------------------------------------ the four buckets
 
@@ -300,6 +300,39 @@ export const ROW_SHAPES = {
     activatedBy: { bucket: 'durable' },
     promptChars: { bucket: 'durable' },
     since: { bucket: 'durable' },
+    reason: { bucket: 'derived' }
+  } satisfies FieldTable,
+
+  /**
+   * A record whose directory no longer exists — `list_agents.strandedAgents[]`
+   * (KAN-594).
+   *
+   * `lastEvent` IS DURABLE AND `reason` IS NOT, which is the split this table
+   * exists to make. The event is read straight off the registry row and is a
+   * fact about what somebody did; the sentence is composed from it at read time
+   * and is this daemon's account of what that means now. A consumer keying on
+   * the prose rather than on `lastEvent` is keying on the derived half.
+   *
+   * ⚠ `path` IS DURABLE AND STILL RESOLVES TO NOTHING, and that is not a
+   * contradiction in the buckets. `durable` says the value came off the log
+   * rather than being computed here — it does not claim the world still agrees
+   * with it. This is the one row shape where those two come apart by
+   * definition, which is worth saying once rather than leaving a reader to
+   * wonder whether the bucket is wrong.
+   */
+  StrandedAgent: {
+    path: { bucket: 'durable' },
+    paneName: { bucket: 'derived' },
+    label: { bucket: 'durable' },
+    launcher: { bucket: 'durable' },
+    config: { bucket: 'durable' },
+    configVersion: { bucket: 'durable' },
+    configuredAt: { bucket: 'durable' },
+    everActivated: { bucket: 'durable' },
+    activatedBy: { bucket: 'durable' },
+    promptChars: { bucket: 'durable' },
+    since: { bucket: 'durable' },
+    lastEvent: { bucket: 'durable' },
     reason: { bucket: 'derived' }
   } satisfies FieldTable,
 
@@ -691,8 +724,8 @@ export const LIST_AGENTS_FIELDS = {
   action: { bucket: 'derived' },
   success: { bucket: 'derived' },
 
-  // The seven row-carrying categories. `agents` and `unbackedPanes` are built
-  // from the herdr census and are complete in every response; the other five
+  // The eight row-carrying categories. `agents` and `unbackedPanes` are built
+  // from the herdr census and are complete in every response; the other six
   // are paged.
   agents: { bucket: 'derived', rows: 'ListedAgent' },
   unbackedPanes: { bucket: 'derived', rows: 'UnbackedPane' },
@@ -700,6 +733,7 @@ export const LIST_AGENTS_FIELDS = {
   preemptedAgents: { bucket: 'derived', rows: 'PreemptedAgent' },
   standbyAgents: { bucket: 'derived', rows: 'StandbyAgent' },
   unstartedAgents: { bucket: 'derived', rows: 'UnstartedAgent' },
+  strandedAgents: { bucket: 'derived', rows: 'StrandedAgent' },
   foreignPanes: { bucket: 'derived', rows: 'ForeignPane' },
 
   // How big each paged category is, whatever this page carried. These say how
@@ -708,6 +742,7 @@ export const LIST_AGENTS_FIELDS = {
   preemptedTotal: { bucket: 'derived' },
   standbyTotal: { bucket: 'derived' },
   unstartedTotal: { bucket: 'derived' },
+  strandedTotal: { bucket: 'derived' },
   foreignPanesTotal: { bucket: 'derived' },
 
   /**

@@ -72,6 +72,7 @@ import {
   selectVictim
 } from './priority.js';
 import {
+  AgentEvent,
   AgentIntent,
   AgentRecord,
   AgentRegistry,
@@ -749,6 +750,13 @@ const STATE_READ_PROVENANCE = {
     'label', 'refusable', 'chargeable', 'preemptable', 'launcher', 'priority',
     'since', 'at', 'wasPreempted', 'by', 'derivation', 'herdrStatusWhenPreempted',
     'occupiedAgent',
+    // `strandedAgents[].lastEvent` (KAN-594). The registry row's own event,
+    // quoted rather than interpreted, so it is this bucket by the same reading
+    // that puts `claimsEvent` here. ⚠ Note that its NEIGHBOUR on that row,
+    // `path`, is durable and resolves to nothing — which is the point of the
+    // category. The bucket says where a value came from, never that the world
+    // still agrees with it, and this row is where those two come apart.
+    'lastEvent',
     // `unreadableRecords[]` (KAN-302, extended by KAN-344). These five are the
     // row's OWN bytes, read off the log and unchanged by a restart, which is
     // this bucket's definition applied to a row that is not an agent. The other
@@ -1519,6 +1527,85 @@ interface UnstartedAgent extends ConfigEcho {
 }
 
 /**
+ * The last event a stranded record carries.
+ *
+ * `forgotten` IS UNREPRESENTABLE HERE, and by the type rather than by a check.
+ * {@link AgentRegistry.intents} drops `forgotten` — that event removes rather
+ * than replaces, which is the whole of what `forget` is for — so a stranded row
+ * can only ever have been one of the other three. Writing that as a type means
+ * a later author cannot introduce the fourth: it is a build error rather than a
+ * row asserting that a forgotten agent is still stranded, which is the one
+ * sentence this category must never say.
+ */
+type StrandedLastEvent = Exclude<AgentEvent, 'forgotten'>;
+
+/**
+ * An agent whose DIRECTORY IS GONE: the registry still holds a record, and the
+ * path it is keyed by no longer exists on disk.
+ *
+ * WHY THIS IS A CATEGORY AND NOT A FILTER (KAN-594). Before it existed, a
+ * record whose directory had been deleted reached a reader in one of two ways,
+ * and both were wrong in the same direction — toward looking finished:
+ *
+ *   - `standbyAgents` and `unstartedAgents` DROPPED IT SILENTLY, on a bare
+ *     `if (!fs.existsSync(agentPath)) continue`. That filter is correct about
+ *     what it was written for — neither list may offer a switch that cannot be
+ *     thrown — and it was doing a second job nobody asked it to do: deciding
+ *     that the record should not be REPORTED either. So the row left the
+ *     response entirely. It was still in the registry, still counted by
+ *     anything that counts intents, and visible to nobody.
+ *   - `missingAgents` KEPT IT AND DESCRIBED IT WRONGLY. That category has no
+ *     existence check at all, so an `activated`-last record whose directory had
+ *     been deleted was reported with the sentence *"herdr has no live agent in
+ *     its directory and this daemon holds no session for it"* — which asserts a
+ *     directory that is not there, and reads as a loss that a supervisor should
+ *     re-activate or stand down. Re-activating is refused (`activate` requires
+ *     the path to resolve), and the refusal does not arrive until they try.
+ *
+ * THE DISTINCTION IS OBSERVABLE, WHICH IS WHY IT IS THIS ONE. KAN-594 asked
+ * whether the instruments should tell fixture rows from fleet rows, and named
+ * the trap in the same breath: a filter on `/tmp` would make the rows invisible
+ * rather than accounted for, and `/tmp` is a heuristic about provenance rather
+ * than a fact about anything. `fs.existsSync(path)` is not a heuristic. It is
+ * the same question `configure` already answers at admission — see
+ * `canonicalPath`, which refuses a path that does not resolve — asked again
+ * later, because a directory that existed at `configure` time can be deleted
+ * afterwards and nothing writes a row when it is.
+ *
+ * WHAT A READER MAY DO WITH ONE, which is the behavioural test every other
+ * category here is drawn on. Nothing can be started: `activate` will refuse it.
+ * Nothing will resume: there is no conversation left, because there is no
+ * directory to hold one. The only remaining verb is `forget`, which works
+ * precisely because `forget` addresses a record rather than a directory. One
+ * behaviour, one category — the same argument {@link UnstartedAgent} was split
+ * out of standby on.
+ *
+ * IT IS NOT `missingAgents`, AND THE PAIR IS EASY TO CONFUSE, so: `missing` is
+ * about the PANE — the directory is there and nothing of ours is running in it,
+ * which is recoverable and usually means re-activate. `stranded` is about the
+ * DIRECTORY — it is gone, and nothing is recoverable. A row is in exactly one
+ * of them, and the existence check is what separates them.
+ */
+interface StrandedAgent extends ConfigEcho {
+  path: string;
+  paneName: string;
+  label: string | null;
+  /** Which launcher its record names. It will not run again under this record. */
+  launcher: string;
+  /** When the registry recorded {@link lastEvent}. */
+  since: string;
+  /**
+   * The last event on the record, which is what says whether this agent ever
+   * ran — and is the distinction KAN-594 asked to be made explicit, because a
+   * `configured`-and-never-retired row and a raw line count of an append-only
+   * log differed by an order of magnitude on the population that commissioned
+   * this and both were honest readings of the same file.
+   */
+  lastEvent: StrandedLastEvent;
+  reason: string;
+}
+
+/**
  * A preempted agent as `list_agents` reports it. Named rather than inferred so
  * it can be a member of {@link FleetCategories} — the totality claim below has
  * to be able to say its name.
@@ -1579,6 +1666,7 @@ interface FleetCategories {
   preemptedAgents: PreemptedAgentDto[];
   standbyAgents: StandbyAgent[];
   unstartedAgents: UnstartedAgent[];
+  strandedAgents: StrandedAgent[];
 }
 
 /**
@@ -1663,6 +1751,14 @@ const PAGED_FLEET_CATEGORIES = [
   'preemptedAgents',
   'standbyAgents',
   'unstartedAgents',
+  // Paged like the other registry-derived inventories rather than bounded like
+  // `unreadableRecords`, and the difference is which thing bounds it. A fault
+  // report is bounded by how badly one file has been hand-edited; this list is
+  // bounded by how many agents have ever been configured and had their
+  // directories removed, which grows with use and has no ceiling. A consumer
+  // has to be able to walk it to the end, because the end is where the row it
+  // means to `forget` might be.
+  'strandedAgents',
   'foreignPanes'
 ] as const;
 
@@ -1779,6 +1875,10 @@ const _unstartedAgentMatchesTheContract: Exact<
   keyof UnstartedAgent,
   keyof typeof ROW_SHAPES.UnstartedAgent
 > = true;
+const _strandedAgentMatchesTheContract: Exact<
+  keyof StrandedAgent,
+  keyof typeof ROW_SHAPES.StrandedAgent
+> = true;
 const _foreignPaneMatchesTheContract: Exact<
   keyof ForeignPane,
   keyof typeof ROW_SHAPES.ForeignPane
@@ -1888,6 +1988,7 @@ void _missingAgentMatchesTheContract;
 void _preemptedAgentMatchesTheContract;
 void _standbyAgentMatchesTheContract;
 void _unstartedAgentMatchesTheContract;
+void _strandedAgentMatchesTheContract;
 void _foreignPaneMatchesTheContract;
 void _configEchoMatchesTheContract;
 void _fleetPageMatchesTheContract;
@@ -2053,7 +2154,13 @@ const OWNER_FILTERED_CATEGORIES = [
   'missingAgents',
   'preemptedAgents',
   'standbyAgents',
-  'unstartedAgents'
+  'unstartedAgents',
+  // FILTERED, like every other category built from a record. A stranded row
+  // carries the owner its record was configured with — the directory going
+  // away does not un-own it — so an owner-scoped read that returned everybody's
+  // stranded records would be carrying rows belonging to nobody the caller
+  // asked about, which is the half of KAN-193's argument that points this way.
+  'strandedAgents'
 ] as const;
 
 /** Row-carrying categories an owner filter deliberately leaves whole. */
@@ -6560,6 +6667,12 @@ export class MessageRouter {
       // start.
       ['unstartedAgents', narrow(this.unstartedAgents(agents, intents)),
         (r: any) => r.since, (r: any) => r.path],
+      // Records whose directory is gone. NOT built from the census — the
+      // question is about the filesystem rather than about what is running, and
+      // handing it `agents` would suggest the two interact. See
+      // {@link strandedAgents}.
+      ['strandedAgents', narrow(this.strandedAgents(intents)),
+        (r: any) => r.since, (r: any) => r.path],
       // NOT NARROWED, and deliberately: a foreign pane is not our agent and has
       // no owner to be asked about. See OWNER_FILTERED_CATEGORIES, and
       // `ownerFilter.unfiltered` on the response, which says so to the caller.
@@ -6616,7 +6729,8 @@ export class MessageRouter {
       missingAgents: missing.rows,
       preemptedAgents: preempted.rows,
       standbyAgents: standby,
-      unstartedAgents: unstarted
+      unstartedAgents: unstarted,
+      strandedAgents: paged.strandedAgents.rows
     };
 
     const payload = {
@@ -6682,6 +6796,16 @@ export class MessageRouter {
       // these have no conversation to resume. Always present, even when empty,
       // for the same reason `missingAgents` is.
       unstartedTotal: paged.unstartedAgents.page.total,
+      // Records whose DIRECTORY is gone — the sixth answer to "not running",
+      // and the one that used to be two different wrong answers (KAN-594):
+      // dropped silently by `standbyAgents` and `unstartedAgents`, and reported
+      // by `missingAgents` in a sentence that asserted a directory which was not
+      // there. Always present, even when empty, for the reason `missingAgents`
+      // is: a caller distinguishing "no record is stranded" from "this daemon
+      // does not track that" cannot do it from an absent key — and on this
+      // category that distinction is the whole point, because a zero here is
+      // the claim the registry is clean.
+      strandedTotal: paged.strandedAgents.page.total,
       // THE HANDLE PAST THE CLIP, one entry per paged category (KAN-163).
       //
       // Every `*Total` above says how many rows a category has; none of them
@@ -6938,6 +7062,15 @@ export class MessageRouter {
     for (const [agentPath, intent] of sharedIntents ?? this.deps.agentRegistry.intents()) {
       if (intent.event !== 'activated') continue;
       if (alive.has(agentPath)) continue;
+      // A DIRECTORY THAT IS GONE IS NOT A LOSS, and this row belongs to
+      // `strandedAgents` instead (KAN-594). Every sentence below says "in its
+      // directory", and the decision each of them invites — re-activate it, or
+      // stand it down — is a decision about an agent that could come back.
+      // Neither is true here: `activate` refuses a path that does not resolve,
+      // so this row's only remaining verb is `forget`, and saying so is
+      // `strandedAgents`' whole job. Reporting it in both would also break the
+      // disjointness the four other categories are drawn on.
+      if (!fs.existsSync(agentPath)) continue;
 
       const occupant = occupants.get(agentPath) ?? null;
       const heldASession = staleSessions?.has(agentPath) ?? false;
@@ -7035,6 +7168,13 @@ export class MessageRouter {
       if (!intent.everActivated) continue;
       if (intent.preemption) continue;
       if (alive.has(agentPath)) continue;
+      // Not offered here, and no longer dropped on the floor: the row is
+      // reported by `strandedAgents` instead (KAN-594). This filter is right
+      // about what it was written for — this list's every row promises that
+      // switching it on "resumes the conversation it was stopped in", and a
+      // deleted directory holds no conversation — and it was silently doing a
+      // second job it was never argued for, which was deciding the record
+      // should not be REPORTED anywhere either.
       if (!fs.existsSync(agentPath)) continue;
 
       standby.push({
@@ -7101,6 +7241,11 @@ export class MessageRouter {
       // stop standby from making.
       if (intent.everActivated) continue;
       if (alive.has(agentPath)) continue;
+      // Reported by `strandedAgents` instead of falling out of the response —
+      // see the same filter in {@link standbyAgents}. This is the branch the
+      // thirteen rows KAN-594 was filed about landed in: configured, their
+      // fixture directories deleted at teardown with no `forget`, and therefore
+      // in the registry and in no category at all.
       if (!fs.existsSync(agentPath)) continue;
 
       unstarted.push({
@@ -7119,6 +7264,92 @@ export class MessageRouter {
 
     // Unpaged, for the reason standbyAgents gives.
     return unstarted;
+  }
+
+  /**
+   * Agents whose directory has been deleted out from under their record.
+   *
+   * See {@link StrandedAgent} for why this is a category rather than a filter,
+   * and for the pair it is easiest to confuse it with.
+   *
+   * THE MEMBERSHIP TEST IS ONE FACT: `fs.existsSync(path)` is false. There is
+   * deliberately no second condition — not the last event, not `everActivated`,
+   * not whether the path looks like a fixture. A record for a directory that is
+   * not there is the same object whatever it used to be, because the same three
+   * things are true of all of them: it cannot be activated, it cannot be
+   * resumed, and `forget` is the only verb left. The last event is REPORTED, on
+   * {@link StrandedAgent.lastEvent}, which is where a difference that does not
+   * change the behaviour belongs.
+   *
+   * ⚠ AND THE TEST IS NOT `/tmp`, WHICH IS THE TRAP KAN-594 NAMED WHEN IT ASKED
+   * FOR THIS. The population that commissioned this category was fixture rows
+   * under `/tmp` left behind by proof runs, and a prefix filter would have made
+   * exactly those rows stop being counted — invisible rather than accounted
+   * for, which is the defect wearing the fix's clothes. A prefix is also not a
+   * fact about provenance: an operator may legitimately keep a workspace under
+   * `/tmp`, and a proof may legitimately keep one anywhere else. What is a fact
+   * is whether the directory is there.
+   *
+   * ⚠ NOTHING HERE DELETES A ROW, and that is a deliberate limit rather than an
+   * omission — see {@link AgentRegistry.compact}, which never drops an agent
+   * because a directory can be temporarily unmounted and "your agent stopped
+   * existing because a mount was slow" is not a trade anybody offered. This
+   * category makes the record VISIBLE so that a person can retire it with
+   * `forget`; deciding on their behalf that it is gone for good is a different
+   * and much stronger claim, and one read of a filesystem is not evidence for
+   * it. A row that reappears when a mount comes back leaves this list by
+   * itself, which is the behaviour that would be lost by compacting on it.
+   *
+   * `alive` is not consulted, and it cannot matter: a live pane of ours in a
+   * directory that does not exist is not a state the filesystem can be in.
+   * Taking the argument anyway would invite a reader to think the two questions
+   * interact.
+   */
+  private strandedAgents(sharedIntents?: Map<string, AgentIntent>): StrandedAgent[] {
+    const stranded: StrandedAgent[] = [];
+
+    for (const [agentPath, intent] of sharedIntents ?? this.deps.agentRegistry.intents()) {
+      if (fs.existsSync(agentPath)) continue;
+      // `intents()` drops `forgotten`, so the other three are the whole domain
+      // — which is what {@link StrandedLastEvent} says in the type. The cast is
+      // the one place that fact crosses from a comment into the value, and it
+      // is checked rather than asserted: a `forgotten` reaching here would be
+      // `intents()` having changed its contract, so it is skipped and the row
+      // is left out rather than published under a value its type forbids.
+      if (intent.event === 'forgotten') continue;
+      const lastEvent: StrandedLastEvent = intent.event;
+
+      stranded.push({
+        path: agentPath,
+        paneName: paneNameFor(agentPath),
+        label: intent.record.config.label ?? null,
+        launcher: intent.record.config.launcher,
+        ...configEcho(intent, 'summarised'),
+        since: intent.at,
+        lastEvent,
+        // WHAT IT WAS is what decides this sentence, because it decides what a
+        // reader would otherwise have gone looking for. Each arm names the
+        // thing that is NOT true any more, then the one verb that still works.
+        reason:
+          (lastEvent === 'activated'
+            ? 'The registry records this agent as active, and its directory no longer ' +
+              'exists. This is not a loss to recover: there is nothing to re-activate into, ' +
+              'and `activate` will refuse it because the path does not resolve. '
+            : lastEvent === 'deactivated'
+              ? 'Switched off deliberately, and its directory has since been deleted. It is ' +
+                'not offered as a standby agent because there is no conversation left to ' +
+                'resume — that promise needs the directory. '
+              : 'Configured and never activated, and its directory has since been deleted. ' +
+                'It is not offered as an unstarted agent because there is nothing to start. ') +
+          'The record is all that is left of it. `forget` is what retires the record, and ' +
+          'it works on a deleted directory by design; nothing here removes it for you, ' +
+          'because a directory can also be missing because a mount is late.'
+      });
+    }
+
+    // Unpaged and unsorted, for the reason standbyAgents gives: ordering and
+    // paging are one decision, made once, in handleListAgents.
+    return stranded;
   }
 
   /**
