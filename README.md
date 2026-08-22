@@ -375,6 +375,7 @@ FAILED: activate /home/brooswit/.local/share/butchr/workspaces/task/kan-39
 
 Refusing to activate /home/brooswit/.local/share/butchr/workspaces/task/kan-39: 1 live pane(s) are already running in that directory and none of them is ours.
   pane_id w65702dcc803d94-8, name 'butchr-task-kan-39', agent_status done, cwd /home/brooswit/.local/share/butchr/workspaces/task/kan-39
+WHOSE IT IS: unknown — no owner is recorded for the agent configured here. THAT IS NOT EVIDENCE THAT IT IS NOT YOURS: an agent configured before its owner was ever passed carries none, which is most of a fleet that has been running a while. Pass `owner` at `configure` if you want this question answerable.
 NOTHING WAS STARTED. Two agents in one directory is how work gets overwritten and neither of them finds out. Stop the pane above, or point CrabCast at a different directory. This is not a claim on that pane: CrabCast never closes a pane it did not start.
   refused by:    occupied
   started:       false — NOTHING was spawned
@@ -382,8 +383,11 @@ NOTHING WAS STARTED. Two agents in one directory is how work gets overwritten an
 
 live panes already in that directory (1):
   pane_id w65702dcc803d94-8  name butchr-task-kan-39  [done]  cwd /home/brooswit/.local/share/butchr/workspaces/task/kan-39
+  owner   (none recorded) — NOT a claim that it is not yours
 [exit 1]
 ```
+
+**`owner` answers a question the refusal used to leave to inference.** This session was configured without `--owner`, so the answer here is `unowned` — and that is the case worth showing, because it is the majority one on any fleet older than the knob. Read it as *nobody said*, never as *not yours*: an agent configured before its caller began declaring an owner carries none, and treating that as foreignness points a reader at the one remedy that ends somebody's work. Pass `activate --owner <name>` and a recorded owner that matches yours reads `YOURS, under another runtime`, with the adoption sequence named in the refusal. The value is the one `configure` was handed, reported verbatim — **no pane name is parsed**, here or anywhere: that derivation is not API.
 
 **`verified: false` there is not a second failure.** Nothing was spawned, so there is no agent of ours to confirm. Note also what the response does *not* carry: no `alreadyRunning`, in either direction. This branch found a pane that is **not** ours, so it established nothing about whether our agent is running — `true` would be the swallow that turns a safety refusal into a silent success, and `false` would claim a look that never happened.
 

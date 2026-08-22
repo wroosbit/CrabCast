@@ -241,6 +241,54 @@ export type ActivateRefusalKind = 'not-configured' | 'unverifiable' | 'occupied'
  */
 export type ActivateRefusedBy = 'capacity';
 
+/**
+ * WHOSE AGENT THE OCCUPIED DIRECTORY BELONGS TO, on the `occupied` refusal
+ * (KAN-596) — four answers, and the fourth is the one that keeps this honest.
+ *
+ * THE REFUSAL NAMES AN OWNER IT WAS HANDED AND DERIVES NOTHING. The occupying
+ * pane is not ours, so it has no record and no owner of its own; what carries
+ * one is the AGENT whose directory it is sitting in — the agent this call was
+ * asked to activate. Its `owner` was frozen onto the record by `configure` and
+ * is reported verbatim. Nothing here parses a pane name, and that absence is a
+ * design position rather than an oversight: a derived pane name is not API, and
+ * matching one would put the caller's naming rule under this daemon's
+ * compatibility promise. See {@link AgentConfig.owner}.
+ *
+ * WHY FOUR AND NOT THREE. `unowned` and `others` are the pair that must never
+ * collapse, for the reason {@link AgentConfig.owner} gives about filters: a
+ * false NON-match is the direction that stops agents. An agent configured
+ * before anybody passed an owner carries none, which is most of this fleet
+ * today — reading that as "not yours" would be confidently wrong about the
+ * majority, and wrong toward the destructive remedy.
+ *
+ * `unasked` is the same rule applied to the CALLER's half. This daemon
+ * authenticates nobody, so "is this mine" is answerable only when the caller
+ * says who it is. When an owner IS recorded and the caller did not, the
+ * question was not answered rather than answered "no" — and folding that into
+ * `others` would manufacture exactly the false non-match above out of a caller
+ * that simply did not pass a flag.
+ */
+export type OccupantOwnerRelation = 'unowned' | 'yours' | 'others' | 'unasked';
+
+/**
+ * The `occupantOwner` block on an `occupied` refusal (KAN-596): what the record
+ * said, what the caller said, and this daemon's comparison of the two.
+ *
+ * BOTH INPUTS ARE CARRIED BESIDE THE VERDICT, deliberately. `relation` is the
+ * field a program branches on, but a consumer that disagrees with the
+ * comparison — or that wants to show the operator the two strings — must not
+ * have to re-derive them from prose. They are also what makes the verdict
+ * auditable: `unowned` beside a non-null `recorded` would be a contradiction a
+ * reader can see, where a bare verdict is one nobody can check.
+ */
+export interface OccupantOwnership {
+  /** The owner frozen onto the agent's record by `configure`, or null. */
+  recorded: string | null;
+  /** Who the caller said it was on THIS call, or null if it did not say. */
+  askedAs: string | null;
+  relation: OccupantOwnerRelation;
+}
+
 type ActivateRefusalFields = Record<string, unknown> & {
   alreadyRunning?: true;
   started?: false;
@@ -1860,6 +1908,10 @@ const _ownerFilterMatchesTheContract: Exact<
   keyof OwnerFilterDto,
   keyof typeof BLOCK_SHAPES.OwnerFilter
 > = true;
+const _occupantOwnerMatchesTheContract: Exact<
+  keyof OccupantOwnership,
+  keyof typeof BLOCK_SHAPES.OccupantOwner
+> = true;
 const _provenanceMatchesTheContract: Exact<
   keyof ReturnType<typeof stateReadProvenance>,
   keyof typeof BLOCK_SHAPES.Provenance
@@ -2245,6 +2297,159 @@ function readOwnerFilter(raw: unknown): { owner: string | null } | { error: stri
     };
   }
   return { owner: raw };
+}
+
+/**
+ * The `owner` field of an ACTIVATE request — the caller's own word for itself,
+ * validated, or the refusal naming what is wrong with it (KAN-596). `null` when
+ * the caller did not say.
+ *
+ * IT IS NOT A FILTER AND IT IS NOT AN ATTRIBUTE OF THE AGENT, which is what
+ * makes it admissible on a verb whose contract is that everything an agent is
+ * comes from its record. It cannot disagree with the record because it says
+ * nothing about the agent; it says who is asking. That puts it on the same side
+ * of {@link MessageRouter.handleActivate}'s "no inline options" rule as
+ * `override` and `preempt` — decisions and facts belonging to whoever pressed
+ * the button, not knobs the record already owns.
+ *
+ * IT CHANGES NO BEHAVIOUR. Activation is refused, or not, identically whether
+ * this is passed. Its ONLY effect is which of {@link OccupantOwnerRelation}'s
+ * answers the `occupied` refusal can give — passing it buys a sharper refusal
+ * and nothing else, and omitting it costs a reader the mine/not-mine split and
+ * nothing else.
+ *
+ * The two refusals mirror `readOwnerFilter`'s and for the same reason: an
+ * explicit `null` is what an unset variable serialises to, and an empty string
+ * is a value `configure` refuses to store, so neither can be a caller's
+ * intention. Reading either as "did not say" would answer a caller that meant
+ * to identify itself with `unasked`, which is the softer of the two wrong
+ * answers it did not ask for.
+ *
+ * ⚠ IT RETURNS `askedAs` AND NOT `owner`, WHICH IS NOT A STYLE CHOICE. Named
+ * `owner`, this function's `raw === undefined` branch is textually identical to
+ * {@link readOwnerFilter}'s, and `verify-owner-filter.mjs` mutates that exact
+ * string — so a second copy makes its `null-is-no-filter` mutation match two
+ * sites, fail to apply, and the section it guards prove nothing. That proof
+ * caught this and said so rather than passing quietly. The name is also the
+ * truer one: what comes back is who the CALLER said it was, which is the same
+ * word the response block uses for it.
+ */
+function readCallerOwner(raw: unknown): { askedAs: string | null } | { error: string } {
+  if (raw === undefined) return { askedAs: null };
+  if (raw === null) {
+    return {
+      error:
+        'Invalid owner: null. Omit `owner` entirely if you are not saying who you are — an ' +
+        'explicit null is what an unset variable serialises to, and reading it as "did not say" ' +
+        'would quietly answer a caller that meant to identify itself. It is matched EXACTLY ' +
+        'against the owner frozen onto the agent\'s record and is used only to tell you whether ' +
+        'the pane occupying that directory is your own; it changes nothing about whether this ' +
+        'activation is refused.'
+    };
+  }
+  if (typeof raw !== 'string') {
+    return {
+      error:
+        `Invalid owner: expected a string, got ${JSON.stringify(raw)}. It is matched EXACTLY ` +
+        `against the opaque name frozen onto the agent's record — no prefix, no glob, no ` +
+        `hierarchy and no case-folding — so there is no structure here for a non-string to carry.`
+    };
+  }
+  if (!raw.trim()) {
+    return {
+      error:
+        `Invalid owner: ${JSON.stringify(raw)} is empty. \`configure\` refuses to store an empty ` +
+        `owner, so no agent can carry one and this could never match anything. Omit \`owner\` ` +
+        `entirely if you are not saying who you are.`
+    };
+  }
+  return { askedAs: raw };
+}
+
+/**
+ * WHOSE THE OCCUPIED DIRECTORY IS — the whole of the ownership judgement this
+ * daemon makes, in one place (KAN-596).
+ *
+ * WRITTEN AS FOUR EXPLICIT BRANCHES rather than a nested ternary, for the
+ * reason {@link ownedBy} is written as two: the failure this is shaped against
+ * is a later author reaching for `recorded ?? askedAs`, or for
+ * `recorded === askedAs` alone, either of which silently folds `unowned` or
+ * `unasked` into an answer about foreignness. Both would read as tidying, and
+ * both produce the false NON-match that is the direction that stops agents.
+ *
+ * THE ORDER IS LOAD-BEARING. `unowned` is decided FIRST and without consulting
+ * the caller at all, because an agent with no owner is unowned no matter who is
+ * asking — testing the caller first would let a caller that named itself turn
+ * the majority case into `others`.
+ */
+function occupantOwnership(
+  recorded: string | undefined,
+  askedAs: string | null
+): OccupantOwnership {
+  const answer = (relation: OccupantOwnerRelation) => ({
+    recorded: recorded ?? null,
+    askedAs,
+    relation
+  });
+  // No owner on the record. NOT evidence that the pane is somebody else's —
+  // every agent configured before an owner was ever passed carries none.
+  if (recorded === undefined) return answer('unowned');
+  // An owner IS recorded and the caller did not say who it is, so the question
+  // was never put. Distinct from `others`, which is an answer.
+  if (askedAs === null) return answer('unasked');
+  if (recorded === askedAs) return answer('yours');
+  return answer('others');
+}
+
+/**
+ * THE OWNERSHIP SENTENCE THE `occupied` REFUSAL CARRIES (KAN-596) — one per
+ * {@link OccupantOwnerRelation}, and they are four sentences rather than one
+ * sentence with a value interpolated into it.
+ *
+ * WHY THE PROSE IS SPLIT AND NOT PARAMETERISED. The structured field beside it
+ * is what a program reads; this is what the person staring at a refused
+ * activation reads, and the four cases do not differ by a noun — they differ by
+ * what the reader should DO. `yours` ends in a migration path, `unowned` ends
+ * in a warning against reading it as foreignness, and collapsing them into
+ * "owner: X" with the verdict left implicit is the defect this ticket was filed
+ * about: the refusal already named the pane and still left the operator to
+ * infer whose it was.
+ *
+ * ⚠ `unowned` IS THE MAJORITY CASE AND ITS SENTENCE IS THE LOAD-BEARING ONE.
+ * Most of a fleet predates anybody passing an owner, so this is the branch a
+ * reader meets first and the one whose wording has to refuse the inference
+ * hardest — an absent owner is a question nobody answered, never a "no".
+ */
+function occupantOwnershipSentence(o: OccupantOwnership): string {
+  switch (o.relation) {
+    case 'unowned':
+      return (
+        'WHOSE IT IS: unknown — no owner is recorded for the agent configured here. ' +
+        'THAT IS NOT EVIDENCE THAT IT IS NOT YOURS: an agent configured before its owner ' +
+        'was ever passed carries none, which is most of a fleet that has been running a ' +
+        'while. Pass `owner` at `configure` if you want this question answerable.'
+      );
+    case 'yours':
+      return (
+        `WHOSE IT IS: yours — the agent configured here is owned by '${o.recorded}', which ` +
+        `is who you said you are. THIS IS YOUR OWN AGENT, under another runtime: CrabCast ` +
+        `did not start what is in that directory, so it will not adopt it and will not ` +
+        `close it. The migration path is the documented adoption sequence — stand your own ` +
+        `pane down, then activate again, and CrabCast starts it and holds its terminal.`
+      );
+    case 'others':
+      return (
+        `WHOSE IT IS: somebody else's — the agent configured here is owned by ` +
+        `'${o.recorded}' and you asked as '${o.askedAs}'. Take it up with them rather than ` +
+        `standing the pane down: CrabCast never closes a pane it did not start.`
+      );
+    case 'unasked':
+      return (
+        `WHOSE IT IS: not asked — the agent configured here is owned by '${o.recorded}', ` +
+        `and you did not say who you are, so whether that is you was NOT ANSWERED rather ` +
+        `than answered no. Pass \`owner\` on this call to have it answered.`
+      );
+  }
 }
 
 /**
@@ -5099,6 +5304,18 @@ export class MessageRouter {
       return;
     }
 
+    // WHO IS ASKING (KAN-596). Validated here, beside the other two request
+    // fields that are facts about the caller rather than knobs of the agent,
+    // and refused BEFORE anything is looked up for the same reason they are: a
+    // malformed identity is the caller's mistake and answering it with work
+    // done is worse than answering it with a refusal. It gates nothing — see
+    // `readCallerOwner` — so this refusal is the only way it can stop a call.
+    const callerOwner = readCallerOwner(data.owner);
+    if ('error' in callerOwner) {
+      fail(callerOwner.error, { path: agentPath });
+      return;
+    }
+
     // `configure` is mandatory and this is where that is enforced. The refusal
     // names what is missing rather than merely saying no, because a caller
     // that is only told "no" retries the same call forever.
@@ -5354,10 +5571,16 @@ export class MessageRouter {
     }
 
     if (occupancy.occupants.length > 0) {
+      // WHOSE DIRECTORY THIS IS, ANSWERED RATHER THAN LEFT TO BE INFERRED
+      // (KAN-596). Read off the record this call was already holding — the
+      // owner `configure` froze onto it — and never from the occupying pane's
+      // name, which is a derivation and not API. See `occupantOwnership`.
+      const ownership = occupantOwnership(config.owner, callerOwner.askedAs);
       fail(
         `Refusing to activate ${agentPath}: ${occupancy.occupants.length} live pane(s) are ` +
           `already running in that directory and none of them is ours.\n` +
           occupancy.occupants.map((o) => `  ${this.describeOccupant(o)}`).join('\n') +
+          `\n${occupantOwnershipSentence(ownership)}` +
           `\nNOTHING WAS STARTED. Two agents in one directory is how work gets overwritten ` +
           `and neither of them finds out. Stop the pane above, or point CrabCast at a ` +
           `different directory. This is not a claim on that pane: CrabCast never closes a ` +
@@ -5374,7 +5597,12 @@ export class MessageRouter {
           // absence is asserted in verify-idempotent-lifecycle.mjs §4, because
           // one branch over the same value is correct and no type can tell
           // them apart. `started: false` comes from `fail`.
-          occupiedBy: occupancy.occupants
+          occupiedBy: occupancy.occupants,
+          // The machine-readable half of the sentence above (KAN-596). Both
+          // are carried because they answer different readers, and `relation`
+          // is what a program branches on so it never has to parse the prose —
+          // which is the derived-vocabulary trap this ticket refused one layer up.
+          occupantOwner: ownership
         }
       );
       return;

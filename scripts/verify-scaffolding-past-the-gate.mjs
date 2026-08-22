@@ -609,14 +609,18 @@ const BARE_ACTIVATIONS = [
   {
     script: 'verify-refuses-occupied-directory',
     classification: 'occupied-refusal-first',
-    sites: 7,
+    sites: 8,
     reason:
       'The whole file is about the refusal that fires at router.ts:4894 (973d5ce) when a live ' +
       'pane in the directory is not ours — which is BEFORE the gate at :4931, so these seven ' +
       'never reach it. The file already carries `PAST_THE_GATE` and uses it on the three ' +
       'activations that are scaffolding rather than subject, which is why the count here is seven ' +
       'and not ten: the same author told the two kinds apart by hand, and this entry is that ' +
-      'reading written down.',
+      'reading written down. The eighth (KAN-596) is `refuseOccupied`, the helper behind §f1-f5, ' +
+      'and it is the same classification for the same reason: every one of its activations is ' +
+      'driven into a directory holding a live foreign pane, so the occupied refusal fires first ' +
+      'and the gate is never reached. It deliberately does NOT spread `PAST_THE_GATE` — that ' +
+      'refusal IS its subject, and immunising it would delete what §f1-f5 measure.',
     evidence: 'const PAST_THE_GATE = { override: true };'
   },
 

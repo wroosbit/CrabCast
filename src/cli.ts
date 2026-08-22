@@ -1044,7 +1044,7 @@ function renderActivate(reader: ResponseReader, request: Record<string, unknown>
       reader.take('verified') === false
         ? `${INDENT}verified:      false — the daemon could not confirm the agent exists`
         : null,
-      occupiedBlock(reader.take('occupiedBy')),
+      occupiedBlock(reader.take('occupiedBy'), reader.take('occupantOwner')),
       missingKnobs(reader.take('missing')),
       alreadyInError ? null : verbatim('derivation:', derivation),
       capacity ? `\ncapacity:\n${capacity}` : null,
@@ -1173,8 +1173,45 @@ function renderDeactivate(reader: ResponseReader, request: Record<string, unknow
   );
 }
 
+/**
+ * WHOSE THE OCCUPIED DIRECTORY IS, as one skimmable line (KAN-596).
+ *
+ * DELIBERATELY SHORTER THAN THE DAEMON'S SENTENCE, and not a second copy of it.
+ * `failure()` prints `error` verbatim directly above this block, and that text
+ * already carries the reasoning and the migration path — which is the daemon's
+ * to word, for the same reason the `remedy` line is. What a reader cannot get
+ * from a paragraph is a labelled value they can find at a glance beside the
+ * pane it is about, and that is the whole of this function's job.
+ *
+ * ⚠ THE `default` BRANCH IS NOT DEAD CODE. `relation` is a closed set in THIS
+ * build and the CLI can be pointed at a newer daemon, so an unrecognised value
+ * is rendered rather than dropped — a blank line where an ownership verdict
+ * should be is the one output that would read as "nobody owns it".
+ */
+function occupantOwnerLine(ownership: unknown): string | null {
+  if (!ownership || typeof ownership !== 'object') return null;
+  const { recorded, askedAs, relation } = ownership as {
+    recorded: string | null;
+    askedAs: string | null;
+    relation: string;
+  };
+  const label = `${INDENT}owner   `;
+  switch (relation) {
+    case 'unowned':
+      return `${label}(none recorded) — NOT a claim that it is not yours`;
+    case 'yours':
+      return `${label}${recorded} — YOURS, under another runtime`;
+    case 'others':
+      return `${label}${recorded} — somebody else's (you asked as ${askedAs})`;
+    case 'unasked':
+      return `${label}${recorded} — not asked whether that is you`;
+    default:
+      return `${label}${recorded ?? '(none recorded)'} — ${relation}`;
+  }
+}
+
 /** The advisory/refusal list of panes sitting in the target directory. */
-function occupiedBlock(occupants: unknown): string | null {
+function occupiedBlock(occupants: unknown, ownership?: unknown): string | null {
   if (!Array.isArray(occupants) || !occupants.length) return null;
   return lines(
     `\nlive panes already in that directory (${occupants.length}):`,
@@ -1182,7 +1219,8 @@ function occupiedBlock(occupants: unknown): string | null {
       (o: any) =>
         `${INDENT}pane_id ${o.paneId ?? '(not reported)'}  name ${o.name}  ` +
         `[${o.agentStatus}]${o.workDir ? `  cwd ${o.workDir}` : ''}`
-    )
+    ),
+    occupantOwnerLine(ownership)
   );
 }
 
@@ -2442,17 +2480,22 @@ export const COMMANDS: CommandSpec[] = [
     positionals: [PATH_ARG],
     // No inline options, deliberately: everything an agent IS comes from its
     // record, so there is nothing here a caller could pass that might disagree
-    // with what the agent already is. These two are not attributes of the
-    // agent — they are decisions about the machine.
+    // with what the agent already is. These three are not attributes of the
+    // agent — the first two are decisions about the machine, and `owner` is a
+    // fact about WHO IS ASKING (KAN-596). It cannot disagree with the record
+    // because it says nothing about the agent, and it gates nothing: it buys a
+    // sharper occupied refusal and changes no outcome.
     flags: [
       { name: 'override', kind: 'boolean', help: 'start it even at capacity — recorded with the figures it bypassed' },
-      { name: 'preempt', kind: 'boolean', help: 'make room by standing down an agent this one STRICTLY outranks; destructive' }
+      { name: 'preempt', kind: 'boolean', help: 'make room by standing down an agent this one STRICTLY outranks; destructive' },
+      { name: 'owner', kind: 'string', value: '<name>', help: 'who YOU are, matched EXACTLY against the owner on the agent\'s record. Changes nothing about whether this call is refused — it only lets an occupied refusal tell you whether the pane in the way is your own agent under another runtime. Omit it and that question is reported as not asked, never as no' }
     ],
     spawnsDaemon: true,
     build: ({ positionals, flags }) => ({
       path: agentPathOf(positionals),
       override: flags.override,
-      preempt: flags.preempt
+      preempt: flags.preempt,
+      owner: flags.owner
     }),
     render: renderActivate
   },
