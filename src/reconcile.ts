@@ -58,6 +58,65 @@ const RESTORE_STAGGER_MS = 3_000;
  */
 const DEFERRED_RETRY_WAIT_MS = 15_000;
 
+/**
+ * WHETHER A RESTORE WHOSE PATH CANNOT RESOLVE SHOULD STOP BEING ATTEMPTED —
+ * KAN-619's question 2, decided here rather than inherited.
+ *
+ * THE RULING: **it keeps being attempted, and it stops being called `failed`.**
+ * The retry is unchanged; only the word and the log line are new.
+ *
+ * WHY IT WAS A REAL QUESTION. KAN-594 settled that ONE FILESYSTEM READ IS NOT
+ * ENOUGH EVIDENCE TO DELETE A RECORD — "your agent stopped existing because a
+ * mount was slow" is not a trade anybody offered, so `strandedAgents` reports
+ * and never retires. Whether one read is enough to stop RETRYING a restore is a
+ * strictly weaker claim, and a weaker claim can go the other way. It is not
+ * settled by the first, and inheriting it would have been assuming the answer.
+ *
+ * WHY IT GOES THE SAME WAY ANYWAY, WHICH IS THE PART THAT IS NOT OBVIOUS. The
+ * mount-late argument is not merely as strong here as it was there — it is
+ * STRONGER, because of WHEN this pass runs. This is boot. A machine that has
+ * just come back is precisely the machine whose mounts are still arriving, so
+ * the one moment a stranded path is most likely to be a slow mount rather than
+ * a deleted directory is the moment this code executes. A rule that stopped
+ * retrying on one `ENOENT` would be at its most wrong exactly where it fires.
+ *
+ * AND STOPPING BUYS NOTHING THAT IS ACTUALLY WANTED. The attempt is one refused
+ * call against a path that does not resolve: no process is spawned, no
+ * provisioning runs, no pane is touched, nothing is written. The cost is a log
+ * line. What "stop retrying" would have to mean to be worth anything is
+ * recording something durable — and that is the delete KAN-594 refused, reached
+ * by a different door.
+ *
+ * ⚠ SO WHAT WAS ACTUALLY WRONG WAS THE REPORTING, AND THAT IS FIXED INSTEAD.
+ * Before this, a vanished path came back `result: 'failed'` — the same word a
+ * genuine restoration failure gets — carrying `canonicalPath`'s admission
+ * message, which ends *"create it first, then configure it."* That advice is
+ * right for the typo at `configure` time it was written for and WRONG for this
+ * record, whose only remaining verb is `forget`. So the boot summary reported
+ * the ordinary residue of finished workspaces as a fleet that came back short,
+ * and named a remedy that would resurrect an agent nobody wanted back. It is
+ * the shape KAN-382 named one layer down: five conditions with three different
+ * remedies arriving as one undifferentiated refusal.
+ *
+ * WHAT THIS DOES NOT CHANGE, said plainly because the new word could be read as
+ * more than it is: nothing is recorded, the record's last event is still
+ * `activated`, it is still in `expected()`, and it is still attempted on the
+ * next boot. `stranded` is a NAME for an outcome that already happened, not a
+ * new behaviour and not a durable state. The record is retired by `forget` and
+ * by nothing else.
+ *
+ * ⚠ AND IT IS NOT RETRIED BY THE DEFERRED PASS, which is a deliberate boundary
+ * rather than an oversight. That pass exists for a herdr blip or a busy machine
+ * — conditions measured in seconds, which is why retrying once behind a fresh
+ * wait is worth the wall-clock. A mount that is going to arrive does not arrive
+ * in the seconds between the main pass and the deferred one, and putting a
+ * stranded path in that retry would spend the pass on the one condition it
+ * cannot clear. Its retry is the NEXT BOOT, which is the interval a late mount
+ * is actually measured against.
+ */
+const RECONCILE_STRANDED = Symbol('KAN-619: the ruling above');
+void RECONCILE_STRANDED;
+
 /** What one agent's restoration did, for the log and for the caller. */
 export interface RestoreOutcome {
   path: string;
@@ -70,8 +129,12 @@ export interface RestoreOutcome {
    * `already-running` — running AND already attached, so there was nothing to
    *   do. At boot this is unreachable by construction: a daemon that has just
    *   started holds no sessions.
+   * `stranded` — its DIRECTORY IS GONE, so `activate` refused the path and
+   *   there was never anything to start. See {@link RECONCILE_STRANDED} for
+   *   why that is its own word rather than `failed`, and for why this pass goes
+   *   on attempting it.
    */
-  result: 'already-running' | 'reattached' | 'restored' | 'failed' | 'deferred';
+  result: 'already-running' | 'reattached' | 'restored' | 'failed' | 'deferred' | 'stranded';
   /**
    * Which of the two things a deferral was about, present only on `deferred`.
    *
@@ -401,6 +464,33 @@ export async function reconcileAgents(opts: {
           `forgotten.\n${error}`
         );
         return { path: agentPath, paneName, result: 'deferred', deferredBy: 'capacity', error };
+      }
+
+      // ITS DIRECTORY IS GONE (KAN-619). Named rather than folded into
+      // `failed`, and still attempted rather than skipped — {@link
+      // RECONCILE_STRANDED} is the whole argument, including why the retry
+      // stays.
+      //
+      // The test is the refusal the daemon actually gave, not a second
+      // `existsSync` taken here. A stat of our own would be a SECOND reading of
+      // the filesystem, taken at a different instant from the one that decided
+      // the refusal, and the two could disagree across exactly the late mount
+      // this outcome exists to keep waiting for — at which point this pass
+      // would label an agent stranded that `activate` refused for some other
+      // reason, or the reverse. `pathProblem` is the daemon's own verdict on
+      // the address it was given (KAN-382, and it is on this branch precisely
+      // so a caller need not re-derive it), so the classification and the
+      // refusal cannot come apart.
+      if (response?.pathProblem === 'does-not-exist') {
+        log(
+          `[reconcile] ${agentPath} is stranded: its directory no longer exists, so there is ` +
+          `nothing to restore into and \`activate\` refused the path. Nothing was recorded, so ` +
+          `its record still says it should be running and this pass will try again at the next ` +
+          `boot — a directory can also be absent because a mount is late. If the directory is ` +
+          `gone for good, \`crabcast forget\` is what retires the record; nothing here removes ` +
+          `it for you. It is reported under \`strandedAgents\` on every \`list_agents\`.`
+        );
+        return { path: agentPath, paneName, result: 'stranded', error };
       }
 
       log(`[reconcile] Could not restore ${agentPath}: ${error}`);

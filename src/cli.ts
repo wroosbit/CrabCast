@@ -299,9 +299,23 @@ function indent(text: string, prefix = INDENT): string {
     .join('\n');
 }
 
-function field(label: string, value: unknown, width = 14): string | null {
+const FIELD_WIDTH = 14;
+
+function field(label: string, value: unknown, width = FIELD_WIDTH): string | null {
   if (value === undefined || value === null || value === '') return null;
   return `${INDENT}${(label + ':').padEnd(width)} ${String(value)}`;
+}
+
+/**
+ * A continuation line under a {@link field}, aligned to that field's value
+ * column.
+ *
+ * Derived from {@link FIELD_WIDTH} rather than written as a literal: the two
+ * would otherwise be a number in two places, and the one that goes stale is the
+ * one nothing renders in a test.
+ */
+function continuation(text: string): string {
+  return `${INDENT}${' '.repeat(FIELD_WIDTH + 1)}${text}`;
 }
 
 /**
@@ -389,6 +403,60 @@ function provisionedBlock(value: unknown): string | null {
  * fault report, and a permanent "unreadable registry rows (0)" on every list
  * would train exactly the blindness the block exists to break.
  */
+/**
+ * The `agents` line of `crabcast daemon-status`, and the caveat that keeps
+ * "expected to be running" from asserting a directory (KAN-619).
+ *
+ * `expectedAgents` counts records whose last event is `activated`. A record
+ * whose directory has been deleted is one of them and cannot be started, so the
+ * bare sentence claimed something `crabcast list` disproved one command away.
+ * The number is NOT adjusted here — see the comment on the daemon's own
+ * response, which says why disclosing beats subtracting — so this renders what
+ * the daemon sent and adds what the daemon sent beside it.
+ *
+ * THE SECOND CLAUSE IS PRINTED ONLY WHEN IT SAYS SOMETHING THE FIRST DID NOT.
+ * `strandedTotal` counts every stranded record whatever its last event, so it
+ * is `expectedStranded` plus the `configured`- and `deactivated`-last ones; on
+ * the common registry, where every stranded record was activated, the two are
+ * equal and a second sentence repeating the same number would read as a second
+ * finding. It is printed when they differ, which is exactly when a reader
+ * comparing this against `crabcast list` would otherwise be surprised.
+ *
+ * DEGRADES TO THE OLD LINE, DELIBERATELY. An older daemon carries neither
+ * field, and `crabcast` is routinely newer than the daemon it is talking to —
+ * so absent counts print the sentence this command printed before this version
+ * rather than a `0` nobody measured. Absence is not evidence of a clean
+ * registry, and rendering it as one is the defect this ticket is about.
+ */
+function agentsField(
+  configured: unknown,
+  expected: unknown,
+  expectedStranded: unknown,
+  strandedTotal: unknown
+): string | null {
+  const base = `${configured} configured, ${expected} expected to be running`;
+  if (typeof expectedStranded !== 'number' || expectedStranded === 0) {
+    return field('agents', base);
+  }
+  const startable = typeof expected === 'number' ? expected - expectedStranded : null;
+  const extra =
+    typeof strandedTotal === 'number' && strandedTotal > expectedStranded
+      ? ` (${strandedTotal} stranded in the registry altogether, counting records ` +
+        `nobody activated)`
+      : '';
+  return lines(
+    field('agents', base),
+    continuation(
+      `⚠ ${expectedStranded} of those ${expected} cannot be started: the directory is gone. ` +
+        (startable === null ? '' : `${startable} can.`)
+    ),
+    continuation(
+      `\`crabcast list\` names them under "stranded agents"${extra}; ` +
+        `\`crabcast forget <path>\` is what retires one.`
+    )
+  );
+}
+
 function unreadableBlock(rows: unknown, total: unknown): string | null {
   if (!Array.isArray(rows) || !rows.length) return null;
   const shown = rows.length;
@@ -2122,8 +2190,12 @@ function renderDaemonStatus(reader: ResponseReader): string {
     field('config', reader.take('configPath')),
     field('data dir', reader.take('dataDir')),
     field('registry', reader.take('registryPath')),
-    field('agents', `${reader.take('configuredAgents')} configured, ` +
-      `${reader.take('expectedAgents')} expected to be running`),
+    agentsField(
+      reader.take('configuredAgents'),
+      reader.take('expectedAgents'),
+      reader.take('expectedStranded'),
+      reader.take('strandedTotal')
+    ),
     // The event stream's identity, for a human asking the question a
     // subscriber asks programmatically: is this the same daemon boot I was
     // talking to? A different `bootId` means every sequence number anyone held

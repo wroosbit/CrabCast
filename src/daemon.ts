@@ -926,6 +926,7 @@ function onListen() {
       const restored = result.outcomes.filter((o) => o.result === 'restored');
       const failed = result.outcomes.filter((o) => o.result === 'failed');
       const deferred = result.outcomes.filter((o) => o.result === 'deferred');
+      const stranded = result.outcomes.filter((o) => o.result === 'stranded');
       const idle = restored.filter((o) => o.resumedConversation && o.nudged === false);
       log(
         `[reconcile] Done: ${result.expected} expected, ` +
@@ -940,6 +941,16 @@ function onListen() {
         `(their panes survived), ` +
         `${result.outcomes.filter((o) => o.result === 'already-running').length} already running, ` +
         `${failed.length} failed, ` +
+        // COUNTED APART FROM `failed`, AND THAT IS THE WHOLE OF WHAT KAN-619
+        // CHANGED HERE. A record whose directory is gone used to be counted as
+        // a failure, so the ordinary residue of workspaces somebody finished
+        // with and deleted read as a fleet that came back short — and the error
+        // beside it advised recreating the directory, which is the remedy for a
+        // typo at `configure` time and the opposite of what this record wants.
+        // It is not deferred either: nothing about it will have changed by the
+        // deferred pass. See `RECONCILE_STRANDED` in reconcile.ts for why it is
+        // still attempted at all.
+        `${stranded.length} stranded, ` +
         // Named separately from `failed` on purpose: a deferred agent was not
         // refused on its own merits and nothing about it was recorded, so it
         // is still expected and still restorable. Folding it into "failed"
@@ -957,6 +968,11 @@ function onListen() {
         (deferred.length
           ? ` Still expected and unrestored: ${deferred.map((o) => o.path).join(', ')} — ` +
             `reported by the missing-agent sweep until they come back.`
+          : '') +
+        (stranded.length
+          ? ` Stranded (their directories are gone; nothing was recorded and nothing was ` +
+            `retired, so they are attempted again at the next boot — \`crabcast forget\` is ` +
+            `what retires one): ${stranded.map((o) => o.path).join(', ')}.`
           : '') +
         (idle.length
           ? ` ${idle.length} restored agent(s) could not be told to carry on and may be idle: ` +

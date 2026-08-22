@@ -565,6 +565,24 @@ const BARE_ACTIVATIONS = [
     evidence: "setCensus([ourPane(ranThenGone, '%100'), ourPane(stoodDown, '%101')]);"
   },
   {
+    script: 'verify-daemon-status-accounts-for-stranded',
+    classification: 'census-seeded',
+    sites: 3,
+    reason:
+      'Three scaffolding activations, each preceded by `setCensus([ourPane(<the same dir>, …)])` ' +
+      'so the shimmed herdr reports a live pane there, `handleActivate` takes the ' +
+      'already-running branch and returns before the gate. Their only job is to put an ' +
+      '`activated` row in the registry, because this file\'s subject is whether `daemon_status` ' +
+      'ACCOUNTS for records it counts and cannot start — which needs `activated`-last rows whose ' +
+      'directories are then deleted, and needs them to differ from the `configured`- and ' +
+      '`deactivated`-last ones so the two new counts can be shown to be two populations. §1 ' +
+      'stands up the five-record fixture, §6 stands up the one record the reconcile ruling is ' +
+      'demonstrated on, and §7\'s `statusOn` stands the same shape up against each mutated ' +
+      'build. The capacity gate is not this file\'s subject, and reaching it would make a proof ' +
+      'about arithmetic over a registry a function of the load average.',
+    evidence: "setCensus([ourPane(goneActive, '%100'), ourPane(goneStandby, '%101'), ourPane(survivor, '%102')]);"
+  },
+  {
     script: 'verify-missing-agent-occupancy',
     classification: 'census-seeded',
     sites: 2,

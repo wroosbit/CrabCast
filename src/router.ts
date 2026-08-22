@@ -3725,6 +3725,11 @@ export class MessageRouter {
         // cached "current" at boot would report it forever, including for the
         // hour after somebody rebuilt underneath it.
         const { build, freshness } = buildProvenanceReport(bootBuild);
+        // From the SAME expression `list_agents` builds its rows from, over the
+        // SAME `intents` this response's counts are taken from — see
+        // `strandedIntents`, and see the two fields below for what each of them
+        // is a count of.
+        const strandedRecords = this.strandedIntents(intents);
         respond({
           // Every other reply in this router carries one, and this was the
           // single exception. Butchr's client layer dispatches purely on
@@ -3750,6 +3755,46 @@ export class MessageRouter {
           registryPath: agentRegistry.path,
           configuredAgents: intents.size,
           expectedAgents: Array.from(intents.values()).filter((i) => i.event === 'activated').length,
+          // WHAT `expectedAgents` CANNOT SAY, SAID BESIDE IT (KAN-619).
+          //
+          // `expectedAgents` counts records whose last event is `activated`,
+          // and its sentence is "expected to be RUNNING". A record whose
+          // directory has been deleted is counted by it and cannot run: it is
+          // refused by `activate` because the path does not resolve, and
+          // `list_agents` — the same head, the same registry, one call away —
+          // reports it under `strandedAgents`. Two instruments, one registry,
+          // different answers about one row. That was the defect.
+          //
+          // IT IS DISCLOSED RATHER THAN SUBTRACTED, which is a decision and not
+          // the obvious move. Excluding stranded records from `expectedAgents`
+          // would make this response disagree with `reconcile` instead, which
+          // restores from `registry.expected()` — the SAME `activated` filter,
+          // with no existence check — so the count would stop describing the
+          // set the daemon actually acts on and the disagreement would move one
+          // field to the right rather than going away. It is also the argument
+          // `unreadableRecordsTotal` directly below was added on: a count that
+          // silently excludes what it could not account for is the whole
+          // defect, one field to the left.
+          //
+          // ⚠ THE TWO NUMBERS ARE DIFFERENT POPULATIONS AND THAT IS WHY BOTH
+          // ARE HERE. `expectedStranded` is the subset OF `expectedAgents`, so
+          // `expectedAgents - expectedStranded` is what can actually be
+          // started, and that subtraction is the one this defect was filed
+          // about. `strandedTotal` is every stranded record whatever its last
+          // event — the identical name, population and value `list_agents`
+          // carries — so the two surfaces can be cross-read without a reader
+          // discovering by subtraction that they count different things.
+          // `strandedTotal >= expectedStranded` always, and a registry holding
+          // stranded `configured`- or `deactivated`-last rows is exactly where
+          // they differ. Publishing only the first would have minted a second
+          // instrument that looks like `strandedTotal` and is not.
+          //
+          // `configuredAgents` is deliberately NOT qualified by either. It
+          // answers "what is in my registry", and a stranded record IS in the
+          // registry — so it is right as it stands, and adding a caveat to it
+          // would imply an exclusion that is not happening.
+          expectedStranded: strandedRecords.filter(([, i]) => i.event === 'activated').length,
+          strandedTotal: strandedRecords.length,
           // THE REGISTRY ROWS THIS DAEMON COULD NOT READ (KAN-302), on the
           // cheapest call on the socket as well as on the fleet read.
           //
@@ -7267,6 +7312,38 @@ export class MessageRouter {
   }
 
   /**
+   * THE MEMBERSHIP TEST FOR "STRANDED", AND THE ONLY COPY OF IT.
+   *
+   * Both instruments that report stranded records read this one expression:
+   * {@link strandedAgents} builds `list_agents`' rows from it, and
+   * `daemon_status` counts from it. That is the whole reason it is a method
+   * rather than a loop in each of them — KAN-619 was filed because those two
+   * responses gave different answers about one registry, and a second copy of
+   * the membership test is how two instruments come to disagree in the first
+   * place. See {@link StrandedAgent} for what membership means and for the
+   * `/tmp` trap that is deliberately not part of it.
+   *
+   * `intents()` deletes a `forgotten` path outright, so the other three events
+   * are the whole domain — which is what {@link StrandedLastEvent} says in the
+   * type. The skip below is checked rather than asserted: a `forgotten`
+   * reaching here would be `intents()` having changed its contract, so the
+   * record is left out rather than published under a value its type forbids,
+   * and it is left out of the COUNTS for the same reason it is left out of the
+   * rows.
+   */
+  private strandedIntents(
+    sharedIntents?: Map<string, AgentIntent>
+  ): Array<[string, AgentIntent & { event: StrandedLastEvent }]> {
+    const stranded: Array<[string, AgentIntent & { event: StrandedLastEvent }]> = [];
+    for (const [agentPath, intent] of sharedIntents ?? this.deps.agentRegistry.intents()) {
+      if (fs.existsSync(agentPath)) continue;
+      if (intent.event === 'forgotten') continue;
+      stranded.push([agentPath, intent as AgentIntent & { event: StrandedLastEvent }]);
+    }
+    return stranded;
+  }
+
+  /**
    * Agents whose directory has been deleted out from under their record.
    *
    * See {@link StrandedAgent} for why this is a category rather than a filter,
@@ -7308,15 +7385,7 @@ export class MessageRouter {
   private strandedAgents(sharedIntents?: Map<string, AgentIntent>): StrandedAgent[] {
     const stranded: StrandedAgent[] = [];
 
-    for (const [agentPath, intent] of sharedIntents ?? this.deps.agentRegistry.intents()) {
-      if (fs.existsSync(agentPath)) continue;
-      // `intents()` drops `forgotten`, so the other three are the whole domain
-      // — which is what {@link StrandedLastEvent} says in the type. The cast is
-      // the one place that fact crosses from a comment into the value, and it
-      // is checked rather than asserted: a `forgotten` reaching here would be
-      // `intents()` having changed its contract, so it is skipped and the row
-      // is left out rather than published under a value its type forbids.
-      if (intent.event === 'forgotten') continue;
+    for (const [agentPath, intent] of this.strandedIntents(sharedIntents)) {
       const lastEvent: StrandedLastEvent = intent.event;
 
       stranded.push({

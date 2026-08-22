@@ -1192,6 +1192,7 @@ jobs:
             verify-fleet-enumeration
             verify-missing-agent-occupancy
             verify-stranded-agents
+            verify-daemon-status-accounts-for-stranded
             verify-fleet-read-fits-the-wire
             verify-config-echo-contract
             verify-ci-wiring-guards
